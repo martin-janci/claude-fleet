@@ -643,6 +643,21 @@ impl EventBus for BroadcastEventBus {
         // clearing is untouched.
         let mut payload = e.payload();
         crate::json::strip_nulls(&mut payload);
+        // The same derived `needs_attention` `list_sessions` stamps, so a
+        // phone that listed once and then follows this stream keeps the
+        // hub's answer instead of losing it on the row's first change. Here
+        // and not in `payload()`: the desktop's Tauri bus shares that, and
+        // deserialises the payload straight back into `SessionRow`.
+        if let RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) = e {
+            if let (Some(att), serde_json::Value::Object(map)) = (
+                crate::service::attention::needs_attention(row),
+                &mut payload,
+            ) {
+                if let Ok(v) = serde_json::to_value(att) {
+                    map.insert("needs_attention".to_string(), v);
+                }
+            }
+        }
         // The number and the ring position are taken under one lock, so a
         // client resuming at N can never be sent N+1 before N.
         let msg = {
@@ -1049,6 +1064,43 @@ mod tests {
             msg.payload.get("detail").and_then(|v| v.as_str()),
             Some("list_sessions"),
             "a field that has a value is untouched"
+        );
+    }
+
+    /// A phone follows `session:updated` for hours after one `list_sessions`,
+    /// so a `needs_attention` that only the list carried would vanish from
+    /// the phone's row at the first change — and the phone would be back to
+    /// deciding it for itself, the second rule `service::attention` exists to
+    /// remove. The stream stamps it exactly as `list_sessions` does, and
+    /// leaves it off a row that needs nobody.
+    #[tokio::test]
+    async fn a_session_frame_carries_the_hubs_needs_attention() {
+        let s = crate::store::Store::open_in_memory().unwrap();
+        s.upsert_host("hosta").unwrap();
+        s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+            .unwrap();
+        let calm = s.get_session("dev", "hosta").unwrap().expect("row");
+        let mut blocked = calm.clone();
+        blocked.claude_status = Some("blocked".into());
+
+        let bus = BroadcastEventBus::new(4);
+        let mut rx = bus.subscribe();
+        bus.emit(&RowChange::SessionUpdated(blocked.clone()));
+        bus.emit(&RowChange::SessionCreated(blocked));
+        bus.emit(&RowChange::SessionUpdated(calm));
+
+        for name in ["session:updated", "session:created"] {
+            let msg = rx.recv().await.unwrap();
+            assert_eq!(msg.name, name);
+            let att = msg.payload.get("needs_attention").expect("stamped");
+            assert_eq!(att["reason"], "waiting", "{}", msg.payload);
+            assert_eq!(att["since"], 1, "{}", msg.payload);
+        }
+        let msg = rx.recv().await.unwrap();
+        assert!(
+            msg.payload.get("needs_attention").is_none(),
+            "a session that needs nobody carries no key: {}",
+            msg.payload
         );
     }
 

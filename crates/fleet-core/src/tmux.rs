@@ -1269,8 +1269,11 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 /// green local suite says nothing about it — step 3 is what makes it safe by
 /// construction rather than by luck.
 ///
-/// Lives in `tmux.rs` rather than in a module of its own so `ssh.rs`'s fakes
-/// can share it without adding a file to the crate root.
+/// Lives in `tmux.rs` rather than in a module of its own so the crate's other
+/// fakes can share it without adding a file to the crate root: `ssh.rs`,
+/// `claude_cli.rs`, `service/account_usage.rs`, `service/add_project.rs` and
+/// `service/move_session/carry.rs` all write their exec'd stubs through it.
+/// Any new fake the test process itself spawns belongs here too.
 #[cfg(test)]
 pub(crate) mod fake_exec {
     use std::path::{Path, PathBuf};

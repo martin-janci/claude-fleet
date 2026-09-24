@@ -15,7 +15,8 @@ impl FleetTools {
         blocked | completed | failed | stopped | idle; stuck_kind is one of \
         auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status \
         (full rows) is one of passing | failing | pending (null when the \
-        session has no PR or its PR has no checks).")]
+        session has no PR or its PR has no checks). fresh_for returns only \
+        what is new since your last read.")]
     pub(super) async fn list_sessions(
         &self,
         Parameters(p): Parameters<ListSessionsParams>,
@@ -23,7 +24,7 @@ impl FleetTools {
         audit(
             "list_sessions",
             &format!(
-                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} view={:?} limit={:?} force={} tag={:?}",
+                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} view={:?} limit={:?} force={} tag={:?} fresh_for={:?}",
                 p.host_alias,
                 p.project_id,
                 p.status,
@@ -34,6 +35,7 @@ impl FleetTools {
                 p.limit,
                 p.force,
                 p.tag,
+                p.fresh_for,
             ),
         );
         // Parsed before the listing runs: an unknown view must cost the
@@ -109,20 +111,90 @@ impl FleetTools {
         // client asks for full rows today. `summary` keeps its default of
         // true, so a caller that names a view need not also say
         // `summary: false` to be understood.
-        match (view, p.summary) {
+        //
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched — kept as a literal early return (not folded into the
+        // hashing branch below) so the two paths can never drift apart.
+        let Some(reader) = p.fresh_for else {
+            return match (view, p.summary) {
+                (Some(v), _) => {
+                    let full: Vec<SessionWithController> = tagged.collect();
+                    ok_json_compact_view(&full, Some(v.fields()))
+                }
+                (None, true) => {
+                    let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
+                    ok_json_compact(&slim)
+                }
+                (None, false) => {
+                    let full: Vec<SessionWithController> = tagged.collect();
+                    ok_json_compact(&full)
+                }
+            };
+        };
+
+        // `fresh_for` present: build the EXACT same fields the branch above
+        // would have sent — `compact_json_value` is what `compact_json_string`
+        // (in turn what `ok_json_compact` / `ok_json_compact_view` call)
+        // builds internally — and hash THAT `Value`, never a curated subset.
+        // This is why the default slim shape (which drops `last_activity_at`
+        // and `current_activity`, the two fields a reconcile pass bumps
+        // constantly) makes `unchanged` fire usefully: a `summary: false`
+        // caller hashes those two churny fields too, so it will rarely see
+        // `unchanged`.
+        //
+        // Sorted by session id first, on this path only: `list_all_sessions`
+        // (the store's underlying query) orders by `last_activity_at DESC` —
+        // the very field the slim shape just dropped because reconcile bumps
+        // it constantly. Two sessions trading activity would otherwise
+        // reorder this array with no field actually differing, changing the
+        // hash for a caller who could not possibly see why. The DEFAULT path
+        // above keeps today's order untouched — only the opt-in envelope's
+        // row order changes here.
+        let data = match (view, p.summary) {
             (Some(v), _) => {
-                let full: Vec<SessionWithController> = tagged.collect();
-                ok_json_compact_view(&full, Some(v.fields()))
+                let mut full: Vec<SessionWithController> = tagged.collect();
+                full.sort_by_key(|s| s.row.id);
+                compact_json_value(&full, Some(v.fields()))?
             }
             (None, true) => {
-                let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
-                ok_json_compact(&slim)
+                let mut slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
+                slim.sort_by_key(|s| s.id);
+                compact_json_value(&slim, None)?
             }
             (None, false) => {
-                let full: Vec<SessionWithController> = tagged.collect();
-                ok_json_compact(&full)
+                let mut full: Vec<SessionWithController> = tagged.collect();
+                full.sort_by_key(|s| s.row.id);
+                compact_json_value(&full, None)?
             }
+        };
+
+        let resource_key = list_sessions_resource_key(&p);
+        // Read-then-write: validate the reader and read the stored hash
+        // before deciding anything, so `unchanged` can never be answered to
+        // a reader session that no longer exists.
+        let (reader_exists, stored_hash) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored_hash = s
+                .get_read_cursor(reader, "list_sessions", &resource_key)
+                .map_err(to_mcp_err)?
+                .and_then(|c| c.content_hash);
+            (reader_exists, stored_hash)
+        };
+
+        let decision = snapshot_decision(reader_exists, stored_hash.as_deref(), data)?;
+        // Written only now that the payload was built successfully;
+        // `snapshot_decision` never returns a hash for an unknown reader or
+        // an unchanged read.
+        if let Some(hash) = &decision.new_hash {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.put_snapshot_cursor(reader, "list_sessions", &resource_key, None, hash)
+                .map_err(to_mcp_err)?;
         }
+        ok_json(&decision.envelope)
     }
 
     #[tool(description = "List sessions related to a given session — those \
@@ -525,4 +597,45 @@ impl FleetTools {
     }
 
     // ── Orchestration (Wave 3 Track E) ───────────────────────────────────
+}
+
+/// `list_sessions`'s snapshot cursor key: a fingerprint of every filter
+/// param that SHAPES the output — `host_alias`, `project_id`, `status`,
+/// `claude_status`, `include_lost`, `summary`, `limit`, `tag`, `view`,
+/// `needs_attention`. `force` and `fresh_for` are excluded: neither changes
+/// what "the same filters" means, so including them would split one caller's
+/// repeated reads across needless cursors. A plain JSON encoding of a
+/// fixed-field-order struct is already deterministic; it is hashed only to
+/// keep the stored key short, reusing `fresh::snapshot_hash` rather than a
+/// second hasher. Two calls with identical filters share a cursor; two
+/// different filters never do.
+#[derive(serde::Serialize)]
+struct ListSessionsFilterFingerprint<'a> {
+    host_alias: &'a Option<String>,
+    project_id: Option<i64>,
+    status: &'a Option<String>,
+    claude_status: &'a Option<String>,
+    include_lost: bool,
+    summary: bool,
+    limit: Option<usize>,
+    tag: &'a Option<String>,
+    view: &'a Option<String>,
+    needs_attention: Option<bool>,
+}
+
+fn list_sessions_resource_key(p: &ListSessionsParams) -> String {
+    let fp = ListSessionsFilterFingerprint {
+        host_alias: &p.host_alias,
+        project_id: p.project_id,
+        status: &p.status,
+        claude_status: &p.claude_status,
+        include_lost: p.include_lost,
+        summary: p.summary,
+        limit: p.limit,
+        tag: &p.tag,
+        view: &p.view,
+        needs_attention: p.needs_attention,
+    };
+    let json = serde_json::to_string(&fp).expect("fixed-shape fingerprint always serializes");
+    fresh::snapshot_hash(&json)
 }

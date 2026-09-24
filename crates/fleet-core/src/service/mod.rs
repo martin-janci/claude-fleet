@@ -20,6 +20,7 @@ pub mod clipboard;
 pub mod context;
 pub mod delivery;
 pub mod diagnostics;
+pub mod fresh;
 pub mod gc;
 pub mod health;
 pub mod hooks;

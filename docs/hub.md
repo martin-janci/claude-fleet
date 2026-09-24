@@ -671,19 +671,25 @@ compression.
 Compression makes the same answer cheaper; these two parameters make the
 answer smaller, and they stack with it.
 
-`list_sessions { view: "phone" }` returns each row projected to the 14
-columns a phone-sized session list draws — `id`, `tmux_name`,
+`list_sessions { view: "phone" }` returns each row projected to the
+columns the phone app reads — the session list's `id`, `tmux_name`,
 `friendly_name`, `last_prompt`, `host_alias`, `project_id`, `status`,
 `kind`, `claude_status`, `stuck_kind`, `current_activity`, `context_pct`,
-`last_activity_at`, `ci_status`, `pending_input`, `needs_attention`. On the
-same 44-session fleet that is
-**46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped**. The view is
+`last_activity_at`, `ci_status`, `pending_input`, `needs_attention`, and the
+session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
+`started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
+`usage_model`. The first cut — the list's sixteen alone — measured
+**46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
+44-session fleet; the card's nine are short scalars and do not change that
+picture. The first cut left the card's columns out, and a phone that
+switched to it would have read `is_controller` as `false` and offered to
+kill its own controller — the list is not the only screen a row feeds. The view is
 *named*, not a caller-supplied field list, so the hub keeps the definition of
 what a pager row is and can widen it without an app release; an unknown name
 is refused with `E_INVALID` rather than quietly answering full rows. It
 exists because neither shape fitted: the default summary row is 9 951 B but
 drops `friendly_name`, `current_activity` and `last_activity_at`, which are
-three of the sixteen a pager uses. `pending_input` is in the view for the
+three of the columns a pager uses. `pending_input` is in the view for the
 same reason: it carries the dialog a blocked session is waiting on and its
 options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
@@ -750,6 +756,13 @@ is the permission/question dialog a blocked pane is showing —
 `{kind, question, options[{n,label,selected}]}`, or null when the pane shows
 none — so a client can turn the numbered choices into buttons instead of
 typing them.
+
+`session:created` and `session:updated` frames also carry `needs_attention`
+(`{reason, since}`, absent when the session needs nobody) — the same answer
+`list_sessions` stamps on each row, from the one rule in
+`service::attention`. A client that listed once and then follows the stream
+keeps the hub's answer instead of losing it at the row's first change and
+falling back to a rule of its own.
 
 The `ready` frame also carries `contract`, the wire-contract revision of the
 row shapes and tool results this hub sends (`fleet_core::wire_contract`,

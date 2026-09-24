@@ -184,20 +184,99 @@ impl FleetTools {
         changes, prompts, stuck, kills, and conversation events: \
         conversation_started, conversation_ended, compact_started, \
         compact_done, turn_done). Newest-first; pass `limit` to cap \
-        (default 50). Returns the events as JSON."
+        (default 50). Returns the events as JSON. fresh_for returns only \
+        what is new since your last read."
     )]
     pub(super) async fn session_history(
         &self,
         Parameters(p): Parameters<SessionHistoryParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("session_history", &format!("session_id={}", p.session_id));
+        audit(
+            "session_history",
+            &format!("session_id={} fresh_for={:?}", p.session_id, p.fresh_for),
+        );
         let limit = p.limit.unwrap_or(50);
-        let events = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.list_session_events(p.session_id, limit)
-                .map_err(to_mcp_err)?
+
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched — `limit` reaches the store exactly as it always has
+        // (0 => [], negative => SQLite's own "no limit"), so the clamp
+        // below must never run on this path.
+        let Some(reader) = p.fresh_for else {
+            let events = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                s.list_session_events(p.session_id, limit)
+                    .map_err(to_mcp_err)?
+            };
+            return ok_json_compact(&events);
         };
-        ok_json_compact(&events)
+
+        // ≥ 1, for the fresh_for path only: 0 or negative would either loop
+        // `more:true, data:[]` forever (history/inbox's paging is
+        // `limit`-driven, not offset-driven) or, unclamped, reach
+        // `session_events_after` as an effectively unlimited SQL `LIMIT`.
+        let limit = limit.max(1);
+
+        let resource_key = p.session_id.to_string();
+        let payload = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored = s
+                .get_read_cursor(reader, "session_history", &resource_key)
+                .map_err(to_mcp_err)?;
+            let head = s.max_session_event_id(p.session_id).map_err(to_mcp_err)?;
+            // No generation for this tool: pass None on both sides.
+            let decision = stream_decision(reader_exists, stored.as_ref(), head, None);
+            let (rows, more) = match decision {
+                fresh::StreamStart::Unchanged => (Vec::new(), false),
+                fresh::StreamStart::After(after) => {
+                    page_events(&s, p.session_id, after, limit).map_err(to_mcp_err)?
+                }
+                // An unknown reader gets no cursor, so paging it from id 0
+                // would hand it the same oldest page with `more: true` on
+                // every call — forever, for a caller following `more`. It
+                // gets the DEFAULT newest-first page instead (what no
+                // `fresh_for` returns), `more: false`, reason stated.
+                fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown)) => (
+                    s.list_session_events(p.session_id, limit)
+                        .map_err(to_mcp_err)?,
+                    false,
+                ),
+                fresh::StreamStart::Full(_) => {
+                    page_events(&s, p.session_id, 0, limit).map_err(to_mcp_err)?
+                }
+            };
+            let reset = match decision {
+                fresh::StreamStart::Full(r) => r,
+                _ => None,
+            };
+            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
+            let mut data = serde_json::to_value(&rows)
+                .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+            crate::json::strip_nulls(&mut data);
+            // The cursor advances only now that serialisation succeeded — a
+            // failure building the response must not silently mark rows as
+            // delivered.
+            if let (Some(last), false) = (
+                rows.last().map(|e| e.id),
+                reset == Some(fresh::ResetReason::ReaderUnknown),
+            ) {
+                s.put_stream_cursor(
+                    reader,
+                    "session_history",
+                    &resource_key,
+                    Some(p.session_id),
+                    last,
+                    None,
+                    None,
+                )
+                .map_err(to_mcp_err)?;
+            }
+            fresh::envelope(unchanged, reset, more, data)
+        };
+        ok_json(&payload)
     }
 
     #[tool(
@@ -381,7 +460,8 @@ impl FleetTools {
         results arrive here as kind=task_result. mark_read \
         (default true) flips returned unread rows to read — pass false to \
         peek without consuming. A per-host token may only read inboxes of \
-        sessions on its own host (E_FORBIDDEN).")]
+        sessions on its own host (E_FORBIDDEN). fresh_for returns only what \
+        is new since your last read.")]
     pub(super) async fn inbox(
         &self,
         Extension(caller): Extension<Caller>,
@@ -390,8 +470,8 @@ impl FleetTools {
         audit(
             "inbox",
             &format!(
-                "session_id={} unread_only={} mark_read={} summary={}",
-                p.session_id, p.unread_only, p.mark_read, p.summary
+                "session_id={} unread_only={} mark_read={} summary={} fresh_for={:?}",
+                p.session_id, p.unread_only, p.mark_read, p.summary, p.fresh_for
             ),
         );
         // Master skips the lookup; a per-host token is gated to its own host
@@ -410,20 +490,116 @@ impl FleetTools {
             )?;
         }
         let limit = p.limit.unwrap_or(50);
-        let msgs = crate::service::messages::list_inbox(
-            p.session_id,
-            p.unread_only,
-            limit,
-            p.mark_read,
-            &self.store,
-        )
-        .map_err(to_mcp_err)?;
-        if p.summary {
-            let slim: Vec<InboxSummary> = msgs.into_iter().map(InboxSummary::from).collect();
-            ok_json_compact(&slim)
-        } else {
-            ok_json_compact(&msgs)
-        }
+
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched — `limit` reaches `list_inbox` exactly as it always has
+        // (0 => [], negative => SQLite's own "no limit"), so the clamp
+        // below must never run on this path.
+        let Some(reader) = p.fresh_for else {
+            let msgs = crate::service::messages::list_inbox(
+                p.session_id,
+                p.unread_only,
+                limit,
+                p.mark_read,
+                &self.store,
+            )
+            .map_err(to_mcp_err)?;
+            return if p.summary {
+                let slim: Vec<InboxSummary> = msgs.into_iter().map(InboxSummary::from).collect();
+                ok_json_compact(&slim)
+            } else {
+                ok_json_compact(&msgs)
+            };
+        };
+
+        // ≥ 1, matching session_history, for the fresh_for path only: 0 or
+        // negative would either page forever (`more:true, data:[]`) or
+        // reach the store as an effectively unlimited SQL `LIMIT`.
+        let limit = limit.max(1);
+
+        // `unread_only` is part of the resource key: a `true` cursor and a
+        // `false` cursor watch different, independent sequences of "what
+        // this reader has seen" — sharing one would let a `true` read
+        // advance past rows a later `false` read never got to return (a
+        // skip across filters), or vice versa.
+        let resource_key = format!("{}:{}", p.session_id, p.unread_only);
+        let payload = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored = s
+                .get_read_cursor(reader, "inbox", &resource_key)
+                .map_err(to_mcp_err)?;
+            let head = s.max_inbox_id(p.session_id).map_err(to_mcp_err)?;
+            // No generation for this tool: pass None on both sides.
+            let decision = stream_decision(reader_exists, stored.as_ref(), head, None);
+            let (rows, more) = match decision {
+                fresh::StreamStart::Unchanged => (Vec::new(), false),
+                fresh::StreamStart::After(after) => {
+                    page_inbox(&s, p.session_id, after, p.unread_only, limit).map_err(to_mcp_err)?
+                }
+                // See `session_history`: an unknown reader gets the default
+                // newest-first page with `more: false`, never an endless
+                // oldest page.
+                fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown)) => (
+                    s.list_inbox(p.session_id, p.unread_only, limit)
+                        .map_err(to_mcp_err)?,
+                    false,
+                ),
+                fresh::StreamStart::Full(_) => {
+                    page_inbox(&s, p.session_id, 0, p.unread_only, limit).map_err(to_mcp_err)?
+                }
+            };
+            let reset = match decision {
+                fresh::StreamStart::Full(r) => r,
+                _ => None,
+            };
+            // mark_read applies to the rows actually returned — exactly as
+            // the non-fresh_for path, just sourced from this page instead of
+            // list_inbox's own newest-first fetch. Best-effort, matching
+            // `service::messages::list_inbox`: a failure here must not fail
+            // the read that already succeeded.
+            if p.mark_read {
+                let ids: Vec<i64> = rows
+                    .iter()
+                    .filter(|m| m.read_at.is_none())
+                    .map(|m| m.id)
+                    .collect();
+                if !ids.is_empty() {
+                    let _ = s.mark_messages_read(&ids, p.session_id);
+                }
+            }
+            let last_id = rows.last().map(|m| m.id);
+            let unchanged = matches!(decision, fresh::StreamStart::Unchanged);
+            let mut data = if p.summary {
+                let slim: Vec<InboxSummary> = rows.into_iter().map(InboxSummary::from).collect();
+                serde_json::to_value(&slim)
+            } else {
+                serde_json::to_value(&rows)
+            }
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+            crate::json::strip_nulls(&mut data);
+            // The cursor advances only now that serialisation succeeded — a
+            // failure building the response must not silently mark rows as
+            // delivered.
+            if let (Some(last), false) = (last_id, reset == Some(fresh::ResetReason::ReaderUnknown))
+            {
+                s.put_stream_cursor(
+                    reader,
+                    "inbox",
+                    &resource_key,
+                    Some(p.session_id),
+                    last,
+                    None,
+                    None,
+                )
+                .map_err(to_mcp_err)?;
+            }
+            fresh::envelope(unchanged, reset, more, data)
+        };
+        ok_json(&payload)
     }
 
     #[tool(description = "What is a peer session doing? Returns claude_status, \
@@ -438,4 +614,42 @@ impl FleetTools {
             crate::service::messages::peer_status(p.session_id, &self.store).map_err(to_mcp_err)?;
         ok_json(&status)
     }
+}
+
+// ---- fresh_for paging: oldest-first, `more` when truncated ------------------
+
+/// One page of `session_history`'s timeline strictly after `after`, oldest
+/// first. `more` is true when the underlying page was longer than `limit` —
+/// fetched as `limit + 1` and truncated, never `LIMIT limit` alone, so a
+/// truncated page is always detectable rather than silently equal to a
+/// complete one.
+fn page_events(
+    s: &Store,
+    session_id: i64,
+    after: i64,
+    limit: i64,
+) -> Result<(Vec<crate::store::SessionEvent>, bool), IpcError> {
+    let limit = limit.max(1);
+    // `saturating_add`, not `+`: callers already clamp `limit` to ≥ 1, but
+    // an unclamped `i64::MAX` here would panic (debug) or wrap (release)
+    // instead of just capping the page at `MAX_READ_BYTES`-scale reality.
+    let mut rows = s.session_events_after(session_id, after, limit.saturating_add(1))?;
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    Ok((rows, more))
+}
+
+/// [`page_events`]'s `inbox` counterpart.
+fn page_inbox(
+    s: &Store,
+    session_id: i64,
+    after: i64,
+    unread_only: bool,
+    limit: i64,
+) -> Result<(Vec<crate::store::SessionMessage>, bool), IpcError> {
+    let limit = limit.max(1);
+    let mut rows = s.inbox_after(session_id, after, unread_only, limit.saturating_add(1))?;
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    Ok((rows, more))
 }

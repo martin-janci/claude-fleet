@@ -2946,17 +2946,14 @@ pub(crate) mod tests {
         // A `wc` that prints nothing for `-c`, simulating a `wc -c` failure.
         let fakebin = tmp.path().join("fakebin");
         std::fs::create_dir_all(&fakebin).unwrap();
-        std::fs::write(
-            fakebin.join("wc"),
-            "#!/bin/sh\ncase \"$1\" in -c) exit 0;; esac\nexec /usr/bin/wc \"$@\"\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(fakebin.join("wc"), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
+        crate::tmux::fake_exec::write_exec(
+            &fakebin,
+            "wc",
+            &format!(
+                "#!/bin/sh\n{}case \"$1\" in -c) exit 0;; esac\nexec /usr/bin/wc \"$@\"\n",
+                crate::tmux::fake_exec::PROBE_GUARD
+            ),
+        );
         let path = format!(
             "{}:{}",
             fakebin.display(),

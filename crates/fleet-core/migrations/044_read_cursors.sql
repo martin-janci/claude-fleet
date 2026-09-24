@@ -1,0 +1,70 @@
+-- Remembered read cursors (smart caching, cycle 2). A reader re-asking a
+-- fetch tool with `fresh_for` gets only what is new. Keyed by the READER'S
+-- OWN session id, never the caller: a caller label is `host:<alias>`, so
+-- every Claude session on a host is the same caller, and a caller-keyed
+-- cursor would let them consume each other's deltas by default.
+--
+-- A row uses `watermark` (+ `generation`) for an append-only stream, or
+-- `content_hash` for a snapshot — never both.
+--
+-- `generation`: for session_transcript, the id of the latest
+-- conversation-boundary event when the cursor was written. turn_seq keeps
+-- counting across /clear while the transcript FILE changes, so without it a
+-- /clear between two reads would silently skip the old conversation's tail.
+--
+-- `anchor`: for session_transcript only, a small JSON string
+-- `{"at":"...","fingerprint":"..."}` naming the turn its last read stopped
+-- at: that turn's opening prompt timestamp, plus a hash of its rendered
+-- text at read time. `watermark` (turn_seq) is only a CHANGE detector
+-- here, never a position: an in-progress turn, an interrupt, a slash
+-- command or a queued prompt each add a turn to the transcript FILE with
+-- no Stop hook behind it, so "turn_seq − watermark" turns from the end of
+-- the file does not reliably name the same turns a caller already saw.
+-- `at` alone is not unique either (more than one turn can open within the
+-- same millisecond), so `fingerprint` both disambiguates a duplicate `at`
+-- and detects growth: a turn found with the same `at` but a different
+-- fingerprint changed since it was served (an assistant entry, an
+-- interrupt, a merged notification — `ended_at` alone would miss some of
+-- these) and is re-served whole. `anchor` is what positions the next read;
+-- NULL until a `fresh_for` transcript read has happened at least once.
+--
+-- `target_session_id`: the session a cursor is ABOUT (NULL for
+-- list_sessions, which has none), so a cursor can be dropped when its target
+-- is gone. No foreign keys, matching the rest of this schema; cleanup is the
+-- trigger below, with the GC sweep (`sweep_orphan_read_cursors`) kept as a
+-- backstop for any row that names an id no session ever had.
+CREATE TABLE IF NOT EXISTS read_cursors (
+  id INTEGER PRIMARY KEY,
+  reader_session_id INTEGER NOT NULL,
+  tool TEXT NOT NULL,
+  resource_key TEXT NOT NULL,
+  target_session_id INTEGER,
+  watermark INTEGER,
+  generation INTEGER,
+  anchor TEXT,
+  content_hash TEXT,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_read_cursors_key
+  ON read_cursors(reader_session_id, tool, resource_key);
+CREATE INDEX IF NOT EXISTS idx_read_cursors_target
+  ON read_cursors(target_session_id) WHERE target_session_id IS NOT NULL;
+
+-- A session's cursors die WITH its row, as the reader and as the target.
+-- `sessions.id` has no AUTOINCREMENT, so SQLite hands a deleted highest id
+-- to the next session created: a reviewer killed and reaped within the GC
+-- sweep's interval would otherwise pass its cursors to a brand-new session,
+-- whose FIRST read then answers `unchanged` (or a delta) for data it never
+-- saw — a silent skip. A trigger rather than a DELETE at each call site:
+-- cycle 1 found five separate session-delete paths (`delete_session` —
+-- kill, ghost dismissal and move all end there — the reconcile ghost reap,
+-- host removal, project removal, and a test helper), and a trigger is the
+-- one place none of them, nor a future sixth, can miss.
+CREATE TRIGGER IF NOT EXISTS trg_read_cursors_on_session_delete
+AFTER DELETE ON sessions
+BEGIN
+  DELETE FROM read_cursors
+   WHERE reader_session_id = old.id OR target_session_id = old.id;
+END;
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (44);
