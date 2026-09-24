@@ -40,8 +40,8 @@ contract change (`details` is already an optional JSON value).
 - Produces:
   - `pub enum SshFailureKind { HostKeyUnknown, HostKeyChanged, AuthDenied, DnsFail, Refused, Timeout, Handshake, MuxBroken, Unknown }` (`Copy`, serde `snake_case`)
   - `impl SshFailureKind { pub fn never_connected(self) -> bool; pub fn summary(self) -> &'static str }`
-  - `pub struct SshFailure { pub kind: SshFailureKind, pub host_alias: String, pub raw_tail: String }` (serde)
-  - `pub fn classify(host_alias: &str, exit_code: Option<i32>, stderr: &str) -> Option<SshFailure>`
+  - `pub struct SshFailure { pub kind: SshFailureKind, pub ssh_alias: String, pub raw_tail: String }` (serde)
+  - `pub fn classify(ssh_alias: &str, exit_code: Option<i32>, stderr: &str) -> Option<SshFailure>`
   - `pub(crate) fn connect_failure_kind(stderr: &str) -> Option<SshFailureKind>`
   - `pub(crate) fn mentions_mux_failure(stderr: &str) -> bool`
   - re-exports from `ssh_diag`: `pub use classify::{classify, SshFailure, SshFailureKind};`
@@ -153,7 +153,7 @@ mod tests {
         assert!(classify("h", Some(1), "Host key verification failed.").is_none());
         assert!(classify("h", None, "Host key verification failed.").is_none());
         let f = classify("mac", Some(255), "Host key verification failed.\n").unwrap();
-        assert_eq!(f.host_alias, "mac");
+        assert_eq!(f.ssh_alias, "mac");
         assert_eq!(f.raw_tail, "Host key verification failed.\n");
     }
 
@@ -186,7 +186,7 @@ mod tests {
         let f = classify("mac", Some(255), "Host key verification failed.\n").unwrap();
         let v = serde_json::to_value(&f).unwrap();
         assert_eq!(v["kind"], "host_key_unknown");
-        assert_eq!(v["host_alias"], "mac");
+        assert_eq!(v["ssh_alias"], "mac");
     }
 }
 ```
@@ -264,7 +264,7 @@ impl SshFailureKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshFailure {
     pub kind: SshFailureKind,
-    pub host_alias: String,
+    pub ssh_alias: String,
     /// The end of ssh's stderr, bounded (see [`tail`]).
     pub raw_tail: String,
 }
@@ -284,7 +284,7 @@ const TAIL_LINES: usize = 40;
 const TAIL_BYTES: usize = 4096;
 
 /// Classify an ssh run. `None` unless ssh itself exited 255.
-pub fn classify(host_alias: &str, exit_code: Option<i32>, stderr: &str) -> Option<SshFailure> {
+pub fn classify(ssh_alias: &str, exit_code: Option<i32>, stderr: &str) -> Option<SshFailure> {
     if exit_code != Some(255) {
         return None;
     }
@@ -293,7 +293,7 @@ pub fn classify(host_alias: &str, exit_code: Option<i32>, stderr: &str) -> Optio
         .unwrap_or(SshFailureKind::Unknown);
     Some(SshFailure {
         kind,
-        host_alias: host_alias.to_string(),
+        ssh_alias: ssh_alias.to_string(),
         raw_tail: tail(stderr),
     })
 }
@@ -464,7 +464,7 @@ git commit -m "refactor(ssh): mux and usage-fallback checks read the shared clas
 
 **Interfaces:**
 - Consumes: `crate::ssh_diag::classify(host, code, stderr) -> Option<SshFailure>`.
-- Produces: the `E_PROBE` `IpcError.details == {"ssh_failure": {kind, host_alias, raw_tail}}` when ssh exits 255. PR 2/3 read this shape; the message text keeps its current form plus a summary.
+- Produces: the `E_PROBE` `IpcError.details == {"ssh_failure": {kind, ssh_alias, raw_tail}}` when ssh exits 255. PR 2/3 read this shape; the message text keeps its current form plus a summary.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -504,11 +504,11 @@ Add to the `FakeSsh` test section of `hosts.rs`:
         );
         let failure = &err.details.as_ref().expect("details")["ssh_failure"];
         assert_eq!(failure["kind"], "host_key_unknown");
-        assert_eq!(failure["host_alias"], "hk.example");
+        assert_eq!(failure["ssh_alias"], "hk.example");
     }
 ```
 
-`host_alias` here is the ssh alias the probe dialled (`probe_with_token`'s
+`ssh_alias` here is the ssh alias the probe dialled (`probe_with_token`'s
 `host`), which is the name the ssh config and known_hosts know it by.
 
 - [ ] **Step 2: Run it to verify it fails**

@@ -88,7 +88,7 @@ src/lib/SshDiagnosisCard.svelte, src/lib/sshDiag.ts
 
 ### Classifier (`classify.rs`)
 
-`SshFailure { kind: SshFailureKind, host_alias, raw_tail: String }` where
+`SshFailure { kind: SshFailureKind, ssh_alias, raw_tail: String }` where
 `SshFailureKind` is `HostKeyUnknown | HostKeyChanged | AuthDenied | DnsFail |
 Refused | Timeout | Handshake | MuxBroken | Unknown`. `Timeout` also covers
 `No route to host` / `Network is unreachable`; `Handshake` is

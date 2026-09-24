@@ -411,7 +411,7 @@ async fn probe_with_token(
             .as_ref()
             .map(|f| format!("{}; ", f.kind.summary()))
             .unwrap_or_default();
-        let mut err = IpcError::new(
+        let err = IpcError::new(
             codes::E_PROBE,
             format!(
                 "ssh {host}: {summary}exited {:?}: {}",
@@ -419,10 +419,10 @@ async fn probe_with_token(
                 stderr.trim()
             ),
         );
-        if let Some(f) = failure {
-            err.details = Some(serde_json::json!({ "ssh_failure": f }));
-        }
-        return Err(err);
+        return Err(match failure {
+            Some(f) => err.with_details(serde_json::json!({ "ssh_failure": f })),
+            None => err,
+        });
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut parts = stdout.split("---");
@@ -1415,7 +1415,7 @@ mod tests {
         );
         let failure = &err.details.as_ref().expect("details")["ssh_failure"];
         assert_eq!(failure["kind"], "host_key_unknown");
-        assert_eq!(failure["host_alias"], "hk.example");
+        assert_eq!(failure["ssh_alias"], "hk.example");
     }
 
     #[tokio::test]
