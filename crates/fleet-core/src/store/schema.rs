@@ -395,6 +395,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/045_peer_links.sql"),
         already_applied: Some(participants_have_address),
     },
+    // `participants(peer_link_id)` index (federation review G17):
+    // `CREATE INDEX IF NOT EXISTS`, safe to re-run.
+    Migration::plain(46, include_str!("../../migrations/046_peer_link_index.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2196,5 +2199,76 @@ mod tests {
         }
         let (unique, _) = partial_unique("idx_session_messages_peer_pending");
         assert_eq!(unique, 0, "the pending index is a plain partial index");
+    }
+
+    /// G17: `pending_outbox`, `has_pending_outbox`, `mark_peer_accepted`,
+    /// `handover_upto` and `peer_links_down`'s listener branch all join
+    /// `participants ON participants.peer_link_id = peer_links.id` — every
+    /// poll of every dialer loop and every listener exchange. Migration 046
+    /// gives that join an index; this pins that it exists, is partial (only
+    /// the `remote` rows that ever set the column), and is a plain (not
+    /// unique) index — more than one participant can belong to the same
+    /// link.
+    #[test]
+    fn migration_046_adds_a_partial_index_on_participants_peer_link_id() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let (unique, sql): (i64, Option<String>) = s
+            .conn
+            .query_row(
+                "SELECT il.\"unique\", m.sql FROM sqlite_master m \
+                   JOIN pragma_index_list(m.tbl_name) il ON il.name = m.name \
+                  WHERE m.type = 'index' AND m.name = 'idx_participants_peer_link'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unique, 0, "more than one participant can share a link");
+        let sql = sql.unwrap_or_default();
+        assert!(sql.contains("peer_link_id"), "{sql}");
+        assert!(sql.contains(" WHERE "), "partial: {sql}");
+    }
+
+    /// Migration 046 on a database that already has migration 045 and rows
+    /// in `participants`: it must not disturb them, and running it twice
+    /// (`CREATE INDEX IF NOT EXISTS`) is a no-op.
+    #[test]
+    fn migration_046_on_a_populated_v45_database_is_a_safe_reindex() {
+        const SEED_AT: i64 = 45;
+        let conn = Connection::open_in_memory().unwrap();
+        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= SEED_AT) {
+            conn.execute_batch(sql)
+                .unwrap_or_else(|e| panic!("migration {version}: {e}"));
+        }
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+             INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+               VALUES (1, 'a1', 'local', 1, 1, 'running');
+             INSERT INTO participants (id, kind, session_id, created_at)
+               VALUES (1, 'session', 1, 1);
+             INSERT INTO participants (id, kind, address, peer_link_id, created_at)
+               VALUES (2, 'remote', 'fleet-b/session/h/b1', NULL, 1);",
+        )
+        .unwrap();
+        let s = Store {
+            conn,
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
+        };
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        // Re-running the migration script directly (as `migrate()` would on
+        // a database that already recorded 46) must not fail.
+        s.conn
+            .execute_batch(include_str!("../../migrations/046_peer_link_index.sql"))
+            .unwrap();
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "the re-run touched no rows");
     }
 }
