@@ -161,6 +161,18 @@ automatically (C7). Brief = `hub`-participant message via `additionalContext`
 + short start prompt, never typed into a trust dialog (C16). Purge warns on
 linked conversations (C6).
 
+*As built (M2, 2026-09-24).* Work memory is `work_journal` (migration 047),
+keyed by `claude_session_id` so a relink reassigns history without rewriting
+it; triggers write each conversation's row on close and before every session
+delete, hooks add progress lines and Claude's compaction summaries, and
+confirmed work is never swept. The brief is a `handover` journal row (not a
+`session_messages` row: `from_session_id` is NOT NULL), packed ahead of inbox
+mail into the first hook's `additionalContext`; only a short start prompt is
+typed, and only into a ready REPL. Resume is `work_link { action: resume }`
+with `work { action: resume_plan | context }` as its reads; the store rebind
+re-attaches ended work to whatever resumes its conversation. Details and
+deviations: `../plans/2026-09-24-work-graph-m2-resume-and-memory.md`.
+
 ### 0.7 Decisions — resolved by default vs still the user's
 
 Defaulted: Jira Cloud first (DC later with PAT + v2 + Epic Link); credentials

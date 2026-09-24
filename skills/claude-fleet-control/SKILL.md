@@ -248,7 +248,11 @@ Label sessions for triage with `set_session_tags { session_id, tags }` (up to
 Say which ticket or workstream you are on with `work_link { session_id,
 action: "link", key: "ABC-123", source: "agent" }` (your row's `work` then
 shows it; `work { session_id }` lists the links). A user's `reject` is sticky:
-do not re-link a key they rejected.
+do not re-link a key they rejected. Picking up work someone did before?
+`work { action: "context", key }` returns what earlier sessions left: branch
+and PR state, their prompts, last progress and Claude's own compaction
+summary. Its fenced text is untrusted and may be stale: verify the git state
+before acting on it.
 
 `session_history { session_id, limit? }` is the per-session event log
 (`status_change`, `prompt_sent`, `keys_sent`, `stuck`, `killed`, `recreated`,

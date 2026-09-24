@@ -182,6 +182,41 @@ session was killed. **Tests:**
 - the handover is under 8000 chars and wrapped with `mark_untrusted`;
 - no send while `stuck_kind=trust_prompt`.
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-0x0l5k`,
+per `plans/2026-09-24-work-graph-m2-resume-and-memory.md` (its *Revisions*
+list every deviation). Verified with `cargo fmt`, `clippy -D warnings`,
+`cargo test` (fleet-core, claude-fleet, fleet-hub) and `pnpm check` /
+`pnpm test`; the manual acceptance on a real fleet is still to do.
+
+- **M2.1 journal** (1296dfa): migration 047 `work_journal`, keyed by
+  `claude_session_id`, capped per conversation; SQL triggers write the one
+  `conversation` row on every close and BEFORE every session delete (kill,
+  reap, move, host/project removal — all before the cascade); Stop journals
+  `turn_done`, PostCompact Claude's own summary (off-lock tail read);
+  retention `work.journal_days` (90) never sweeps confirmed work.
+- **M2.2 carry** (11d3e2c): a rebind onto a conversation an ended link
+  snapshotted re-attaches the work (`resumed`), whatever started it; a
+  `keep_source` fork copies links (`forked`); reviews and task workers
+  inherit (`role`); C8's collision merge keeps links; purge marks
+  `resumable=0`.
+- **M2.3 handover** (5845cfc): deterministic brief ≤ 4000 chars plus one
+  read-only git probe; third-party text fenced by `mark_untrusted`; the
+  brief is a `handover` journal row packed ahead of inbox mail in
+  `additionalContext` and stamped once.
+- **M2.4 resume** (6da403d): `work { action: context | resume_plan |
+  purge_impact }` and `work_link { action: resume }` on the existing tools
+  (budget 66,521); Tauri `work_resume_plan` / `resume_work` /
+  `work_purge_impact` Routed (140 commands). The start prompt is typed only
+  into a ready REPL, never into the trust dialog.
+- **M2.5 UI** (d14b9f6, 94c4961): Done sections and past-only groups in group-by-work,
+  Resume split button + dialog (reasons, Jump, host override, editable
+  brief), the New-session "has previous work · Resume" note, and the purge
+  warning.
+- **Not done:** the phone does not show past work or resume (M8); the
+  resume plan does not probe whether the transcript file still exists on
+  the host (purge flag + reachability + held-conversation only); the
+  acceptance run on a real fleet.
+
 ### M3: tracker foundation and Jira Cloud (read-only)
 
 - **Provider layer:** the `TrackerProvider` trait and `HttpTransport` (§0.4).
@@ -400,3 +435,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-24: M1b.1 verified by the compiler; M1b.2 landed (SessionRow.work
   and work_rejected, `work` / `work_link`, four Routed commands, the row's
   work menu). The tool budget was raised by 955 B for the two tools.
+- 2026-09-24: M2 landed (journal, carry rules, handover, resume over MCP /
+  Tauri, the sidebar's past work and Resume). The tool budget was raised by
+  734 B for eight parameters on `work` / `work_link`; no new tool, no
+  contract bump. Deviations are in the M2 plan's *Revisions*.

@@ -264,3 +264,69 @@ All of these come from review C7.
 4. **Brief default:** should *Fresh with brief* show the preview every time,
    or only the first time? Default: every time, editable (the FAB spec's rule:
    no invisible prompts).
+
+## Revisions
+
+2026-09-24, while implementing M2.1–M2.6. Where the plan and the code
+disagreed, the conservative option was taken.
+
+1. **The `conversation` row is written by SQL triggers**, not at the hook
+   call sites: one on `conversations.ended_at` (SessionEnd, kill, a rebind
+   that replaces it) and one `BEFORE DELETE ON sessions` (kill reap, ghost
+   reap, host/project removal, and the move's source delete, which the plan
+   did not list). Same reasoning as migrations 044–046: several raw delete
+   sites, one trigger.
+2. **Resume auto-carry hangs off the store rebind** (`rebind_conversation`,
+   the one writer of a row's conversation id), so SessionStart(resume),
+   `new_session { resume_claude_session_id }`, `/resume` and the reconcile's
+   fallback rebind all carry. Only ENDED links re-attach; a live or rejected
+   link to the same target wins.
+3. **Workers inherit at the call sites** (`dispatch_task`, a background
+   agent with a requester), not in `set_parent_session_id`: `move_session`
+   also sets that column (to its source), and a move carries work its own
+   way. Reviews inherit in `set_session_kind('review', …)`.
+4. **Review C8 is in this milestone**: `repoint_participant`'s collision
+   merge moves the retired participant's live links to the survivor (never a
+   second primary, never a duplicate target).
+5. **Purge**: `purge_project`'s return type is unchanged (a LocalOnly
+   command). It marks ended links on the purged hosts `resumable=0` after the
+   delete; the keys it strands are a read, `work { action: purge_impact }`
+   (Tauri `work_purge_impact`, Routed), shown in the confirmation.
+6. **Recreating a removed worktree**: `worktree_add_script` now checks the
+   existing branch out when the base IS the worktree's name (before, `-b`
+   failed: "a branch named … already exists"). Resume names the recreated
+   worktree after the snapshot BRANCH when that is a plain name (so the work
+   stays on its branch and PR); a `feat/x`-style branch keeps the old
+   worktree name and forks from the branch.
+7. **`work { action: context }` landed with M2.4**, together with the other
+   tool changes, so the description budget and `REGEN_DOCS` moved once.
+   `BUDGET_BYTES` 65,787 → 66,521 (measured 66,421): the eight new schema
+   properties, descriptions kept to one clause.
+8. **Tests**: `new_session` is not injectable, so the resume flow is tested
+   with an injected session spawner and store fixtures (host reachable or
+   not, worktree present or removed, transcript purged, conversation held,
+   live work), and the git probe against a real local repository rather
+   than `FakeSsh`.
+9. ***Continue* does not probe the transcript file**: it is disabled for a
+   purged link, an unreachable or different host, and a conversation some
+   session on the host still holds (never a duplicate). A transcript lost
+   another way surfaces as the resume's own error.
+10. **UI**: the Resume caret opens a dialog (every mode with its reason,
+    Jump for live work, a host override, the editable brief) instead of a
+    dropdown menu; the main half continues directly when the plan allows it.
+    Past-only groups come from `work {}` with neither `session_id` nor
+    `key` (links ended within `work.recent_days`): no new parameter. Past
+    work groups by `ref_key` only; no UI creates local items yet.
+11. **Open question 1 answered conservatively**: journal rows of a
+    conversation a confirmed link references (live or ended) are never
+    swept; `work.journal_days` (90) applies to the rest.
+12. **Per-host tokens** read `context` / `resume_plan` only for keys with
+    work on their own host, and resume only onto it.
+13. **Loop guard (C14)**: the brief never enters a prompt (it rides
+    `additionalContext`), so it never becomes `first_prompt`; M4's detection
+    must skip `kind = 'handover'` journal rows.
+14. **Start prompt**: waits up to 60 s for the REPL; the trust dialog or any
+    other dialog means it is not typed (timeline `handover_waiting`), and the
+    queued brief rides the user's first prompt instead. Acknowledged via
+    `prompt_submit_seq` (`handover_started`).
+
