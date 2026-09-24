@@ -25,7 +25,7 @@ handover brief.
 | Claude's own summaries | `ConvItem::Compact { summary }` in `service/transcript.rs:447,944-953` (the `isCompactSummary` entry, ≤20k chars) |
 | Turn-level progress | the `turn_done` detail (the first 200 chars of `last_assistant_message`, `service/hooks.rs:738`) |
 | Hook points | `apply_post_compact_hook` (`hooks.rs:675`), `apply_session_end_hook`, Stop; `record_kill`; the ghost reap |
-| Context injection | inbox → `additionalContext` on UserPromptSubmit / Stop (`service/delivery.rs`, 8000 chars / 200 lines, whole messages only) |
+| Context injection | inbox → `additionalContext` on UserPromptSubmit / Stop (`service/delivery.rs`, 8000 chars / 200 lines, whole messages only). `session_messages.from_session_id` is `NOT NULL`, so the brief uses its own journal row (M2.3) |
 | Safe prompt sending | `wait_for_repl_ready`, `stuck_kind=trust_prompt` detection (`pane_intel.rs:389`), `prompt_submit_seq` (042) |
 | Untrusted text | `mark_untrusted` / `UNTRUSTED_END` (`mcp/guard.rs:1213`) |
 
@@ -49,8 +49,8 @@ handover brief.
 4. **Pull beats push.** The brief injected at start stays short, at most
    4000 chars. The full context is a `work` read (`action: context`) that the
    agent can call.
-5. **Never type into an unknown pane.** The brief travels as a message from
-   the **hub** participant through `additionalContext`. Only a short start
+5. **Never type into an unknown pane.** The brief travels as a `handover`
+   journal row through `additionalContext`, packed ahead of inbox mail. Only a short start
    prompt is typed, and only when the REPL is ready and
    `stuck_kind != trust_prompt`. Delivery is confirmed by `prompt_submit_seq`.
 6. **Resume never destroys or duplicates.**
@@ -72,9 +72,11 @@ change. Work in the **Worker** environment, where cargo reaches crates.io.
 ### M2.1: journal storage and harvest (backend)
 
 - **Migration 047 `work_journal`:**
-  `id, claude_session_id TEXT NOT NULL, participant_id REFERENCES participants ON DELETE SET NULL, at, kind, source, body, meta`,
+  `id, claude_session_id TEXT, participant_id REFERENCES participants ON DELETE SET NULL, at, kind, source, body, meta, delivered_at`
+  (`claude_session_id` is NULL only for a `handover` row addressed to a
+  session that has not started its conversation yet),
   plus the indexes `(claude_session_id, kind, at DESC)` and `(at)`.
-  - `kind` ∈ `conversation | progress | compact_summary | outcome | note`.
+  - `kind` ∈ `conversation | progress | compact_summary | outcome | note | handover`.
   - `source` ∈ `hook | transcript | probe | agent | fleet`.
 - **`store/work_journal.rs`:**
   - `append_journal` enforces the per-conversation caps in the same
@@ -146,19 +148,20 @@ All of these come from review C7.
   with fleet-authored lines outside them. This covers C14 and the injection
   finding.
 - **Delivery:**
-  - Add `Store::insert_system_message(to_session, body, kind)` with the
-    **hub** participant as sender. First check that
-    `session_messages.from_session_id` accepts NULL; if not, it needs a
-    guarded migration.
-  - It is delivered on the next UserPromptSubmit or Stop through the
-    existing packer.
-  - `kind='handover'` is excluded from key detection (the loop guard,
-    ahead of M4).
+  - `session_messages.from_session_id` is `NOT NULL` (migration 015), so a
+    hub-sent inbox message would need a table rebuild. Do not add one.
+  - Store the brief as a `work_journal` row instead: `kind='handover'`, with
+    the target participant and a `delivered_at` column (migration 047).
+  - Teach the UserPromptSubmit / Stop delivery path to pack undelivered
+    handover rows **ahead of** inbox messages, through the same `pack`
+    budget, and stamp `delivered_at`.
+  - Handover rows are excluded from key detection (the loop guard, ahead of
+    M4).
 - **Tests:**
   - template snapshots: full, a bare key, no git, a removed worktree, an
     oversized summary;
   - the untrusted fencing;
-  - `insert_system_message` delivery through `pack`.
+  - handover-row delivery through `pack`, ahead of inbox mail, exactly once.
 
 ### M2.4: `resume_work` over MCP and Tauri
 
