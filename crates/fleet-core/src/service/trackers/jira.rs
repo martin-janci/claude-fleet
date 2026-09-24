@@ -24,11 +24,16 @@
 //!   and dedupes on `(id, updated)`.
 //! * **Descriptions** are ADF; only a plain-text excerpt is kept.
 
-use super::{
-    Caps, Fetched, Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo,
-    TrackerProvider, ViewDef, WorkItemSnapshot, DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
+pub use super::jira_common::{
+    adf_excerpt, keys_in_text, map_status_category, normalize_resolution, SPRINT_FIELD_SCHEMA,
 };
-use crate::net::https::{HttpTransport, Request, Response, TransportError};
+use super::jira_common::{check, current_sprint, key_in_path};
+use super::{
+    map_transport, CallKind as Call, Caps, Fetched, Incremental, ItemRef, Page, RefCtx,
+    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
+    NOT_FOUND_OR_NO_PERMISSION,
+};
+use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -38,23 +43,11 @@ use std::sync::Arc;
 pub const BULK_MAX: usize = 100;
 /// Page size for `search/jql`.
 pub const PAGE_SIZE: usize = 100;
-/// The sprint field's `schema.custom`.
-pub const SPRINT_FIELD_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
 
 /// Built-in views (plan M3.2). The `sprint` one only where sprints exist.
 pub const VIEW_MINE: &str = "assignee = currentUser() AND statusCategory != Done";
 pub const VIEW_SPRINT: &str = "sprint in openSprints() AND assignee = currentUser()";
 pub const VIEW_RECENT: &str = "assignee = currentUser() AND updated >= -14d";
-
-/// Which call a response answers; decides what a 403 means.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Call {
-    /// `/myself`: a 403 here is an auth failure.
-    Identity,
-    /// A view's search: a 403 disables that view only.
-    View,
-    Other,
-}
 
 pub struct JiraCloud {
     site: String,
@@ -245,157 +238,6 @@ impl JiraCloud {
     }
 }
 
-fn map_transport(e: TransportError) -> TrackerError {
-    match e {
-        TransportError::Refused(m) => TrackerError::Refused(m),
-        TransportError::Connect(m) => TrackerError::Unreachable(m),
-        TransportError::Timeout => TrackerError::Unreachable("timed out".into()),
-        TransportError::TooLarge(m) | TransportError::Protocol(m) => TrackerError::Invalid(m),
-    }
-}
-
-/// Map a non-2xx answer (C25–C28 and the plan's error list).
-fn check(resp: &Response, call: Call) -> Result<(), TrackerError> {
-    if resp.is_success() {
-        return Ok(());
-    }
-    let captcha = resp
-        .header("X-Seraph-LoginReason")
-        .is_some_and(|r| r.contains("AUTHENTICATION_DENIED"));
-    let retry_after = resp
-        .header("Retry-After")
-        .and_then(|v| v.trim().parse::<u64>().ok());
-    Err(match resp.status {
-        401 | 403 if captcha => TrackerError::Captcha,
-        401 => TrackerError::Auth("401 Unauthorized".into()),
-        403 if call == Call::Identity => TrackerError::Auth("403 on /myself".into()),
-        403 if call == Call::View => TrackerError::Forbidden("403 on this view's query".into()),
-        403 => TrackerError::Forbidden("403".into()),
-        404 => TrackerError::NotFound,
-        429 => TrackerError::RateLimited {
-            retry_after_secs: retry_after,
-        },
-        503 if retry_after.is_some() => TrackerError::RateLimited {
-            retry_after_secs: retry_after,
-        },
-        300..=399 => TrackerError::Invalid(format!(
-            "{} redirect (not followed){}",
-            resp.status,
-            resp.header("Location")
-                .map(|l| format!(" to {}", crate::logging::redact(l)))
-                .unwrap_or_default()
-        )),
-        s => TrackerError::Invalid(format!("HTTP {s}")),
-    })
-}
-
-/// `statusCategory.key` → fleet's category. `undefined` (C26) and anything
-/// unknown count as todo: never claim work is under way or done on a guess.
-pub fn map_status_category(key: Option<&str>) -> &'static str {
-    match key {
-        Some("indeterminate") => "in_progress",
-        Some("done") => "done",
-        _ => "todo",
-    }
-}
-
-/// A resolution name → completed | not_planned | duplicate. Conservative:
-/// only names that plainly say "not done" or "duplicate" are told apart;
-/// everything else (Done, Fixed, a custom name) is `completed`.
-pub fn normalize_resolution(name: &str) -> String {
-    let n = name.trim().to_lowercase().replace('\u{2019}', "'");
-    if n.contains("duplicate") {
-        return "duplicate".into();
-    }
-    const NOT_PLANNED: &[&str] = &[
-        "won't do",
-        "wont do",
-        "won't fix",
-        "wont fix",
-        "declined",
-        "cancelled",
-        "canceled",
-        "rejected",
-        "obsolete",
-    ];
-    if NOT_PLANNED.contains(&n.as_str()) {
-        "not_planned".into()
-    } else {
-        "completed".into()
-    }
-}
-
-/// The sprint field's value → (the current sprint's name, it is active). An
-/// active sprint wins; else the newest future one; closed ones are history.
-fn current_sprint(v: &Value) -> (Option<String>, bool) {
-    let Some(list) = v.as_array() else {
-        return (None, false);
-    };
-    let name = |s: &Value| s["name"].as_str().map(str::to_string);
-    if let Some(active) = list.iter().find(|s| s["state"] == "active") {
-        return (name(active), true);
-    }
-    (
-        list.iter()
-            .rev()
-            .find(|s| s["state"] == "future")
-            .and_then(name),
-        false,
-    )
-}
-
-/// Plain text out of an Atlassian Document Format value, at most
-/// [`DESCRIPTION_MAX_CHARS`] characters. A plain string (API v2, or a
-/// renderer) is taken as is.
-pub fn adf_excerpt(v: &Value) -> Option<String> {
-    let mut out = String::new();
-    match v {
-        Value::String(s) => out.push_str(s),
-        Value::Object(_) => adf_walk(v, &mut out),
-        _ => return None,
-    }
-    let text = out
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
-    if text.is_empty() {
-        return None;
-    }
-    Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect())
-}
-
-fn adf_walk(node: &Value, out: &mut String) {
-    if out.chars().count() > DESCRIPTION_MAX_CHARS {
-        return;
-    }
-    let attrs = &node["attrs"];
-    match node["type"].as_str().unwrap_or_default() {
-        "text" => out.push_str(node["text"].as_str().unwrap_or_default()),
-        "hardBreak" => out.push('\n'),
-        "mention" => out.push_str(attrs["text"].as_str().unwrap_or("@someone")),
-        "emoji" => out.push_str(attrs["shortName"].as_str().unwrap_or_default()),
-        "inlineCard" | "blockCard" => out.push_str(attrs["url"].as_str().unwrap_or_default()),
-        "status" => out.push_str(attrs["text"].as_str().unwrap_or_default()),
-        "listItem" => out.push_str("- "),
-        _ => {}
-    }
-    if let Some(children) = node["content"].as_array() {
-        for c in children {
-            adf_walk(c, out);
-        }
-    }
-    if matches!(
-        node["type"].as_str(),
-        Some("paragraph" | "heading" | "codeBlock" | "blockquote" | "rule" | "listItem")
-    ) && !out.ends_with('\n')
-    {
-        out.push('\n');
-    }
-}
-
 /// `https://<site>.atlassian.net/browse/ABC-123` (or a board URL with
 /// `selectedIssue=ABC-123`) → `(site_url, "ABC-123")`, the site fenced by
 /// `normalize_site_url`. For "connect by pasting a ticket URL".
@@ -406,69 +248,6 @@ pub fn parse_ticket_url(url: &str) -> Option<(String, String)> {
     let site = crate::store::normalize_site_url(&format!("https://{host}")).ok()?;
     let key = key_in_path(path)?;
     Some((site, key))
-}
-
-/// The issue key a Jira URL path names.
-fn key_in_path(path: &str) -> Option<String> {
-    let (path, query) = path.split_once('?').unwrap_or((path, ""));
-    let path = path.split('#').next().unwrap_or(path);
-    if let Some(k) = path
-        .strip_prefix("browse/")
-        .map(|k| k.split('/').next().unwrap_or(k))
-    {
-        if is_key(k) {
-            return Some(k.to_ascii_uppercase());
-        }
-    }
-    query
-        .split(['&', '#'])
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| *k == "selectedIssue")
-        .map(|(_, v)| v)
-        .filter(|v| is_key(v))
-        .map(str::to_ascii_uppercase)
-}
-
-/// `ABC-123`: a letter, then letters/digits/underscore, a dash, digits.
-fn is_key(s: &str) -> bool {
-    let Some((p, n)) = s.split_once('-') else {
-        return false;
-    };
-    p.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-        && (2..=10).contains(&p.len())
-        && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && (1..=7).contains(&n.len())
-        && n.chars().all(|c| c.is_ascii_digit())
-}
-
-/// Keys with one of `prefixes` in free text, case-insensitive, bounded by
-/// non-alphanumerics (C11), upper-cased, in order, without repeats.
-pub fn keys_in_text(text: &str, prefixes: &[String]) -> Vec<String> {
-    if prefixes.is_empty() {
-        return Vec::new();
-    }
-    let alternation = prefixes
-        .iter()
-        .map(|p| regex::escape(p))
-        .collect::<Vec<_>>()
-        .join("|");
-    // The regex crate has no lookaround; the boundary is checked by hand.
-    let Ok(re) = regex::Regex::new(&format!(r"(?i)({alternation})-(\d{{1,7}})")) else {
-        return Vec::new();
-    };
-    let bytes = text.as_bytes();
-    let mut out: Vec<String> = Vec::new();
-    for m in re.find_iter(text) {
-        let before_ok = m.start() == 0 || !bytes[m.start() - 1].is_ascii_alphanumeric();
-        let after_ok = m.end() == bytes.len() || !bytes[m.end()].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            let k = m.as_str().to_ascii_uppercase();
-            if !out.contains(&k) {
-                out.push(k);
-            }
-        }
-    }
-    out
 }
 
 #[async_trait::async_trait]

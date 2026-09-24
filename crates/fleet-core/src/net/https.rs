@@ -223,10 +223,56 @@ pub trait HttpTransport: Send + Sync {
 /// Which hosts a [`DirectTransport`] may connect to.
 pub type HostPolicy = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Why an address a host name resolved to is refused (work graph M6.5: an
+/// admin-configured site must not reach this machine or a cloud metadata
+/// service). IPv4-mapped IPv6 is judged as the IPv4 it carries.
+pub fn refused_address(ip: std::net::IpAddr) -> Option<&'static str> {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            if v4.is_loopback() {
+                Some("loopback")
+            } else if v4.is_link_local() {
+                Some("link-local (cloud metadata lives at 169.254.169.254)")
+            } else if o[0] == 0 {
+                Some("unspecified")
+            } else if v4.is_broadcast() || v4.is_multicast() {
+                Some("broadcast or multicast")
+            } else {
+                None
+            }
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return refused_address(IpAddr::V4(v4));
+            }
+            if v6.is_loopback() {
+                Some("loopback")
+            } else if v6.is_unspecified() {
+                Some("unspecified")
+            } else if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                Some("link-local")
+            } else if v6.is_multicast() {
+                Some("multicast")
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// HTTPS from this process. See the module docs for what it refuses.
 pub struct DirectTransport {
     allow_host: HostPolicy,
     max_body: u64,
+    /// Resolve first and refuse loopback / link-local / unspecified
+    /// addresses (`Some(false)`), or allow them on an admin's opt-in
+    /// (`Some(true)`); either way connect to the checked address only.
+    /// `None`: the plain path (a fixed public API host).
+    addr_guard: Option<bool>,
+    /// Extra trusted CA (PEM) for this transport's connections.
+    extra_ca: Option<String>,
 }
 
 impl DirectTransport {
@@ -234,7 +280,66 @@ impl DirectTransport {
         DirectTransport {
             allow_host,
             max_body: DEFAULT_MAX_BODY,
+            addr_guard: None,
+            extra_ca: None,
         }
+    }
+
+    /// Check every address the host resolves to (see [`refused_address`])
+    /// before connecting, and connect only to a checked one. `allow_private`
+    /// is the admin's explicit opt-in to loopback / link-local targets.
+    pub fn with_address_guard(mut self, allow_private: bool) -> Self {
+        self.addr_guard = Some(allow_private);
+        self
+    }
+
+    /// Trust `pem` (one or more CA certificates) besides the platform store.
+    /// Implies the address guard's pinned connect path.
+    pub fn with_extra_ca(mut self, pem: Option<String>) -> Self {
+        self.extra_ca = pem.filter(|p| !p.trim().is_empty());
+        self
+    }
+
+    /// The guarded path: resolve, check, connect to a checked address.
+    async fn connect_guarded(
+        &self,
+        at: &Target,
+        allow_private: bool,
+    ) -> Result<super::conn::Stream, TransportError> {
+        let host = at.endpoint.host();
+        let port = at.endpoint.port();
+        let addrs: Vec<std::net::SocketAddr> =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
+                .await
+                .map_err(|_| TransportError::Connect(format!("resolving {host} timed out")))?
+                .map_err(|e| TransportError::Connect(format!("resolve {host}: {e}")))?
+                .collect();
+        if addrs.is_empty() {
+            return Err(TransportError::Connect(format!("{host} has no address")));
+        }
+        for a in &addrs {
+            let why = refused_address(a.ip());
+            let multicast = a.ip().is_multicast();
+            if let Some(why) = why.filter(|_| !allow_private || multicast) {
+                return Err(TransportError::Refused(format!(
+                    "{host} resolves to {} ({why}); a tracker site may not point there \
+                     unless an admin sets allow_private_network",
+                    a.ip()
+                )));
+            }
+        }
+        let connector = match &self.extra_ca {
+            Some(pem) => super::tls::tls_connector_with_extra_roots(pem)
+                .await
+                .map_err(TransportError::Refused)?,
+            None => super::tls::tls_connector()
+                .await
+                .map_err(TransportError::Connect)?
+                .clone(),
+        };
+        super::conn::connect_pinned(&addrs, host, &connector, CONNECT_TIMEOUT)
+            .await
+            .map_err(TransportError::Connect)
     }
 
     pub fn with_max_body(mut self, max: u64) -> Self {
@@ -348,10 +453,14 @@ impl HttpTransport for DirectTransport {
         }
         let bytes = render_request(&req, &at)?;
         let max = self.max_body;
+        let guard = self.addr_guard.or(self.extra_ca.as_ref().map(|_| false));
         let exchange = async {
-            let stream = conn::connect(&at.endpoint, CONNECT_TIMEOUT)
-                .await
-                .map_err(TransportError::Connect)?;
+            let stream = match guard {
+                Some(allow_private) => self.connect_guarded(&at, allow_private).await?,
+                None => conn::connect(&at.endpoint, CONNECT_TIMEOUT)
+                    .await
+                    .map_err(TransportError::Connect)?,
+            };
             let host = at.endpoint.host();
             let port = at.endpoint.port();
             conn::speak(stream, host, port, &bytes, max)
@@ -553,6 +662,66 @@ mod tests {
             let err = t.send(Request::get(url)).await.unwrap_err();
             assert!(matches!(err, TransportError::Refused(_)), "{url}: {err}");
         }
+    }
+
+    #[test]
+    fn loopback_link_local_and_unspecified_addresses_are_refused() {
+        use std::net::IpAddr;
+        for ip in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "169.254.169.254",
+            "169.254.0.1",
+            "0.0.0.0",
+            "0.1.2.3",
+            "::1",
+            "::",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "255.255.255.255",
+            "224.0.0.1",
+        ] {
+            assert!(
+                refused_address(ip.parse::<IpAddr>().unwrap()).is_some(),
+                "{ip}"
+            );
+        }
+        for ip in [
+            "10.0.0.5",
+            "192.168.1.10",
+            "172.16.0.1",
+            "93.184.216.34",
+            "2606:4700::1",
+        ] {
+            assert_eq!(refused_address(ip.parse::<IpAddr>().unwrap()), None, "{ip}");
+        }
+    }
+
+    /// After resolution, not before: a name that resolves to loopback (or
+    /// an IP literal) is refused, unless the admin opted in.
+    #[tokio::test]
+    async fn the_guard_checks_what_the_name_resolved_to() {
+        let t = DirectTransport::new(Arc::new(|_: &str| true)).with_address_guard(false);
+        for url in [
+            "https://localhost/rest/api/2/myself",
+            "https://127.0.0.1/rest/api/2/myself",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/x",
+        ] {
+            let e = t.send(Request::get(url)).await.unwrap_err();
+            assert!(
+                matches!(&e, TransportError::Refused(m) if m.contains("allow_private_network")),
+                "{url}: {e}"
+            );
+        }
+        // Opted in: the connect is attempted (and fails: nothing listens).
+        let t = DirectTransport::new(Arc::new(|_: &str| true)).with_address_guard(true);
+        let e = t
+            .send(Request::get("https://127.0.0.1:9/x").with_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap_err();
+        assert!(!matches!(e, TransportError::Refused(_)), "{e}");
     }
 
     /// A 3xx is handed back, never followed: the Location is not dialled.

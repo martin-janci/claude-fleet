@@ -29,7 +29,7 @@ use std::fmt;
 
 /// Providers a tracker may be (M6 adds GitHub, Asana, Linear and Jira Data
 /// Center, one at a time).
-pub const TRACKER_PROVIDERS: &[&str] = &["jira", "github", "asana", "linear"];
+pub const TRACKER_PROVIDERS: &[&str] = &["jira", "github", "asana", "linear", "jira_dc"];
 
 /// `trackers.state`.
 pub const TRACKER_STATES: &[&str] = &[
@@ -73,6 +73,9 @@ pub struct TrackerConfig {
     /// The sprint custom field's id (`customfield_10020`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprint_field: Option<String>,
+    /// Jira Data Center: the Epic Link custom field's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic_field: Option<String>,
     // --- M6: what the providers after Jira learn; all default.
     /// The workspace / organisation the tracker reads (Asana workspace gid,
     /// Linear organisation id).
@@ -431,6 +434,58 @@ fn normalize_linear_site(raw: &str) -> Result<String, IpcError> {
     }
 }
 
+/// A Jira Data Center site as an admin enters it (or any ticket URL on it):
+/// `https://<host>[/<context path>]`, lower-case host, https only, no
+/// userinfo, no port (a port would let the site aim at another service on
+/// the same machine), no query or fragment; a `/browse/…` tail is dropped.
+/// An Atlassian Cloud host is refused (that is the `jira` provider).
+pub fn normalize_dc_site(raw: &str) -> Result<String, IpcError> {
+    let invalid = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{why}: a Jira Data Center site is https://<host>[/<context path>], \
+                 without a port or credentials"
+            ),
+        )
+    };
+    let (host, segs) = split_https(raw).map_err(invalid)?;
+    let host_ok = host.len() <= 253
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && host.contains('.')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
+    if !host_ok {
+        return Err(invalid("not a host name"));
+    }
+    if host.ends_with(".atlassian.net") {
+        return Err(invalid("an Atlassian Cloud site (use the jira provider)"));
+    }
+    let ctx: Vec<&String> = segs
+        .iter()
+        .take_while(|s| !matches!(s.as_str(), "browse" | "rest" | "secure" | "projects"))
+        .collect();
+    if ctx.len() > 3
+        || ctx.iter().any(|s| {
+            s.is_empty()
+                || s.starts_with('.')
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+    {
+        return Err(invalid("not a context path"));
+    }
+    let mut out = format!("https://{host}");
+    for s in ctx {
+        out.push('/');
+        out.push_str(s);
+    }
+    Ok(out)
+}
+
 /// Normalise and fence a site URL for `provider` (see each provider's
 /// fence). `E_INVALID` for an unknown provider.
 pub fn normalize_provider_site(provider: &str, raw: &str) -> Result<String, IpcError> {
@@ -439,6 +494,7 @@ pub fn normalize_provider_site(provider: &str, raw: &str) -> Result<String, IpcE
         "github" => normalize_github_site(raw),
         "asana" => normalize_asana_site(raw),
         "linear" => normalize_linear_site(raw),
+        "jira_dc" => normalize_dc_site(raw),
         other => Err(IpcError::new(
             codes::E_INVALID,
             format!(

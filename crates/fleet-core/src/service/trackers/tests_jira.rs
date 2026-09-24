@@ -2,8 +2,9 @@
 //! `testdata/jira/` (see its README). No test here reaches a real site.
 
 use super::*;
-use crate::net::https::{FakeTransport, Method, Response};
+use crate::net::https::{FakeTransport, Method, Response, TransportError};
 use crate::service::trackers::list_all;
+use crate::service::trackers::DESCRIPTION_MAX_CHARS;
 
 const SITE: &str = "https://acme.atlassian.net";
 const ME: &str = "557058:00000000-aaaa-bbbb-cccc-000000000001";

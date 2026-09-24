@@ -14,6 +14,8 @@ pub mod asana;
 pub mod conformance;
 pub mod github;
 pub mod jira;
+pub mod jira_common;
+pub mod jira_dc;
 pub mod linear;
 pub mod sync;
 pub mod tickets;
@@ -356,6 +358,12 @@ pub fn provider_for(
             cred,
             transport,
         )),
+        "jira_dc" => Box::new(jira_dc::JiraDc::new(
+            &row.site_url,
+            row.config.clone(),
+            cred,
+            transport,
+        )),
         "linear" => Box::new(linear::Linear::new(
             &row.site_url,
             row.config.clone(),
@@ -465,6 +473,14 @@ impl TrackerNet {
             })
         };
         match TransportKind::parse(&row.transport)? {
+            // An admin-configured site (Data Center): resolve first, refuse
+            // loopback / link-local / unspecified unless opted in, connect
+            // to the checked address, and trust the admin's extra CA.
+            TransportKind::Direct if row.provider == "jira_dc" => Ok(Arc::new(
+                DirectTransport::new(policy)
+                    .with_address_guard(row.settings.allow_private_network)
+                    .with_extra_ca(row.settings.extra_ca.clone()),
+            )),
             TransportKind::Direct => Ok(Arc::new(DirectTransport::new(policy))),
             TransportKind::ViaCli(h) => match row.provider.as_str() {
                 "github" => Ok(Arc::new(crate::net::via_host::GhCliTransport::new(
@@ -506,6 +522,17 @@ pub fn host_policy(row: &TrackerRow) -> HostPolicy {
         "github" => Arc::new(|h: &str| h == crate::net::via_host::GITHUB_API_HOST),
         "asana" => Arc::new(|h: &str| h == asana::API_HOST),
         "linear" => Arc::new(|h: &str| h == linear::API_HOST),
+        // Exactly the configured site's host: nothing else, not a subdomain.
+        "jira_dc" => {
+            let site_host = row
+                .site_url
+                .trim_start_matches("https://")
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            Arc::new(move |h: &str| h.eq_ignore_ascii_case(&site_host))
+        }
         _ => Arc::new(crate::store::is_allowed_tracker_host),
     }
 }

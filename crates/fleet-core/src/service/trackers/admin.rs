@@ -25,7 +25,7 @@ pub struct WorkAdminArgs {
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_id: Option<i64>,
-    /// jira|github|asana|linear (default: from the URL)
+    /// jira|github|asana|linear|jira_dc (default: from the URL)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Display name.
