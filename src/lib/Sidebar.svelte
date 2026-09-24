@@ -66,6 +66,15 @@
   import TasksPanel from './TasksPanel.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
   import SessionRowItem from './SessionRowItem.svelte';
+  import ResumeButton from './ResumeButton.svelte';
+  import {
+    loadPastWork,
+    pastWork,
+    pastWorkSummary,
+    workPurgeImpact,
+    type WorkLink,
+  } from './work';
+  import { timeAgo } from './session_status';
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
   import { isRecency, matchesRecency, type Recency } from './session_status';
 
@@ -408,6 +417,47 @@
     if (!keyed || keyed.size === 0) return base;
     return (s) => !keyed.has(s.id) && (base ? base(s) : true);
   });
+
+  // ── Past work (roadmap M2.5) ──
+  // Ended links: a live group's collapsed "Done · n", and a group of its own
+  // (collapsed) for work that has only ended sessions — so reopened work has
+  // somewhere to show. Reloaded when the live keys or the session count
+  // change (a session ending is what makes past work).
+  let openDone: Set<string> = $state(new Set());
+  let openPast: Set<string> = $state(new Set());
+  const liveWorkKeys = $derived(workGroups.map((g) => g.key).join('\n'));
+  $effect(() => {
+    if ($sidebarGroupBy !== 'work') return;
+    const keys = liveWorkKeys;
+    void $sessions.length;
+    untrack(() => void loadPastWork(keys ? keys.split('\n') : []));
+  });
+  const pastOnlyGroups = $derived.by((): { key: string; links: WorkLink[] }[] => {
+    if ($sidebarGroupBy !== 'work') return [];
+    const live = new Set(workGroups.map((g) => g.key));
+    const q = searchQuery.toLowerCase();
+    const out: { key: string; links: WorkLink[] }[] = [];
+    for (const [key, links] of $pastWork) {
+      if (live.has(key) || links.length === 0) continue;
+      // Hosts outside the filter hide their past work too.
+      const shown = links.filter((l) => $hostFilter === 'all' || l.snap_host === $hostFilter);
+      if (shown.length === 0) continue;
+      if (
+        q &&
+        !key.toLowerCase().includes(q) &&
+        !shown.some((l) => (l.snap_name ?? '').toLowerCase().includes(q))
+      )
+        continue;
+      out.push({ key, links: shown });
+    }
+    return out.sort((a, b) => (b.links[0].ended_at ?? 0) - (a.links[0].ended_at ?? 0));
+  });
+  function toggleIn(set: Set<string>, key: string): Set<string> {
+    const next = new Set(set);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  }
 
   function toggleWorkCollapse(key: string) {
     const next = new Set(collapsedWork);
@@ -765,6 +815,19 @@
   // --- Purge Project ---
   let pendingPurge: ProjectRow | null = $state(null);
 
+  // The work keys whose conversations the purge would take away, named in
+  // the confirmation (M2.5). Empty when there are none or the hub is older.
+  let purgeKeys: string[] = $state([]);
+  $effect(() => {
+    const p = pendingPurge;
+    purgeKeys = [];
+    if (!p) return;
+    const hosts = untrack(() => purgeHostsForProject(p.id, $sessions));
+    void workPurgeImpact(p.id, hosts).then((r) => {
+      if (r.ok && pendingPurge === p) purgeKeys = r.value;
+    });
+  });
+
   async function confirmPurge() {
     if (!pendingPurge) return;
     const project = pendingPurge;
@@ -845,7 +908,23 @@
     {#if !$onboardingDismissed}
       <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
     {/if}
-    {#if workGroups.length > 0}
+    {#snippet pastRow(key: string, l: WorkLink)}
+      <div
+        class="past-row"
+        data-testid="past-work-row"
+        title="Ended {l.ended_at ? timeAgo(l.ended_at, nowSec * 1000) : ''}{l.snap_worktree ? ` · worktree ${l.snap_worktree}` : ''}"
+      >
+        <span class="past-label">{l.snap_name ?? l.snap_tmux ?? key}</span>
+        <span class="past-meta"
+          >{[l.snap_host, l.snap_branch].filter(Boolean).join(' · ')}{l.ended_at
+            ? ` · ended ${timeAgo(l.ended_at, nowSec * 1000)}`
+            : ''}</span
+        >
+        {#if l.resumable === false}<span class="past-purged" title="Its transcripts were purged: only a fresh start is possible">purged</span>{/if}
+        <ResumeButton workKey={key} link={l} />
+      </div>
+    {/snippet}
+    {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
       <ul class="tree work-tree" data-testid="work-groups">
         {#each workGroups as g (g.key)}
           {@const isCollapsed = collapsedWork.has(g.key)}
@@ -882,6 +961,50 @@
               {#each g.sessions as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
               {/each}
+              {@const past = $pastWork.get(g.key) ?? []}
+              {#if past.length > 0}
+                <div
+                  class="done-row"
+                  data-testid="work-done"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => (openDone = toggleIn(openDone, g.key))}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') openDone = toggleIn(openDone, g.key);
+                  }}
+                >
+                  <span class="caret" class:collapsed={!openDone.has(g.key)}>▾</span>
+                  Done · {past.length}
+                </div>
+                {#if openDone.has(g.key)}
+                  {#each past as l (l.id)}{@render pastRow(g.key, l)}{/each}
+                {/if}
+              {/if}
+            {/if}
+          </li>
+        {/each}
+        {#each pastOnlyGroups as pg (pg.key)}
+          {@const isOpen = openPast.has(pg.key)}
+          <li class="proj past-only" data-testid="past-work-group">
+            <div
+              class="proj-row work-row"
+              data-testid="past-work-header"
+              title="Past work on {pg.key}: no session is running it"
+              role="button"
+              tabindex="0"
+              onclick={() => (openPast = toggleIn(openPast, pg.key))}
+              onkeydown={(e) => {
+                if (!fromRowItself(e)) return;
+                if (e.key === 'Enter' || e.key === ' ') openPast = toggleIn(openPast, pg.key);
+              }}
+            >
+              <span class="caret" class:collapsed={!isOpen}>▾</span>
+              <span class="label"><span class="work-key">{pg.key}</span></span>
+              <span class="past-note">{pastWorkSummary(pg.links, nowSec * 1000)}</span>
+              <ResumeButton workKey={pg.key} link={pg.links[0]} />
+            </div>
+            {#if isOpen}
+              {#each pg.links as l (l.id)}{@render pastRow(pg.key, l)}{/each}
             {/if}
           </li>
         {/each}
@@ -935,7 +1058,7 @@
           </li>
         {/each}
       </ul>
-    {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       <p class="empty" data-testid="sidebar-empty">
         {hubSkewEmptyMessage ??
           ($projects.length === 0
@@ -1121,6 +1244,12 @@
     confirmTestId="confirm-purge"
   >
     This will permanently delete all Claude Code state for <code>{pendingPurge.repo}</code>. This is irreversible.
+    {#if purgeKeys.length > 0}
+      <p class="purge-work" data-testid="purge-work-keys">
+        Past work loses its conversations: {purgeKeys.join(', ')}. It can only be restarted
+        fresh (with a brief) afterwards, not continued.
+      </p>
+    {/if}
   </ConfirmDialog>
 {/if}
 
@@ -1222,6 +1351,49 @@
   .work-key {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-weight: 600;
+  }
+  .done-row {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1rem 0.5rem 0.1rem 1.6rem;
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .past-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.15rem 0.5rem 0.15rem 1.6rem;
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+    opacity: 0.85;
+  }
+  .past-label {
+    color: var(--fg);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .past-meta {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .past-note {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .past-purged {
+    font-size: 0.65rem;
+    color: var(--danger, #e5534b);
+  }
+  .purge-work {
+    margin: 0.5rem 0 0;
   }
   .work-pr {
     font-size: 0.7rem;

@@ -1891,6 +1891,70 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(pr.getAttribute('title')).toContain('CI failing');
   });
 
+  it('past work: a live group gets a collapsed Done, past-only work a collapsed group of its own (M2.5)', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ended = (id: number, key: string, name: string) => ({
+      id, ref_key: key, state: 'confirmed', source: 'manual', created_at: 1,
+      ended_at: nowSec - 3 * 86400, snap_host: 'local', snap_name: name, snap_branch: key.toLowerCase(),
+    });
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
+    mockBackend(workProjects, [a]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { key?: string } }) => {
+      if (cmd === 'session_work_links') {
+        const key = args?.args?.key;
+        if (key === 'PAY-7') return [ended(1, 'PAY-7', 'old pay')];
+        if (key === undefined) return [ended(2, 'ABC-9', 'login fix'), ended(1, 'PAY-7', 'old pay')];
+        return [];
+      }
+      return base(cmd, args);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const pg = await screen.findByTestId('past-work-group');
+    expect(pg).toHaveTextContent('ABC-9');
+    expect(pg).toHaveTextContent('1 session, last 3d ago');
+    expect(within(pg).getByTestId('resume-button')).toBeTruthy();
+    expect(within(pg).queryAllByTestId('past-work-row')).toHaveLength(0);
+    await fireEvent.click(within(pg).getByTestId('past-work-header'));
+    await tick();
+    const row = within(pg).getByTestId('past-work-row');
+    expect(row).toHaveTextContent('login fix');
+    expect(row).toHaveTextContent('abc-9');
+    expect(row).toHaveTextContent('ended 3d ago');
+
+    // The live PAY-7 group: one session, and its past collapsed under Done.
+    const done = screen.getByTestId('work-done');
+    expect(done).toHaveTextContent('Done · 1');
+    const liveGroup = done.closest('li')!;
+    expect(within(liveGroup as HTMLElement).queryAllByTestId('past-work-row')).toHaveLength(0);
+    await fireEvent.click(done);
+    await tick();
+    expect(within(liveGroup as HTMLElement).getByTestId('past-work-row')).toHaveTextContent('old pay');
+    // PAY-7 is live: it never shows up as a past-only group as well.
+    expect(screen.getAllByTestId('past-work-group')).toHaveLength(1);
+  });
+
+  it('the purge confirmation names the work that loses its conversations (M2.5)', async () => {
+    mockBackend(workProjects, [sessionFor(1, 'dev-a')]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'work_purge_impact') return { keys: ['ABC-1', 'PAY-7'] };
+      return base(cmd, args);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click((await screen.findAllByTestId('purge-project'))[0]);
+    const warn = await screen.findByTestId('purge-work-keys');
+    expect(warn).toHaveTextContent('ABC-1, PAY-7');
+  });
+
   it('with nothing keyed, work mode looks exactly like project mode', async () => {
     mockBackend(workProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-b')]);
     sidebarGroupBy.set('work');

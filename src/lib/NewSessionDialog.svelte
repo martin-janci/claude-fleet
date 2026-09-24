@@ -2,6 +2,8 @@
   import { onMount, onDestroy, untrack } from 'svelte';
   import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
+  import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
+  import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { hosts } from './hosts';
@@ -388,6 +390,22 @@
         ) ?? null)
       : null,
   );
+  // A key with only PAST work (M2.5): say so and offer to resume it rather
+  // than start from nothing. Read from the hub per key; an older hub has no
+  // answer and the note stays the plain one.
+  let pastOfKey = $state<{ key: string; links: WorkLink[] } | null>(null);
+  let resumeOpen = $state(false);
+  $effect(() => {
+    const key = plannedKey;
+    if (!key || duplicateOf) return;
+    void endedWorkLinks(key).then((r) => {
+      if (plannedKey !== key) return;
+      pastOfKey = r.ok && Array.isArray(r.value) && r.value.length > 0 ? { key, links: r.value } : null;
+    });
+  });
+  const pastWork = $derived(
+    pastOfKey && pastOfKey.key === plannedKey && !duplicateOf ? pastOfKey.links : null,
+  );
   function openDuplicate() {
     if (!duplicateOf) return;
     selectSessionExplicitly(duplicateOf);
@@ -758,10 +776,20 @@
               >Open it</button
             >
           </span>
+        {:else if pastWork}
+          <span class="dup" data-testid="work-past">
+            — has previous work ({pastWorkSummary(pastWork, now * 1000)}).
+            <button type="button" class="linkish" data-testid="resume-past" onclick={() => (resumeOpen = true)}
+              >Resume</button
+            >
+          </span>
         {:else}
           <span class="muted">— sessions on this branch group under it (sidebar: by work)</span>
         {/if}
       </p>
+    {/if}
+    {#if resumeOpen && plannedKey}
+      <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
 
     <label for="kind-picker">Type</label>

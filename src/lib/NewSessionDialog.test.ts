@@ -1477,6 +1477,34 @@ describe('NewSessionDialog — work key (roadmap M1)', () => {
     expect(get(selectedSession)?.id).toBe(77);
   });
 
+  it('a key with only past work offers to resume it (M2.5)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'session_work_links') {
+        const key = (a as { args?: { key?: string } })?.args?.key;
+        return key === 'ABC-123'
+          ? [
+              { id: 1, ref_key: 'ABC-123', state: 'confirmed', source: 'manual', created_at: 1, ended_at: now - 2 * 86400 },
+              { id: 2, ref_key: 'ABC-123', state: 'confirmed', source: 'manual', created_at: 1, ended_at: now - 5 * 86400 },
+            ]
+          : [];
+      }
+      if (cmd === 'work_resume_plan') return { key: 'ABC-123', modes: [{ mode: 'last', ok: true }], live: [] };
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'ABC-123 again' } });
+    await tick();
+    const past = await screen.findByTestId('work-past');
+    expect(past).toHaveTextContent('2 sessions, last 2d ago');
+    expect(screen.queryByTestId('work-duplicate')).toBeNull();
+    await fireEvent.click(screen.getByTestId('resume-past'));
+    expect(await screen.findByTestId('resume-dialog')).toBeTruthy();
+  });
+
   it('a pasted ticket URL becomes its key, ready for a title', async () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
