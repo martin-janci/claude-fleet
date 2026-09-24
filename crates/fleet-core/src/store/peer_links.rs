@@ -374,8 +374,12 @@ impl Store {
             )
             .optional()?
         {
+            // `IS NOT` (NULL-safe) skips the write when this address is
+            // already pinned to this link — the common case once a link is
+            // established, and no-op writes are not free under the store's
+            // single connection.
             self.conn.execute(
-                "UPDATE participants SET peer_link_id = ?1 WHERE id = ?2",
+                "UPDATE participants SET peer_link_id = ?1 WHERE id = ?2 AND peer_link_id IS NOT ?1",
                 rusqlite::params![link_id, id],
             )?;
             return Ok(id);
@@ -679,6 +683,62 @@ mod tests {
         assert_eq!(row.token.as_deref(), Some("t2"));
         assert_eq!(row.state, LINK_RETRYING);
         assert!(s.peer_link(new).unwrap().is_none());
+    }
+
+    /// `idx_peer_links_live_fleet` is unique on `fleet_id` among live rows,
+    /// regardless of role: a dialer row already pinned to `B` means a fresh
+    /// listener row can never claim `B` too (both hubs dialing each other).
+    /// `ensure_listener_link`'s create-on-first-sight INSERT is the write
+    /// that hits it.
+    #[test]
+    fn ensure_listener_link_refuses_a_fleet_already_linked_the_other_way() {
+        let s = Store::open_in_memory().unwrap();
+        let dialer = s.insert_dialer_link("https://b.example", "t").unwrap();
+        assert_eq!(s.adopt_dialer_fleet(dialer, B).unwrap(), dialer);
+
+        let c = client(&s, "hub-b");
+        let err = s.ensure_listener_link(c, B).unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+        assert!(
+            err.message.contains("already linked the other way"),
+            "{}",
+            err.message
+        );
+
+        // The refused call wrote no row: only the original dialer link
+        // exists, and the client token it was handed pins to nothing.
+        assert_eq!(s.peer_link_summaries().unwrap().len(), 1);
+        assert!(s
+            .peer_link_summaries()
+            .unwrap()
+            .iter()
+            .all(|l| l.role == LINK_ROLE_DIALER));
+    }
+
+    /// The mirror of the test above: a listener row already pinned to `B`
+    /// means `adopt_dialer_fleet`'s plain `UPDATE ... SET fleet_id` (its
+    /// no-other-dialer-row branch) is the write that hits the same
+    /// constraint.
+    #[test]
+    fn adopt_dialer_fleet_refuses_a_fleet_already_linked_the_other_way() {
+        let s = Store::open_in_memory().unwrap();
+        let c = client(&s, "hub-b");
+        let listener = s.ensure_listener_link(c, B).unwrap();
+        assert_eq!(listener.fleet_id.as_deref(), Some(B));
+
+        let fresh = s.insert_dialer_link("https://b.example", "t").unwrap();
+        let err = s.adopt_dialer_fleet(fresh, B).unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+        assert!(
+            err.message.contains("already linked the other way"),
+            "{}",
+            err.message
+        );
+
+        // The refused call left the fresh dialer row untouched and created
+        // nothing: still exactly the listener row plus the unpinned dialer.
+        assert_eq!(s.peer_link_summaries().unwrap().len(), 2);
+        assert_eq!(s.peer_link(fresh).unwrap().unwrap().fleet_id, None);
     }
 
     #[test]
