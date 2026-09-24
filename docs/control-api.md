@@ -694,7 +694,10 @@ newer than `after_message_id`, the same bounded-wait budget as
 delivery happens on the dialer's next exchange, typically within a few
 seconds. `deliver: true` is refused (`E_UNSUPPORTED`: "deliver types into a
 pane; a hub never types into another fleet's panes") — there is no pane on
-the other side of a link to type into. The reply, once the remote session
+the other side of a link to type into. So is `kind: "question"`
+(`E_VALIDATE`: a message from another fleet cannot hold a session's stop), a
+recipient address over 256 bytes, and a `reply_to` whose parent came from a
+third fleet (`E_INVALID`). The reply, once the remote session
 sends one, arrives through the normal `wait_for_reply` / `inbox` path like
 any other message, with `from_addr` set to the sender's
 `<fleet>/session/<host>/<name>` and marked as untrusted input. If the peer

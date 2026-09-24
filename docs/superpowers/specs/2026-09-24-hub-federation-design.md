@@ -349,10 +349,17 @@ Pending rows, `peer_state`, the pinned `fleet_id` and `after` all live in
   (re-pair), or upgrading the older hub, is the way back. A terminal link's
   pending rows stay pending until the 7-day sweep, so a re-pair within a week
   still delivers them. When a new token's first exchange returns a `fleet_id`
-  that already has a non-revoked `dialer` row, the new `url` and `token` are
-  written onto that existing row and the temporary row is dropped. The pending
-  rows therefore stay attached to the same link, and the unique `fleet_id` is
-  never violated.
+  that already has a non-revoked `dialer` row in state `refused` or
+  `incompatible`, the new `url` and `token` are written onto that existing row
+  and the temporary row is dropped. The pending rows therefore stay attached
+  to the same link, and the unique `fleet_id` is never violated. A handshake
+  claiming a fleet whose live dialer row is in any other state (`connected`,
+  `retrying`) is refused: the NEW row goes terminal `refused` with
+  `fleet <id> is already linked (link <N>); remove it first with fleet-hub
+  peer remove`, and the live row is untouched — otherwise any newly paired
+  hub could take over a working link to a third fleet. The dialer checks the
+  answered `fleet_id` before anything else: malformed is `incompatible`, this
+  hub's own id is `refused`.
 
 ### Retention
 
@@ -374,8 +381,22 @@ cannot reorder an inbox or dodge the sweep.
 ### Limits a peer cannot bypass
 
 - `PEER_BODY_MAX` = 32 KiB per body, on both sides.
-- `PEER_BATCH_MAX` = 50 items per direction per exchange. 50 × 32 KiB stays
-  under `/mcp`'s 2 MB axum body limit.
+- `PEER_BATCH_MAX` = 50 items per direction per exchange, and
+  `PEER_PAGE_MAX_BYTES` = 512 KiB: both the dialer's `send` page and the
+  listener's `messages` page are cut once their items' serialized size
+  reaches it, always keeping at least one item (the listener sets `more`).
+  A count cap alone is not enough: items are double-encoded and SSE-framed,
+  control-heavy bodies grow several-fold in JSON, and 50 × 32 KiB can exceed
+  the dialer's 8 MiB answer cap or a proxy's body limit — a size failure is
+  a transport failure, so the same page would be re-sent until the sweep.
+  A proxy in front of a listening hub must allow request bodies of at least
+  1 MiB.
+- `PEER_ADDR_MAX` = 256 bytes for `from_addr` and `to_addr`, on both sides.
+  An address becomes the sender label of the recipient's hook delivery; the
+  hook packer also drops a label that cannot fit, so one item can never
+  stall a session's delivery queue.
+- `kind` `question` does not cross a link (it holds the recipient's `Stop`
+  hook): the listener rejects it `E_VALIDATE`, and `send_remote` refuses it.
 - `PEER_WAIT_MAX_MS` = 25 000, under common reverse-proxy idle timeouts. The
   plan checks the hub's own MCP request timeout and the NAS proxy
   (`fleet.rlt.sk`) against it.
@@ -384,15 +405,16 @@ cannot reorder an inbox or dodge the sweep.
 
 - **`list_peer_links`**, a new hub-only tool. It lists each link's `fleet_id`,
   role, state, `last_exchange_at`, `last_error` and pending count. It is
-  read-only, so a `readonly` token may call it. It is not called `peer_status`,
-  because that name is the existing session-peer tool.
+  master-only (as built): it names every fleet this hub is linked to, which
+  no paired client needs. It is not called `peer_status`, because that name
+  is the existing session-peer tool.
 - **`fleet-hub peer list | add | remove`**, the same information and the
   management.
 - **`fleet_health`**, one roll-up line when any live link is outside
   `connected`.
-- **Desktop in hub-client mode.** `list_peer_links` gets a row in
-  `src-tauri/src/backend/verdicts.rs` (routed), then
-  `REGEN_HUB_VERDICTS=1`. No desktop UI this cycle.
+- **Desktop in hub-client mode.** Nothing (as built): `list_peer_links` is
+  an MCP tool with no Tauri command, so it has no row in
+  `src-tauri/src/backend/verdicts.rs`. No desktop UI this cycle.
 - **`docs/hub.md`**, a new section, "Link two hubs": setup, revocation, what a
   peer can and cannot do. `docs/control-api.md` gets a short "Across a hub
   link" paragraph under messaging.
@@ -400,6 +422,35 @@ cannot reorder an inbox or dodge the sweep.
   `mcp/tools/tests.rs`). Measure it, never guess. Prose goes into the docs.
   `REGEN_DOCS=1` for the reference, and `REGEN_HUB_CONTRACT=1` if a wire type
   changes.
+
+### As built
+
+Controller rulings during the build changed the design above as follows
+(each is also reflected where it applies):
+
+- **Listener rebind only after revocation.** A listener row is rebound to a
+  new peer client token only when its current token is revoked (or gone);
+  a second live token claiming the fleet is refused `E_FORBIDDEN`, naming
+  `fleet-hub client revoke`.
+- **Dialer merge only into a stopped row.** The dialer-side mirror: a re-pair
+  merges into a `refused` / `incompatible` row only (§3 Retry).
+- **Link-scoped results.** A peer's `accepted` / `rejected` results settle
+  only rows on its own link; the listener ignores `accepted` entries and
+  hands rows over by `after` alone.
+- **One wake per recipient per exchange,** with the nudge for its last new
+  message, on a status re-read after all inserts.
+- **Token-fenced dialer writes.** Every state or progress write a dialer loop
+  makes applies only while the row still carries the token the loop started
+  with; a loop outlived by a re-pair stops as `Superseded`.
+- **Store faults retried, not rejected.** A store failure while applying a
+  peer's item fails the exchange (non-terminal `E_INTERNAL`) instead of
+  rejecting the item; the resend is idempotent.
+- **Peer text on the timeline** is tagged `(untrusted, another fleet)` and
+  scrubbed to one line; a `reply_to` that does not resolve reads the same
+  whether the message is missing or not the recipient's, and a reply across
+  a link cannot thread onto a third fleet's message.
+- **Size caps:** `PEER_PAGE_MAX_BYTES`, `PEER_ADDR_MAX`, no `question` (§3
+  Limits).
 
 ## 5. Components
 

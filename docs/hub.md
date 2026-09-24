@@ -647,6 +647,16 @@ minted it — otherwise the new code's first exchange is refused (`fleet <id>
 is already linked to another peer token; revoke that client first`); the
 link's waiting messages stay attached across a legitimate re-pair.
 
+On the dialing hub, a new `peer add` takes over an existing link to the same
+fleet only once that link has stopped (`peer list` shows it `refused` or
+`incompatible`); its waiting messages then go out over the new credentials.
+While the old link is still `connected` or `retrying`, the new one is refused
+on its first exchange (`fleet <id> is already linked (link <N>); remove it
+first with fleet-hub peer remove`) and the working link is left alone — so a
+newly paired hub can never claim a fleet you already talk to. A peer that
+answers with a malformed fleet id is `incompatible`; one that answers with
+this hub's own fleet id is `refused`.
+
 What a linked hub can do: deliver messages into your sessions' inboxes,
 marked as untrusted input, and receive your sessions' messages to it. What it
 cannot do: call any other tool, read `/events`, type into a pane (a message
@@ -661,17 +671,23 @@ does any message a peer has not taken within 7 days. A link that is refused
 are kept for the week.
 
 A message's `kind` crossing a link is a short lowercase token — 1 to 32
-bytes of `[a-z0-9_-]` (the default, `message`, always passes). The sender
-checks this before queuing, so a `kind` the other hub would refuse comes
-back as an immediate error, never as a `message_undeliverable` a week later.
+bytes of `[a-z0-9_-]` (the default, `message`, always passes) — and never
+`question`: a message from another fleet cannot hold a session's `Stop`
+hook. Sender and recipient addresses are at most 256 bytes. The sender
+checks all of this before queuing, so a message the other hub would refuse
+comes back as an immediate error, never as a `message_undeliverable` a week
+later.
 
 If you put a reverse proxy in front of a **listening** hub, it must allow a
 request of at least 35 s: the dialer's idle exchange long-polls up to 25 s,
 and a proxy timeout shorter than that (plus margin) drops the connection
-mid-poll and the link sits `retrying`.
+mid-poll and the link sits `retrying`. It must also allow request bodies of
+at least 1 MiB (nginx's default `client_max_body_size` is exactly 1 MiB): one
+exchange carries up to 512 KiB of messages each way, encoded.
 
 Limits: plain `http://` peers are allowed only on loopback (`--insecure`);
-at most 50 messages per exchange and 32 KiB per message; an unread message
+at most 50 messages and 512 KiB of them per exchange in each direction (a
+single larger message still goes, alone), and 32 KiB per message; an unread message
 from another fleet whose recipient session is later deleted is not reported
 back to the sending fleet.
 
