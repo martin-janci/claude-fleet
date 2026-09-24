@@ -15,6 +15,8 @@ export interface HostRow {
   provisioned: boolean;
   /** `"ssh"` | `"agent"` — see `HostRow::transport` in `crates/fleet-core/src/store/rows.rs`. */
   transport: 'ssh' | 'agent';
+  /** The host's org (work graph M5): its per-host token's boundary. */
+  org_id?: number | null;
 }
 
 export interface SshHost {
