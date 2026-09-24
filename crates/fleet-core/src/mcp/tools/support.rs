@@ -657,6 +657,33 @@ pub(super) fn ok_json_compact<T: serde::Serialize>(value: &T) -> Result<CallTool
     ok_json_compact_view(value, None)
 }
 
+/// The `serde_json::Value` [`compact_json_string`] serializes — split out so
+/// a snapshot tool (`list_sessions`) can hash the exact `Value` it later
+/// places in the `fresh_for` envelope's `data`, via [`snapshot_decision`],
+/// rather than a separately-serialized string that could drift from it.
+pub(super) fn compact_json_value<T: serde::Serialize>(
+    value: &T,
+    view: Option<&[&str]>,
+) -> Result<serde_json::Value, McpError> {
+    let mut v = serde_json::to_value(value)
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+    if let Some(fields) = view {
+        super::views::project_rows(&mut v, fields);
+    }
+    strip_nulls(&mut v);
+    Ok(v)
+}
+
+/// The compact JSON string [`ok_json_compact_view`] returns.
+pub(super) fn compact_json_string<T: serde::Serialize>(
+    value: &T,
+    view: Option<&[&str]>,
+) -> Result<String, McpError> {
+    let v = compact_json_value(value, view)?;
+    serde_json::to_string(&v)
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))
+}
+
 /// [`ok_json_compact`] with an optional named projection applied first — the
 /// one place a `view` narrows a list, because this is already where the value
 /// is walked for `strip_nulls`.
@@ -671,15 +698,9 @@ pub(super) fn ok_json_compact_view<T: serde::Serialize>(
     value: &T,
     view: Option<&[&str]>,
 ) -> Result<CallToolResult, McpError> {
-    let mut v = serde_json::to_value(value)
-        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-    if let Some(fields) = view {
-        super::views::project_rows(&mut v, fields);
-    }
-    strip_nulls(&mut v);
-    let json = serde_json::to_string(&v)
-        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-    Ok(CallToolResult::success(vec![text_content(json)]))
+    Ok(CallToolResult::success(vec![text_content(
+        compact_json_string(value, view)?,
+    )]))
 }
 
 // One home, because the hub's `/events` broadcast strips the same rows for
@@ -1146,6 +1167,105 @@ impl FleetTools {
             ));
         }
         Ok(task)
+    }
+}
+
+// ---- smart caching (`fresh_for`) --------------------------------------------
+
+/// The gate every `fresh_for`-aware tool applies before
+/// [`fresh::decide_stream`] even sees the stored cursor: a `fresh_for` that
+/// names no session cannot be trusted, so it is answered as a full read with
+/// [`fresh::ResetReason::ReaderUnknown`] regardless of what the cursor says.
+/// Kept pure (no store, no I/O) so it can be tested without a fixture that
+/// can serve a real read.
+pub(super) fn stream_decision(
+    reader_exists: bool,
+    stored: Option<&crate::store::CursorRow>,
+    head: Option<i64>,
+    generation: Option<i64>,
+) -> fresh::StreamStart {
+    if !reader_exists {
+        return fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown));
+    }
+    fresh::decide_stream(stored, head, generation)
+}
+
+/// [`snapshot_decision`]'s result: the envelope to return, plus the hash to
+/// persist via `put_snapshot_cursor` — `None` when nothing should be
+/// written (an unknown reader, or a read that came back unchanged).
+pub(super) struct SnapshotDecision {
+    pub(super) envelope: serde_json::Value,
+    pub(super) new_hash: Option<String>,
+}
+
+/// The snapshot-tool decision `repo_diff` and `list_sessions` share: an
+/// unknown reader gets the full `data` with `ReaderUnknown` stated and no
+/// cursor written; a known reader whose stored hash matches gets
+/// `unchanged` with no payload and nothing to write; anything else gets the
+/// payload and a hash to store.
+///
+/// Hashes `serde_json::to_string(&data)` — the CANONICAL bytes `data` itself
+/// re-serializes to (this crate builds `serde_json::Value` without the
+/// `preserve_order` feature, so a `Value` object always serializes with its
+/// keys in sorted order, deterministically, however it was constructed).
+/// `data` is exactly the `serde_json::Value` this function places in the
+/// envelope's `data` field, so "the stored hash matches" and "the bytes
+/// this call would send are unchanged" are the same claim, not two
+/// serializations that merely happen to agree.
+pub(super) fn snapshot_decision(
+    reader_exists: bool,
+    stored_hash: Option<&str>,
+    data: serde_json::Value,
+) -> Result<SnapshotDecision, McpError> {
+    let canonical = serde_json::to_string(&data)
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+    let hash = fresh::snapshot_hash(&canonical);
+
+    if !reader_exists {
+        return Ok(SnapshotDecision {
+            envelope: fresh::envelope(false, Some(fresh::ResetReason::ReaderUnknown), false, data),
+            new_hash: None,
+        });
+    }
+    if stored_hash == Some(hash.as_str()) {
+        return Ok(SnapshotDecision {
+            envelope: fresh::envelope(true, None, false, serde_json::Value::Null),
+            new_hash: None,
+        });
+    }
+    Ok(SnapshotDecision {
+        envelope: fresh::envelope(false, None, false, data),
+        new_hash: Some(hash),
+    })
+}
+
+/// The continuation note `session_transcript` appends when
+/// [`transcript::TranscriptDelta::more`] is set: turns remain past this
+/// page's `max_chars` budget. The anchor already advanced past everything
+/// in `body` (never past what was not sent), so re-reading with the SAME
+/// `fresh_for` picks up exactly where this page left off — visible, not a
+/// silent truncation.
+pub(super) fn format_transcript_more(body: String, more: bool) -> String {
+    if more {
+        format!(
+            "{body}\n[more: additional new turns follow — call session_transcript \
+             again with the same fresh_for to continue]"
+        )
+    } else {
+        body
+    }
+}
+
+/// The `Full(reason)` text `session_transcript` returns: the raw transcript,
+/// prefixed with a cursor-reset banner when `reason` is `Some` — never a
+/// silent reset back to "just the last turn".
+pub(super) fn format_transcript_full(raw: String, reason: Option<fresh::ResetReason>) -> String {
+    match reason {
+        Some(r) => format!(
+            "[cursor reset: {} — earlier turns may not be shown; see session_conversations]\n{raw}",
+            r.as_str()
+        ),
+        None => raw,
     }
 }
 

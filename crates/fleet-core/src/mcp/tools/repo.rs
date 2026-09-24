@@ -1,7 +1,15 @@
 //! MCP tools: projects, worktrees and read-only repo browsing.
 
 use super::*;
+use crate::ipc_error::lock;
 use crate::service::{repo, repo_read};
+
+/// `repo_diff`'s snapshot cursor key: one file in one session's worktree.
+/// Two different files (or the same file across two sessions) never share a
+/// cursor.
+pub(super) fn repo_diff_resource_key(session_id: i64, path: &str) -> String {
+    format!("{session_id}:{path}")
+}
 
 #[tool_router(router = repo_router, vis = "pub(super)")]
 impl FleetTools {
@@ -200,19 +208,72 @@ impl FleetTools {
     }
 
     #[tool(description = "Unified diff for one worktree file vs HEAD (untracked \
-        files render as all-added). Returns JSON {path, diff, binary, truncated}.")]
+        files render as all-added). Returns JSON {path, diff, binary, truncated}. \
+        fresh_for returns only what is new since your last read.")]
     pub(super) async fn repo_diff(
         &self,
-        Parameters(args): Parameters<repo_read::RepoFileArgs>,
+        Parameters(p): Parameters<RepoDiffParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_diff",
-            &format!("session_id={} path={}", args.session_id, args.path),
+            &format!(
+                "session_id={} path={} fresh_for={:?}",
+                p.session_id, p.path, p.fresh_for
+            ),
         );
-        let v = repo_read::repo_diff(args, &self.store, &self.ssh)
+
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched — kept as a literal early return so the two paths can
+        // never drift apart.
+        let Some(reader) = p.fresh_for else {
+            let v = repo_read::repo_diff((&p).into(), &self.store, &self.ssh)
+                .await
+                .map_err(to_mcp_err)?;
+            return ok_json(&v);
+        };
+
+        // Scope 1: reader + stored hash, resolved BEFORE the (async,
+        // SSH-backed) diff below — never held across an `.await`.
+        let resource_key = repo_diff_resource_key(p.session_id, &p.path);
+        let (reader_exists, stored_hash) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored_hash = s
+                .get_read_cursor(reader, "repo_diff", &resource_key)
+                .map_err(to_mcp_err)?
+                .and_then(|c| c.content_hash);
+            (reader_exists, stored_hash)
+        };
+
+        // The diff is still computed here in order to hash it — repo_diff
+        // has no cheaper "did it change" signal than the diff itself (no
+        // watermark, no generation to compare first), so `unchanged` saves
+        // the CALLER context and transfer, never the server-side git work.
+        //
+        // `data` keeps every field `ok_json` would send (never
+        // `compact_json_value`, which strips nulls) — hashing a narrower
+        // shape than what is actually returned would make `unchanged` a
+        // lie. `snapshot_decision` hashes this exact `Value`.
+        let v = repo_read::repo_diff((&p).into(), &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        ok_json(&v)
+        let data = serde_json::to_value(&v)
+            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+        let decision = snapshot_decision(reader_exists, stored_hash.as_deref(), data)?;
+
+        // Scope 2: written only now that the diff was built and hashed
+        // successfully — a failure above must not mark this as delivered,
+        // and `snapshot_decision` never returns a hash to store for an
+        // unknown reader or an unchanged read.
+        if let Some(hash) = &decision.new_hash {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.put_snapshot_cursor(reader, "repo_diff", &resource_key, Some(p.session_id), hash)
+                .map_err(to_mcp_err)?;
+        }
+        ok_json(&decision.envelope)
     }
 
     #[tool(description = "Commit log (branch graph) for a session's worktree. \

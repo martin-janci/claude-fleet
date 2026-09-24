@@ -19,7 +19,8 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::service::{
-    catalog, health, hosts, projects, safe_kill, sessions, tasks, transcript, usage, worktrees,
+    catalog, fresh, health, hosts, projects, safe_kill, sessions, tasks, transcript, usage,
+    worktrees,
 };
 use crate::ssh::SshClient;
 use crate::store::Store;
