@@ -2058,4 +2058,143 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "participants.address must exist exactly once");
     }
+
+    /// Migration 045 on a POPULATED v44 database: sessions, participants and
+    /// messages survive with their ids, every new column reads NULL or its
+    /// default, and the partial unique indexes exist.
+    #[test]
+    fn migration_045_upgrades_a_populated_v44_db_and_keeps_its_rows() {
+        const SEED_AT: i64 = 44;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= SEED_AT) {
+            conn.execute_batch(sql)
+                .unwrap_or_else(|e| panic!("migration {version}: {e}"));
+        }
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+             INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+               VALUES (11, 'a1', 'local', 1, 1, 'running'),
+                      (12, 'b1', 'local', 1, 1, 'running');
+             INSERT INTO participants (id, kind, session_id, created_at)
+               VALUES (21, 'session', 11, 1), (22, 'session', 12, 1);
+             INSERT INTO session_messages
+               (id, from_session_id, to_session_id, from_participant_id, to_participant_id,
+                body, kind, sent_at, reply_to, delivered_at)
+               VALUES (31, 11, 12, 21, 22, 'hello', 'message', 5, NULL, 6),
+                      (32, 12, 11, 22, 21, 'back', 'task_result', 7, 31, NULL);",
+        )
+        .unwrap();
+        let s = Store {
+            conn,
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
+        };
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
+        assert!(!s.has_table("peer_links").unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(s.has_table("peer_links").unwrap());
+
+        let sessions: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE id IN (11, 12)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sessions, 2, "sessions survive");
+        type Part = (i64, Option<i64>, Option<String>, Option<i64>);
+        let parts: Vec<Part> = s
+            .conn
+            .prepare("SELECT id, session_id, address, peer_link_id FROM participants ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            parts,
+            vec![(21, Some(11), None, None), (22, Some(12), None, None)],
+            "participants survive; address and peer_link_id are NULL"
+        );
+        type Row = (
+            i64,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            i64,
+            Option<String>,
+        );
+        let msgs: Vec<Row> = s
+            .conn
+            .prepare(
+                "SELECT id, body, reply_to, delivered_at, remote_fleet_id, remote_message_id, \
+                        peer_state, peer_wake, peer_from_addr \
+                 FROM session_messages ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            msgs,
+            vec![
+                (31, "hello".into(), None, Some(6), None, None, None, 0, None),
+                (32, "back".into(), Some(31), None, None, None, None, 0, None),
+            ],
+            "messages survive; the remote and outbox columns are NULL / 0"
+        );
+        // Local rows read as before: the inbox is unchanged.
+        let inbox = s.list_inbox(12, false, 10).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].body, "hello");
+        assert!(inbox[0].from_addr.is_none());
+
+        let partial_unique = |name: &str| -> (i64, Option<String>) {
+            s.conn
+                .query_row(
+                    "SELECT il.\"unique\", m.sql FROM sqlite_master m \
+                       JOIN pragma_index_list(m.tbl_name) il ON il.name = m.name \
+                      WHERE m.type = 'index' AND m.name = ?1",
+                    [name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or_else(|e| panic!("index {name}: {e}"))
+        };
+        for name in [
+            "idx_peer_links_live_fleet",
+            "idx_peer_links_client",
+            "idx_participants_address",
+            "idx_session_messages_remote",
+        ] {
+            let (unique, sql) = partial_unique(name);
+            assert_eq!(unique, 1, "{name} is unique");
+            assert!(
+                sql.as_deref().unwrap_or("").contains(" WHERE "),
+                "{name} is partial: {sql:?}"
+            );
+        }
+        let (unique, _) = partial_unique("idx_session_messages_peer_pending");
+        assert_eq!(unique, 0, "the pending index is a plain partial index");
+    }
 }
