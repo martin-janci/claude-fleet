@@ -451,6 +451,21 @@ The order serves the user's real setup. Decision D1 below may reorder it.
 
 **Value:** triage and start work from the phone.
 
+**Status (2026-09-24): M8.0 (hub side) landed** on
+`claude/cloud-fleet-work-graph-m8` (stacked on M4), per
+`plans/2026-09-24-work-graph-m8-phone.md`: `work_suggested` in
+`PHONE_SESSION_FIELDS`; `work` / `work_link` `action` served as a schema
+`enum` from the parsers' own tables (+66 B); a test pinning that a readonly
+client token sees `work` but not `work_link`, and no client `work_admin`. No
+contract bump. **M8.1–M8.5** (fleet-mobile: the model, `tools/list`
+discovery and work transport; group by work, "My work" and the row chip; the
+session screen's ticket chip and decisions; the Tickets sheet with Start /
+Resume / Jump; docs) landed on fleet-mobile `main` via
+martin-janci/fleet-mobile#32 (merge `9b9212e`). A parallel M8.1–M8.2 on
+fleet-mobile's `claude/cloud-fleet-work-graph-m8` is superseded by it. Note
+the plan's Revisions item 4 (an absent `work` on a row means none), which
+#32 follows.
+
 ### M9: beyond
 
 The ideas the review ranked, for when M1–M8 have settled.
@@ -548,3 +563,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   actions, 87 for `force_cross_org`); no new tool, no contract bump. M3's
   per-host ticket fence was kept and composed with the org fence rather
   than removed. Deviations are in the M5 plan's *Revisions*.
+- 2026-09-24: M8.0 (hub side) landed on `claude/cloud-fleet-work-graph-m8`:
+  `work_suggested` on the phone view, the `work` / `work_link` action enums
+  (+72 B on top of M5; generated from M5's action tables), the client
+  tool-list gate test. No new tool, no contract bump.
