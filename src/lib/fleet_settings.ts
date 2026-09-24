@@ -36,6 +36,7 @@ export const SETTING_KEYS = {
   reportsMaxAgeSecs: 'reports.max_age_secs',
   workJournalDays: 'work.journal_days',
   workRecentDays: 'work.recent_days',
+  workSyncIntervalSecs: 'work.sync_interval_secs',
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -109,6 +110,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'reports.max_age_secs': '604800',
   'work.journal_days': '90',
   'work.recent_days': '14',
+  'work.sync_interval_secs': '300',
 };
 
 export type FleetSettings = Record<string, string>;

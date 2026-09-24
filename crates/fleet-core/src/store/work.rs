@@ -148,7 +148,7 @@ fn default_true() -> bool {
 }
 
 /// A live session's primary work, for the session row and the sidebar.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkSummary {
     pub link_id: i64,
     #[serde(default)]
@@ -160,6 +160,19 @@ pub struct WorkSummary {
     #[serde(default)]
     pub title: String,
     pub source: String,
+    // --- the tracker item's status (work graph M3), absent for a bare key,
+    // a local item, or a hub older than M3.
+    /// todo | in_progress | done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_category: Option<String>,
+    /// The tracker's own status name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The tracker no longer answers for the item (C25).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
 }
 
 /// What to link a session to.
@@ -378,6 +391,13 @@ impl Store {
             }
             WorkTarget::Key(raw) => {
                 let key = normalize_work_ref(raw)?;
+                // A tracker item exactly one tracker has (by key or alias)
+                // wins; else a local item; else a bare key a later sync
+                // binds. The key is kept on a tracker link too, for history
+                // and for a tracker that is later removed.
+                if let Some(item) = self.tracker_item_for_key(&key)? {
+                    return Ok((Some(item.id), Some(key)));
+                }
                 match self.local_work_item_by_key(&key)? {
                     Some(item) => Ok((Some(item.id), None)),
                     None => Ok((None, Some(key))),
@@ -439,7 +459,8 @@ impl Store {
             .query_row(
                 "SELECT id FROM work_links \
                  WHERE participant_id = ?1 AND ended_at IS NULL \
-                   AND item_id IS ?2 AND ref_key IS ?3",
+                   AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
+                 ORDER BY id LIMIT 1",
                 rusqlite::params![participant, item_id, ref_key],
                 |r| r.get(0),
             )
@@ -879,7 +900,9 @@ impl Store {
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT p.session_id, l.id, l.item_id, COALESCE(i.key, l.ref_key), \
-                    COALESCE(i.title, ''), l.source \
+                    COALESCE(i.title, ''), l.source, \
+                    CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                    i.status_name, i.url, i.unavailable_at IS NOT NULL \
              FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN work_items i ON i.id = l.item_id \
@@ -895,6 +918,10 @@ impl Store {
                     key: r.get(3)?,
                     title: r.get(4)?,
                     source: r.get(5)?,
+                    status_category: r.get(6)?,
+                    status_name: r.get(7)?,
+                    url: r.get(8)?,
+                    unavailable: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
                 },
             ))
         })?;
@@ -1135,6 +1162,7 @@ mod tests {
                 key: Some("ABC-9".into()),
                 title: "Login".into(),
                 source: "manual".into(),
+                ..Default::default()
             })
         );
         assert!(row.row_version > before.row_version);

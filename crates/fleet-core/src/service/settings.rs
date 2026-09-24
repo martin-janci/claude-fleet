@@ -162,6 +162,9 @@ pub const WORK_JOURNAL_DAYS: &str = "work.journal_days";
 /// How far back (days) the sidebar looks for work that has only ended
 /// sessions, so reopened work has a group to show in.
 pub const WORK_RECENT_DAYS: &str = "work.recent_days";
+/// Seconds between tracker sync passes (work graph M3); `0` turns the sync
+/// off. Values under a minute are raised to one.
+pub const WORK_SYNC_INTERVAL_SECS: &str = "work.sync_interval_secs";
 
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
@@ -330,6 +333,11 @@ pub const SPECS: &[Spec] = &[
         key: WORK_RECENT_DAYS,
         default: "14",
         kind: Kind::Int { min: 1, max: 365 },
+    },
+    Spec {
+        key: WORK_SYNC_INTERVAL_SECS,
+        default: "300",
+        kind: Kind::Secs,
     },
 ];
 

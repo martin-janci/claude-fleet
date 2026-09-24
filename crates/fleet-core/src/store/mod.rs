@@ -25,6 +25,7 @@ mod tasks;
 #[cfg(test)]
 mod test_support;
 mod timeline;
+mod tracker_items;
 mod trackers;
 mod usage;
 mod work;
@@ -42,6 +43,7 @@ pub use rows::*;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub use tracker_items::{ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use trackers::{
     is_allowed_tracker_host, normalize_site_url, validate_credential_ref, Secret, TrackerConfig,
     TrackerCredential, TrackerRow, TrackerViewRow, TRACKER_AUTH_KINDS, TRACKER_PROVIDERS,
@@ -190,6 +192,13 @@ impl Store {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// The raw connection, for a test outside `store` that has to set up a
+    /// state no public method writes (a claude_session_id, say).
+    #[cfg(test)]
+    pub(crate) fn conn_for_test(&self) -> &Connection {
+        &self.conn
     }
 
     #[cfg(test)]

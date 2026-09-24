@@ -288,7 +288,12 @@ pub(super) const SESSION_COLUMNS: &str =
      pending_input, row_version, lost_reason, \
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
                          'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
-                         'source', l.source) \
+                         'source', l.source, \
+                         'status_category', \
+                           CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'status_name', i.status_name, 'url', i.url, \
+                         'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
+                                                  THEN 'true' ELSE 'false' END)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \

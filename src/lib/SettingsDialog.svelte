@@ -1040,6 +1040,16 @@
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workRecentDays, 'Recent work', e)} />
         <span class="hook-desc" id="work-recent-days-desc">days ended work with no live session still gets a sidebar group (by work)</span>
       </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-sync-interval">tracker sync</label>
+        <input class="port" id="work-sync-interval" type="number" min="0" max="86400" step="60"
+          value={settingInt($fleetSettings, SETTING_KEYS.workSyncIntervalSecs)}
+          disabled={limitsBusy}
+          aria-describedby="work-sync-interval-desc"
+          data-testid="work-sync-interval"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workSyncIntervalSecs, 'Tracker sync', e)} />
+        <span class="hook-desc" id="work-sync-interval-desc">seconds between tracker (Jira) sync passes (0 = off; read at launch)</span>
+      </div>
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
 
