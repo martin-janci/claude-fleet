@@ -366,6 +366,39 @@ and hook/probe integration via `FakeSsh`.
 company's hosts can read. **Tests:** isolation matrix per caller kind
 (master, client full, client readonly, host A, host B).
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-m5`
+(stacked on M4), per `plans/2026-09-24-work-graph-m5-orgs-and-isolation.md`
+(its *Revisions* list every deviation). Verified with `cargo fmt`, `clippy
+-D warnings` (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub;
+only the four chmod tests that fail as root on `main` fail), `cargo deny
+check`, `pnpm check` / `pnpm test` and `scripts/hub-e2e.sh` (102/102). An
+independent security review of M5.3 ran before it was pushed; its findings
+are fixed and covered. The manual acceptance on a hub with two orgs is still
+to do.
+
+- **M5.1 + M5.2** (bb9e44a): migration 050 (`orgs`, text-keyed `org_rules`,
+  `hosts.org_id`, `work_links.snap_org_id` + its retirement trigger);
+  `SessionRow.org_id` computed in SQL and held equal to the pure resolver;
+  `org_id` on hosts, trackers, links and `work` summaries; `work { scopes |
+  orgs | org_suggestions }`; `work_admin`'s org actions (Master-only,
+  removals confirm-gated); `fleet-hub org …`; seven LocalOnly and three
+  Routed desktop commands (161).
+- **M5.3** (5515199): `OrgScope` + `Caller::org_scope`, applied in the work
+  service layer; M3's per-host ticket fence kept and composed with the org
+  fence; no existence oracle; the cross-org integrity rule with
+  `force_cross_org`; readers-scoped briefs and SessionStart context; the
+  `call_tool` redaction backstop and per-frame `/events` fencing; D7
+  `isolate_sessions`; the isolation matrix.
+- **M5.4 + M5.5** (74a29c3): the scope selector (⌘⇧O), needs-you across
+  scopes, Settings → Work → Organisations (read-only when paired), colour
+  bars, the cross-org "Link anyway"; one `rowMatches` for the sidebar's
+  two modes, past work and ⌘K.
+- **Not done:** a Today view to scope (M9 does not exist yet); tracker /
+  status / assignee / has-session / archived filters have no chrome of
+  their own yet (the predicate composes them; only scope, host, bg and
+  needs-you are wired to controls); the phone does not show orgs (M8); the
+  manual acceptance.
+
 ### M6: more providers
 
 The order serves the user's real setup. Decision D1 below may reorder it.
@@ -508,3 +541,10 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   off). The tool budget grew by 172 B for `work_link`'s confirm / reject by
   id / trust_project; no new tool, no contract bump. M4.6 is not done.
   Deviations are in the M4 plan's *Revisions*.
+- 2026-09-24: M5 landed on `claude/cloud-fleet-work-graph-m5` (orgs, the
+  org boundary for per-host tokens, D7 `isolate_sessions` per org, default
+  off, the scope selector and Organisations settings, one `rowMatches`).
+  Migration 050. The tool budget grew by 714 B (627 for `work_admin`'s org
+  actions, 87 for `force_cross_org`); no new tool, no contract bump. M3's
+  per-host ticket fence was kept and composed with the org fence rather
+  than removed. Deviations are in the M5 plan's *Revisions*.

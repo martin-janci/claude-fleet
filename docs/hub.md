@@ -689,12 +689,79 @@ What to know:
 - **Secrets** never leave `tracker_secrets`: no answer, event, log line,
   diagnostics bundle or error report carries the token (a row shows only
   `…abcd`), and `last_error` is redacted before it is stored.
-- **Isolation, until organisations exist:** a per-host token (an in-session
-  Claude) sees only tickets linked to sessions on its own host, and never
-  receives `work:*` frames on `/events`. Master and paired clients see all.
+- **Isolation:** a per-host token (an in-session Claude) sees only tickets
+  linked to sessions on its own host, inside its host's organisation (see
+  *Organisations and isolation* below), and never receives `work:*` frames
+  on `/events`. Master and paired clients see all.
 - **Migrating from the desktop:** a copied `state.db` carries the desktop's
   trackers and a stored token. Re-enter the token on the hub (or rotate it
   and use a `--ref`) rather than keep one that lived on another machine.
+
+## Organisations and isolation
+
+Organisations are optional. With none, the desktop's scope selector offers
+the GitHub owners of the live sessions (only when there are two or more) and
+nothing is fenced. Name an org to merge or split owners, to attach a
+tracker, or to make it a **boundary** for the hosts you put in it.
+
+An org is two things at once:
+
+- **A view** for people. The master and every paired client read every org;
+  the sidebar's selector (⌘⇧O / Ctrl+Shift+O) only narrows what is shown,
+  and a session waiting on you in another scope still says so ("2 need you
+  in Personal →").
+- **A boundary** for per-host tokens. The Claude on a host in org A reads
+  only org A's work and unassigned work; the Claude on a host in no org
+  reads unassigned work only. That covers work items and tickets, trackers,
+  work links (live and past), the work journal and every text built from it
+  (`work { context }`, resume and start briefs, the SessionStart context),
+  and a session row's `work` / `work_suggested` / `work_rejected` in any
+  answer or `/events` frame. An item, link or tracker id outside the
+  boundary answers exactly as an id that does not exist; a key or URL
+  outside it answers as a key nothing is linked to on that host.
+
+Which org a session is in: the most specific matching rule — a path prefix,
+then `owner/repo`, then `owner`, then a host-only rule — else its host's
+org. Rules are text (a project row that is re-created keeps its org);
+`local` (an adopted folder's placeholder owner) is never an owner. A
+ticket's org is its tracker's. A link's is its ticket's, else its session's.
+
+```sh
+fleet-hub org add "Company A" --color '#e11d48'
+fleet-hub org rule add 1 --owner acme                  # acme/*
+fleet-hub org rule add 1 --owner acme-labs --repo api  # one repo of another owner
+fleet-hub org rule add 1 --path /home/me/work/acme     # by where the worktree lives
+fleet-hub org assign-host hetzner-a 1                  # the boundary for that host's token
+fleet-hub org assign-tracker 2 1                       # its tickets are Company A's
+fleet-hub org set 1 --isolate-sessions on              # see below
+fleet-hub org list
+```
+
+Only the master can change any of it (`work_admin`); a paired desktop shows
+it read-only, and a host can never move itself into another org.
+
+What else to know:
+
+- **Linking across orgs is refused for everyone**, the master included,
+  unless `force_cross_org: true`: it is a data-integrity rule that stops
+  Company B's ticket from being attached to a Company A session by mistake
+  (the desktop explains it and offers "Link anyway"). Detection never
+  guesses across orgs, and the sync never binds (nor fetches) a bare key
+  for another org's session.
+- **Sessions are not fenced by default.** `isolate_sessions` (per org, off
+  by default) also hides that org's sessions from every other org's hosts —
+  `list_sessions`, `whoami`, `peer_status`, `related_sessions`,
+  `session_history`, the repo reads, `send_message`, `broadcast_prompt` and
+  `session:*` frames — and its own hosts then see only its sessions and
+  unassigned ones. A host always sees its own sessions. It can break a
+  controller that dispatches across companies, which is why it is yours to
+  turn on.
+- **With isolation off, a session's own fields are not work data.** A
+  session's name, branch, worktree and last prompt stay readable by other
+  orgs' hosts (so a branch named after a ticket shows its key); turn
+  `isolate_sessions` on for an org whose session names must not be seen.
+- **A host in no org sees only unassigned work.** Assign every host of a
+  company before connecting a second company's tracker.
 
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
@@ -1615,6 +1682,14 @@ deliberately.
   reached over Tailscale/SSH, with no public URL at all. Whichever you pick,
   a routable bind serving plaintext is refused unless you pass
   `--allow-plaintext`.
+- **Per-host tokens and the org boundary.** A per-host token's scope is
+  computed from its host's org on every call (and on every `/events`
+  frame after an org change), in one place (`Caller::org_scope`); the
+  work service layer filters with it, and every tool answer a per-host
+  token receives passes one more redaction of session rows' work fields.
+  An isolation matrix test runs every `work` / `work_link` / `work_admin`
+  action for master, clients and hosts in two orgs and in none. See
+  *Organisations and isolation*.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
   the desktop.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
