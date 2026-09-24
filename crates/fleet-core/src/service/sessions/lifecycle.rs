@@ -251,6 +251,11 @@ pub(super) fn git_setup_error(
 /// (`pwd -P`, last line), which the caller uses as the tmux cwd. The logical
 /// `pwd` echoed a symlinked root's spelling, a second identity for the same
 /// checkout next to the physical one tmux and git report.
+///
+/// When the base IS the worktree's own name and that branch already exists
+/// locally (work graph M2: resuming work whose worktree a safe kill removed,
+/// with its branch still there), the existing branch is checked out instead
+/// of `-b` failing with "a branch named … already exists".
 pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) -> String {
     // Requested base branch, shell-quoted; empty string when unset (= default
     // branch). The shell var is `basebr` to avoid colliding with `base`, which
@@ -277,7 +282,11 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          elif [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$basebr\"; then start=\"origin/$basebr\"\n\
          else start=\"$def\"\n\
          fi\n\
+         if [ \"$basebr\" = \"$name\" ] && git show-ref --verify --quiet \"refs/heads/$name\"; then\n\
+         git worktree add \"$wt\" \"$name\" 1>&2\n\
+         else\n\
          git worktree add \"$wt\" -b \"$name\" \"$start\" 1>&2\n\
+         fi\n\
          fi\n\
          ( cd \"$wt\" && pwd -P )\n",
         root = quote(root),

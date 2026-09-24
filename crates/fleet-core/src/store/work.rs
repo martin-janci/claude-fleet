@@ -727,6 +727,57 @@ impl Store {
         )?)
     }
 
+    /// The work item that carries `key` (normalised): a tracker's item when
+    /// one exists, else the local one.
+    pub fn work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {ITEM_COLUMNS} FROM work_items WHERE key = ?1 \
+                     ORDER BY (source = 'local') ASC, id ASC LIMIT 1"
+                ),
+                rusqlite::params![key],
+                map_item,
+            )
+            .optional()
+            .map_err(IpcError::from)
+    }
+
+    /// Live confirmed links to `key` with the session each is on, newest
+    /// decision first.
+    pub fn live_work_sessions_for_key(
+        &self,
+        key: &str,
+    ) -> Result<Vec<(WorkLinkRow, super::SessionRow)>, IpcError> {
+        let key = normalize_work_ref(key)?;
+        let cols = LINK_COLUMNS
+            .split(", ")
+            .map(|c| format!("l.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let pairs: Vec<(WorkLinkRow, i64)> = {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {cols}, p.session_id FROM work_links l \
+                 LEFT JOIN work_items i ON i.id = l.item_id \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
+                   AND p.session_id IS NOT NULL AND (l.ref_key = ?1 OR i.key = ?1) \
+                 ORDER BY COALESCE(l.decided_at, l.created_at) DESC, l.id DESC"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params![key], |r| {
+                Ok((map_link(r)?, r.get::<_, i64>(20)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut out = Vec::with_capacity(pairs.len());
+        for (link, sid) in pairs {
+            if let Some(row) = self.get_session_by_id(sid)? {
+                out.push((link, row));
+            }
+        }
+        Ok(out)
+    }
+
     /// session id → its primary work, for every live session that has one.
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
         let mut stmt = self.conn.prepare(

@@ -3337,6 +3337,21 @@ async fn create_worktree_local_creates_and_is_idempotent() {
         "idempotent call must return same path"
     );
 
+    // Work graph M2: the worktree is removed (a safe kill) but its branch
+    // stays; recreating it with base == name checks the branch out again.
+    let status = Command::new("git")
+        .args(["-C", repo_str, "worktree", "remove", "--force", &wt_path])
+        .status()
+        .expect("git worktree remove");
+    assert!(status.success());
+    let again = create_worktree_local(repo_str, "feat-x", Some("feat-x")).await;
+    assert_eq!(again.expect("recreate the worktree"), wt_path);
+    let head = Command::new("git")
+        .args(["-C", &wt_path, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("rev-parse");
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feat-x");
+
     // cleanup
     std::fs::remove_dir_all(&base).ok();
 }

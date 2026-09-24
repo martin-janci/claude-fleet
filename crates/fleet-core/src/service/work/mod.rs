@@ -3,6 +3,7 @@
 //! agnostic entry the MCP tools `work` / `work_link` and the desktop commands
 //! share, so a paired desktop and a local one answer the same way.
 
+pub mod handover;
 pub mod harvest;
 
 use crate::ipc_error::{codes, lock, IpcError};

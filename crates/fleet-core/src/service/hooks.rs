@@ -292,7 +292,18 @@ fn take_pending_delivery_locked(
     let pending = s
         .list_undelivered_for_session(row.id, DELIVERY_SCAN_LIMIT)
         .ok()?;
-    if pending.is_empty() {
+    // Handover briefs (work graph M2.3) ride ahead of the inbox, through the
+    // same budget. They never cause a Stop block: only a question does.
+    let handovers: Vec<crate::service::delivery::PendingHandover> = s
+        .undelivered_handovers(row.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|h| {
+            h.body
+                .map(|body| crate::service::delivery::PendingHandover { id: h.id, body })
+        })
+        .collect();
+    if pending.is_empty() && handovers.is_empty() {
         if for_stop {
             // The legitimate reset: a turn ended with nothing pending
             // (verified — past the conversation guard above), so a later
@@ -338,17 +349,33 @@ fn take_pending_delivery_locked(
         match stop_action(&carried, streak) {
             StopAction::Block => (block_packed, Some(StopAction::Block)),
             StopAction::Context => (
-                crate::service::delivery::pack(&pending, &label),
+                crate::service::delivery::pack_with_handovers(
+                    &handovers,
+                    &pending,
+                    &label,
+                    crate::service::delivery::CTX_MAX_CHARS,
+                    crate::service::delivery::CTX_MAX_LINES,
+                ),
                 Some(StopAction::Context),
             ),
         }
     } else {
-        (crate::service::delivery::pack(&pending, &label), None)
+        (
+            crate::service::delivery::pack_with_handovers(
+                &handovers,
+                &pending,
+                &label,
+                crate::service::delivery::CTX_MAX_CHARS,
+                crate::service::delivery::CTX_MAX_LINES,
+            ),
+            None,
+        )
     };
     // Only what this response carries is stamped: `pack`/`pack_within` never
     // put a partial body in `text`, and an individually oversized message
-    // rides as a stub (which IS in `included`), so `included` is empty only
-    // when `pending` is — impossible past the check above.
+    // rides as a stub (which IS in `included`). `included` can be empty when
+    // a handover brief took the budget first; the mail waits for the next
+    // hook, still in order.
     if let Err(e) = s.mark_messages_delivered(&packed.included) {
         // A failed UPDATE here means the same messages get packed and
         // handed over again on the next prompt, forever — never silent.
@@ -357,6 +384,15 @@ fn take_pending_delivery_locked(
             error = %e.message,
             "[hook] mark_messages_delivered failed; delivery will repeat"
         );
+    }
+    if !packed.handovers.is_empty() {
+        if let Err(e) = s.mark_handovers_delivered(&packed.handovers, Some(current)) {
+            tracing::warn!(
+                ids = ?packed.handovers,
+                error = %e.message,
+                "[hook] mark_handovers_delivered failed; the brief will repeat"
+            );
+        }
     }
     if for_stop {
         bookkeep_stop_streak(s, row.id, streak, action);
@@ -2968,6 +3004,65 @@ mod tests {
             take_pending_delivery(&store, &payload, &ctx).is_none(),
             "a delivered message is not handed over twice"
         );
+    }
+
+    #[test]
+    fn a_handover_brief_rides_ahead_of_the_inbox_exactly_once() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (a, b) = {
+            let s = store.lock().unwrap();
+            (seed(&s, "alpha"), seed(&s, "beta"))
+        };
+        {
+            let s = store.lock().unwrap();
+            s.insert_message(a, b, "ping", "message", None).unwrap();
+            s.enqueue_handover(b, "# Handover: ABC-1\nbrief body", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_session_id='conv-b' WHERE id=?1",
+                    rusqlite::params![b],
+                )
+                .unwrap();
+        }
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+        };
+        let packed = take_pending_delivery(&store, &payload, &ctx).expect("brief + mail");
+        assert_eq!(packed.handovers.len(), 1);
+        assert_eq!(packed.included.len(), 1);
+        let brief = packed.text.find("# Handover: ABC-1").expect("brief");
+        let mail = packed.text.find("ping").expect("mail");
+        assert!(brief < mail, "the brief rides first: {}", packed.text);
+        {
+            let s = store.lock().unwrap();
+            assert!(s.undelivered_handovers(b).unwrap().is_empty());
+        }
+        assert!(
+            take_pending_delivery(&store, &payload, &ctx).is_none(),
+            "delivered once"
+        );
+        // A brief alone (no mail) is delivered too, on a Stop as context.
+        store
+            .lock()
+            .unwrap()
+            .enqueue_handover(b, "second brief", None)
+            .unwrap();
+        let stop = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        let (packed, action) =
+            take_pending_stop_delivery(&store, &stop, &ctx).expect("the brief alone");
+        assert_eq!(action, crate::service::delivery::StopAction::Context);
+        assert!(packed.text.contains("second brief"));
     }
 
     #[test]
