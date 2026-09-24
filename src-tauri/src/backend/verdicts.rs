@@ -244,6 +244,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "session_conversations",
         },
     ),
+    // Work links (roadmap M1b.2): four commands, two tools. Reads and link
+    // decisions route; tracker admin (later) is the LocalOnly half (C17).
+    ("session_work_links", Verdict::Routed { tool: "work" }),
+    ("link_session_work", Verdict::Routed { tool: "work_link" }),
+    ("reject_session_work", Verdict::Routed { tool: "work_link" }),
+    ("unlink_session_work", Verdict::Routed { tool: "work_link" }),
     (
         "session_conversation",
         Verdict::Routed {

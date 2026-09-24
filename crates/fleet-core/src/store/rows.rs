@@ -239,6 +239,11 @@ pub struct SessionRow {
     /// `serde(default)` so a peer older than the work graph parses the row.
     #[serde(default)]
     pub work: Option<WorkSummary>,
+    /// Keys this session's user said it does NOT work on (sticky rejections,
+    /// migration 046). A client that recognises keys itself (the sidebar's
+    /// branch/tag fallback) must not show these. Empty for most rows.
+    #[serde(default)]
+    pub work_rejected: Vec<String>,
 }
 
 impl SessionRow {
@@ -288,7 +293,14 @@ pub(super) const SESSION_COLUMNS: &str =
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \
         LEFT JOIN work_items i ON i.id = l.item_id \
-       WHERE p.session_id = sessions.id AND p.retired_at IS NULL LIMIT 1) AS work";
+       WHERE p.session_id = sessions.id AND p.retired_at IS NULL LIMIT 1) AS work, \
+     (SELECT json_group_array(COALESCE(i.key, l.ref_key)) \
+        FROM participants p \
+        JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
+                         AND l.state = 'rejected' \
+        LEFT JOIN work_items i ON i.id = l.item_id \
+       WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
+         AND COALESCE(i.key, l.ref_key) IS NOT NULL) AS work_rejected";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -372,6 +384,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         pending_input: decode_pending_input(row.get(51)?),
         lost_reason: row.get(53)?,
         work: decode_work(row.get(54)?),
+        work_rejected: decode_tags(row.get(55)?),
     })
 }
 

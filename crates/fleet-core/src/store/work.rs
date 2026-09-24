@@ -737,10 +737,14 @@ mod tests {
         assert!(row.row_version > before.row_version);
         assert_eq!(bus.take(), vec![format!("session:updated:{sid}")]);
 
-        // A rejection of the primary leaves the row without work.
+        assert!(row.work_rejected.is_empty());
+        // A rejection of the primary leaves the row without work, and names
+        // the key so a client's own recognition does not show it either.
         s.reject_session_work(sid, WorkTarget::Item(item.id))
             .unwrap();
-        assert_eq!(s.get_session("dev", "h").unwrap().unwrap().work, None);
+        let row = s.get_session("dev", "h").unwrap().unwrap();
+        assert_eq!(row.work, None);
+        assert_eq!(row.work_rejected, vec!["ABC-9".to_string()]);
         assert_eq!(bus.take().len(), 1);
 
         let bare = s

@@ -362,6 +362,7 @@ mod tests {
             context: Default::default(),
             pending_input: None,
             work: None,
+            work_rejected: vec![],
         }
     }
 

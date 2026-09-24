@@ -17,4 +17,5 @@ pub mod resolve_move;
 pub mod sessions;
 pub mod tasks;
 pub mod upload;
+pub mod work;
 pub mod worktrees;

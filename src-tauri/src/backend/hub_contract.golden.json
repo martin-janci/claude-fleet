@@ -275,6 +275,8 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "work",
+      "work_rejected",
       "worktree_id",
       "worktree_key"
     ],
@@ -296,6 +298,26 @@
       "cost_micros",
       "input_tokens",
       "output_tokens"
+    ],
+    "WorkLinkRow": [
+      "created_at",
+      "decided_at",
+      "ended_at",
+      "id",
+      "is_primary",
+      "item_id",
+      "participant_id",
+      "ref_key",
+      "snap_branch",
+      "snap_claude_ids",
+      "snap_host",
+      "snap_name",
+      "snap_pr_url",
+      "snap_project_id",
+      "snap_tmux",
+      "snap_worktree",
+      "source",
+      "state"
     ],
     "WorktreeOccupancy": [
       "occupants",

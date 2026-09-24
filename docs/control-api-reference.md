@@ -507,6 +507,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
+- `commands::work::session_work_links`
+- `commands::work::link_session_work`
+- `commands::work::reject_session_work`
+- `commands::work::unlink_session_work`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`

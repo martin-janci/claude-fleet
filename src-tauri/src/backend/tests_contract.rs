@@ -12,7 +12,8 @@ use fleet_core::service::usage::DayUsage;
 use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
     AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectRow, SessionContext,
-    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkSummary, WorktreeRow,
+    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkLinkRow, WorkSummary,
+    WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -102,6 +103,7 @@ pub(crate) fn sample_session() -> SessionRow {
             title: "Login".into(),
             source: "manual".into(),
         }),
+        work_rejected: vec!["XYZ-9".into()],
     }
 }
 
@@ -329,6 +331,29 @@ fn sample_subagent() -> ConvItem {
     }
 }
 
+fn sample_work_link() -> WorkLinkRow {
+    WorkLinkRow {
+        id: 5,
+        item_id: Some(6),
+        ref_key: Some("ABC-123".into()),
+        participant_id: Some(7),
+        state: "confirmed".into(),
+        source: "manual".into(),
+        is_primary: true,
+        created_at: 1,
+        decided_at: Some(2),
+        ended_at: Some(3),
+        snap_host: Some("trn".into()),
+        snap_tmux: Some("demo".into()),
+        snap_name: Some("Fix login".into()),
+        snap_project_id: Some(8),
+        snap_worktree: Some("abc-123".into()),
+        snap_branch: Some("abc-123-login".into()),
+        snap_pr_url: Some("https://example.com/pr/1".into()),
+        snap_claude_ids: Some("[\"c1\"]".into()),
+    }
+}
+
 fn sample_changed_file() -> ChangedFile {
     ChangedFile {
         path: "src/lib.rs".into(),
@@ -355,6 +380,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         c.insert(name.to_string(), keys);
     };
     put("SessionRow", wire_keys(&sample_session()));
+    put("WorkLinkRow", wire_keys(&sample_work_link()));
     put("HostRow", wire_keys(&sample_host()));
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));
@@ -659,7 +685,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_five() {
+fn a_session_rows_wire_names_are_these_exact_fifty_six() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -714,11 +740,12 @@ fn a_session_rows_wire_names_are_these_exact_fifty_five() {
         "usage_output_tokens",
         "usage_updated_at",
         "work",
+        "work_rejected",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 55, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 56, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 
