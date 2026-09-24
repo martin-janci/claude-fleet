@@ -4,9 +4,14 @@
 
 pub mod apply;
 pub mod backoff;
+pub mod dial;
 pub mod listen;
+pub mod supervisor;
 pub mod validate;
 pub mod wire;
+
+#[cfg(test)]
+mod tests_two_hubs;
 
 #[cfg(test)]
 pub(crate) mod testkit {

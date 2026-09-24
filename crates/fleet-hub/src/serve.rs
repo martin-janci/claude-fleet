@@ -825,6 +825,15 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Arc::clone(&bus) as Arc<dyn EventBus>,
         ticks_cancel.clone(),
     );
+    // Hub↔hub federation: one exchange loop per dialer link in state.db,
+    // rescanned every 5 s so a CLI `peer add` / `peer remove` lands without
+    // a restart. Stopped with the ticks.
+    let peer_handle = fleet_core::service::peer::supervisor::spawn_peer_supervisor(
+        Arc::clone(&store),
+        Arc::clone(&ssh),
+        Arc::new(fleet_core::http_client::TcpTransport),
+        ticks_cancel.clone(),
+    );
 
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
@@ -857,6 +866,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tick_handles.push(h);
     }
     tick_handles.push(usage_handle);
+    tick_handles.push(peer_handle);
     await_ticks(tick_handles, TICK_SHUTDOWN_TIMEOUT).await;
     tunnels.stop_all();
     ssh.shutdown_all();

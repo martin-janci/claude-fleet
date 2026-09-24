@@ -46,6 +46,24 @@ pub fn check_batch(send: usize, results: usize) -> Result<(), Rejection> {
     Ok(())
 }
 
+/// A `kind` that may cross a hub link: 1 to 32 of `[a-z0-9_-]`. The sender
+/// checks it too (`send_remote`), so a kind the peer would refuse is refused
+/// up front rather than coming back as `message_undeliverable`.
+pub fn check_kind(kind: &str) -> Result<(), Rejection> {
+    if kind.is_empty()
+        || kind.len() > PEER_KIND_MAX
+        || !kind
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(reject(
+            "E_VALIDATE",
+            format!("kind must be 1 to {PEER_KIND_MAX} of [a-z0-9_-]"),
+        ));
+    }
+    Ok(())
+}
+
 /// `peer_fleet` is the link's pinned fleet; `own_fleet` is ours.
 pub fn check_inbound(
     m: &WireMessage,
@@ -84,18 +102,7 @@ pub fn check_inbound(
             ))
         }
     };
-    if m.kind.is_empty()
-        || m.kind.len() > PEER_KIND_MAX
-        || !m
-            .kind
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    {
-        return Err(reject(
-            "E_VALIDATE",
-            format!("kind must be 1 to {PEER_KIND_MAX} of [a-z0-9_-]"),
-        ));
-    }
+    check_kind(&m.kind)?;
     if m.body.is_empty() {
         return Err(reject("E_VALIDATE", "body is empty"));
     }

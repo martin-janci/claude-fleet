@@ -1,0 +1,644 @@
+//! The dialer's exchange loop: one task per live dialer link. Sends the
+//! outbox and pending rejections, long-polls when it has nothing, drops a
+//! parked poll the moment the outbox gets a row, backs off on transport
+//! failure and stops on a refusal.
+//!
+//! The link's token lives in [`HttpPeerCall`] and in `PeerLinkRow` (whose
+//! `Debug` redacts it). Neither this module nor the supervisor puts it in a
+//! log field or an error, and `HttpPeerCall` deliberately has no `Debug`.
+
+use super::apply::{apply_inbound, apply_results, outbox_to_wire};
+use super::backoff::{is_terminal, Backoff};
+use super::validate::check_batch;
+use super::wire::{
+    ExchangeRequest, ExchangeResponse, ResultStatus, WireResult, PEER_BATCH_MAX, PEER_WAIT_MAX_MS,
+    PROTO,
+};
+use crate::http_client::HubTransport;
+use crate::ipc_error::{codes, lock, IpcError};
+use crate::mcp::guard;
+use crate::service::messages::timeline_detail;
+use crate::ssh::SshClient;
+use crate::store::{PeerLinkRow, Store, LINK_INCOMPATIBLE, LINK_REFUSED, LINK_RETRYING};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+
+/// Past the long-poll budget before a call counts as a transport timeout.
+const CALL_MARGIN: Duration = Duration::from_secs(10);
+/// How often a parked dialer re-reads its outbox (and its link row) when no
+/// notify arrives — a row written by another process (the CLI) has none.
+const POLL_FLOOR: Duration = Duration::from_millis(500);
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug)]
+pub enum CallError {
+    /// Retry with backoff: the peer was not reached, or answered with
+    /// anything that is not a refusal.
+    Transport(String),
+    /// Terminal: the link stops (`refused`, or `incompatible` for
+    /// `E_UNSUPPORTED`).
+    Refused { code: String, message: String },
+}
+
+/// The one classifier of a peer's coded error, shared by [`HttpPeerCall`]
+/// and the two-hub test fake: a refusal only for [`is_terminal`] codes,
+/// every other code — `E_RATE_LIMITED` included — a transport failure. The
+/// peer's words are scrubbed onto one capped line: they land in
+/// `last_error`, which an operator reads.
+pub(crate) fn classify(code: &str, message: String) -> CallError {
+    let message = guard::scrub_line(&timeline_detail(&message));
+    let code = guard::scrub_line(&timeline_detail(code));
+    if is_terminal(&code) {
+        CallError::Refused { code, message }
+    } else {
+        CallError::Transport(format!("{code}: {message}"))
+    }
+}
+
+#[async_trait::async_trait]
+pub trait PeerCall: Send + Sync {
+    async fn exchange(
+        &self,
+        req: &ExchangeRequest,
+        timeout: Duration,
+    ) -> Result<ExchangeResponse, CallError>;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LinkExit {
+    Cancelled,
+    Revoked,
+    Refused,
+    Incompatible,
+    /// The handshake merged this row into an older link for the same fleet.
+    Rebound(i64),
+}
+
+/// `peer_exchange` over HTTP(S). Holds the link's token: no `Debug`.
+pub struct HttpPeerCall {
+    pub url: String,
+    pub token: String,
+    pub transport: Arc<dyn HubTransport>,
+}
+
+#[async_trait::async_trait]
+impl PeerCall for HttpPeerCall {
+    async fn exchange(
+        &self,
+        req: &ExchangeRequest,
+        timeout: Duration,
+    ) -> Result<ExchangeResponse, CallError> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "peer_exchange", "arguments": req },
+        })
+        .to_string();
+        let url = format!("{}/mcp", self.url.trim_end_matches('/'));
+        let resp = tokio::time::timeout(timeout, self.transport.post_json(&url, &self.token, body))
+            .await
+            .map_err(|_| CallError::Transport(format!("no answer within {timeout:?}")))?
+            .map_err(|e| CallError::Transport(self.redact(&e)))?;
+        read_answer(resp.status, &resp.body)
+    }
+}
+
+impl HttpPeerCall {
+    /// A transport error names the URL at most; scrubbed of the token anyway.
+    /// A token too short to be a real one (a test's `"t"`) is left alone:
+    /// replacing it would mangle every word that contains it.
+    fn redact(&self, s: &str) -> String {
+        let one = guard::scrub_line(s);
+        if self.token.len() < 8 {
+            one
+        } else {
+            one.replace(&self.token, "[token]")
+        }
+    }
+}
+
+/// PURE: one HTTP answer to a `peer_exchange` call.
+fn read_answer(status: u16, body: &str) -> Result<ExchangeResponse, CallError> {
+    match status {
+        200 => {}
+        401 => {
+            return Err(CallError::Refused {
+                code: codes::E_UNAUTHORIZED.into(),
+                message: "the peer refused this token".into(),
+            })
+        }
+        403 => {
+            return Err(CallError::Refused {
+                code: codes::E_FORBIDDEN.into(),
+                message: "the peer refused this link".into(),
+            })
+        }
+        s => return Err(CallError::Transport(format!("HTTP {s}"))),
+    }
+    let payload = crate::mcp::wire::last_event_payload(body);
+    let envelope: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|e| CallError::Transport(format!("unreadable answer: {e}")))?;
+    if let Some(err) = envelope.get("error") {
+        // rmcp answers an unknown tool with a JSON-RPC error: an older hub.
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Err(classify(codes::E_UNSUPPORTED, message));
+    }
+    let result = envelope
+        .get("result")
+        .ok_or_else(|| CallError::Transport("no result".into()))?;
+    let text = result
+        .pointer("/content/0/text")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
+    if result.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+        // The structured form first (`tool_error_result`), the text block's
+        // "CODE: message" as the fallback.
+        let structured = result
+            .get("structuredContent")
+            .and_then(|sc| Some((sc.get("code")?.as_str()?, sc.get("message")?.as_str()?)));
+        let (code, message) = match structured {
+            Some((c, m)) => (c.to_string(), m.to_string()),
+            None => match text.split_once(": ") {
+                Some((c, m)) if c.starts_with("E_") => (c.to_string(), m.to_string()),
+                _ => (codes::E_INTERNAL.to_string(), text.to_string()),
+            },
+        };
+        return Err(classify(&code, message));
+    }
+    serde_json::from_str(text)
+        .map_err(|e| CallError::Transport(format!("unreadable exchange: {e}")))
+}
+
+/// What one successful exchange came to.
+enum Settled {
+    /// Applied; reset the backoff.
+    Ok,
+    /// Applied, but the peer answered no result for something sent: back
+    /// off rather than resend at full speed.
+    Short,
+    Exit(LinkExit),
+}
+
+pub async fn run_link(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    link_id: i64,
+    call: Arc<dyn PeerCall>,
+    cancel: CancellationToken,
+) -> LinkExit {
+    let mut backoff = Backoff::new();
+    let Ok(notify) = lock(&store).map(|s| s.message_notify()) else {
+        return LinkExit::Cancelled;
+    };
+    // The first exchange of a loop never parks: it is the handshake (or the
+    // resume after a restart), and its answer settles the link's state now
+    // rather than a long-poll later.
+    let mut first = true;
+    loop {
+        let snapshot = read_link(&store, link_id);
+        let (own, link, send, rejects) = match snapshot {
+            Ok(Some(x)) => x,
+            Ok(None) => return LinkExit::Revoked,
+            Err(e) => {
+                tracing::warn!(link_id, error = %e.message, "[peer] cannot read the link; retrying");
+                if sleep_or_cancel(&cancel, backoff.next()).await {
+                    return LinkExit::Cancelled;
+                }
+                continue;
+            }
+        };
+        if link.revoked_at.is_some() {
+            return LinkExit::Revoked;
+        }
+        let idle = send.is_empty() && rejects.is_empty();
+        let parks = idle && !first && link.fleet_id.is_some();
+        let wait_ms = if parks { PEER_WAIT_MAX_MS } else { 0 };
+        let req = ExchangeRequest {
+            proto: PROTO,
+            fleet_id: own.clone(),
+            send,
+            after: link.after,
+            results: rejects,
+            wait_ms,
+        };
+        let timeout = Duration::from_millis(wait_ms) + CALL_MARGIN;
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return LinkExit::Cancelled,
+            r = call.exchange(&req, timeout) => Some(r),
+            _ = wake_parked(&store, &notify, link_id), if parks => None,
+        };
+        // `None`: the parked poll was dropped to send now (D2, D7 — `after`
+        // did not move, so whatever it would have carried comes again).
+        let Some(result) = outcome else { continue };
+        match result {
+            Ok(resp) => match settle(&store, &ssh, &link, &own, &req, resp).await {
+                Ok(Settled::Ok) => {
+                    first = false;
+                    backoff.reset();
+                }
+                Ok(Settled::Short) => {
+                    first = false;
+                    tracing::warn!(
+                        link_id,
+                        "[peer] the peer answered no result for a sent message; backing off"
+                    );
+                    if sleep_or_cancel(&cancel, backoff.next()).await {
+                        return LinkExit::Cancelled;
+                    }
+                }
+                Ok(Settled::Exit(exit)) => return exit,
+                Err(e) => {
+                    tracing::warn!(link_id, error = %e.message, "[peer] applying an exchange failed; retrying");
+                    set_state(
+                        &store,
+                        link_id,
+                        LINK_RETRYING,
+                        &format!("{}: {}", e.code, e.message),
+                    );
+                    if sleep_or_cancel(&cancel, backoff.next()).await {
+                        return LinkExit::Cancelled;
+                    }
+                }
+            },
+            Err(CallError::Transport(why)) => {
+                tracing::debug!(link_id, error = %why, "[peer] exchange failed; backing off");
+                set_state(&store, link_id, LINK_RETRYING, &why);
+                if sleep_or_cancel(&cancel, backoff.next()).await {
+                    return LinkExit::Cancelled;
+                }
+            }
+            Err(CallError::Refused { code, message }) => {
+                let (state, exit) = if code == codes::E_UNSUPPORTED {
+                    (LINK_INCOMPATIBLE, LinkExit::Incompatible)
+                } else {
+                    (LINK_REFUSED, LinkExit::Refused)
+                };
+                tracing::warn!(link_id, code = %code, "[peer] the peer refused the link; stopping");
+                set_state(&store, link_id, state, &format!("{code}: {message}"));
+                return exit;
+            }
+        }
+    }
+}
+
+type Snapshot = (
+    String,
+    PeerLinkRow,
+    Vec<super::wire::WireMessage>,
+    Vec<WireResult>,
+);
+
+/// The link row, our fleet id, the outbox page and the pending rejections.
+/// `ensure_local_fleet_id` locks the store itself, so it runs first, outside
+/// the guard below.
+fn read_link(store: &Mutex<Store>, link_id: i64) -> Result<Option<Snapshot>, IpcError> {
+    let own = crate::service::address::ensure_local_fleet_id(store)?;
+    let s = lock(store)?;
+    let Some(link) = s.peer_link(link_id)? else {
+        return Ok(None);
+    };
+    let rows = s.pending_outbox(link_id, 0, PEER_BATCH_MAX as i64)?;
+    let send = outbox_to_wire(&s, &own, rows)?;
+    let mut rejects: Vec<WireResult> = link
+        .pending_rejects
+        .as_deref()
+        .map(|j| serde_json::from_str(j).unwrap_or_default())
+        .unwrap_or_default();
+    // A response is at most PEER_BATCH_MAX items, so this never cuts; it
+    // keeps a corrupt column from turning every request into a refusal.
+    rejects.truncate(PEER_BATCH_MAX);
+    Ok(Some((own, link, send, rejects)))
+}
+
+fn set_state(store: &Mutex<Store>, link_id: i64, state: &str, why: &str) {
+    if let Ok(s) = lock(store) {
+        let _ = s.set_peer_link_state(link_id, state, Some(why), now_unix());
+    }
+}
+
+/// Apply one successful exchange.
+async fn settle(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    link: &PeerLinkRow,
+    own: &str,
+    req: &ExchangeRequest,
+    resp: ExchangeResponse,
+) -> Result<Settled, IpcError> {
+    if resp.proto != PROTO {
+        lock(store)?.set_peer_link_state(
+            link.id,
+            LINK_INCOMPATIBLE,
+            Some(&format!(
+                "the peer speaks proto {}, not {PROTO}",
+                resp.proto
+            )),
+            now_unix(),
+        )?;
+        return Ok(Settled::Exit(LinkExit::Incompatible));
+    }
+    let mut link = link.clone();
+    match link.fleet_id.as_deref() {
+        None => {
+            let kept = lock(store)?.adopt_dialer_fleet(link.id, &resp.fleet_id)?;
+            if kept != link.id {
+                return Ok(Settled::Exit(LinkExit::Rebound(kept)));
+            }
+            link.fleet_id = Some(resp.fleet_id.clone());
+        }
+        Some(f) if f != resp.fleet_id => {
+            lock(store)?.set_peer_link_state(
+                link.id,
+                LINK_REFUSED,
+                Some("E_FORBIDDEN: the peer answered as another fleet"),
+                now_unix(),
+            )?;
+            return Ok(Settled::Exit(LinkExit::Refused));
+        }
+        Some(_) => {}
+    }
+    // The peer's limits hold both ways: an oversized answer is not applied.
+    check_batch(resp.messages.len(), resp.results.len())
+        .map_err(|r| IpcError::new(r.code, format!("the peer's answer: {}", r.message)))?;
+    // Only results for what this request sent: a peer settles the rows it
+    // was handed, not the rest of this link's outbox.
+    let sent: Vec<i64> = req.send.iter().map(|m| m.id).collect();
+    let results: Vec<WireResult> = resp
+        .results
+        .iter()
+        .filter(|r| sent.contains(&r.id))
+        .cloned()
+        .collect();
+    let short = sent.iter().any(|id| !results.iter().any(|r| r.id == *id));
+    apply_results(store, link.id, &results)?;
+    let rejects: Vec<WireResult> = apply_inbound(store, ssh, &link, own, &resp.messages)
+        .await
+        .into_iter()
+        .filter(|r| r.status == ResultStatus::Rejected)
+        .collect();
+    let after = resp
+        .messages
+        .iter()
+        .map(|m| m.id)
+        .max()
+        .unwrap_or(req.after)
+        .max(req.after);
+    // Overwrites `pending_rejects`: the ones this request carried were
+    // delivered by its success, so only the new ones remain.
+    let rejects_json = if rejects.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&rejects).unwrap_or_default())
+    };
+    lock(store)?.set_peer_link_progress(link.id, after, rejects_json.as_deref(), now_unix())?;
+    Ok(if short { Settled::Short } else { Settled::Ok })
+}
+
+/// Resolves when a parked poll should be dropped: the outbox got a row, or
+/// the link was revoked or removed (the loop then exits on its next read).
+async fn wake_parked(store: &Mutex<Store>, notify: &tokio::sync::Notify, link_id: i64) {
+    loop {
+        // Registered BEFORE the read, so a row inserted between the read
+        // and the wait still wakes it.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let wake = lock(store)
+            .and_then(|s| {
+                Ok(s.has_pending_outbox(link_id, 0)?
+                    || s.peer_link(link_id)?.is_none_or(|l| l.revoked_at.is_some()))
+            })
+            .unwrap_or(false);
+        if wake {
+            return;
+        }
+        let _ = tokio::time::timeout(POLL_FLOOR, notified).await;
+    }
+}
+
+/// True when cancelled.
+async fn sleep_or_cancel(cancel: &CancellationToken, d: Duration) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => true,
+        _ = tokio::time::sleep(d) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::peer::testkit::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn sse(envelope: serde_json::Value) -> String {
+        format!("event: message\ndata: {envelope}\n\n")
+    }
+
+    fn tool_error(code: &str, message: &str) -> String {
+        sse(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {
+                "isError": true,
+                "content": [{"type": "text", "text": format!("{code}: {message}")}],
+                "structuredContent": {"code": code, "message": message, "details": null},
+            },
+        }))
+    }
+
+    #[test]
+    fn an_answer_is_read_and_every_failure_is_classified() {
+        let ok = ExchangeResponse {
+            proto: PROTO,
+            fleet_id: "fleet-b".into(),
+            results: vec![WireResult::accepted(3)],
+            messages: vec![],
+            more: false,
+        };
+        let body = sse(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": serde_json::to_string(&ok).unwrap()}]},
+        }));
+        assert_eq!(read_answer(200, &body).unwrap(), ok);
+
+        let refused = |r: Result<ExchangeResponse, CallError>| match r {
+            Err(CallError::Refused { code, .. }) => code,
+            other => panic!("not a refusal: {:?}", other.map(|_| ())),
+        };
+        let transport = |r: Result<ExchangeResponse, CallError>| match r {
+            Err(CallError::Transport(why)) => why,
+            other => panic!("not a transport failure: {:?}", other.map(|_| ())),
+        };
+        assert_eq!(refused(read_answer(401, "")), "E_UNAUTHORIZED");
+        assert_eq!(refused(read_answer(403, "")), "E_FORBIDDEN");
+        assert_eq!(
+            refused(read_answer(200, &tool_error("E_FORBIDDEN", "removed"))),
+            "E_FORBIDDEN"
+        );
+        assert_eq!(
+            refused(read_answer(200, &tool_error("E_UNSUPPORTED", "proto 2"))),
+            "E_UNSUPPORTED"
+        );
+        let unknown_tool = sse(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "tool not found"},
+        }));
+        assert_eq!(refused(read_answer(200, &unknown_tool)), "E_UNSUPPORTED");
+        // Not refusals: the link retries.
+        assert!(
+            transport(read_answer(200, &tool_error("E_RATE_LIMITED", "busy")))
+                .starts_with("E_RATE_LIMITED: ")
+        );
+        assert!(
+            transport(read_answer(200, &tool_error("E_INTERNAL", "db"))).starts_with("E_INTERNAL")
+        );
+        assert_eq!(transport(read_answer(502, "bad gateway")), "HTTP 502");
+        assert_eq!(transport(read_answer(429, "")), "HTTP 429");
+        assert!(transport(read_answer(200, "not json")).starts_with("unreadable answer"));
+        // The fallback when a hub sends no structured form.
+        let text_only = sse(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"isError": true, "content": [{"type": "text", "text": "E_FORBIDDEN: no"}]},
+        }));
+        assert_eq!(refused(read_answer(200, &text_only)), "E_FORBIDDEN");
+    }
+
+    #[test]
+    fn a_peers_words_become_one_capped_line() {
+        let noisy = "a\nb\r\n\u{2028}".repeat(200);
+        match classify("E_FORBIDDEN", noisy.clone()) {
+            CallError::Refused { message, .. } => {
+                assert!(
+                    !message.chars().any(crate::store::breaks_a_line),
+                    "{message:?}"
+                );
+                assert!(message.chars().count() <= 200);
+            }
+            CallError::Transport(_) => panic!("a refusal"),
+        }
+        match classify("E_INTERNAL", noisy) {
+            CallError::Transport(why) => {
+                assert!(!why.chars().any(crate::store::breaks_a_line), "{why:?}")
+            }
+            CallError::Refused { .. } => panic!("not a refusal"),
+        }
+    }
+
+    struct Failing;
+
+    #[async_trait::async_trait]
+    impl HubTransport for Failing {
+        async fn post_json(
+            &self,
+            _url: &str,
+            bearer: &str,
+            _body: String,
+        ) -> Result<crate::http_client::HubResponse, String> {
+            Err(format!("refused, and a careless transport echoed {bearer}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_never_carries_the_token() {
+        let call = HttpPeerCall {
+            url: "https://b.example".into(),
+            token: "sekrit-token-value".into(),
+            transport: Arc::new(Failing),
+        };
+        let req = ExchangeRequest {
+            proto: PROTO,
+            fleet_id: "fleet-a".into(),
+            send: vec![],
+            after: 0,
+            results: vec![],
+            wait_ms: 0,
+        };
+        match call.exchange(&req, Duration::from_secs(1)).await {
+            Err(CallError::Transport(why)) => assert!(!why.contains("sekrit"), "{why}"),
+            _ => panic!("a transport failure"),
+        }
+    }
+
+    /// A peer that answers nothing for what it was sent is backed off, not
+    /// hammered: the row stays pending and is resent at the backoff's pace.
+    struct Mute {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerCall for Mute {
+        async fn exchange(
+            &self,
+            _req: &ExchangeRequest,
+            _timeout: Duration,
+        ) -> Result<ExchangeResponse, CallError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ExchangeResponse {
+                proto: PROTO,
+                fleet_id: "fleet-b".into(),
+                results: vec![],
+                messages: vec![],
+                more: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_answering_no_result_is_backed_off() {
+        let (store, ssh) = hub("fleet-a");
+        let a1 = session(&store, "a1");
+        let link = {
+            let s = store.lock().unwrap();
+            let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(link, "fleet-b").unwrap();
+            let to = s
+                .ensure_remote_participant(link, "fleet-b/session/h/b1")
+                .unwrap();
+            s.insert_outbound_remote(
+                a1,
+                "fleet-a/session/local/a1",
+                to,
+                "x",
+                "message",
+                None,
+                false,
+            )
+            .unwrap();
+            link
+        };
+        let mute = Arc::new(Mute {
+            calls: AtomicUsize::new(0),
+        });
+        let cancel = CancellationToken::new();
+        let h = tokio::spawn(run_link(
+            store.clone(),
+            ssh,
+            link,
+            mute.clone(),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let calls = mute.calls.load(Ordering::SeqCst);
+        assert!((1..=3).contains(&calls), "{calls} calls in 1.5 s");
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .pending_outbox(link, 0, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        cancel.cancel();
+        assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+    }
+}

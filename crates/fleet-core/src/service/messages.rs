@@ -467,11 +467,14 @@ fn send_remote(
             ),
         ));
     }
+    let kind = args.kind.as_deref().unwrap_or("message");
+    // The peer's own rule: refused here, not a week later as undeliverable.
+    crate::service::peer::validate::check_kind(kind)
+        .map_err(|r| IpcError::new(r.code, format!("to another fleet, {}", r.message)))?;
     // Must be called before `lock(store)` below: it takes the store lock
     // internally, and the store mutex must never be locked while already
     // held.
     let fleet = crate::service::address::ensure_local_fleet_id(store)?;
-    let kind = args.kind.as_deref().unwrap_or("message");
     let detail = timeline_detail(&args.body);
     let s = lock(store)?;
     let id = s.atomically(|s| {
@@ -955,6 +958,49 @@ mod tests {
             send_message(big, &store, &ssh).await.unwrap_err().code,
             codes::E_VALIDATE
         );
+    }
+
+    /// A kind the peer's `check_inbound` would reject is refused at the
+    /// sender, before it queues; the default kind passes.
+    #[tokio::test]
+    async fn a_kind_the_peer_would_reject_is_refused_before_it_queues() {
+        let (store, ssh, a, _b) = fixture();
+        let link = {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+        };
+        for bad in ["Task", "a b", "kind\nx", &"k".repeat(33)] {
+            let mut m = args(a, 0, "hi");
+            m.to_addr = Some("fleet-b/session/h/b1".into());
+            m.kind = Some(bad.to_string());
+            assert_eq!(
+                send_message(m, &store, &ssh).await.unwrap_err().code,
+                codes::E_VALIDATE,
+                "{bad:?}"
+            );
+        }
+        assert!(store
+            .lock()
+            .unwrap()
+            .pending_outbox(link, 0, 50)
+            .unwrap()
+            .is_empty());
+        let mut ok = args(a, 0, "hi");
+        ok.to_addr = Some("fleet-b/session/h/b1".into());
+        send_message(ok, &store, &ssh).await.unwrap();
+        let mut result = args(a, 0, "done");
+        result.to_addr = Some("fleet-b/session/h/b1".into());
+        result.kind = Some("task_result".into());
+        send_message(result, &store, &ssh).await.unwrap();
+        let s = store.lock().unwrap();
+        let kinds: Vec<String> = s
+            .pending_outbox(link, 0, 50)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(kinds, vec!["message", "task_result"]);
     }
 
     #[tokio::test]
