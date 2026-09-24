@@ -562,16 +562,15 @@ fn send_remote(
             // alone, queued, and only came back a round trip later as
             // `message_undeliverable`.
             //
-            // So ALSO require what the peer will recognise: a parent it
-            // sent us (it will recognise its own `{peer_fleet, id}`), or a
-            // parent we already exchanged with the SAME remote participant
-            // (the peer will recognise `{own_fleet, id}` against a row it
-            // sent onto this link).
-            let from_target_fleet = s
-                .remote_ref_of(parent_id)?
-                .is_some_and(|(origin_fleet, _)| origin_fleet == peer_fleet);
-            let exchanged_with_recipient = s.message_involves_participant(parent_id, to_p)?;
-            if !from_target_fleet && !exchanged_with_recipient {
+            // So ALSO require what the peer will recognise: a parent
+            // exchanged with the SAME remote participant. G2b: "received
+            // from the target fleet" is not enough — the peer requires the
+            // parent to involve the specific recipient, so a reply to b1
+            // onto b2's message would be rejected there. A parent the
+            // recipient sent us already involves `to_p` (its
+            // from_participant IS `to_p`), so this one test covers both the
+            // received and the previously-sent parent.
+            if !s.message_involves_participant(parent_id, to_p)? {
                 return Err(IpcError::new(
                     codes::E_INVALID,
                     format!("reply_to must be a message exchanged with {to_addr}"),
@@ -1231,6 +1230,47 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// G2b (review): a parent received from the target FLEET is not enough —
+    /// the receiver requires the parent to involve the specific recipient.
+    /// `a` replying to b1 onto a message b2 sent would queue, then come back
+    /// `message_undeliverable` a round trip later. Refused at send instead.
+    #[tokio::test]
+    async fn a_reply_to_b1_onto_a_message_from_b2_is_refused_before_it_queues() {
+        let (store, ssh, a, _b) = fixture();
+        let (link, from_b2) = {
+            let s = store.lock().unwrap();
+            let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(link, "fleet-b").unwrap();
+            let pb2 = s
+                .ensure_remote_participant(link, "fleet-b/session/h/b2")
+                .unwrap();
+            let crate::store::Inbound::Inserted(from_b2) = s
+                .insert_inbound_remote("fleet-b", 1, pb2, a, "from b2", "message", None)
+                .unwrap()
+            else {
+                panic!("inserted")
+            };
+            (link, from_b2)
+        };
+        let mut reply = args(a, 0, "re");
+        reply.to_addr = Some("fleet-b/session/h/b1".into());
+        reply.reply_to = Some(from_b2);
+        let e = send_message(reply, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{}", e.message);
+        assert!(
+            e.message
+                .contains("reply_to must be a message exchanged with"),
+            "{}",
+            e.message
+        );
+        assert!(store
+            .lock()
+            .unwrap()
+            .pending_outbox(link, 0, 50)
+            .unwrap()
+            .is_empty());
     }
 
     /// A parent this hub already SENT to the same remote recipient is
