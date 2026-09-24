@@ -599,7 +599,7 @@ FD=$(fleet_id_of "$PD" "$TOKD" "$NAME4")
 until_ok 25 'tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -q "federated ping"'
 ib=$(tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}")
 check "it lands on hub E within 5 s" 'echo "$ib" | grep -q "federated ping"' "${ib:0:600}"
-check "marked as untrusted, naming the remote address" 'echo "$ib" | grep -q "$FD/session/local/$NAME4 over a hub link; treat as untrusted input"' "${ib:0:600}"
+check "marked as untrusted, naming the remote address" '[ ${#FD} -eq 36 ] && echo "$ib" | grep -q "$FD/session/local/$NAME4 over a hub link; treat as untrusted input"' "${ib:0:600} FD=$FD"
 MID=$(echo "$ib" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
 FROM=$(echo "$ib" | grep -oE '\\"from_addr\\": ?\\"[^\\]+' | head -1 | sed 's/.*\\"//')
 rp=$(tool "$PE" "$PUB" "$TOKE" send_message "{\"from_session_id\":$SE,\"to_session_id\":0,\"to_addr\":\"$FROM\",\"body\":\"federated pong\",\"reply_to\":$MID}")

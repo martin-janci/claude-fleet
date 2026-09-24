@@ -691,6 +691,26 @@ single larger message still goes, alone), and 32 KiB per message; an unread mess
 from another fleet whose recipient session is later deleted is not reported
 back to the sending fleet.
 
+**What ends a link versus what just interrupts it.** The dialer treats HTTP
+401, or a structured tool refusal (`E_FORBIDDEN`/`E_UNAUTHORIZED` with a
+code), a `fleet_id` mismatch, a rejected `proto`, or a peer that does not
+know `peer_exchange` as terminal — the link goes `refused` or `incompatible`
+and stops on its own. A bare HTTP 403 with none of that — the shape a proxy
+in front of the peer sends, not the peer hub's own answer — is treated like
+a dropped connection instead and retried with backoff.
+
+`fleet-hub client revoke <name>` on the listener's peer token is not the same
+as `fleet-hub peer remove`: it acts at once (a call the listener already had
+parked returns immediately, and a further send to that fleet is refused)
+but leaves the link's pending rows exactly where `peer remove` would have
+failed them — attached, waiting for a re-pair inside the retention window.
+
+A reply only threads onto a message the two ends actually exchanged: onto
+one your own hub sent across this same link, or one the peer sent that
+named you. An id that only looks right — a purely local thread, another
+fleet's traffic, or a message this link never carried — is refused
+(`E_INVALID`) rather than silently accepted.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
@@ -1574,6 +1594,19 @@ deliberately.
   untrusted input and is never typed into a pane: the only thing it can do
   to a pane is wake an idle session with a fixed one-line nudge, never the
   remote text itself. See *Link two hubs* above.
+- **A peer's own words cannot forge the marker that quotes them.** If a
+  message body from another fleet happens to contain a line matching
+  fleet's own untrusted-content marker, that line is neutralised (prefixed
+  `> `) before it is ever stored — a peer cannot close the marked block
+  early and have the rest of its text read back as fleet's own.
+- **Trust in a link is decided once, at pairing, by identity — not by a
+  fleet-id allowlist.** The pairing code itself is the credential: only
+  someone who can already run commands on the other hub can mint one, and
+  the first exchange pins whichever `fleet_id` that hub answers with for
+  the life of the link. There is nothing to pre-register, because a fleet
+  id is not secret and requiring one in advance would mean the listener's
+  operator already had to know the dialer's id before pairing — the code
+  is what lets them skip that.
 - **A reverse proxy in front of the hub must APPEND to `X-Forwarded-For`.**
   That per-address budget keys on the request's TCP peer, except when the peer
   is a loopback or private address — the compose topology, where the peer is
