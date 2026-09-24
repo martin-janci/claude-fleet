@@ -62,6 +62,27 @@ export function extractWorkKey(text: string | null | undefined): string | null {
   return null;
 }
 
+/** The work key in a pasted ticket URL — Jira `/browse/ABC-123` or
+ *  `?selectedIssue=ABC-123`, Linear `/<ws>/issue/ENG-42/…` — or null when
+ *  `text` is not a lone URL or names no key. */
+export function keyFromTicketUrl(text: string): string | null {
+  const t = text.trim();
+  if (!/^https?:\/\/\S+$/i.test(t)) return null;
+  let u: URL;
+  try {
+    u = new URL(t);
+  } catch {
+    return null;
+  }
+  let path = u.pathname;
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    /* keep the raw path */
+  }
+  return extractWorkKey(u.searchParams.get('selectedIssue')) ?? extractWorkKey(path);
+}
+
 /** worktree id → branch, over every worktree the projects store holds. */
 export function worktreeBranchById(projects: readonly ProjectTreeRow[]): Map<number, string> {
   const out = new Map<number, string>();

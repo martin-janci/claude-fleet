@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   describeWorkKey,
   extractWorkKey,
+  keyFromTicketUrl,
   workGroupPrSummary,
   workKeyFor,
   worktreeBranchById,
@@ -113,5 +114,25 @@ describe('workGroupPrSummary', () => {
 
   it('is empty without PRs', () => {
     expect(workGroupPrSummary([sess({})])).toEqual({ prCount: 0, ci: null });
+  });
+});
+
+describe('keyFromTicketUrl', () => {
+  it.each([
+    ['https://acme.atlassian.net/browse/ABC-123', 'ABC-123'],
+    ['https://acme.atlassian.net/jira/software/projects/ABC/boards/1?selectedIssue=ABC-9', 'ABC-9'],
+    ['https://linear.app/acme/issue/ENG-42/fix-search', 'ENG-42'],
+    ['  https://acme.atlassian.net/browse/PAY-7  ', 'PAY-7'],
+  ])('%s → %s', (url, key) => {
+    expect(keyFromTicketUrl(url)).toBe(key);
+  });
+
+  it.each([
+    ['ABC-123 not a url'],
+    ['https://github.com/o/r/pull/12'],
+    ['see https://acme.atlassian.net/browse/ABC-1 please'],
+    ['https://'],
+  ])('ignores %s', (text) => {
+    expect(keyFromTicketUrl(text)).toBeNull();
   });
 });
