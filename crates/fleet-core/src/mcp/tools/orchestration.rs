@@ -558,7 +558,7 @@ impl FleetTools {
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
-        {key|url}; trackers.")]
+        {key|url}; trackers; tidy (tidy-up candidates); reopened.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -632,6 +632,25 @@ impl FleetTools {
                 &crate::service::trackers::tickets::trackers(&self.store, tracker_scope(&caller))
                     .map_err(to_mcp_err)?,
             ),
+            WorkAction::Tidy => ok_json_compact(
+                &crate::service::work::tidy::work_tidy(
+                    &self.store,
+                    caller.host_alias.as_deref(),
+                    crate::service::catalog::now_secs(),
+                )
+                .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Reopened => {
+                let mut rows = lock(&self.store)
+                    .map_err(to_mcp_err)?
+                    .reopened_work()
+                    .map_err(to_mcp_err)?;
+                // Another host's past work is not a per-host token's to read.
+                if let Some(h) = &caller.host_alias {
+                    rows.retain(|r| r.last_host.as_deref() == Some(h));
+                }
+                ok_json_compact(&rows)
+            }
         }
     }
 
@@ -640,7 +659,9 @@ impl FleetTools {
         suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
-        ticket.")]
+        ticket. archive|unarchive (UI only), snooze {days}|never (tidy-up); \
+        dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill \
+        when dirty).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -695,6 +716,56 @@ impl FleetTools {
             return ok_json(
                 &crate::service::work::trust_project(&args, &self.store).map_err(to_mcp_err)?,
             );
+        }
+        if args.action == "dismiss" {
+            // Reopened work is fleet-wide, not one host's to dismiss.
+            if caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "dismiss is not available to a per-host token",
+                    None,
+                ));
+            }
+            return ok_json(
+                &crate::service::work::dismiss_reopened(&args, &self.store).map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "tidy_apply" {
+            let items = args.items.clone().unwrap_or_default();
+            let summary = format!(
+                "tidy_apply {}",
+                items
+                    .iter()
+                    .map(|i| format!("{}:{}", i.session_id, i.action))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            // Kills: gated like kill_session when mcp.confirm_destructive is on.
+            if items
+                .iter()
+                .any(|i| matches!(i.action.as_str(), "kill" | "safe_kill"))
+            {
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    &summary,
+                    &caller,
+                )?;
+            }
+            let exec = crate::service::gc::RealGcExec {
+                store: std::sync::Arc::clone(&self.store),
+                ssh: std::sync::Arc::clone(&self.ssh),
+            };
+            let report = crate::service::work::tidy::tidy_apply(
+                &self.store,
+                &exec,
+                &items,
+                caller.host_alias.as_deref(),
+                crate::service::catalog::now_secs(),
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&report);
         }
         if args.action == "start" {
             // The host fence (a per-host token starts only its own host's

@@ -9,6 +9,7 @@ pub mod harvest;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
+pub mod tidy;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::store::{SessionRow, Store, WorkLinkRow, WorkTarget};
@@ -24,7 +25,7 @@ pub struct WorkArgs {
     /// Or: ended (past) links to this key.
     #[serde(default)]
     pub key: Option<String>,
-    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers
+    /// Default links.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     /// Ended link.
@@ -65,7 +66,7 @@ pub struct WorkLinkArgs {
     /// Fleet session id.
     #[serde(default)]
     pub session_id: Option<i64>,
-    /// link|reject|unlink|confirm|trust_project|resume|start
+    /// See the description.
     pub action: String,
     /// Work key, e.g. ABC-123, or a free-form name.
     #[serde(default)]
@@ -106,6 +107,32 @@ pub struct WorkLinkArgs {
     /// trust_project: on/off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<bool>,
+    /// Snooze (7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u32>,
+    /// tidy_apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<tidy::TidyApplyItem>>,
+    /// Approved nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
+/// `work_link { action: dismiss, item_id }`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dismissed {
+    #[serde(default)]
+    pub dismissed: bool,
+}
+
+/// `work_link { action: dismiss, item_id }`: clear an item's "reopened".
+pub fn dismiss_reopened(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<Dismissed, IpcError> {
+    let item = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "dismiss needs item_id"))?;
+    Ok(Dismissed {
+        dismissed: lock(store)?.dismiss_reopened(item)?,
+    })
 }
 
 /// `work_link { action: trust_project }`: the projects whose branch keys
@@ -160,6 +187,10 @@ pub enum WorkAction {
     Lookup,
     /// The trackers (no secrets).
     Trackers,
+    /// Tidy-up candidates (work graph M7).
+    Tidy,
+    /// Work open again that has past sessions (work graph M7).
+    Reopened,
 }
 
 impl WorkArgs {
@@ -172,11 +203,13 @@ impl WorkArgs {
             "tickets" => Ok(WorkAction::Tickets),
             "lookup" => Ok(WorkAction::Lookup),
             "trackers" => Ok(WorkAction::Trackers),
+            "tidy" => Ok(WorkAction::Tidy),
+            "reopened" => Ok(WorkAction::Reopened),
             other => Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
                     "unknown work action {other:?}; one of links, context, resume_plan, \
-                     purge_impact, tickets, lookup, trackers"
+                     purge_impact, tickets, lookup, trackers, tidy, reopened"
                 ),
             )),
         }
@@ -312,7 +345,10 @@ pub fn work(args: &WorkArgs, store: &Mutex<Store>) -> Result<Vec<WorkLinkRow>, I
 /// Apply one link decision and return the session's updated row (its `work`
 /// is the new primary link, or none).
 pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow, IpcError> {
-    if matches!(args.action.as_str(), "resume" | "start" | "trust_project") {
+    if matches!(
+        args.action.as_str(),
+        "resume" | "start" | "trust_project" | "dismiss" | "tidy_apply"
+    ) {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!("{} has its own entry point", args.action),
@@ -325,6 +361,41 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
         )
     })?;
     let s = lock(store)?;
+    // The lifecycle actions (work graph M7) write flags, not decisions: no
+    // resolver run after them.
+    match args.action.as_str() {
+        "archive" => {
+            s.archive_session_work(session_id)?;
+            return lifecycle_row(&s, session_id);
+        }
+        // A click, or an attach: a person's touch un-archives.
+        "unarchive" => {
+            if !s.touch_session(session_id)? {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {session_id} not found"),
+                ));
+            }
+            return lifecycle_row(&s, session_id);
+        }
+        "snooze" => {
+            let days = args.days.unwrap_or(tidy::SNOOZE_DEFAULT_DAYS);
+            if !(1..=tidy::SNOOZE_MAX_DAYS).contains(&days) {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("snooze days must be 1..={}", tidy::SNOOZE_MAX_DAYS),
+                ));
+            }
+            let until = crate::service::catalog::now_secs() + i64::from(days) * 86_400;
+            s.snooze_tidy(session_id, args.link_id, until)?;
+            return lifecycle_row(&s, session_id);
+        }
+        "never" => {
+            s.never_tidy(session_id, args.link_id)?;
+            return lifecycle_row(&s, session_id);
+        }
+        _ => {}
+    }
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
             (Some(id), None) => Ok(WorkTarget::Item(id)),
@@ -370,7 +441,8 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
                 codes::E_INVALID,
                 format!(
                     "unknown work_link action {other:?}; one of link, reject, unlink, confirm, \
-                     trust_project, resume, start"
+                     trust_project, resume, start, archive, unarchive, snooze, never, dismiss, \
+                     tidy_apply"
                 ),
             ))
         }
@@ -379,6 +451,11 @@ pub fn work_link(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<SessionRow
     if let Err(e) = detect::resolve_session(&s, session_id) {
         tracing::debug!(error = %e.message, "[work] resolve after a decision failed");
     }
+    s.get_session_by_id(session_id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
 }
@@ -536,6 +613,59 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(missing.code, codes::E_NOTFOUND);
+    }
+
+    /// Work graph M7.2: archive / unarchive / snooze / never through the one
+    /// entry both transports share; dismiss has its own.
+    #[test]
+    fn lifecycle_actions_answer_the_row() {
+        let (st, sid) = store();
+        assert_eq!(
+            work_link(&link(sid, "archive"), &st).unwrap_err().code,
+            codes::E_INVALID,
+            "nothing to archive under"
+        );
+        work_link(
+            &WorkLinkArgs {
+                key: Some("abc-1".into()),
+                ..link(sid, "link")
+            },
+            &st,
+        )
+        .unwrap();
+        let row = work_link(&link(sid, "archive"), &st).unwrap();
+        assert!(row.work.unwrap().archived_at.is_some());
+        let row = work_link(&link(sid, "unarchive"), &st).unwrap();
+        assert_eq!(row.work.unwrap().archived_at, None);
+        work_link(
+            &WorkLinkArgs {
+                days: Some(3),
+                ..link(sid, "snooze")
+            },
+            &st,
+        )
+        .unwrap();
+        let bad = WorkLinkArgs {
+            days: Some(0),
+            ..link(sid, "snooze")
+        };
+        assert_eq!(work_link(&bad, &st).unwrap_err().code, codes::E_INVALID);
+        work_link(&link(sid, "never"), &st).unwrap();
+        for own_entry in ["dismiss", "tidy_apply"] {
+            assert_eq!(
+                work_link(&link(sid, own_entry), &st).unwrap_err().code,
+                codes::E_INVALID
+            );
+        }
+        let d = dismiss_reopened(
+            &WorkLinkArgs {
+                action: "dismiss".into(),
+                item_id: Some(1),
+                ..Default::default()
+            },
+            &st,
+        );
+        assert_eq!(d.unwrap_err().code, codes::E_NOTFOUND);
     }
 
     #[test]

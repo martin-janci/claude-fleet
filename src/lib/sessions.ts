@@ -163,6 +163,9 @@ export interface SessionWork {
   preselected?: boolean;
   /** Live suggestions still to decide. */
   suggestions?: number;
+  /** Work graph M7: archived from the UI at this unix second — the session
+   *  collapses into its group's Done while tmux keeps running. */
+  archived_at?: number | null;
 }
 
 type UsageFields = Partial<

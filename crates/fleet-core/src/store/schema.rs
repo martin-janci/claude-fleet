@@ -154,6 +154,18 @@ fn work_links_has_evidence(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 050: `work_links` already has its
+/// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'archived_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -444,6 +456,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 49,
         sql: include_str!("../../migrations/049_work_detection.sql"),
         already_applied: Some(work_links_has_evidence),
+    },
+    // Work graph M7: archive / snooze / never on `work_links`, the last
+    // touch on `sessions`, `work_items.reopened_at` — ADD COLUMNs, so the
+    // same guard.
+    Migration {
+        version: 50,
+        sql: include_str!("../../migrations/050_work_lifecycle.sql"),
+        already_applied: Some(work_links_has_archived_at),
     },
 ];
 
@@ -2202,5 +2222,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(branch.as_deref(), Some("abc-2-x"));
+    }
+
+    /// Migration 050 (work graph M7): the lifecycle columns land on a
+    /// database with a live link and a done item, nothing is archived,
+    /// snoozed or reopened by the migration itself, and a re-run (the guard)
+    /// keeps what was written since.
+    #[test]
+    fn migration_050_adds_lifecycle_columns_and_reruns_safely() {
+        let old = store_at_version(49);
+        old.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h'); \
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES ('dev', 'h', 1, 1, 'running'); \
+                 INSERT INTO work_items (source, key, title, status_category, created_at, updated_at) \
+                 VALUES ('local', 'ABC-1', 't', 'done', 1, 1); \
+                 INSERT INTO work_links (item_id, participant_id, state, source, is_primary, created_at) \
+                 SELECT 1, id, 'confirmed', 'manual', 1, 1 FROM participants;",
+            )
+            .unwrap();
+        let sid: i64 = old
+            .conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        old.migrate().expect("050 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let (archived, snoozed, never): (Option<i64>, Option<i64>, i64) = old
+            .conn
+            .query_row(
+                "SELECT archived_at, tidy_snoozed_until, tidy_never FROM work_links",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((archived, snoozed, never), (None, None, 0));
+        let row = old.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().archived_at, None);
+        old.conn
+            .execute_batch(
+                "UPDATE work_links SET archived_at = 7; UPDATE sessions SET last_touch_at = 9;",
+            )
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 50;")
+            .unwrap();
+        old.migrate().expect("re-running 050 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = old.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().archived_at, Some(7));
+        let reopened: Option<i64> = old
+            .conn
+            .query_row("SELECT reopened_at FROM work_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reopened, None);
     }
 }

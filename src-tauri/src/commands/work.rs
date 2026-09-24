@@ -6,14 +6,19 @@
 //! decisions plus `resume_work` → `work_link`, with the action filled in
 //! here, so a paired desktop decides and resumes on the hub exactly as a
 //! local one does here (work graph M2.4 added the resume half).
+//!
+//! Work graph M7.2 adds the lifecycle: `work_tidy` / `work_reopened` →
+//! `work`, and archive / unarchive / snooze / never / tidy_apply / dismiss →
+//! `work_link`.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::resume::ResumePlan;
-use fleet_core::service::work::{self, PurgeImpact, WorkArgs, WorkLinkArgs};
+use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
+use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{SessionRow, Store, WorkLinkRow};
+use fleet_core::store::{ReopenedWork, SessionRow, Store, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -95,6 +100,109 @@ pub struct WorkPurgeImpactArgs {
     pub project_id: i64,
     #[serde(default)]
     pub host_aliases: Vec<String>,
+}
+
+/// Archive a live session from the UI (it collapses into its work group's
+/// Done; tmux keeps running), or un-archive it — which an attach also does.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionLifecycleArgs {
+    pub session_id: i64,
+}
+
+/// Snooze tidy-up for a session's work (`days`, default 7), or never
+/// suggest it (`days` ignored).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TidyFlagArgs {
+    pub session_id: i64,
+    #[serde(default)]
+    pub link_id: Option<i64>,
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
+/// The Tidy-up sheet's choices, one per session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TidyApplyArgs {
+    pub items: Vec<TidyApplyItem>,
+}
+
+/// Dismiss a reopened item's Attention entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DismissReopenedArgs {
+    pub item_id: i64,
+}
+
+/// The tidy-up candidates (work graph M7).
+#[tauri::command]
+pub async fn work_tidy(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<TidyReport, IpcError> {
+    routed::work_tidy(&backend, &store).await
+}
+
+/// Work open again that has past sessions (work graph M7).
+#[tauri::command]
+pub async fn work_reopened(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<ReopenedWork>, IpcError> {
+    routed::work_reopened(&backend, &store).await
+}
+
+#[tauri::command]
+pub async fn archive_session_work(
+    args: SessionLifecycleArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::archive_session_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn unarchive_session_work(
+    args: SessionLifecycleArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::unarchive_session_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn snooze_tidy(
+    args: TidyFlagArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::snooze_tidy(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn never_tidy(
+    args: TidyFlagArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::never_tidy(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn tidy_apply(
+    args: TidyApplyArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<TidyApplyReport, IpcError> {
+    routed::tidy_apply(&backend, args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub async fn dismiss_reopened(
+    args: DismissReopenedArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Dismissed, IpcError> {
+    routed::dismiss_reopened(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -185,6 +293,147 @@ pub async fn unlink_session_work(
 
 pub(crate) mod routed {
     use super::*;
+
+    fn now() -> i64 {
+        fleet_core::service::catalog::now_secs()
+    }
+
+    pub async fn work_tidy(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<TidyReport, IpcError> {
+        let args = WorkArgs {
+            action: Some("tidy".into()),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_tidy", &args).await,
+            None => work::tidy::work_tidy(store, None, now()),
+        }
+    }
+
+    pub async fn work_reopened(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<ReopenedWork>, IpcError> {
+        let args = WorkArgs {
+            action: Some("reopened".into()),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_reopened", &args).await,
+            None => fleet_core::ipc_error::lock(store)?.reopened_work(),
+        }
+    }
+
+    fn lifecycle(action: &str, session_id: i64) -> WorkLinkArgs {
+        WorkLinkArgs {
+            session_id: Some(session_id),
+            action: action.into(),
+            ..Default::default()
+        }
+    }
+
+    pub async fn archive_session_work(
+        backend: &FleetBackend,
+        args: SessionLifecycleArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        let args = lifecycle("archive", args.session_id);
+        match backend.hub() {
+            Some(hub) => hub.route("archive_session_work", &args).await,
+            None => work::work_link(&args, store),
+        }
+    }
+
+    pub async fn unarchive_session_work(
+        backend: &FleetBackend,
+        args: SessionLifecycleArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        let args = lifecycle("unarchive", args.session_id);
+        match backend.hub() {
+            Some(hub) => hub.route("unarchive_session_work", &args).await,
+            None => work::work_link(&args, store),
+        }
+    }
+
+    pub async fn snooze_tidy(
+        backend: &FleetBackend,
+        args: TidyFlagArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        let args = WorkLinkArgs {
+            link_id: args.link_id,
+            days: args.days,
+            ..lifecycle("snooze", args.session_id)
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("snooze_tidy", &args).await,
+            None => work::work_link(&args, store),
+        }
+    }
+
+    pub async fn never_tidy(
+        backend: &FleetBackend,
+        args: TidyFlagArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        let args = WorkLinkArgs {
+            link_id: args.link_id,
+            ..lifecycle("never", args.session_id)
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("never_tidy", &args).await,
+            None => work::work_link(&args, store),
+        }
+    }
+
+    pub async fn tidy_apply(
+        backend: &FleetBackend,
+        args: TidyApplyArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<TidyApplyReport, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "tidy_apply".into(),
+            items: Some(args.items),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("tidy_apply", &wire).await,
+            None => {
+                let exec = fleet_core::service::gc::RealGcExec {
+                    store: Arc::clone(store),
+                    ssh: Arc::clone(ssh),
+                };
+                work::tidy::tidy_apply(
+                    store,
+                    &exec,
+                    wire.items.as_deref().unwrap_or_default(),
+                    None,
+                    now(),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn dismiss_reopened(
+        backend: &FleetBackend,
+        args: DismissReopenedArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Dismissed, IpcError> {
+        let args = WorkLinkArgs {
+            action: "dismiss".into(),
+            item_id: Some(args.item_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("dismiss_reopened", &args).await,
+            None => work::dismiss_reopened(&args, store),
+        }
+    }
 
     pub async fn session_work_links(
         backend: &FleetBackend,

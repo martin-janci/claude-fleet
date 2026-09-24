@@ -473,7 +473,7 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; tidy (tidy-up candidates); reopened.
 
 Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `project_id`, `query`, `session_id`, `tracker_id`, `url`, `view`, `with_brief`
 
@@ -485,9 +485,9 @@ Parameters: `action`, `auth_kind`, `confirm_nonce`, `credential_ref`, `name`, `p
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty).
 
-Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `host_alias`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -518,6 +518,14 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::reject_session_work`
 - `commands::work::unlink_session_work`
 - `commands::work::confirm_session_work`
+- `commands::work::work_tidy`
+- `commands::work::work_reopened`
+- `commands::work::archive_session_work`
+- `commands::work::unarchive_session_work`
+- `commands::work::snooze_tidy`
+- `commands::work::never_tidy`
+- `commands::work::tidy_apply`
+- `commands::work::dismiss_reopened`
 - `commands::work::set_work_project_trust`
 - `commands::work::work_resume_plan`
 - `commands::work::resume_work`

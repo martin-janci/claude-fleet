@@ -265,6 +265,22 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "set_work_project_trust",
         Verdict::Routed { tool: "work_link" },
     ),
+    // Work graph M7.2: the self-cleaning lifecycle — two reads of `work`
+    // and six actions of the existing `work_link`.
+    ("work_tidy", Verdict::Routed { tool: "work" }),
+    ("work_reopened", Verdict::Routed { tool: "work" }),
+    (
+        "archive_session_work",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "unarchive_session_work",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("snooze_tidy", Verdict::Routed { tool: "work_link" }),
+    ("never_tidy", Verdict::Routed { tool: "work_link" }),
+    ("tidy_apply", Verdict::Routed { tool: "work_link" }),
+    ("dismiss_reopened", Verdict::Routed { tool: "work_link" }),
     // Work graph M2.4: resume past work, and what a purge would strand.
     ("work_resume_plan", Verdict::Routed { tool: "work" }),
     ("resume_work", Verdict::Routed { tool: "work_link" }),

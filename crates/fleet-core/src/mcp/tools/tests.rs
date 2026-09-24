@@ -2912,7 +2912,12 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M4.4: `work_link` gains confirm / reject-by-link_id /
     // trust_project (one new parameter, `on`, and a longer description);
     // no new tool. Measured at 68,385 on 2026-09-24 (+172); plus 100.
-    const BUDGET_BYTES: usize = 68_485;
+    // Work graph M7.2: `work` gains tidy / reopened, `work_link` gains
+    // archive / unarchive / snooze / never / dismiss / tidy_apply (three new
+    // parameters: days, items, confirm_nonce), and `work_link` is now
+    // confirm-gated for tidy_apply's kills; no new tool. Measured at 69,024
+    // on 2026-09-24 (+639); plus 100.
+    const BUDGET_BYTES: usize = 69_124;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

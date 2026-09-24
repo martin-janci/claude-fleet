@@ -1108,6 +1108,9 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
+        // A prompt is a person's touch (work graph M7): it protects the
+        // session from tidy-up for an hour and un-archives it.
+        self.touch_for_prompt(row_id)?;
         Ok(self.emit_session(row_id)?)
     }
 

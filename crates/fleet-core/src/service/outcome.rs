@@ -29,10 +29,11 @@ const RC_NO_CWD: &str = "97";
 /// Line prefix of a session's commit messages since its upstream (work
 /// graph M4.2: commit trailers). Lines are joined with `\x1f`.
 const TRAILERS_PREFIX: &str = "__FLEET_TRAILERS__\t";
-/// The `gh pr view` fields fleet reads. The last four are work detection's
-/// (M4.2): read, parsed and dropped — the body is capped at 4k by `--jq`
-/// and never stored.
-const PR_FIELDS: &str = "url,statusCheckRollup,headRefName,title,body,closingIssuesReferences";
+/// The `gh pr view` fields fleet reads. `headRefName` … `closingIssuesReferences`
+/// are work detection's (M4.2): read, parsed and dropped — the body is capped
+/// at 4k by `--jq` and never stored. `state` tells tidy-up a merged PR (M7).
+const PR_FIELDS: &str =
+    "url,statusCheckRollup,headRefName,title,body,closingIssuesReferences,state";
 /// The fields an older `gh` without `closingIssuesReferences` (or `--jq`)
 /// still answers: the probe falls back to them.
 const PR_FIELDS_BASIC: &str = "url,statusCheckRollup";

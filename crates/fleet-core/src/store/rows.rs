@@ -301,7 +301,8 @@ pub(super) const SESSION_COLUMNS: &str =
                          'status_name', i.status_name, 'url', i.url, \
                          'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
                                                   THEN 'true' ELSE 'false' END), \
-                         'state', l.state, 'strength', l.strength, 'rule', l.rule) \
+                         'state', l.state, 'strength', l.strength, 'rule', l.rule, \
+                         'archived_at', l.archived_at) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \

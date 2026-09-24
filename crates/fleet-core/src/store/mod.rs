@@ -31,6 +31,7 @@ mod usage;
 mod work;
 mod work_detect;
 mod work_journal;
+mod work_tidy;
 
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
@@ -57,6 +58,7 @@ pub use work_detect::DetectionState;
 pub use work_journal::{
     JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };
+pub use work_tidy::ReopenedWork;
 
 pub struct Store {
     conn: Connection,
