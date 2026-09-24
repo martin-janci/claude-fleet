@@ -49,7 +49,7 @@ pub fn check_batch(send: usize, results: usize) -> Result<(), Rejection> {
 /// A `kind` that may cross a hub link: 1 to 32 of `[a-z0-9_-]`. The sender
 /// checks it too (`send_remote`), so a kind the peer would refuse is refused
 /// up front rather than coming back as `message_undeliverable`.
-pub fn check_kind(kind: &str) -> Result<(), Rejection> {
+fn check_kind(kind: &str) -> Result<(), Rejection> {
     if kind.is_empty()
         || kind.len() > PEER_KIND_MAX
         || !kind
@@ -80,7 +80,7 @@ pub fn check_addr_len(label: &str, addr: &str) -> Result<(), Rejection> {
 
 /// `question` asks the recipient's `Stop` hook to hold the session until it
 /// answers; a message from another fleet may not do that. Checked on both
-/// sides, like [`check_kind`].
+/// sides, like `check_kind`.
 pub fn check_kind_for_link(kind: &str) -> Result<(), Rejection> {
     check_kind(kind)?;
     if kind == "question" {
@@ -90,6 +90,18 @@ pub fn check_kind_for_link(kind: &str) -> Result<(), Rejection> {
         ));
     }
     Ok(())
+}
+
+/// `text` without every leading untrusted-marker line, not only the first: a
+/// peer that stacked two would otherwise keep one of its own under ours.
+pub(super) fn strip_markers(mut text: &str) -> &str {
+    loop {
+        let next = crate::mcp::guard::strip_marker(text);
+        if next.len() == text.len() {
+            return text;
+        }
+        text = next;
+    }
 }
 
 /// `peer_fleet` is the link's pinned fleet; `own_fleet` is ours.
@@ -133,14 +145,16 @@ pub fn check_inbound(
         }
     };
     check_kind_for_link(&m.kind)?;
-    if m.body.is_empty() {
-        return Err(reject("E_VALIDATE", "body is empty"));
-    }
     if m.body.len() > PEER_BODY_MAX {
         return Err(reject(
             "E_VALIDATE",
             format!("body is over {PEER_BODY_MAX} bytes"),
         ));
+    }
+    // What is stored is the text under the markers, so that is what must
+    // not be empty (G25a): a body of nothing but markers is empty.
+    if strip_markers(&m.body).is_empty() {
+        return Err(reject("E_VALIDATE", "body is empty"));
     }
     Ok(Checked {
         from_addr: address::render(&from),
@@ -228,6 +242,38 @@ mod tests {
             .unwrap_err();
             assert_eq!(e.code, "E_VALIDATE");
         }
+    }
+
+    /// G25(a): the non-empty check runs on what is left once the leading
+    /// marker lines are stripped — a body that is nothing but markers would
+    /// otherwise land as an empty message under our own marker.
+    #[test]
+    fn a_body_that_is_only_markers_is_empty() {
+        let marker = crate::mcp::guard::untrusted_marker("session 3 on h");
+        for body in [
+            marker.clone(),
+            format!("{marker}\n"),
+            format!("{marker}\n{marker}\n"),
+        ] {
+            let e = check_inbound(
+                &m("fleet-a/session/h/a1", "fleet-b/session/h/b1", &body),
+                "fleet-a",
+                "fleet-b",
+            )
+            .unwrap_err();
+            assert_eq!(e.code, "E_VALIDATE", "{body:?}");
+            assert_eq!(e.message, "body is empty", "{body:?}");
+        }
+        assert!(check_inbound(
+            &m(
+                "fleet-a/session/h/a1",
+                "fleet-b/session/h/b1",
+                &format!("{marker}\nhi")
+            ),
+            "fleet-a",
+            "fleet-b"
+        )
+        .is_ok());
     }
 
     /// M1: `kind` is short, non-empty and `[a-z0-9_-]` — it is stored and

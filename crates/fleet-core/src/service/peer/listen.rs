@@ -25,7 +25,45 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// All a peer is told when this hub fails it: a non-terminal E_INTERNAL, so
+/// its dialer backs off and resends. The detail stays in our own log.
+const RESEND_LATER: &str = "this hub could not store a message just now; resend it";
+
+/// A refusal the peer is meant to read — its request, its token or its
+/// link is the problem. Anything else is this hub's own fault.
+const PEER_READABLE: &[&str] = &[
+    codes::E_FORBIDDEN,
+    codes::E_UNSUPPORTED,
+    codes::E_VALIDATE,
+    codes::E_EXISTS,
+];
+
+/// What the peer may see of `e` (G9): a refusal as it is; anything else —
+/// a store fault's E_SQLITE and its text above all — as the one generic
+/// [`RESEND_LATER`], logged here first (code and message only: no body, no
+/// token ever reaches an error on this path).
+fn for_the_peer(e: IpcError) -> IpcError {
+    if PEER_READABLE.contains(&e.code.as_str())
+        || (e.code == codes::E_INTERNAL && e.message == RESEND_LATER)
+    {
+        return e;
+    }
+    tracing::warn!(code = %e.code, error = %e.message, "[peer] an exchange failed on this hub; the peer will resend");
+    IpcError::new(codes::E_INTERNAL, RESEND_LATER)
+}
+
 pub async fn exchange(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    client_id: i64,
+    req: ExchangeRequest,
+) -> Result<ExchangeResponse, IpcError> {
+    serve(store, ssh, client_id, req)
+        .await
+        .map_err(for_the_peer)
+}
+
+async fn serve(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     client_id: i64,
@@ -76,10 +114,7 @@ pub async fn exchange(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(link_id = link.id, error = %e.message, "[peer] storing a peer's message failed; it will be resent");
-            return Err(IpcError::new(
-                codes::E_INTERNAL,
-                "this hub could not store a message just now; resend it",
-            ));
+            return Err(IpcError::new(codes::E_INTERNAL, RESEND_LATER));
         }
     };
 
@@ -93,10 +128,19 @@ pub async fn exchange(
         let notified = notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if lock(store)?.peer_generation(link.id) != generation {
+        let (superseded, revoked) = {
+            let s = lock(store)?;
+            (
+                s.peer_generation(link.id) != generation,
+                !s.client_token_is_live(client_id)?,
+            )
+        };
+        if superseded || revoked {
             // Superseded: the newer exchange hands over whatever is pending,
             // so this one answers with an empty page and leaves the link's
-            // state to it.
+            // state to it. Revoked (G8a): the token that opened this call no
+            // longer opens this hub, so nothing more goes out on it — what
+            // is pending stays pending, for a re-pair.
             return Ok(ExchangeResponse {
                 proto: PROTO,
                 fleet_id: own,
@@ -586,6 +630,119 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+
+    /// G9: a store fault anywhere in the exchange — not only while applying
+    /// the peer's items — reaches the peer as the one generic E_INTERNAL.
+    /// The store's own words (E_SQLITE and its text) stay in our log.
+    #[tokio::test]
+    async fn a_store_fault_outside_apply_inbound_reaches_the_peer_as_a_generic_internal_error() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        let link = store
+            .lock()
+            .unwrap()
+            .live_peer_link_for_fleet("fleet-a")
+            .unwrap()
+            .unwrap();
+        let m = {
+            let s = store.lock().unwrap();
+            let to = s
+                .ensure_remote_participant(link.id, "fleet-a/session/h/a1")
+                .unwrap();
+            s.insert_outbound_remote(
+                b1,
+                "fleet-b/session/local/b1",
+                to,
+                "one",
+                "message",
+                None,
+                false,
+            )
+            .unwrap()
+        };
+        let exec = |sql: &str| store.lock().unwrap().conn_ref().execute_batch(sql).unwrap();
+        // handover_upto (an UPDATE of session_messages), then
+        // set_peer_link_state (an UPDATE of peer_links).
+        for (table, after) in [("session_messages", m), ("peer_links", 0)] {
+            exec(&format!(
+                "CREATE TEMP TRIGGER boom BEFORE UPDATE ON {table} \
+                 BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;"
+            ));
+            let mut r = req("fleet-a");
+            r.after = after;
+            let e = exchange(&store, &ssh, c, r).await.unwrap_err();
+            assert_eq!(e.code, "E_INTERNAL", "{table}: {}", e.message);
+            assert!(
+                !e.message.contains("injected"),
+                "{table}: store detail leaked: {}",
+                e.message
+            );
+            exec("DROP TRIGGER temp.boom;");
+        }
+        // A policy refusal is still the peer's to read, word for word.
+        let e = exchange(&store, &ssh, c, req("fleet-x")).await.unwrap_err();
+        assert_eq!(e.code, "E_FORBIDDEN");
+        assert_eq!(e.message, "this token is pinned to another fleet");
+    }
+
+    /// G8(a): a handler parked before its client token was revoked answers
+    /// with an empty page — it must not hand a row queued after the revoke
+    /// to a peer whose token no longer opens this hub. The row stays
+    /// pending, for a re-pair.
+    #[tokio::test]
+    async fn a_parked_handler_returns_empty_once_its_client_token_is_revoked() {
+        let (store, ssh) = hub("fleet-b");
+        let b1 = session(&store, "b1");
+        let c = peer_client(&store, "hub-a");
+        exchange(&store, &ssh, c, req("fleet-a")).await.unwrap();
+        let link = store
+            .lock()
+            .unwrap()
+            .live_peer_link_for_fleet("fleet-a")
+            .unwrap()
+            .unwrap();
+        let (st, ss) = (store.clone(), ssh.clone());
+        let parked = tokio::spawn(async move {
+            let mut poll = req("fleet-a");
+            poll.wait_ms = 5_000;
+            exchange(&st, &ss, c, poll).await.unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        {
+            let s = store.lock().unwrap();
+            s.revoke_client_token("hub-a").unwrap();
+            let to = s
+                .ensure_remote_participant(link.id, "fleet-a/session/h/a1")
+                .unwrap();
+            s.insert_outbound_remote(
+                b1,
+                "fleet-b/session/local/b1",
+                to,
+                "after the revoke",
+                "message",
+                None,
+                false,
+            )
+            .unwrap();
+        }
+        let resp = parked.await.unwrap();
+        assert!(
+            resp.messages.is_empty(),
+            "a revoked peer was handed {} row(s)",
+            resp.messages.len()
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .pending_outbox(link.id, 0, 50)
+                .unwrap()
+                .len(),
+            1
         );
     }
 

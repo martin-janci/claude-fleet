@@ -21,7 +21,7 @@ impl Backoff {
         Self::with_seed(seed)
     }
 
-    pub fn with_seed(seed: u64) -> Self {
+    fn with_seed(seed: u64) -> Self {
         Self {
             step: 0,
             rng: seed | 1,
