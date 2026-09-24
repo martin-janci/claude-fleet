@@ -118,6 +118,17 @@ fn messages_have_participant_columns(conn: &Connection) -> rusqlite::Result<bool
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 045: `participants.address` exists,
+/// so its `ALTER TABLE ... ADD COLUMN` lines would fail again.
+fn participants_have_address(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('participants') WHERE name = 'address'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -377,6 +388,13 @@ const MIGRATIONS: &[Migration] = &[
     // `read_cursors` (smart caching, cycle 2): CREATE TABLE / INDEX IF NOT
     // EXISTS only, so re-running it is a no-op — no `already_applied` guard.
     Migration::plain(44, include_str!("../../migrations/044_read_cursors.sql")),
+    // Hub↔hub federation (cycle 3): `peer_links`, remote participants, and the
+    // remote / outbox columns on `session_messages`. Guarded: ADD COLUMN.
+    Migration {
+        version: 45,
+        sql: include_str!("../../migrations/045_peer_links.sql"),
+        already_applied: Some(participants_have_address),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -598,6 +616,7 @@ mod tests {
         "error_reports",
         "participants",
         "read_cursors",
+        "peer_links",
     ];
 
     #[test]
@@ -2005,5 +2024,34 @@ mod tests {
             count, 1,
             "guarded second pass over 043 must not duplicate the participant"
         );
+    }
+
+    // ── migration 045: peer_links, remote participants, outbox columns ──
+
+    /// A guarded second pass over 045: roll the recorded version back and
+    /// migrate again. `participants_have_address` sees the ADD COLUMNs
+    /// already applied, so 045's whole body is skipped and only its version
+    /// is re-recorded — must not error, and `participants.address` must
+    /// still exist exactly once.
+    #[test]
+    fn migration_045_guarded_second_pass_does_not_error() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 45;")
+            .unwrap();
+        s.migrate().expect("guarded second pass over 045");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('participants') WHERE name = 'address'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "participants.address must exist exactly once");
     }
 }

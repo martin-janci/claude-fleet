@@ -14,6 +14,7 @@ mod conversations;
 mod hosts_accounts;
 mod layers;
 mod participants;
+mod peer_links;
 mod projects;
 mod read_cursors;
 mod reconcile;
@@ -32,7 +33,11 @@ pub use clients::{
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
-pub use participants::{ParticipantRow, RETIRED_RETENTION_SECS};
+pub use participants::{ParticipantRow, PARTICIPANT_REMOTE, RETIRED_RETENTION_SECS};
+pub use peer_links::{
+    Inbound, OutboxRow, PeerLinkRow, PeerLinkSummary, LINK_CONNECTED, LINK_INCOMPATIBLE,
+    LINK_REFUSED, LINK_RETRYING, LINK_ROLE_DIALER, LINK_ROLE_LISTENER, PEER_PENDING_MAX_SECS,
+};
 pub use read_cursors::CursorRow;
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
