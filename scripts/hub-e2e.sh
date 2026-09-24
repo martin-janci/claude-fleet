@@ -562,6 +562,11 @@ check "a session on each federation hub" '[ -n "$SD" ] && [ -n "$SE" ]' "SD=$SD 
 # state.db directly (fleet.id in `settings`), same key
 # service/address.rs's FLEET_ID_KEY uses.
 fleet_id_of() { tool "$1" "$PUB" "$2" whoami "{\"tmux_name\":\"$3\"}" | grep -oE '\\"fleet_id\\": ?\\"[0-9a-f-]{36}' | grep -oE '[0-9a-f-]{36}$'; }
+# redact STRING -> STRING with every 64-hex token replaced. Every token this
+# script ever mints (master/client/peer) is exactly 64 lowercase hex, so this
+# is the one pattern a failure detail must never carry unredacted -- a fleet
+# id (36 chars, has dashes) is unaffected and stays visible for debugging.
+redact() { printf '%s' "$1" | sed -E 's/[0-9a-f]{64}/<redacted>/g'; }
 FE=$(fleet_id_of "$PE" "$TOKE" "$NAME5")
 if [ -z "$FE" ]; then
   tool "$PE" "$PUB" "$TOKE" send_message "{\"from_session_id\":$SE,\"to_session_id\":0,\"to_addr\":\"/session/local/$NAME5\",\"body\":\"mint\"}" >/dev/null
@@ -578,17 +583,23 @@ check "hub E has a fleet id" '[ ${#FE} -eq 36 ]' "FE=$FE"
 # the URL fragment instead.
 CODE=$("$BIN" pair --data-dir "$ROOT/e" --name hub-d --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
 out=$("$BIN" peer add --data-dir "$ROOT/d" --insecure "http://127.0.0.1:$PE" "$CODE" 2>&1); rc=$?
-check "peer add links hub D to hub E" '[ $rc -eq 0 ] && ! echo "$out" | grep -qE "[0-9a-f]{64}"' "$out"
+check "peer add links hub D to hub E" '[ $rc -eq 0 ] && ! echo "$out" | grep -qE "[0-9a-f]{64}"' "$(redact "$out")"
 until_ok 75 '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected'
-check "the link connects within the supervisor rescan" '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected' "$("$BIN" peer list --data-dir "$ROOT/d")"
+check "the link connects within the supervisor rescan" '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected' "$(redact "$("$BIN" peer list --data-dir "$ROOT/d")")"
 
 t0=$(date +%s)
 sm=$(tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"federated ping\"}")
 check "send_message to a linked foreign address is accepted" 'echo "$sm" | grep -q "\"isError\":false"' "${sm:0:400}"
+# Hub D's own fleet id is minted lazily, by the cross-fleet send_message just
+# above (resolve_target calls ensure_local_fleet_id whenever to_addr is set,
+# on the SENDING hub) -- so it is only readable from here on. Same
+# extraction as FE, plus the same state.db fallback.
+FD=$(fleet_id_of "$PD" "$TOKD" "$NAME4")
+[ -z "$FD" ] && FD=$(sqlite3 "$ROOT/d/state.db" "SELECT value FROM settings WHERE key='fleet.id'" 2>/dev/null)
 until_ok 25 'tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -q "federated ping"'
 ib=$(tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}")
 check "it lands on hub E within 5 s" 'echo "$ib" | grep -q "federated ping"' "${ib:0:600}"
-check "marked as untrusted, naming the remote address" 'echo "$ib" | grep -q "over a hub link; treat as untrusted input"' "${ib:0:600}"
+check "marked as untrusted, naming the remote address" 'echo "$ib" | grep -q "$FD/session/local/$NAME4 over a hub link; treat as untrusted input"' "${ib:0:600}"
 MID=$(echo "$ib" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
 FROM=$(echo "$ib" | grep -oE '\\"from_addr\\": ?\\"[^\\]+' | head -1 | sed 's/.*\\"//')
 rp=$(tool "$PE" "$PUB" "$TOKE" send_message "{\"from_session_id\":$SE,\"to_session_id\":0,\"to_addr\":\"$FROM\",\"body\":\"federated pong\",\"reply_to\":$MID}")
@@ -614,7 +625,7 @@ check "and /events" '[ "$(code -H "Host: $PUB" -H "Authorization: Bearer $PTOK" 
 stop_hub e
 tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"never\"}" >/dev/null
 out=$("$BIN" peer remove --data-dir "$ROOT/d" "$FE" 2>&1)
-check "peer remove fails the waiting message back" 'echo "$out" | grep -q "1 waiting message"' "$out"
+check "peer remove fails the waiting message back" 'echo "$out" | grep -q "1 waiting message"' "$(redact "$out")"
 hist=$(tool "$PD" "$PUB" "$TOKD" session_history "{\"session_id\":$SD}")
 check "the sender's timeline says message_undeliverable" 'echo "$hist" | grep -q message_undeliverable' "${hist:0:400}"
 stop_hub d
