@@ -122,7 +122,13 @@ pub async fn send_message(
     // session addressing ITSELF by `to_addr` must not sail past
     // `E_SELF_TARGET` just because `args.to_session_id` (unused in the
     // address case) happens to be 0.
-    let to_session_id = resolve_to_session_id(&args, store)?;
+    let target = resolve_target(&args, store)?;
+    let to_session_id = match target {
+        Target::Local(id) => id,
+        Target::Remote { link_id, addr } => {
+            return send_remote(args, link_id, &addr, store);
+        }
+    };
     if args.from_session_id == to_session_id {
         return Err(IpcError::new(
             codes::E_SELF_TARGET,
@@ -363,26 +369,52 @@ fn merge_error(existing: Option<String>, new: String) -> String {
     }
 }
 
-/// Resolve `args.to_session_id` from `args.to_addr` when set, otherwise pass
-/// `args.to_session_id` through unchanged. `to_addr` wins when both are set.
+/// Where a `send_message` goes: a local session, or a peer hub's outbox.
+enum Target {
+    Local(i64),
+    Remote { link_id: i64, addr: String },
+}
+
+/// Resolve `args.to_session_id` / `args.to_addr` to where the message
+/// actually goes. `to_addr` wins when both are set.
 ///
 /// `Client` and `Hub` addresses parse but are refused as recipients this
 /// cycle (`E_UNSUPPORTED`): the participant rows exist so a later cycle can
 /// route to them, and refusing is honest about what is built. A foreign
-/// fleet is refused the same way, naming the missing hub link.
-fn resolve_to_session_id(args: &SendMessageArgs, store: &Mutex<Store>) -> Result<i64, IpcError> {
+/// fleet address with no live hub link is refused the same way, naming the
+/// missing link; with a live link it resolves to `Target::Remote`.
+fn resolve_target(args: &SendMessageArgs, store: &Mutex<Store>) -> Result<Target, IpcError> {
     let Some(raw) = args.to_addr.as_deref() else {
-        return Ok(args.to_session_id);
+        return Ok(Target::Local(args.to_session_id));
     };
     let addr = crate::service::address::parse(raw)?;
     // The one place an address genuinely has to be compared against this
     // fleet's identity, so the one place that may mint it.
     let fleet = crate::service::address::ensure_local_fleet_id(store)?;
     if crate::service::address::is_foreign(&addr, &fleet) {
-        return Err(IpcError::new(
-            codes::E_UNSUPPORTED,
-            "that address names another fleet; a hub-to-hub link is not built yet",
-        ));
+        let crate::service::address::Addr::Session {
+            fleet: Some(peer), ..
+        } = &addr
+        else {
+            return Err(IpcError::new(
+                codes::E_UNSUPPORTED,
+                "only session addresses can receive a message across a hub link",
+            ));
+        };
+        let link = lock(store)?.live_peer_link_for_fleet(peer)?;
+        return match link {
+            Some(l) => Ok(Target::Remote {
+                link_id: l.id,
+                addr: crate::service::address::render(&addr),
+            }),
+            None => Err(IpcError::new(
+                codes::E_UNSUPPORTED,
+                format!(
+                    "that address names fleet {peer}, which this hub has no link to \
+                     (an operator links hubs with `fleet-hub peer add`)"
+                ),
+            )),
+        };
     }
     match addr {
         crate::service::address::Addr::Session { host, name, .. } => {
@@ -401,7 +433,7 @@ fn resolve_to_session_id(args: &SendMessageArgs, store: &Mutex<Store>) -> Result
                     ));
                 }
             }
-            Ok(row.id)
+            Ok(Target::Local(row.id))
         }
         crate::service::address::Addr::Client { .. }
         | crate::service::address::Addr::Hub { .. } => Err(IpcError::new(
@@ -409,6 +441,90 @@ fn resolve_to_session_id(args: &SendMessageArgs, store: &Mutex<Store>) -> Result
             "only session addresses can receive a message today",
         )),
     }
+}
+
+/// Queue a message for a peer hub. Nothing is typed into any pane: `deliver`
+/// is refused, and the recipient's hub decides the wake (a fixed nudge,
+/// never the body). The exchange loop picks the row up from the outbox.
+fn send_remote(
+    args: SendMessageArgs,
+    link_id: i64,
+    to_addr: &str,
+    store: &Mutex<Store>,
+) -> Result<SendMessageResult, IpcError> {
+    if args.deliver {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "deliver types into a pane; a hub never types into another fleet's panes",
+        ));
+    }
+    if args.body.len() > crate::service::peer::wire::PEER_BODY_MAX {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!(
+                "a message to another fleet is at most {} bytes",
+                crate::service::peer::wire::PEER_BODY_MAX
+            ),
+        ));
+    }
+    // Must be called before `lock(store)` below: it takes the store lock
+    // internally, and the store mutex must never be locked while already
+    // held.
+    let fleet = crate::service::address::ensure_local_fleet_id(store)?;
+    let kind = args.kind.as_deref().unwrap_or("message");
+    let detail = timeline_detail(&args.body);
+    let s = lock(store)?;
+    let id = s.atomically(|s| {
+        let from = s.get_session_by_id(args.from_session_id)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("from session {} not found", args.from_session_id),
+            )
+        })?;
+        if let Some(parent_id) = args.reply_to {
+            let mine = s.participant_for_session(args.from_session_id)?;
+            let involved = match mine {
+                Some(p) => s.message_involves_participant(parent_id, p.id)?,
+                None => false,
+            };
+            if !involved {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "reply_to message {parent_id} does not involve session {}",
+                        args.from_session_id
+                    ),
+                ));
+            }
+        }
+        let from_addr = crate::service::address::render(&crate::service::address::Addr::Session {
+            fleet: Some(fleet.clone()),
+            host: from.host_alias.clone(),
+            name: from.tmux_name.clone(),
+        });
+        let to_p = s.ensure_remote_participant(link_id, to_addr)?;
+        let id = s.insert_outbound_remote(
+            args.from_session_id,
+            &from_addr,
+            to_p,
+            &args.body,
+            kind,
+            args.reply_to,
+            args.wake,
+        )?;
+        s.insert_session_event(
+            args.from_session_id,
+            "message_sent",
+            Some(&format!("to={to_addr} {detail}")),
+        )?;
+        Ok(id)
+    })?;
+    Ok(SendMessageResult {
+        id,
+        delivered_to_pane: false,
+        deliver_error: None,
+        woke: false,
+    })
 }
 
 /// Return inbox messages for `session_id`. When `mark_read`, unread rows in
@@ -765,17 +881,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_foreign_fleet_is_refused_until_cycle_three() {
+    async fn a_foreign_fleet_without_a_link_is_refused_naming_the_link() {
         let (store, ssh, a, _b) = fixture();
-        let mut m = args(a, 0, "over there");
+        let mut m = args(a, 0, "hi");
         m.to_session_id = 0;
-        m.to_addr = Some("some-other-fleet/session/mac/x".into());
-        let err = send_message(m, &store, &ssh).await.unwrap_err();
-        assert_eq!(err.code, "E_UNSUPPORTED");
-        assert!(
-            err.message.contains("hub"),
-            "the message must name why: {}",
-            err.message
+        m.to_addr = Some("fleet-zz/session/h/b1".into());
+        let e = send_message(m, &store, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_UNSUPPORTED);
+        assert!(e.message.contains("fleet-hub peer add"), "{}", e.message);
+    }
+
+    #[tokio::test]
+    async fn a_linked_foreign_address_queues_an_outbox_row() {
+        let (store, ssh, a, _b) = fixture();
+        let link = {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+        };
+        let mut m = args(a, 0, "hi");
+        m.to_session_id = 0;
+        m.to_addr = Some("fleet-b/session/h/b1".into());
+        m.wake = true;
+        let r = send_message(m, &store, &ssh).await.unwrap();
+        assert!(!r.delivered_to_pane && !r.woke);
+        let s = store.lock().unwrap();
+        let page = s.pending_outbox(link, 0, 50).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, r.id);
+        assert_eq!(page[0].to_addr, "fleet-b/session/h/b1");
+        assert!(page[0].wake);
+        let fleet = s.get_setting("fleet.id").unwrap().unwrap();
+        assert_eq!(page[0].from_addr, format!("{fleet}/session/local/alpha"));
+        let ev = s.list_session_events(a, 10).unwrap();
+        let sent = ev.iter().find(|e| e.kind == "message_sent").unwrap();
+        assert!(sent
+            .detail
+            .as_deref()
+            .unwrap()
+            .starts_with("to=fleet-b/session/h/b1 "));
+        let zero: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(zero, 0);
+    }
+
+    #[tokio::test]
+    async fn deliver_to_a_remote_address_is_refused_and_a_big_body_too() {
+        let (store, ssh, a, _b) = fixture();
+        {
+            let s = store.lock().unwrap();
+            let id = s.insert_dialer_link("https://b.example", "t").unwrap();
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+        }
+        let mut m = args(a, 0, "hi");
+        m.to_session_id = 0;
+        m.to_addr = Some("fleet-b/session/h/b1".into());
+        m.deliver = true;
+        assert_eq!(
+            send_message(m, &store, &ssh).await.unwrap_err().code,
+            codes::E_UNSUPPORTED
+        );
+        let mut big = args(a, 0, "hi");
+        big.to_session_id = 0;
+        big.to_addr = Some("fleet-b/session/h/b1".into());
+        big.body = "x".repeat(crate::service::peer::wire::PEER_BODY_MAX + 1);
+        assert_eq!(
+            send_message(big, &store, &ssh).await.unwrap_err().code,
+            codes::E_VALIDATE
         );
     }
 
