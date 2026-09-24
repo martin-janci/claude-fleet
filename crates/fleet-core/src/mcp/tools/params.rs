@@ -62,6 +62,9 @@ pub struct ListSessionsParams {
     /// that do not. The row carries the reason.
     #[serde(default)]
     pub needs_attention: Option<bool>,
+    /// Your session id: only what's new since your last read.
+    #[serde(default)]
+    pub fresh_for: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -339,6 +342,9 @@ pub struct SessionHistoryParams {
     pub session_id: i64,
     /// Maximum number of (newest-first) events to return. Defaults to 50.
     pub limit: Option<i64>,
+    /// Your session id: only what's new since your last read.
+    #[serde(default)]
+    pub fresh_for: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -436,6 +442,9 @@ pub struct InboxParams {
     /// message bodies.
     #[serde(default = "default_true")]
     pub summary: bool,
+    /// Your session id: only what's new since your last read.
+    #[serde(default)]
+    pub fresh_for: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -547,6 +556,32 @@ pub struct SessionTranscriptParams {
     /// Default 8000, max 64000.
     #[serde(default)]
     pub max_chars: Option<usize>,
+    /// Your session id: only what's new since your last read.
+    #[serde(default)]
+    pub fresh_for: Option<i64>,
+}
+
+/// `repo_diff`'s own params. Deliberately NOT `repo_read::RepoFileArgs`:
+/// that struct is shared with `repo_file` and routed desktop→hub, so a new
+/// field there would leak onto `repo_file` and change a wire struct.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoDiffParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Worktree-relative file path.
+    pub path: String,
+    /// Your session id: only what's new since your last read.
+    #[serde(default)]
+    pub fresh_for: Option<i64>,
+}
+
+impl From<&RepoDiffParams> for crate::service::repo_read::RepoFileArgs {
+    fn from(p: &RepoDiffParams) -> Self {
+        Self {
+            session_id: p.session_id,
+            path: p.path.clone(),
+        }
+    }
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

@@ -406,6 +406,153 @@ drop `null` fields — an absent field reads the same as a null one to a model,
 and the indentation and `"field": null` repetitions measured ~25% of those
 payloads.
 
+### Remembered read cursors
+
+Five fetch tools — `list_sessions`, `session_history`, `session_transcript`,
+`inbox`, `repo_diff` — accept an optional `fresh_for: <session id>` and, when
+given, remember what that reader last saw so a re-ask returns only what is
+new.
+
+**`fresh_for` is your own session id, not the caller's.** A caller label is
+`host:<alias>`, so every Claude session running on a host shares one caller;
+a cursor keyed by the caller would let those sessions silently consume each
+other's deltas. Pass the id `list_sessions`/`whoami` gave the session about
+itself, never a token or host identifier. An id that names no session gets a
+full read with `cursor_reset: "reader_unknown"` — nothing is stored, so the
+next call with the same bad id behaves identically rather than compounding.
+
+**Two answer shapes.** `session_history`, `inbox`, `repo_diff` and
+`list_sessions` answer with a JSON envelope `{unchanged, cursor_reset, more,
+data}`. `session_transcript` answers with **plain text**, as it does without
+`fresh_for`, and states the same facts as banner lines (below).
+
+Each envelope call answers one of three ways:
+- **new data** — `unchanged: false`, `cursor_reset: null`, `data` holding
+  only what is new since the stored cursor (for a snapshot tool, the whole
+  current payload, since it changed);
+- **`unchanged`** — `unchanged: true`, `data: null` (an empty array for
+  `session_history`/`inbox`); nothing changed since the last read, so
+  nothing is sent;
+- **a reset** — `unchanged: false`, `cursor_reset` set to why the stored
+  cursor could not be trusted for a delta, and `data` depending on the tool:
+  - `session_history` / `inbox`: the **oldest page from the start of the
+    stream** (row id 0, oldest-first, `limit` rows, `more: true` when more
+    follow) — the reader re-walks the stream from the beginning. The one
+    exception is `reader_unknown`, which gets the **default newest-first
+    page** (exactly what the call returns with no `fresh_for`) and
+    `more: false`: with no cursor to store, an oldest-first page would come
+    back identical on every call and a caller following `more` would never
+    stop.
+  - `list_sessions` / `repo_diff`: the full payload, as with no
+    `fresh_for`. Their only reset reason is `reader_unknown`.
+
+A reader's **first** read (no cursor yet) is answered the same as a reset,
+with `cursor_reset: null`. For `session_history` and `inbox` that means a
+first read starts from the **oldest** row, so reaching the present on a long
+stream takes several paged calls.
+
+`session_transcript`'s text answers:
+- `(unchanged since your last read at turn N)` — the whole answer, when
+  nothing changed. **`unchanged` means no completed turn since your last
+  read**: it is keyed on the session's `turn_seq`, which only a `Stop` hook
+  moves. An interrupted turn or a slash command adds to the transcript with
+  no `Stop` behind it, so it can be answered `unchanged` while the session
+  sits idle. Nothing is lost — it is served with the next completed turn —
+  but a caller polling an interrupted, idle session waits for that turn.
+- the new turns, oldest first, separated by `---` lines;
+- `[cursor reset: <reason> — earlier turns may not be shown; see
+  session_conversations]` as the FIRST line, when the stored cursor could
+  not be trusted. What follows is the default window — the last turn with
+  content, as a first read gets — not the whole transcript.
+- `[more: additional new turns follow — call session_transcript again with
+  the same fresh_for to continue]` as the LAST line, when `max_chars` cut
+  the page short;
+- `[session_transcript: N chars dropped from the start — raise max_chars to
+  see more]` above a single turn larger than the whole `max_chars` budget,
+  served truncated from the front (the cursor still moves past it);
+- `(no assistant text in the requested turns)` when the new turns render to
+  nothing.
+
+A first `session_transcript` read (no cursor yet) gets the default window —
+the last turn with content — with no banner, and positions the cursor there.
+`since_turn` is **ignored** whenever `fresh_for` is present: the cursor, not
+`since_turn`, decides what is new.
+
+`cursor_reset` is one of the four reasons in
+`service::fresh::ResetReason::as_str`:
+- `conversation_changed` — a conversation boundary (`/clear`, compaction, a
+  new conversation) happened on the target session since the last read.
+- `ahead_of_head` — the stored cursor is past the current head; the case it
+  was written for is a reused `sessions.id` (the table has no
+  `AUTOINCREMENT`) starting a new session's counters over from zero while an
+  old cursor still named a much later point. Deleting a session now drops its
+  cursors at once (see *Retention*), so this is a defensive backstop.
+- `reader_unknown` — `fresh_for` names no session, as above.
+- `too_far_behind` — `session_transcript` only: the stored positional anchor
+  named a spot this read could not locate (outside the tail window it
+  fetched, or no anchor was ever recorded), or a page could not be ended on
+  a turn the anchor can name (a turn with no timestamp). `turn_seq` said a
+  delta existed, but the delta could not be positioned, so it is answered
+  with the default window rather than guessed.
+
+**Streaming tools page oldest-first.** `session_history`, `inbox` and
+`session_transcript`'s delta path return the oldest new rows first (not the
+usual newest-first order of a plain read) and set `more: true` when the page
+was truncated by `limit` (or, for `session_transcript`, `max_chars`). The
+stored cursor only advances to what was actually returned in that page —
+never past it — so a truncated catch-up is safe to repeat with the same
+`fresh_for` until `more` is false.
+
+`session_transcript` answers `unchanged` straight from the session's
+`turn_seq` (plus its conversation generation) — **no transcript file is
+read** for that answer. When a delta IS due, it is positioned by a stored
+anchor (the last-served turn's opening-prompt timestamp plus a fingerprint
+of its rendered text), not by arithmetic on `turn_seq`: an in-progress turn,
+an interrupt, a slash command, or a queued prompt each add a turn to the
+transcript file with no `Stop` behind it, so "`turn_seq` − watermark turns
+from the end" cannot reliably name the same turns a caller already saw. A
+turn that grew since it was served (its fingerprint changed) is re-served
+whole. A delta with no anchor on record resets as `too_far_behind` instead
+of guessing.
+
+`inbox`'s cursor is keyed by `session_id` **and** `unread_only` together — a
+`true`-filtered read and a `false`-filtered read of the same inbox watch two
+independent sequences, so one can never skip rows the other has not yet
+returned. **`fresh_for` does not change `mark_read`.** `mark_read` still
+defaults to `true` and still flips the rows this call returned to read,
+exactly as without `fresh_for`; pass `mark_read: false` to peek without
+consuming. The cursor itself is per reader and never reads or writes
+`read_at`, so with `unread_only: false` another reader's `mark_read` cannot
+hide rows from your `fresh_for` delta (with `unread_only: true` a row read
+by anyone is, by definition, filtered out).
+
+`repo_diff`'s `unchanged` still computes (and hashes) the full diff on every
+call — the tool has no cheaper "did it change" signal than the diff itself,
+so the saving from `fresh_for` here is in what crosses back to the caller
+and what it has to process, not in server-side git work.
+
+For the two snapshot tools, the stored hash is over the exact `data` value
+the envelope carries (its canonical, key-sorted JSON), so "the hash
+matched" and "the bytes you would have received are the same" are one
+claim. `list_sessions` with `fresh_for` returns rows sorted by session id
+rather than the default's `last_activity_at DESC`, so a reconcile pass
+bumping one session's activity can never reorder the array and change its
+hash with no field the reader would recognize actually differing.
+`unchanged` fires usefully in the default slim shape, which already drops
+`last_activity_at` and `current_activity` — the two fields a reconcile tick
+churns constantly — before hashing; a `summary: false` caller hashes those
+two churny fields as well, so it will see `unchanged` far less often.
+
+**Retention.** A session's cursors are deleted **in the same statement that
+deletes the session row** — as the reader, and as the target a cursor is
+about — by the `trg_read_cursors_on_session_delete` trigger (migration 044).
+It has to be immediate: `sessions.id` has no `AUTOINCREMENT`, so a deleted
+id is handed to the next session created, which must not inherit a dead
+session's "already read". There is no retention window. The GC sweep
+(`Store::sweep_orphan_read_cursors`) is kept as a backstop for rows naming
+an id no session ever had; it runs on every GC tick alongside the
+mail-retention sweep and, like it, is not gated on `gc.enabled`.
+
 ### The served tool surface
 
 `tools/list` is scoped to the caller: the list is filtered by the same

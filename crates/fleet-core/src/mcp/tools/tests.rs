@@ -1,5 +1,6 @@
 use super::*;
 use crate::ipc_error::codes;
+use crate::store::{CursorRow, StartSource};
 use std::time::Duration;
 
 fn text_of(c: &Content) -> &str {
@@ -1233,6 +1234,7 @@ async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
                         session_id,
                         since_turn: None,
                         max_chars: None,
+                        fresh_for: None,
                     }),
                 )
                 .await
@@ -1249,6 +1251,7 @@ async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
                 session_id: bare_b,
                 since_turn: None,
                 max_chars: None,
+                fresh_for: None,
             }),
         )
         .await
@@ -2755,7 +2758,16 @@ fn the_served_definition_budget_stays_bounded() {
     // merged surface is 63,630 rather than any branch's own figure. Raised to
     // that plus the customary 100 bytes. Nothing was added here — this is the
     // arithmetic of four raises landing together.
-    const BUDGET_BYTES: usize = 63_730;
+    //
+    // Raised for smart caching (cycle 2): one `fresh_for` on each of five
+    // fetch tools (list_sessions, session_history, inbox, session_transcript,
+    // repo_diff), plus repo_diff's own `RepoDiffParams` replacing the shared
+    // `RepoFileArgs` schema it used to serve. The field's doc comment was cut
+    // to one short clause first — first measured at 64,792 (1,062 B over
+    // budget, over the ~1 KB guideline), trimmed to "Your session id: only
+    // what's new since your last read." on all five, re-measured at 64,732.
+    // Raised to that plus the customary 100.
+    const BUDGET_BYTES: usize = 64_832;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3518,6 +3530,7 @@ async fn send_message_with_the_same_client_msg_id_sends_once() {
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3567,6 +3580,7 @@ async fn send_message_with_a_client_msg_id_already_in_flight_is_e_in_flight() {
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3625,6 +3639,7 @@ async fn a_send_message_that_fails_releases_its_client_msg_id_for_a_retry() {
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3693,6 +3708,7 @@ async fn a_client_msg_id_reused_from_send_prompt_does_not_replay_into_send_messa
                 limit: Some(10),
                 mark_read: false,
                 summary: false,
+                fresh_for: None,
             }),
         )
         .await
@@ -3869,6 +3885,1575 @@ fn a_view_is_opt_in_and_the_default_answer_is_byte_identical() {
     assert_eq!(text_of(&plain.content[0]), text_of(&no_view.content[0]));
 }
 
+/// `fresh_for` is inert until Tasks 5-7 wire it (smart caching, cycle 2 task
+/// 4): a caller who never names it must see nothing change. Comparing
+/// "omitted" against "explicit `fresh_for: null`" the way
+/// `a_view_is_opt_in_and_the_default_answer_is_byte_identical` compares its
+/// two paths would be tautological here — both deserialize to `None` and hit
+/// the same code either way, since nothing reads the field yet. The
+/// assertion that actually bites later is (c): once caching lands, an absent
+/// `fresh_for` must still never touch `read_cursors` — so this pins that a
+/// bare call today writes no cursor row, which a Task 5-7 regression would
+/// break silently otherwise.
+///
+/// `session_transcript` and `repo_diff` need a live SSH target to actually
+/// run in this store-only fixture, so for those two this only checks (a) the
+/// deserialized default and, further down, that their served schema carries
+/// `fresh_for` — proof by schema rather than by call.
+#[tokio::test]
+async fn fresh_for_is_opt_in_and_the_default_answer_is_byte_identical() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let sid = s
+        .upsert_session("dev", "local", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let cursor_count = |t: &FleetTools| -> i64 {
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(cursor_count(&t), 0, "fixture starts with no cursors");
+
+    // list_sessions: fully defaulted, so an empty object round-trips.
+    let p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(p.fresh_for.is_none());
+    t.list_sessions(Parameters(p)).await.unwrap();
+    assert_eq!(cursor_count(&t), 0, "list_sessions wrote a cursor unasked");
+
+    // session_history
+    let p: SessionHistoryParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid, "limit": null })).unwrap();
+    assert!(p.fresh_for.is_none());
+    t.session_history(Parameters(p)).await.unwrap();
+    assert_eq!(
+        cursor_count(&t),
+        0,
+        "session_history wrote a cursor unasked"
+    );
+
+    // inbox
+    let p: InboxParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid, "limit": null })).unwrap();
+    assert!(p.fresh_for.is_none());
+    t.inbox(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
+    assert_eq!(cursor_count(&t), 0, "inbox wrote a cursor unasked");
+
+    // session_transcript — params only; a real call needs SSH.
+    let p: SessionTranscriptParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid })).unwrap();
+    assert!(p.fresh_for.is_none());
+
+    // repo_diff — params only; a real call needs SSH.
+    let p: RepoDiffParams =
+        serde_json::from_value(serde_json::json!({ "session_id": sid, "path": "x" })).unwrap();
+    assert!(p.fresh_for.is_none());
+
+    assert_eq!(
+        cursor_count(&t),
+        0,
+        "nothing in this test may ever write a cursor"
+    );
+
+    // Schema-name proof (Task 4 controller note 2): repo_diff now serves its
+    // own params, not the shared, hub-routed `repo_read::RepoFileArgs`
+    // (schema title `RepoPathParams`) that `repo_file` still serves —
+    // otherwise adding `fresh_for` here would have leaked onto `repo_file`
+    // and changed a desktop↔hub wire struct.
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let diff = tools
+        .iter()
+        .find(|t| t.name == "repo_diff")
+        .expect("repo_diff is registered");
+    let file = tools
+        .iter()
+        .find(|t| t.name == "repo_file")
+        .expect("repo_file is registered");
+    assert_eq!(
+        diff.input_schema.get("title").and_then(|v| v.as_str()),
+        Some("RepoDiffParams"),
+        "repo_diff must serve its own params struct, not RepoFileArgs"
+    );
+    assert_eq!(
+        file.input_schema.get("title").and_then(|v| v.as_str()),
+        Some("RepoPathParams"),
+        "repo_file's shared, hub-routed struct must be untouched"
+    );
+
+    // Every one of the five tools must actually offer `fresh_for` on its
+    // served schema — the proof substituted for a live call on the two tools
+    // above that this fixture cannot run without SSH.
+    for name in [
+        "list_sessions",
+        "session_history",
+        "inbox",
+        "session_transcript",
+        "repo_diff",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} is registered"));
+        assert!(
+            tool.input_schema["properties"].get("fresh_for").is_some(),
+            "{name} schema lacks fresh_for"
+        );
+    }
+}
+
+// ---- Task 5: session_transcript wired to fresh_for -------------------------
+
+#[test]
+fn transcript_decision_treats_an_unknown_reader_as_reader_unknown_regardless_of_any_stored_cursor()
+{
+    // Even a cursor that WOULD say "unchanged" against the real store must
+    // not be trusted once the reader itself does not exist.
+    let stored = CursorRow {
+        watermark: Some(9),
+        generation: None,
+        content_hash: None,
+        anchor: None,
+    };
+    assert_eq!(
+        stream_decision(false, Some(&stored), Some(9), None),
+        fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown))
+    );
+    assert_eq!(
+        stream_decision(false, None, Some(9), None),
+        fresh::StreamStart::Full(Some(fresh::ResetReason::ReaderUnknown))
+    );
+}
+
+#[test]
+fn transcript_decision_passes_a_known_readers_cursor_straight_to_decide_stream() {
+    let stored = CursorRow {
+        watermark: Some(9),
+        generation: Some(1),
+        content_hash: None,
+        anchor: None,
+    };
+    // Same head, moved generation: still resets, exactly as decide_stream
+    // alone would — the reader-existence gate changes nothing once the
+    // reader is real.
+    assert_eq!(
+        stream_decision(true, Some(&stored), Some(9), Some(2)),
+        fresh::StreamStart::Full(Some(fresh::ResetReason::ConversationChanged))
+    );
+    // A known reader with no stored cursor is a first, full read — no reason.
+    assert_eq!(
+        stream_decision(true, None, Some(9), None),
+        fresh::StreamStart::Full(None)
+    );
+}
+
+#[test]
+fn format_transcript_more_appends_a_continuation_note_only_when_more_is_true() {
+    assert_eq!(
+        format_transcript_more("plain delta".to_string(), false),
+        "plain delta"
+    );
+    let out = format_transcript_more("plain delta".to_string(), true);
+    assert!(out.starts_with("plain delta"));
+    assert!(out.contains("call session_transcript again with the same fresh_for"));
+}
+
+#[test]
+fn format_transcript_full_prefixes_a_reset_banner_only_when_a_reason_is_given() {
+    assert_eq!(format_transcript_full("text".to_string(), None), "text");
+    let out = format_transcript_full("text".to_string(), Some(fresh::ResetReason::AheadOfHead));
+    assert!(out.starts_with(
+        "[cursor reset: ahead_of_head — earlier turns may not be shown; see session_conversations]\n"
+    ));
+    assert!(out.ends_with("text"));
+}
+
+#[tokio::test]
+async fn an_unchanged_transcript_read_touches_no_transcript_at_all() {
+    // A target whose transcript can NOT be read: host with no reachable
+    // ssh, no transcript path. Any read attempt would error.
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("nowhere").unwrap();
+    let reader = s
+        .upsert_session("reader", "nowhere", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "nowhere", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.set_claude_session_id(target, "conv-1").unwrap();
+    for _ in 0..3 {
+        s.record_stop_hook_for_row(target).unwrap();
+    } // turn_seq = 3
+    s.put_stream_cursor(
+        reader,
+        "session_transcript",
+        &target.to_string(),
+        Some(target),
+        3,
+        None,
+        None,
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let out = t
+        .session_transcript(
+            Extension(Caller::master()),
+            Parameters(SessionTranscriptParams {
+                session_id: target,
+                since_turn: None,
+                max_chars: None,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .expect("unchanged must answer without reading the transcript");
+    assert!(text_of(&out.content[0]).starts_with("(unchanged since your last read at turn 3)"));
+}
+
+/// The two cases that need a *readable* transcript (`reader_unknown` and a
+/// moved generation, per the brief) cannot be driven end-to-end in this
+/// fixture — every real read goes through SSH, and no test in this suite
+/// gets one to succeed (`transcript_for` always errors first: see
+/// `per_host_callers_cannot_capture_or_read_another_hosts_session`). Both
+/// are pinned at the decision level above
+/// (`transcript_decision_treats_an_unknown_reader_as_reader_unknown...`,
+/// and `fresh::decide_stream`'s own
+/// `a_moved_generation_resets_even_when_the_watermark_looks_current`). This
+/// test adds the store-side half: even though the ReaderUnknown branch
+/// still attempts the read (only the cursor WRITE is skipped), no cursor
+/// row is ever left behind for an unknown reader.
+#[tokio::test]
+async fn an_unknown_fresh_for_still_attempts_the_read_but_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("nowhere").unwrap();
+    // No claude_session_id: the attempted Full-path read fails fast and
+    // deterministically (E_INVALID_STATE, no SSH round trip needed).
+    let target = s
+        .upsert_session("target", "nowhere", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let cursor_count = |t: &FleetTools| -> i64 {
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+            .unwrap()
+    };
+    let missing_reader = 999_999;
+    let err = t
+        .session_transcript(
+            Extension(Caller::master()),
+            Parameters(SessionTranscriptParams {
+                session_id: target,
+                since_turn: None,
+                max_chars: None,
+                fresh_for: Some(missing_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_INVALID_STATE"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert_eq!(
+        cursor_count(&t),
+        0,
+        "an unknown fresh_for must never get a cursor row"
+    );
+}
+
+// ---- Fix round 1: session_transcript positioned by anchor, not turn_seq ----
+
+/// A `session_transcript` fixture that reads a REAL local transcript file —
+/// host `local` runs bash locally (`ssh::run_shell_bounded`, enabled by
+/// default), so `fresh_for`'s anchor positioning is exercised through an
+/// actual read, not asserted only at the decision level.
+fn transcript_fixture(path: &std::path::Path, jsonl: &str) -> (Store, i64, i64) {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    std::fs::write(path, jsonl).unwrap();
+    s.rebind_conversation(
+        target,
+        "550e8400-e29b-41d4-a716-446655440099",
+        StartSource::Fleet,
+        Some(&path.to_string_lossy()),
+        None,
+    )
+    .unwrap();
+    (s, reader, target)
+}
+
+/// One JSONL turn: a `user` prompt followed by its `assistant` reply, with
+/// distinct `timestamp`s so `ConvTurn::at`/`ended_at` are both real values.
+fn jsonl_turn(prompt: &str, reply: &str, at: &str, ended_at: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"user","message":{"content":prompt},"timestamp":at}),
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":reply}]},"timestamp":ended_at}),
+    )
+}
+
+async fn read_transcript(
+    t: &FleetTools,
+    target: i64,
+    reader: i64,
+    max_chars: Option<usize>,
+) -> String {
+    let out = t
+        .session_transcript(
+            Extension(Caller::master()),
+            Parameters(SessionTranscriptParams {
+                session_id: target,
+                since_turn: None,
+                max_chars,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    text_of(&out.content[0]).to_string()
+}
+
+/// THE regression test this fix round exists for: `turn_seq` is a Stop-hook
+/// COUNT, not a position in the transcript FILE. Turn A completes
+/// (turn_seq 1) and is read — establishing the cursor. Turn B then ALSO
+/// completes (turn_seq 2), but before the next read turn C also opens and
+/// streams a partial reply with no Stop yet (turn_seq stays 2). The old
+/// "last (turn_seq − watermark) turns" arithmetic takes the last ONE
+/// file-turn — turn C, still in progress — and turn B, the actual new
+/// completed turn, is never served.
+#[tokio::test]
+async fn an_in_progress_turn_does_not_hide_the_completed_turn_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "FIRST_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap(); // turn_seq = 1
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("FIRST_REPLY"), "{first}");
+
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&jsonl_turn(
+        "second",
+        "SECOND_REPLY_MARKER",
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:01Z",
+    ));
+    jsonl.push_str(&jsonl_turn(
+        "third",
+        "THIRD_PARTIAL",
+        "2026-01-01T00:02:00Z",
+        "2026-01-01T00:02:01Z",
+    ));
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap(); // turn_seq = 2 (B only; C never Stops)
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("SECOND_REPLY_MARKER"),
+        "turn B must be served, not silently skipped: {second}"
+    );
+}
+
+/// A turn re-read through the SAME anchor `at` (its fingerprint differs
+/// from what was stored) is re-served whole — never left half-delivered.
+#[tokio::test]
+async fn a_grown_in_progress_turn_is_re_served_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "PARTIAL_V1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("PARTIAL_V1"), "{first}");
+
+    // The SAME turn (same `at`) streams a second assistant block with a
+    // later `timestamp`, and only now gets its Stop.
+    let extra = serde_json::json!({"type":"assistant","message":{"content":[
+        {"type":"text","text":"GROWN_TAIL"}
+    ]},"timestamp":"2026-01-01T00:00:05Z"});
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&format!("{extra}\n"));
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("GROWN_TAIL"),
+        "the grown tail must be served: {second}"
+    );
+    assert!(
+        second.contains("PARTIAL_V1"),
+        "the turn is re-served WHOLE, not just its new part: {second}"
+    );
+}
+
+/// Oldest-first paging: a small `max_chars` forces one turn per page, and
+/// every new turn must still be seen exactly once, in order, with `more`
+/// on every page but the last.
+#[tokio::test]
+async fn a_transcript_delta_pages_oldest_first_with_more_and_skips_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "seed",
+            "SEED_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await; // establishes the cursor at "seed"
+
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    for i in 1..=3 {
+        jsonl.push_str(&jsonl_turn(
+            &format!("prompt{i}"),
+            &format!("REPLY_MARKER_{i}"),
+            &format!("2026-01-01T00:0{i}:00Z"),
+            &format!("2026-01-01T00:0{i}:01Z"),
+        ));
+    }
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        for _ in 1..=3 {
+            store.record_stop_hook_for_row(target).unwrap();
+        }
+    }
+
+    let mut seen = Vec::new();
+    let mut more_pages = 0;
+    for _ in 0..8 {
+        let text = read_transcript(&t, target, reader, Some(20)).await;
+        if text.starts_with("(unchanged") {
+            break;
+        }
+        if text.contains("[more:") {
+            more_pages += 1;
+        }
+        for i in 1..=3 {
+            if text.contains(&format!("REPLY_MARKER_{i}")) {
+                seen.push(i);
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![1, 2, 3],
+        "every new turn exactly once, oldest first, none skipped"
+    );
+    assert!(more_pages >= 2, "at least two pages must say more remains");
+}
+
+/// A turn whose opening prompt carries no `timestamp` — `ConvTurn::at` is
+/// `None`, so it cannot be an anchor.
+fn jsonl_turn_without_at(prompt: &str, reply: &str, ended_at: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"user","message":{"content":prompt}}),
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":reply}]},"timestamp":ended_at}),
+    )
+}
+
+/// Seed-read a transcript, append `turns` (each already one-or-more JSONL
+/// lines), record `stops` Stop hooks, then page with `max_chars` until
+/// `unchanged` (at most 8 calls). Returns every page's text.
+async fn page_transcript_until_unchanged(
+    appended: &[String],
+    stops: usize,
+    max_chars: usize,
+) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "seed",
+            "SEED_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await; // anchor := "seed"
+
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    for turn in appended {
+        jsonl.push_str(turn);
+    }
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        for _ in 0..stops {
+            store.record_stop_hook_for_row(target).unwrap();
+        }
+    }
+    let mut pages = Vec::new();
+    for _ in 0..8 {
+        let text = read_transcript(&t, target, reader, Some(max_chars)).await;
+        if text.starts_with("(unchanged") {
+            return pages;
+        }
+        pages.push(text);
+    }
+    panic!("paging never reached unchanged in 8 calls — a `more` loop: {pages:#?}");
+}
+
+/// Ruling 17 (transcript half): a page that ends on a turn with no `at`
+/// used to store NO new anchor, so the next call re-read from the OLD one
+/// and, with `more: true`, served the same page forever. A page now never
+/// ends with `more: true` on an unanchorable turn: it is cut back to its
+/// last anchorable turn, and the cut turn opens the next page. Here the
+/// budget fits B + C (C has no `at`) but not D, so page 1 is B alone, page
+/// 2 is C + D, and every turn is served exactly once — no reset needed.
+#[tokio::test]
+async fn a_transcript_page_ending_on_an_unanchorable_turn_is_cut_back_not_looped() {
+    let long_e = format!("{}EEEE_4", "x".repeat(40));
+    let pages = page_transcript_until_unchanged(
+        &[
+            jsonl_turn(
+                "b",
+                "BBBB_1",
+                "2026-01-01T00:01:00Z",
+                "2026-01-01T00:01:01Z",
+            ),
+            jsonl_turn_without_at("c", "CCCC_2", "2026-01-01T00:02:01Z"),
+            jsonl_turn(
+                "d",
+                "DDDD_3",
+                "2026-01-01T00:03:00Z",
+                "2026-01-01T00:03:01Z",
+            ),
+            jsonl_turn("e", &long_e, "2026-01-01T00:04:00Z", "2026-01-01T00:04:01Z"),
+        ],
+        4,
+        15,
+    )
+    .await;
+    let seen: Vec<&str> = pages
+        .iter()
+        .flat_map(|p| {
+            ["BBBB_1", "CCCC_2", "DDDD_3", "EEEE_4"]
+                .into_iter()
+                .filter(move |m| p.contains(m))
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec!["BBBB_1", "CCCC_2", "DDDD_3", "EEEE_4"],
+        "every turn exactly once, oldest first: {pages:#?}"
+    );
+    assert!(
+        !pages.iter().any(|p| p.contains("[cursor reset")),
+        "a cut-back needs no reset: {pages:#?}"
+    );
+}
+
+/// The degenerate case: a page whose ONLY turn is unanchorable and does
+/// not fit with the next one cannot advance by cutting back. It is
+/// answered as a visible `too_far_behind` reset (the default window,
+/// `more: false`) — it terminates, and says so, never a silent loop.
+#[tokio::test]
+async fn a_transcript_page_with_no_anchorable_turn_resets_visibly_and_terminates() {
+    let long_d = format!("{}DDDD_3", "y".repeat(40));
+    let pages = page_transcript_until_unchanged(
+        &[
+            jsonl_turn(
+                "b",
+                "BBBB_1",
+                "2026-01-01T00:01:00Z",
+                "2026-01-01T00:01:01Z",
+            ),
+            jsonl_turn_without_at("c", "CCCC_2", "2026-01-01T00:02:01Z"),
+            jsonl_turn("d", &long_d, "2026-01-01T00:03:00Z", "2026-01-01T00:03:01Z"),
+        ],
+        3,
+        15,
+    )
+    .await;
+    let all = pages.join("\n=====\n");
+    assert!(all.contains("BBBB_1"), "{all}");
+    assert!(all.contains("DDDD_3"), "the newest turn is reached: {all}");
+    assert!(
+        !all.contains("CCCC_2") && all.contains("[cursor reset: too_far_behind"),
+        "C cannot be anchored or cut back to, so it is not served — and the \
+         reset SAYS so: {all}"
+    );
+    assert!(
+        !pages.last().unwrap().contains("[more:"),
+        "the last page says nothing more remains: {all}"
+    );
+}
+
+/// An anchor the read cannot locate (the file was replaced out from under
+/// it — log rotation, or simply too far behind the tail window) resets
+/// full with `too_far_behind`, never a guess at what to serve.
+#[tokio::test]
+async fn a_transcript_anchor_the_read_cannot_locate_resets_too_far_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "OLD_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await; // anchor := "first"
+
+    // The file is entirely replaced — the anchored turn's `at` is gone.
+    std::fs::write(
+        &path,
+        jsonl_turn(
+            "later",
+            "NEW_REPLY",
+            "2099-01-01T00:00:00Z",
+            "2099-01-01T00:00:01Z",
+        ),
+    )
+    .unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let text = read_transcript(&t, target, reader, None).await;
+    assert!(
+        text.starts_with("[cursor reset: too_far_behind"),
+        "unexpected text: {text}"
+    );
+    assert!(text.contains("NEW_REPLY"), "{text}");
+    let cursor = t
+        .store
+        .lock()
+        .unwrap()
+        .get_read_cursor(reader, "session_transcript", &target.to_string())
+        .unwrap()
+        .unwrap();
+    assert!(
+        cursor.anchor.is_some(),
+        "the reset read still records a fresh anchor to position the next one"
+    );
+}
+
+/// A conversation boundary (e.g. `/clear`) resets full with
+/// `conversation_changed`, even though the watermark alone looked current.
+#[tokio::test]
+async fn a_transcript_conversation_change_resets_full_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "PRE_CLEAR_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    read_transcript(&t, target, reader, None).await;
+
+    std::fs::write(
+        &path,
+        jsonl_turn(
+            "after clear",
+            "POST_CLEAR_REPLY",
+            "2026-02-01T00:00:00Z",
+            "2026-02-01T00:00:01Z",
+        ),
+    )
+    .unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store
+            .insert_session_event(target, "conversation_started", None)
+            .unwrap();
+    }
+
+    let text = read_transcript(&t, target, reader, None).await;
+    assert!(
+        text.starts_with("[cursor reset: conversation_changed"),
+        "{text}"
+    );
+    assert!(text.contains("POST_CLEAR_REPLY"), "{text}");
+}
+
+/// The current (pre-fix) guard test only reaches `ReaderUnknown` through a
+/// read that fails anyway (no `claude_session_id`), so a missing
+/// skip-the-cursor-write guard would go unnoticed. This one uses a REAL,
+/// readable transcript: the read succeeds, and only the guard stops a
+/// cursor row from being written for a reader that does not exist.
+#[tokio::test]
+async fn an_unknown_fresh_for_with_a_readable_transcript_answers_full_and_writes_no_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, _reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "SOME_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+    let missing_reader = 999_999;
+
+    let text = read_transcript(&t, target, missing_reader, None).await;
+    assert!(text.starts_with("[cursor reset: reader_unknown"), "{text}");
+    assert!(text.contains("SOME_REPLY"), "{text}");
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM read_cursors WHERE reader_session_id = ?1",
+            [missing_reader],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "an unknown fresh_for must never get a cursor row, even on a successful read"
+    );
+}
+
+// ---- Fix round 2 ------------------------------------------------------------
+
+/// Two turns can share the same `at` (a command, bash input, harness
+/// block, notification or compact boundary each open a turn stamped from
+/// the same millisecond as another entry). The anchor lands on the SECOND
+/// of the pair; a naive `at`-only, forward-searching reposition finds the
+/// FIRST instead, misreads it as "grown", and re-serves `[A, B]` on every
+/// call — a page that never reaches the real new content and never
+/// advances, because `more` stays true and the watermark stays held.
+#[tokio::test]
+async fn a_duplicate_at_between_two_turns_does_not_loop_forever() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let shared_at = "2026-01-01T00:00:00Z";
+    let mut jsonl = jsonl_turn("first", "REPLY_A", shared_at, "2026-01-01T00:00:01Z");
+    jsonl.push_str(&jsonl_turn(
+        "second",
+        "REPLY_B_MARKER",
+        shared_at,
+        "2026-01-01T00:00:02Z",
+    ));
+    let (s, reader, target) = transcript_fixture(&path, &jsonl);
+    s.record_stop_hook_for_row(target).unwrap();
+    let t = test_tools(s);
+
+    // First read: the default window (last turn) anchors on turn B, the
+    // SECOND of the pair sharing `shared_at`.
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("REPLY_B_MARKER"), "{first}");
+
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&jsonl_turn(
+        "third",
+        "REPLY_C_MARKER",
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:01Z",
+    ));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    // A budget too small to fit turns A + B + C together: a wrong
+    // reposition onto turn A would keep re-serving `[A, B]` forever and
+    // never reach C.
+    let mut seen_c = false;
+    let mut a_re_served = false;
+    let mut calls = 0;
+    loop {
+        calls += 1;
+        assert!(
+            calls <= 4,
+            "paging must terminate quickly, not loop forever"
+        );
+        let text = read_transcript(&t, target, reader, Some(20)).await;
+        if text.starts_with("(unchanged") {
+            break;
+        }
+        if text.contains("REPLY_C_MARKER") {
+            seen_c = true;
+        }
+        if text.contains("REPLY_A") {
+            a_re_served = true;
+        }
+    }
+    assert!(
+        seen_c,
+        "turn C must be served — a duplicate `at` must not hide it forever"
+    );
+    assert!(
+        !a_re_served,
+        "turn A, already anchored past (the anchor was on turn B), must never be re-served"
+    );
+}
+
+/// `default_window` (the `Full`/reset path) must filter out empty-body
+/// turns exactly as `parse_turns`/`render_tail` do: a prompt that just
+/// landed, with no reply yet, must not be mistaken for "the last turn" —
+/// that would both hide the real last reply behind it and anchor on
+/// content that never renders to anything.
+#[tokio::test]
+async fn a_just_landed_empty_prompt_does_not_hide_the_reply_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "PREVIOUS_REPLY_MARKER",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    s.record_stop_hook_for_row(target).unwrap();
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&format!(
+        "{}\n",
+        serde_json::json!({"type":"user","message":{"content":"a new question"},"timestamp":"2026-01-01T00:01:00Z"})
+    ));
+    std::fs::write(&path, &jsonl).unwrap();
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(
+        first.contains("PREVIOUS_REPLY_MARKER"),
+        "the just-landed empty prompt must not hide the reply before it: {first}"
+    );
+
+    // The prompt is now answered.
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"ANSWER_MARKER"}]},"timestamp":"2026-01-01T00:01:01Z"})
+    ));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(second.contains("ANSWER_MARKER"), "{second}");
+}
+
+/// `ended_at` only moves on an assistant entry — an `Interrupt` item (or a
+/// merged notification) adds rendered text to an anchored turn without
+/// touching it, so growth detection must key on the turn's rendered
+/// CONTENT, not `ended_at`.
+#[tokio::test]
+async fn an_anchored_turn_that_gains_an_interrupt_with_no_new_assistant_entry_is_re_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let (s, reader, target) = transcript_fixture(
+        &path,
+        &jsonl_turn(
+            "first",
+            "ORIGINAL_REPLY",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        ),
+    );
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("ORIGINAL_REPLY"), "{first}");
+
+    // The SAME turn (same `at`) is interrupted — a `user`-typed entry with
+    // no new assistant entry, so `ended_at` does not move.
+    let interrupt = serde_json::json!({
+        "type": "user",
+        "message": {"content": "[Request interrupted by user]"},
+        "timestamp": "2026-01-01T00:00:05Z",
+    });
+    let mut jsonl = std::fs::read_to_string(&path).unwrap();
+    jsonl.push_str(&format!("{interrupt}\n"));
+    std::fs::write(&path, &jsonl).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("[interrupted]"),
+        "the interrupt must be visible — the turn's content changed even though ended_at did not: {second}"
+    );
+    assert!(
+        second.contains("ORIGINAL_REPLY"),
+        "the turn is re-served WHOLE, not just its new part: {second}"
+    );
+}
+
+// ---- Fix round 3 -------------------------------------------------------------
+
+fn notification_jsonl(at: &str, summary: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "timestamp": at,
+            "message": {"content": format!(
+                "<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n<summary>{summary}</summary>\n</task-notification>"
+            )},
+        })
+    )
+}
+
+fn bash_input_jsonl(at: &str, command: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "timestamp": at,
+            "message": {"content": format!("<bash-input>{command}</bash-input>")},
+        })
+    )
+}
+
+/// The grown tier's own regression: it must search for the EARLIEST turn
+/// sharing the anchor's `at`, not the latest. Turn A (a notification turn)
+/// grows — a second notification merges into it with no new `at` and no
+/// `ended_at` change — and a turn C opens next, stamped the SAME `at` as A.
+/// A latest-match grown tier jumps straight to C and never serves A's
+/// growth.
+#[tokio::test]
+async fn the_grown_tier_finds_the_earliest_same_at_turn_not_the_latest() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let shared_at = "2026-01-01T00:00:00Z";
+    let jsonl = notification_jsonl(shared_at, "FIRST_NOTIFICATION_SUMMARY");
+    let (s, reader, target) = transcript_fixture(&path, &jsonl);
+    let t = test_tools(s);
+
+    // First read: anchors on turn A, the notification turn.
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(first.contains("FIRST_NOTIFICATION_SUMMARY"), "{first}");
+
+    // A second notification — no assistant entry between them, so it
+    // coalesces into turn A (same `at`, `ended_at` untouched by either).
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&notification_jsonl(
+        shared_at,
+        "SECOND_NOTIFICATION_SUMMARY_MARKER",
+    ));
+    // Turn C opens next, stamped the SAME `at` as A.
+    jsonl2.push_str(&bash_input_jsonl(shared_at, "echo done"));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(
+        second.contains("SECOND_NOTIFICATION_SUMMARY_MARKER"),
+        "turn A's growth must be served — the grown tier must not jump past it to turn C: {second}"
+    );
+}
+
+/// A first read whose only turn is a just-landed, reply-less prompt has an
+/// empty RENDERABLE window (round 2's `default_window` filter drops it),
+/// so it must still anchor on that turn (the last PARSED one) rather than
+/// store no anchor at all — otherwise the next `After` read has nothing to
+/// position from and answers a needless `too_far_behind` reset.
+#[tokio::test]
+async fn a_first_read_of_only_an_empty_prompt_does_not_spuriously_reset_the_next_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    let jsonl = format!(
+        "{}\n",
+        serde_json::json!({"type":"user","message":{"content":"a brand new question"},"timestamp":"2026-01-01T00:00:00Z"})
+    );
+    let (s, reader, target) = transcript_fixture(&path, &jsonl);
+    let t = test_tools(s);
+
+    let first = read_transcript(&t, target, reader, None).await;
+    assert!(
+        first.starts_with("(no assistant text"),
+        "the empty-only first read has nothing to show yet: {first}"
+    );
+
+    let mut jsonl2 = std::fs::read_to_string(&path).unwrap();
+    jsonl2.push_str(&format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"ANSWER_MARKER"}]},"timestamp":"2026-01-01T00:00:01Z"})
+    ));
+    std::fs::write(&path, &jsonl2).unwrap();
+    {
+        let store = t.store.lock().unwrap();
+        store.record_stop_hook_for_row(target).unwrap();
+    }
+
+    let second = read_transcript(&t, target, reader, None).await;
+    assert!(second.contains("ANSWER_MARKER"), "{second}");
+    assert!(
+        !second.contains("[cursor reset:"),
+        "an ordinary catch-up must not be reported as a reset: {second}"
+    );
+}
+
+// ---- Task 6: session_history and inbox wired to fresh_for -------------------
+
+/// Newest-first + limit + advance-to-head would skip rows. Oldest-first,
+/// advancing only to what was returned, cannot.
+#[tokio::test]
+async fn a_history_cursor_that_falls_behind_pages_through_everything() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..5 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+    }
+    // insert_session_event returns (), not an id — recover them the same
+    // way the store's own tests do, reading the timeline back oldest-first.
+    let ids: Vec<i64> = s
+        .session_events_after(target, 0, 100)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(ids.len(), 5);
+    let t = test_tools(s);
+    let mut seen = Vec::new();
+    let mut more_pages = 0;
+    for _ in 0..4 {
+        let out = t
+            .session_history(Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(2),
+                fresh_for: Some(reader),
+            }))
+            .await
+            .unwrap();
+        let v = result_json(&out);
+        if v["more"] == true {
+            more_pages += 1;
+        }
+        for e in v["data"].as_array().unwrap() {
+            seen.push(e["id"].as_i64().unwrap());
+        }
+        if v["unchanged"] == true {
+            break;
+        }
+    }
+    assert_eq!(
+        seen, ids,
+        "every event exactly once, in order, none skipped"
+    );
+    assert!(
+        more_pages >= 2,
+        "5 events at limit 2 must truncate at least twice: {more_pages}"
+    );
+}
+
+#[tokio::test]
+async fn a_history_read_that_has_caught_up_answers_unchanged_with_no_rows() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_session_event(target, "prompt_sent", None).unwrap();
+    let t = test_tools(s);
+    let params = || SessionHistoryParams {
+        session_id: target,
+        limit: Some(50),
+        fresh_for: Some(reader),
+    };
+    let first = t.session_history(Parameters(params())).await.unwrap();
+    let v = result_json(&first);
+    assert_eq!(v["unchanged"], false);
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+
+    let second = t.session_history(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(v2["unchanged"], true);
+    assert_eq!(v2["data"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn two_readers_of_one_targets_history_each_see_the_full_sequence() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader_a = s
+        .upsert_session("reader-a", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let reader_b = s
+        .upsert_session("reader-b", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..3 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+    }
+    let t = test_tools(s);
+    for reader in [reader_a, reader_b] {
+        let out = t
+            .session_history(Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(reader),
+            }))
+            .await
+            .unwrap();
+        let v = result_json(&out);
+        assert_eq!(
+            v["data"].as_array().unwrap().len(),
+            3,
+            "reader {reader} must see the full sequence independently"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_session_event(target, "prompt_sent", None).unwrap();
+    let t = test_tools(s);
+    let missing_reader = 999_999;
+    let out = t
+        .session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(50),
+            fresh_for: Some(missing_reader),
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["cursor_reset"], "reader_unknown");
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
+}
+
+/// Ruling 17: an unknown reader (e.g. an agent still using its
+/// pre-`move_session` id) writes no cursor, so a stream paged from id 0
+/// would hand it the SAME oldest page with `more: true` on every call —
+/// and the docs tell callers to repeat until `more` is false. It gets the
+/// DEFAULT newest-first page instead (exactly what no `fresh_for` returns),
+/// `more: false`, `cursor_reset: "reader_unknown"`: it terminates, and says
+/// why.
+#[tokio::test]
+async fn session_history_with_an_unknown_reader_terminates_with_the_default_page() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..5 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+    }
+    let t = test_tools(s);
+    let call = |fresh_for: Option<i64>| {
+        t.session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(2),
+            fresh_for,
+        }))
+    };
+    let default_page = result_json(&call(None).await.unwrap());
+    for n in 1..=2 {
+        let v = result_json(&call(Some(999_999)).await.unwrap());
+        assert_eq!(
+            v["more"], false,
+            "call {n}: an unknown reader must not be told to page forever: {v}"
+        );
+        assert_eq!(v["cursor_reset"], "reader_unknown", "call {n}: {v}");
+        assert_eq!(
+            v["data"], default_page,
+            "call {n}: the default newest-first page, as without fresh_for"
+        );
+    }
+}
+
+/// [`session_history_with_an_unknown_reader_terminates_with_the_default_page`]'s
+/// `inbox` counterpart.
+#[tokio::test]
+async fn inbox_with_an_unknown_reader_terminates_with_the_default_page() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..5 {
+        s.insert_message(sender, target, &format!("m{i}"), "chat", None)
+            .unwrap();
+    }
+    let t = test_tools(s);
+    let call = |fresh_for: Option<i64>| {
+        t.inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(2),
+                mark_read: false,
+                summary: true,
+                fresh_for,
+            }),
+        )
+    };
+    let default_page = result_json(&call(None).await.unwrap());
+    for n in 1..=2 {
+        let v = result_json(&call(Some(999_999)).await.unwrap());
+        assert_eq!(
+            v["more"], false,
+            "call {n}: an unknown reader must not be told to page forever: {v}"
+        );
+        assert_eq!(v["cursor_reset"], "reader_unknown", "call {n}: {v}");
+        assert_eq!(
+            v["data"], default_page,
+            "call {n}: the default newest-first page, as without fresh_for"
+        );
+    }
+}
+
+#[tokio::test]
+async fn inbox_fresh_for_with_mark_read_false_leaves_read_at_untouched() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_message(sender, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+    let msgs = t
+        .store
+        .lock()
+        .unwrap()
+        .list_inbox(target, false, 50)
+        .unwrap();
+    assert!(
+        msgs[0].read_at.is_none(),
+        "mark_read: false must leave read_at untouched even through fresh_for"
+    );
+}
+
+/// The fix-round-1 regression: a cursor keyed only by `session_id` would
+/// let an `unread_only:true` read advance past a row an `unread_only:false`
+/// read from the SAME reader never got to return (or the reverse) — a skip
+/// across filters. `unread_only` is part of the resource key so the two
+/// stay independent sequences.
+#[tokio::test]
+async fn inbox_fresh_for_keeps_unread_only_true_and_false_cursors_independent() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_message(sender, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+
+    let out1 = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: true,
+                limit: Some(50),
+                mark_read: true,
+                summary: true,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&out1)["data"].as_array().unwrap().len(), 1);
+
+    // The SAME reader, now asking unread_only:false: this must be answered
+    // as its own, independent first read — not "unchanged" leftovers from
+    // the unread_only:true cursor above.
+    let out2 = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(reader),
+            }),
+        )
+        .await
+        .unwrap();
+    let v2 = result_json(&out2);
+    assert_eq!(
+        v2["data"].as_array().unwrap().len(),
+        1,
+        "unread_only:false must still see the message — a separate cursor, not the true one's leftovers: {v2}"
+    );
+}
+
+/// `inbox` already has a consuming "only new" mechanism (`unread_only` +
+/// `mark_read`). `fresh_for` is a second, orthogonal, NON-consuming
+/// per-reader delta: a controller watching a worker's inbox must keep
+/// seeing messages the worker already marked read through its own pull.
+#[tokio::test]
+async fn inbox_fresh_for_is_a_per_reader_delta_not_consumed_by_another_readers_mark_read() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let worker_reader = s
+        .upsert_session("worker-reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let controller = s
+        .upsert_session("controller", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.insert_message(sender, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+
+    // target's own worker-side pull: default mark_read=true, the ordinary
+    // "list and consume" behaviour.
+    t.inbox(
+        Extension(Caller::master()),
+        Parameters(InboxParams {
+            session_id: target,
+            unread_only: false,
+            limit: Some(50),
+            mark_read: true,
+            summary: true,
+            fresh_for: Some(worker_reader),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // A controller watching the SAME inbox through its own, independent
+    // fresh_for cursor still sees the message: marking it read for one
+    // reader does not consume it for a different watcher.
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(controller),
+            }),
+        )
+        .await
+        .unwrap();
+    let v = result_json(&out);
+    assert_eq!(
+        v["data"].as_array().unwrap().len(),
+        1,
+        "a second, independent fresh_for reader still sees the message"
+    );
+}
+
+/// Fix round 2: the `limit >= 1` clamp for the `fresh_for` paging path had
+/// crept in front of the `fresh_for`-absent branch, so `limit: 0` returned
+/// one row instead of none, and a negative `limit` returned one row
+/// instead of every row (SQLite's own "no limit"). Either breaks the
+/// global constraint that `fresh_for` absent is byte-identical to
+/// pre-cycle behaviour.
+#[tokio::test]
+async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let sender = s
+        .upsert_session("sender", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    for i in 0..3 {
+        s.insert_session_event(target, "prompt_sent", Some(&i.to_string()))
+            .unwrap();
+        s.insert_message(sender, target, "hi", "chat", None)
+            .unwrap();
+    }
+    let t = test_tools(s);
+
+    let out = t
+        .session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(0),
+            fresh_for: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        0,
+        "session_history limit:0 without fresh_for must stay pre-cycle byte-identical (empty)"
+    );
+
+    let out = t
+        .session_history(Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(-1),
+            fresh_for: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        3,
+        "session_history negative limit without fresh_for must stay SQLite's own unlimited"
+    );
+
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(0),
+                mark_read: false,
+                summary: true,
+                fresh_for: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        0,
+        "inbox limit:0 without fresh_for must stay pre-cycle byte-identical (empty)"
+    );
+
+    let out = t
+        .inbox(
+            Extension(Caller::master()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(-1),
+                mark_read: false,
+                summary: true,
+                fresh_for: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&out).as_array().unwrap().len(),
+        3,
+        "inbox negative limit without fresh_for must stay SQLite's own unlimited"
+    );
+}
+
 /// The 64 % that is not drawn: the heaviest of these on the measured capture
 /// were `claude_session_id` (2 773 B over 56 rows) and `account_uuid`
 /// (2 160 B). Dropping them is also why a phone stops holding them at all.
@@ -3974,4 +5559,453 @@ async fn list_projects_has_sessions_keeps_only_projects_a_live_session_names() {
 
     let live = repos(t.list_projects(Parameters(params(true))).await.unwrap());
     assert_eq!(live, vec!["used".to_string()], "got {live:?}");
+}
+
+// ---- Task 7: repo_diff and list_sessions wired to fresh_for -----------------
+
+#[tokio::test]
+async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
+    let s = Store::open_in_memory().unwrap();
+    // `list_sessions` goes through the tool layer (real SSH client) and a
+    // fresh store defaults `hub.local_host` to true, so an unlucky gate
+    // (`reconcile_gate()` is a process-global singleton — see
+    // `list_sessions_fresh_for_is_unchanged_when_only_row_order_flips`)
+    // would fan a REAL reconcile out over whatever tmux/background-agent
+    // state happens to exist on the machine running this suite. Disabling
+    // `local_host` and using a fake, unreachable host keeps every assertion
+    // below about the rows this test itself seeded.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = || {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+
+    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let v1 = result_json(&first);
+    assert_eq!(
+        v1["unchanged"], false,
+        "a reader's first read is never unchanged: {v1}"
+    );
+    assert!(
+        v1["data"].is_array(),
+        "first read must carry the payload: {v1}"
+    );
+
+    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(
+        v2["unchanged"], true,
+        "an identical repeat read of an unchanged fleet must answer unchanged: {v2}"
+    );
+    assert!(v2["data"].is_null(), "unchanged carries no payload: {v2}");
+}
+
+#[tokio::test]
+async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
+    let s = Store::open_in_memory().unwrap();
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    let target = s
+        .upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = || {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+
+    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    assert_eq!(result_json(&first)["unchanged"], false);
+
+    // A status change on the target row, applied directly — the freshness
+    // window means the very next `list_sessions` call serves stored rows
+    // rather than re-probing and overwriting it.
+    t.store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET status = 'ghost' WHERE id = ?1",
+            rusqlite::params![target],
+        )
+        .unwrap();
+
+    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(
+        v2["unchanged"], false,
+        "a status change must never be reported unchanged: {v2}"
+    );
+    assert!(
+        v2["data"].is_array(),
+        "a changed read must carry the payload: {v2}"
+    );
+}
+
+/// Ruling 16 (reader-id reuse): `sessions.id` has no AUTOINCREMENT, so a
+/// killed-and-reaped reviewer's id goes to the NEXT session created. That
+/// new session's FIRST `list_sessions fresh_for` must carry the payload —
+/// it has never read anything — not inherit the dead reviewer's hash and
+/// answer `unchanged: true, data: null`. The replacement is seeded
+/// identically (same name, host and fields) so the fleet it sees hashes to
+/// exactly what the dead reader last saw: only the cursor can make the
+/// difference.
+#[tokio::test]
+async fn a_new_session_reusing_a_dead_readers_id_gets_a_full_first_list_sessions() {
+    let s = Store::open_in_memory().unwrap();
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reviewer = s
+        .upsert_session("reviewer", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = |reader: i64| {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+    let first = t.list_sessions(Parameters(params(reviewer))).await.unwrap();
+    assert_eq!(result_json(&first)["unchanged"], false);
+
+    // The reviewer is killed and reaped; a new one is spawned at once, well
+    // inside the GC sweep's interval.
+    let reborn = {
+        let store = t.store.lock().unwrap();
+        store.delete_session(reviewer).unwrap();
+        store
+            .upsert_session("reviewer", "hosta", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    assert_eq!(reborn, reviewer, "SQLite reuses the deleted highest id");
+    let inherited: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM read_cursors WHERE reader_session_id = ?1",
+            rusqlite::params![reborn],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    let v = result_json(&t.list_sessions(Parameters(params(reborn))).await.unwrap());
+    assert_eq!(
+        v["unchanged"], false,
+        "a new session's FIRST read is never unchanged: {v}"
+    );
+    assert!(
+        v["data"].is_array(),
+        "its first read carries the payload: {v}"
+    );
+    assert_eq!(
+        inherited, 0,
+        "the new session must not inherit the dead reader's cursor"
+    );
+}
+
+/// The same reader, asking with two different filter sets, must never share
+/// a cursor — the second filter's first call is a first read for THAT
+/// resource key, not a continuation of the first filter's cursor.
+#[tokio::test]
+async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
+    let s = Store::open_in_memory().unwrap();
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+
+    let filter_a: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
+            .unwrap();
+    let out_a1 = t.list_sessions(Parameters(filter_a)).await.unwrap();
+    assert_eq!(result_json(&out_a1)["unchanged"], false);
+
+    let filter_a_repeat: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
+            .unwrap();
+    let out_a2 = t.list_sessions(Parameters(filter_a_repeat)).await.unwrap();
+    assert_eq!(
+        result_json(&out_a2)["unchanged"],
+        true,
+        "same filter repeated must be unchanged"
+    );
+
+    // A different filter (no status) from the SAME reader: must be its own
+    // first read, never `unchanged` from filter_a's cursor.
+    let filter_b: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "fresh_for": reader })).unwrap();
+    let out_b1 = t.list_sessions(Parameters(filter_b)).await.unwrap();
+    assert_eq!(
+        result_json(&out_b1)["unchanged"],
+        false,
+        "a different filter set must never be answered from another filter's cursor"
+    );
+
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM read_cursors WHERE reader_session_id = ?1",
+            rusqlite::params![reader],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2, "two distinct filters keep two distinct cursor rows");
+}
+
+#[tokio::test]
+async fn list_sessions_with_an_unknown_fresh_for_answers_full_and_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let missing_reader = 999_999;
+    let p: ListSessionsParams =
+        serde_json::from_value(serde_json::json!({ "fresh_for": missing_reader })).unwrap();
+
+    // Make the assertion able to fail: the read itself must succeed even
+    // though the reader does not exist — a missing ReaderUnknown guard would
+    // otherwise visibly insert a row here rather than silently no-op.
+    let out = t.list_sessions(Parameters(p)).await.unwrap();
+    let v = result_json(&out);
+    assert_eq!(v["cursor_reset"], "reader_unknown");
+    assert_eq!(v["unchanged"], false);
+    assert!(
+        v["data"].is_array(),
+        "ReaderUnknown still returns the payload: {v}"
+    );
+
+    let n: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
+}
+
+// ---- repo_diff: smallest-seam coverage (no live SSH/tmux target in this
+// fixture — see the Task 7 report for exactly what this does and doesn't
+// exercise) --------------------------------------------------------------
+
+#[test]
+fn repo_diff_resource_key_is_a_session_and_path_pair() {
+    assert_eq!(
+        repo::repo_diff_resource_key(7, "src/lib.rs"),
+        "7:src/lib.rs"
+    );
+    assert_eq!(
+        repo::repo_diff_resource_key(7, "a"),
+        repo::repo_diff_resource_key(7, "a"),
+        "deterministic for the same inputs"
+    );
+    assert_ne!(
+        repo::repo_diff_resource_key(7, "a"),
+        repo::repo_diff_resource_key(8, "a"),
+        "different sessions never share a cursor"
+    );
+    assert_ne!(
+        repo::repo_diff_resource_key(7, "a"),
+        repo::repo_diff_resource_key(7, "b"),
+        "different paths never share a cursor"
+    );
+}
+
+/// Store-level proof of `repo_diff`'s cursor wiring — the same
+/// `put_snapshot_cursor`/`get_read_cursor` round trip the tool performs,
+/// keyed exactly as `repo_diff_resource_key` builds it, with `target =
+/// Some(session_id)` per the brief. This is the smallest seam this fixture
+/// can exercise without a live tmux pane for `repo_diff`'s own SSH-backed
+/// diff read.
+#[test]
+fn repo_diff_snapshot_cursor_round_trips_at_the_store_seam() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let reader = s
+        .upsert_session("reader", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let target = s
+        .upsert_session("target", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let key = repo::repo_diff_resource_key(target, "src/lib.rs");
+    let payload = serde_json::json!({ "path": "src/lib.rs", "diff": "+x", "binary": false, "truncated": false });
+    let hash = fresh::snapshot_hash(&serde_json::to_string(&payload).unwrap());
+
+    assert!(s
+        .get_read_cursor(reader, "repo_diff", &key)
+        .unwrap()
+        .is_none());
+    s.put_snapshot_cursor(reader, "repo_diff", &key, Some(target), &hash)
+        .unwrap();
+    let stored = s
+        .get_read_cursor(reader, "repo_diff", &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.content_hash.as_deref(), Some(hash.as_str()));
+    assert_eq!(
+        stored.watermark, None,
+        "a snapshot cursor carries no watermark"
+    );
+
+    let other_path_key = repo::repo_diff_resource_key(target, "src/other.rs");
+    assert!(
+        s.get_read_cursor(reader, "repo_diff", &other_path_key)
+            .unwrap()
+            .is_none(),
+        "a different path in the SAME session must not share the cursor just written"
+    );
+}
+
+// ---- Task 7 fix round 1: shared snapshot_decision, order-stable list_sessions
+
+/// The pure decision `repo_diff` and `list_sessions` both call, tested
+/// directly — the tested code is the executed code (fix round 1, finding 3).
+#[test]
+fn snapshot_decision_answers_unchanged_only_when_the_stored_hash_matches_the_canonical_bytes() {
+    let data = serde_json::json!({ "b": 1, "a": 2 });
+    let canonical = serde_json::to_string(&data).unwrap();
+    let hash = fresh::snapshot_hash(&canonical);
+
+    // No stored hash: first read for this reader, never unchanged.
+    let first = snapshot_decision(true, None, data.clone()).unwrap();
+    assert_eq!(first.envelope["unchanged"], false);
+    assert_eq!(first.envelope["data"], data);
+    assert_eq!(first.new_hash.as_deref(), Some(hash.as_str()));
+
+    // Stored hash matches the canonical bytes of the SAME data: unchanged,
+    // no payload, nothing new to write.
+    let repeat = snapshot_decision(true, Some(hash.as_str()), data.clone()).unwrap();
+    assert_eq!(repeat.envelope["unchanged"], true);
+    assert!(repeat.envelope["data"].is_null());
+    assert!(repeat.new_hash.is_none());
+
+    // Stored hash differs: changed, a new hash to persist.
+    let changed = snapshot_decision(true, Some("stale-hash"), data).unwrap();
+    assert_eq!(changed.envelope["unchanged"], false);
+    assert_eq!(changed.new_hash.as_deref(), Some(hash.as_str()));
+}
+
+#[test]
+fn snapshot_decision_treats_an_unknown_reader_as_reader_unknown_and_writes_no_hash() {
+    let data = serde_json::json!({ "x": 1 });
+    // Even a "stored" hash that WOULD match must not be trusted once the
+    // reader itself does not exist.
+    let hash = fresh::snapshot_hash(&serde_json::to_string(&data).unwrap());
+    let d = snapshot_decision(false, Some(hash.as_str()), data.clone()).unwrap();
+    assert_eq!(d.envelope["cursor_reset"], "reader_unknown");
+    assert_eq!(d.envelope["unchanged"], false);
+    assert_eq!(d.envelope["data"], data);
+    assert!(
+        d.new_hash.is_none(),
+        "an unknown reader must never get a hash to store"
+    );
+}
+
+/// Fix round 1, finding 2, pinned at its source: the hash must be over the
+/// CANONICAL serialization of `data` itself (sorted keys — this crate's
+/// `serde_json` has no `preserve_order`), not over some other serialization
+/// of an equivalent value built a different way.
+#[test]
+fn snapshot_decision_hashes_the_canonical_serialization_of_data_itself() {
+    let data = serde_json::json!({ "z": 1, "a": 2, "m": 3 });
+    let canonical = serde_json::to_string(&data).unwrap();
+    assert_eq!(
+        canonical, r#"{"a":2,"m":3,"z":1}"#,
+        "serde_json::Value serializes object keys in sorted order without preserve_order"
+    );
+    let expected_hash = fresh::snapshot_hash(&canonical);
+    let d = snapshot_decision(true, None, data).unwrap();
+    assert_eq!(d.new_hash.as_deref(), Some(expected_hash.as_str()));
+}
+
+/// Fix round 1, finding 1: `list_all_sessions` (store/sessions.rs) orders by
+/// `last_activity_at DESC` — the field the slim shape drops precisely
+/// because reconcile bumps it constantly. Two sessions trading activity
+/// swap that DESC order with no field the hash reads actually changing;
+/// without re-sorting by id first, `unchanged` would almost never fire on a
+/// busy fleet.
+#[tokio::test]
+async fn list_sessions_fresh_for_is_unchanged_when_only_row_order_flips() {
+    let s = Store::open_in_memory().unwrap();
+    // Keep reconcile from ever probing the REAL local machine's tmux — this
+    // test's `list_sessions` calls go through the tool layer (real SSH
+    // client), and a fresh store otherwise defaults `hub.local_host` to
+    // true, which would fan a real reconcile out over whatever background
+    // agents happen to be running on the box this suite executes on.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    // `a` starts with the higher last_activity_at, so the DESC query orders
+    // the first read [a, b].
+    let a = s
+        .upsert_session("a", "hosta", None, None, 1, 100, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("b", "hosta", None, None, 1, 50, "running", None)
+        .unwrap();
+    let reader = s
+        .upsert_session("reader", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let params = || {
+        let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+
+    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    assert_eq!(result_json(&first)["unchanged"], false);
+
+    // Only `last_activity_at` moves — no field the slim shape (or the hash)
+    // reads changes — but it reverses the DESC order to [b, a].
+    t.store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET last_activity_at = 200 WHERE id = ?1",
+            rusqlite::params![b],
+        )
+        .unwrap();
+    assert!(a != b, "sanity: two distinct rows");
+
+    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(
+        v2["unchanged"], true,
+        "a pure reorder from a field the slim shape drops must not invalidate the cursor: {v2}"
+    );
 }

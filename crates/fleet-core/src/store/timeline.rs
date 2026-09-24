@@ -123,6 +123,98 @@ impl Store {
         Ok(())
     }
 
+    /// Events for `session_id` strictly after `after_id`, OLDEST first by
+    /// id. The cursor path: paging oldest-first and advancing only to the
+    /// last id returned is what makes a `limit` unable to skip a row. By id,
+    /// never `at` — `at` is wall-clock and a clock step would reorder it.
+    pub fn session_events_after(
+        &self,
+        session_id: i64,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<SessionEvent>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, at, kind, detail, claude_session_id FROM session_events \
+             WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, after_id, limit], |row| {
+            Ok(SessionEvent {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                at: row.get(2)?,
+                kind: row.get(3)?,
+                detail: row.get(4)?,
+                claude_session_id: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn max_session_event_id(
+        &self,
+        session_id: i64,
+    ) -> Result<Option<i64>, crate::ipc_error::IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(id) FROM session_events WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The id of the latest conversation boundary for `session_id`. A
+    /// transcript cursor stores it: `turn_seq` keeps counting across a
+    /// /clear while the transcript FILE changes, so a moved generation means
+    /// the old conversation's unread tail is not in the file being read.
+    pub fn conversation_generation(
+        &self,
+        session_id: i64,
+    ) -> Result<Option<i64>, crate::ipc_error::IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(id) FROM session_events WHERE session_id = ?1 \
+             AND kind IN ('conversation_started','conversation_ended','compact_done')",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Inbox messages for `session_id` strictly after `after_id`, OLDEST
+    /// first by id. Resolved through the participant exactly as
+    /// [`Self::list_inbox`] is, for the same reason (a moved session's mail
+    /// follows the participant, not a raw `to_session_id`).
+    pub fn inbox_after(
+        &self,
+        session_id: i64,
+        after_id: i64,
+        unread_only: bool,
+        limit: i64,
+    ) -> Result<Vec<SessionMessage>, crate::ipc_error::IpcError> {
+        let unread = if unread_only {
+            " AND read_at IS NULL"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM session_messages \
+             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?1){unread} \
+             AND id > ?2 ORDER BY id ASC LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, after_id, limit],
+            map_message_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn max_inbox_id(&self, session_id: i64) -> Result<Option<i64>, crate::ipc_error::IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(id) FROM session_messages \
+             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?1)",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Return the newest-first event timeline for a session, capped at `limit`.
     /// Ordering is `at DESC, id DESC` so events inserted within the same second
     /// still come back in insertion order (newest first).
@@ -871,6 +963,110 @@ mod tests {
         assert!(
             !ev.iter().any(|e| e.kind == "message_undeliverable"),
             "mail that was actually delivered and read must never produce a false undeliverable notice: {ev:?}"
+        );
+    }
+
+    /// `insert_session_event` returns `Result<(), IpcError>`, not the
+    /// inserted row's id (the brief's draft test assumed the latter), so
+    /// these tests recover the ids with a direct id-ordered query instead.
+    fn event_ids(s: &Store, session_id: i64) -> Vec<i64> {
+        let mut stmt = s
+            .conn
+            .prepare("SELECT id FROM session_events WHERE session_id = ?1 ORDER BY id ASC")
+            .unwrap();
+        stmt.query_map(rusqlite::params![session_id], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn events_after_are_oldest_first_by_id_and_exclude_the_watermark() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        s.insert_session_event(a, "prompt_sent", Some("1")).unwrap();
+        s.insert_session_event(a, "prompt_sent", Some("2")).unwrap();
+        s.insert_session_event(a, "prompt_sent", Some("3")).unwrap();
+        let ids = event_ids(&s, a);
+        let (e1, e2, e3) = (ids[0], ids[1], ids[2]);
+        let got: Vec<i64> = s
+            .session_events_after(a, e1, 50)
+            .unwrap()
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            got,
+            vec![e2, e3],
+            "oldest-first, strictly after the watermark"
+        );
+        assert_eq!(s.max_session_event_id(a).unwrap(), Some(e3));
+    }
+
+    /// The paging rule the cursor depends on: with a limit, the OLDEST rows
+    /// after the watermark come back, so advancing to the largest id returned
+    /// can never step over one that was not returned.
+    #[test]
+    fn events_after_with_a_limit_return_the_oldest_rows_not_the_newest() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        for i in 0..5 {
+            s.insert_session_event(a, "prompt_sent", Some(&i.to_string()))
+                .unwrap();
+        }
+        let ids = event_ids(&s, a);
+        let got: Vec<i64> = s
+            .session_events_after(a, 0, 2)
+            .unwrap()
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(got, vec![ids[0], ids[1]]);
+    }
+
+    #[test]
+    fn inbox_after_resolves_by_participant_and_pages_oldest_first() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let m1 = s.insert_message(a, b, "one", "message", None).unwrap();
+        let m2 = s.insert_message(a, b, "two", "message", None).unwrap();
+        let m3 = s.insert_message(a, b, "three", "message", None).unwrap();
+        let got: Vec<i64> = s
+            .inbox_after(b, m1, false, 50)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(got, vec![m2, m3]);
+        assert_eq!(s.max_inbox_id(b).unwrap(), Some(m3));
+        assert!(
+            s.inbox_after(a, 0, false, 50).unwrap().is_empty(),
+            "the sender's inbox is empty"
+        );
+    }
+
+    #[test]
+    fn the_generation_moves_only_on_a_conversation_boundary() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        assert_eq!(s.conversation_generation(a).unwrap(), None);
+        s.insert_session_event(a, "conversation_started", None)
+            .unwrap();
+        let g1 = *event_ids(&s, a).last().unwrap();
+        s.insert_session_event(a, "prompt_sent", None).unwrap();
+        s.insert_session_event(a, "turn_done", None).unwrap();
+        assert_eq!(
+            s.conversation_generation(a).unwrap(),
+            Some(g1),
+            "ordinary events do not move it"
+        );
+        s.insert_session_event(a, "compact_done", None).unwrap();
+        let g2 = *event_ids(&s, a).last().unwrap();
+        assert_eq!(
+            s.conversation_generation(a).unwrap(),
+            Some(g2),
+            "a compaction does"
         );
     }
 }

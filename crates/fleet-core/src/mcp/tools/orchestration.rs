@@ -50,7 +50,9 @@ impl FleetTools {
         (use send_prompt's turn_seq_before). max_chars caps the text \
         (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE \
         (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). \
-        Read-only; prefer it over capture_session for the reply text.")]
+        Read-only; prefer it over capture_session for the reply text. fresh_for \
+        returns only what is new since your last read. unchanged costs no \
+        transcript read.")]
     pub(super) async fn session_transcript(
         &self,
         Extension(caller): Extension<Caller>,
@@ -59,19 +61,161 @@ impl FleetTools {
         audit(
             "session_transcript",
             &format!(
-                "session_id={} since_turn={:?} max_chars={:?}",
-                p.session_id, p.since_turn, p.max_chars
+                "session_id={} since_turn={:?} max_chars={:?} fresh_for={:?}",
+                p.session_id, p.since_turn, p.max_chars, p.fresh_for
             ),
         );
         let row =
             self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
-        let text = self.transcript_for(&row, p.since_turn, p.max_chars).await?;
-        if text.trim().is_empty() {
-            return Ok(CallToolResult::success(vec![text_content(
-                "(no assistant text in the requested turns)",
-            )]));
+
+        // fresh_for absent: today's default, byte-identical, no cursor
+        // touched — this branch must stay a straight pass-through.
+        let Some(reader) = p.fresh_for else {
+            let text = self.transcript_for(&row, p.since_turn, p.max_chars).await?;
+            if text.trim().is_empty() {
+                return Ok(CallToolResult::success(vec![text_content(
+                    "(no assistant text in the requested turns)",
+                )]));
+            }
+            return Ok(CallToolResult::success(vec![text_content(text)]));
+        };
+
+        // Scope 1: everything that needs the store, resolved BEFORE the
+        // (async, SSH-backed) transcript read — never held across an await,
+        // never re-entered once released (ruling: this codebase shipped a
+        // real deadlock doing that).
+        let resource_key = row.id.to_string();
+        let (decision, generation, stored_anchor, stored_watermark) = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let reader_exists = s
+                .get_session_by_id(reader)
+                .map_err(|e| to_mcp_err(e.into()))?
+                .is_some();
+            let stored = s
+                .get_read_cursor(reader, "session_transcript", &resource_key)
+                .map_err(to_mcp_err)?;
+            let generation = s.conversation_generation(row.id).map_err(to_mcp_err)?;
+            let decision = stream_decision(
+                reader_exists,
+                stored.as_ref(),
+                Some(row.turn_seq),
+                generation,
+            );
+            let stored_anchor = stored.as_ref().and_then(|c| c.anchor.clone());
+            let stored_watermark = stored.as_ref().and_then(|c| c.watermark);
+            (decision, generation, stored_anchor, stored_watermark)
+        };
+
+        // `unchanged` means precisely: NO COMPLETED TURN since this reader's
+        // last read. It is keyed on `turn_seq` (+ generation), and only a
+        // Stop hook moves `turn_seq` — so an interrupted turn or a slash
+        // command, which adds to the transcript file with no Stop behind
+        // it, can be answered "unchanged" here while the session sits idle.
+        // Nothing is lost: the anchor has not moved, so that content is
+        // served with the next completed turn. Deliberately not a second
+        // watermark (Ruling 18); documented in docs/control-api.md.
+        if matches!(decision, fresh::StreamStart::Unchanged) {
+            return Ok(CallToolResult::success(vec![text_content(format!(
+                "(unchanged since your last read at turn {})",
+                row.turn_seq
+            ))]));
         }
-        Ok(CallToolResult::success(vec![text_content(text)]))
+
+        // `turn_seq` (+ generation) only says something changed; it is not
+        // a position in the transcript FILE (an in-progress turn, an
+        // interrupt, a slash command or a queued prompt each add a file
+        // turn with no Stop behind it — see `TranscriptAnchor`'s doc). The
+        // stored ANCHOR is the position. An `After` decision with no
+        // anchor on record — never written, or unparseable — cannot be
+        // positioned either, so it is answered full (`too_far_behind`)
+        // instead of guessing which file turns are actually new.
+        let anchor: Option<transcript::TranscriptAnchor> = stored_anchor
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok());
+        let positioned_after = matches!(decision, fresh::StreamStart::After(_));
+        let anchor_missing_for_after = positioned_after && anchor.is_none();
+        let anchor_for_read = if positioned_after {
+            anchor.as_ref()
+        } else {
+            None
+        };
+
+        let max_chars = p
+            .max_chars
+            .unwrap_or(transcript::DEFAULT_MAX_CHARS)
+            .clamp(1, transcript::MAX_MAX_CHARS);
+        // Today's default window (last turn) — only used when there is no
+        // anchor to position from (a first `Full` read, or the
+        // `too_far_behind` fallback below).
+        let args = transcript::resolve_args(&self.store, &row, 1, max_chars).map_err(to_mcp_err)?;
+        let delta = transcript::fetch_transcript_after(args, anchor_for_read, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+
+        let decision_reason = match decision {
+            fresh::StreamStart::Full(r) => r,
+            _ => None,
+        };
+        let reason = if delta.too_far_behind || anchor_missing_for_after {
+            Some(fresh::ResetReason::TooFarBehind)
+        } else {
+            decision_reason
+        };
+
+        // Scope 2: written only now that the read has succeeded, never for
+        // a reader that does not exist — there is no one to remember a
+        // cursor for. The generation is stored on every write here
+        // (including this reset path), so the next read can detect a
+        // boundary. When this read served nothing new (`delta.anchor` is
+        // `None`), the PREVIOUS anchor is kept rather than cleared, so the
+        // next read can still position from where the last one actually
+        // left off.
+        //
+        // The watermark only advances to the CURRENT `row.turn_seq` when
+        // this page was not itself truncated by `max_chars` (`!more`):
+        // `turn_seq` is the cheap "anything changed" signal the Unchanged
+        // fast path trusts, and while a multi-page catch-up is still in
+        // progress the reader has NOT seen everything as of `turn_seq` yet
+        // — advancing it early would make the next call answer Unchanged
+        // (turn_seq already matches the head) despite pages still pending,
+        // silently ending the catch-up. `fetch_transcript_after` never sets
+        // `more` on the default-window (`Full`) path (it only ever serves
+        // one turn), so this only holds an After read back, and only for
+        // as many calls as the reader's own `max_chars` forces.
+        if reason != Some(fresh::ResetReason::ReaderUnknown) {
+            let anchor_to_store = match &delta.anchor {
+                Some(a) => Some(serde_json::to_string(a).map_err(|e| {
+                    McpError::internal_error(format!("serialize anchor: {e}"), None)
+                })?),
+                None => stored_anchor,
+            };
+            let watermark_to_store = if delta.more {
+                stored_watermark.unwrap_or(row.turn_seq)
+            } else {
+                row.turn_seq
+            };
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.put_stream_cursor(
+                reader,
+                "session_transcript",
+                &resource_key,
+                Some(row.id),
+                watermark_to_store,
+                generation,
+                anchor_to_store.as_deref(),
+            )
+            .map_err(to_mcp_err)?;
+        }
+
+        let body = if delta.text.trim().is_empty() {
+            "(no assistant text in the requested turns)".to_string()
+        } else {
+            delta.text
+        };
+        let body = format_transcript_more(body, delta.more);
+        Ok(CallToolResult::success(vec![text_content(
+            format_transcript_full(body, reason),
+        )]))
     }
 
     #[tool(
