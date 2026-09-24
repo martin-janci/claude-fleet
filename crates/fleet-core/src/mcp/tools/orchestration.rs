@@ -572,37 +572,29 @@ impl FleetTools {
                 args.action, args.session_id, args.key, args.link_id, args.host_alias
             ),
         );
+        // The one scope every action below runs under (work graph M5):
+        // `All` for the master and clients, the host's org boundary for a
+        // per-host token. The service functions filter with it.
+        let scope = self.org_scope(&caller)?;
         match args.parsed_action().map_err(to_mcp_err)? {
             WorkAction::Links => {
                 if let Some(id) = args.session_id {
                     self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
                 }
-                let mut links = w::work(&args, &self.store).map_err(to_mcp_err)?;
-                // Past work of other hosts is not a per-host token's to read.
-                if let Some(h) = &caller.host_alias {
-                    links.retain(|l| l.ended_at.is_none() || l.snap_host.as_deref() == Some(h));
-                }
-                ok_json_compact(&links)
+                ok_json_compact(&w::work(&args, &self.store, &scope).map_err(to_mcp_err)?)
             }
-            WorkAction::Context => {
-                self.require_key_on_callers_host(&caller, args.key.as_deref())?;
-                let ctx = w::work_context(&args, &self.store, &self.ssh)
+            WorkAction::Context => ok_json(
+                &w::work_context(&args, &self.store, &self.ssh, &scope)
                     .await
-                    .map_err(to_mcp_err)?;
-                ok_json(&ctx)
-            }
-            WorkAction::ResumePlan => {
-                self.require_key_on_callers_host(&caller, args.key.as_deref())?;
-                let plan = w::work_resume_plan(&args, &self.store, &self.ssh)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::ResumePlan => ok_json_compact(
+                &w::work_resume_plan(&args, &self.store, &self.ssh, &scope)
                     .await
-                    .map_err(to_mcp_err)?;
-                ok_json_compact(&plan)
-            }
+                    .map_err(to_mcp_err)?,
+            ),
             WorkAction::PurgeImpact => {
-                for h in args.host_aliases.iter().flatten() {
-                    require_host(&caller, h, "the purge")?;
-                }
-                ok_json(&w::work_purge_impact(&args, &self.store).map_err(to_mcp_err)?)
+                ok_json(&w::work_purge_impact(&args, &self.store, &scope).map_err(to_mcp_err)?)
             }
             WorkAction::Tickets => {
                 let rows = crate::service::trackers::tickets::tickets(
@@ -611,7 +603,7 @@ impl FleetTools {
                     args.view.as_deref(),
                     args.query.as_deref(),
                     args.limit,
-                    tracker_scope(&caller),
+                    &scope,
                 )
                 .map_err(to_mcp_err)?;
                 ok_json_compact(&rows)
@@ -621,7 +613,7 @@ impl FleetTools {
                 let t = crate::service::trackers::tickets::lookup(
                     &self.store,
                     reference,
-                    tracker_scope(&caller),
+                    &scope,
                     crate::service::trackers::direct_transport(),
                 )
                 .await
@@ -629,20 +621,17 @@ impl FleetTools {
                 ok_json(&t)
             }
             WorkAction::Trackers => ok_json_compact(
-                &crate::service::trackers::tickets::trackers(&self.store, tracker_scope(&caller))
+                &crate::service::trackers::tickets::trackers(&self.store, &scope)
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::Scopes => ok_json_compact(
-                &crate::service::orgs::scopes(&self.store, &self.org_scope(&caller)?)
-                    .map_err(to_mcp_err)?,
+                &crate::service::orgs::scopes(&self.store, &scope).map_err(to_mcp_err)?,
             ),
             WorkAction::OrgSuggestions => ok_json_compact(
-                &crate::service::orgs::org_suggestions(&self.store, &self.org_scope(&caller)?)
-                    .map_err(to_mcp_err)?,
+                &crate::service::orgs::org_suggestions(&self.store, &scope).map_err(to_mcp_err)?,
             ),
             WorkAction::Orgs => ok_json_compact(
-                &crate::service::orgs::org_details(&self.store, &self.org_scope(&caller)?)
-                    .map_err(to_mcp_err)?,
+                &crate::service::orgs::org_details(&self.store, &scope).map_err(to_mcp_err)?,
             ),
         }
     }
@@ -672,27 +661,31 @@ impl FleetTools {
                 args.host_alias
             ),
         );
+        if !crate::service::work::WORK_LINK_ACTIONS.contains(&args.action.as_str()) {
+            return Err(mcp_err(
+                "E_INVALID",
+                format!(
+                    "unknown work_link action {:?}; one of {}",
+                    args.action,
+                    crate::service::work::WORK_LINK_ACTIONS.join(", ")
+                ),
+                None,
+            ));
+        }
+        let scope = self.org_scope(&caller)?;
         if args.action == "resume" {
+            // The host fence (a per-host token resumes only onto its own
+            // host) and the org fence are inside `resume_work`'s scope.
             let ra = crate::service::work::resume_args(&args).map_err(to_mcp_err)?;
-            // A per-host token resumes only onto its own host.
-            if caller.host_alias.is_some() {
-                let plan = {
-                    let s = lock(&self.store).map_err(to_mcp_err)?;
-                    crate::service::work::resume::plan_resume(
-                        &s,
-                        &ra.key,
-                        ra.link_id,
-                        ra.host_alias.as_deref(),
-                    )
-                    .map_err(to_mcp_err)?
-                };
-                let host = plan.host_alias.as_deref().unwrap_or("an unknown host");
-                require_host(&caller, host, "the resumed session")?;
-            }
-            let row =
-                crate::service::work::resume::resume_work(&self.store, &self.ssh, &self.reg, &ra)
-                    .await
-                    .map_err(to_mcp_err)?;
+            let row = crate::service::work::resume::resume_work(
+                &self.store,
+                &self.ssh,
+                &self.reg,
+                &ra,
+                &scope,
+            )
+            .await
+            .map_err(to_mcp_err)?;
             return ok_json(&row);
         }
         if args.action == "trust_project" {
@@ -716,7 +709,7 @@ impl FleetTools {
                 &self.ssh,
                 &self.reg,
                 &crate::service::work::start_args(&args),
-                tracker_scope(&caller),
+                &scope,
                 crate::service::trackers::direct_transport(),
             )
             .await
@@ -731,7 +724,8 @@ impl FleetTools {
             )
         })?;
         self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
-        let row = crate::service::work::work_link(&args, &self.store).map_err(to_mcp_err)?;
+        let row =
+            crate::service::work::work_link(&args, &self.store, &scope).map_err(to_mcp_err)?;
         ok_json(&row)
     }
 
@@ -782,43 +776,5 @@ impl FleetTools {
     ) -> Result<crate::service::orgs::OrgScope, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         caller.org_scope(&s).map_err(to_mcp_err)
-    }
-
-    /// A per-host token reads a key's context or resume plan only when some
-    /// of that work ran on its own host.
-    fn require_key_on_callers_host(
-        &self,
-        caller: &Caller,
-        key: Option<&str>,
-    ) -> Result<(), McpError> {
-        let Some(h) = caller.host_alias.as_deref() else {
-            return Ok(());
-        };
-        let Some(key) = key else {
-            return Ok(());
-        };
-        let s = lock(&self.store).map_err(to_mcp_err)?;
-        let live = s.live_work_sessions_for_key(key).map_err(to_mcp_err)?;
-        let ended = s.ended_work_links_for_key(key).map_err(to_mcp_err)?;
-        let touches = live.iter().any(|(_, r)| r.host_alias == h)
-            || ended.iter().any(|l| l.snap_host.as_deref() == Some(h));
-        if touches {
-            Ok(())
-        } else {
-            Err(mcp_err(
-                "E_FORBIDDEN",
-                format!("no work on {key} ran on host {h}; this token is bound to {h}"),
-                None,
-            ))
-        }
-    }
-}
-
-/// Which tickets a caller may see (work graph M3.4, the plan's decision 6):
-/// a per-host token only its own host's linked items, everyone else all.
-fn tracker_scope(caller: &Caller) -> crate::service::trackers::tickets::Scope<'_> {
-    match caller.host_alias.as_deref() {
-        Some(h) => crate::service::trackers::tickets::Scope::Host(h),
-        None => crate::service::trackers::tickets::Scope::All,
     }
 }

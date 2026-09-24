@@ -250,6 +250,31 @@ const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[(
 
 /// The other half of the tool check in [`check`]: a wrong tool must not be
 /// able to hide by having no case at all.
+/// Work graph M5: every Routed work command is one fleet-core's isolation
+/// matrix knows (`ROUTED_WORK_COMMANDS`, whose actions the matrix runs for
+/// every caller), and the list names nothing this table does not route.
+#[test]
+fn every_routed_work_command_is_in_the_isolation_matrix() {
+    let table: BTreeSet<(&str, &str)> = VERDICTS
+        .iter()
+        .filter_map(|(cmd, v)| match v {
+            Verdict::Routed { tool } if matches!(*tool, "work" | "work_link" | "work_admin") => {
+                Some((*cmd, *tool))
+            }
+            _ => None,
+        })
+        .collect();
+    let listed: BTreeSet<(&str, &str)> = fleet_core::service::work::ROUTED_WORK_COMMANDS
+        .iter()
+        .map(|(cmd, tool, _)| (*cmd, *tool))
+        .collect();
+    assert_eq!(
+        table, listed,
+        "a Routed work command without an isolation-matrix entry (or a stale entry): add it \
+         to fleet_core::service::work::ROUTED_WORK_COMMANDS"
+    );
+}
+
 #[test]
 fn every_routed_row_is_driven_by_a_case() {
     let driven: BTreeSet<&str> = routed_read_cases()
@@ -975,6 +1000,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         session_id: 7,
                         key: Some("ABC-1".into()),
                         item_id: None,
+                        force_cross_org: false,
                     },
                     s,
                 ))
@@ -1023,6 +1049,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         link_id: Some(4),
                         host_alias: None,
                         brief: Some("edited".into()),
+                        force_cross_org: false,
                     },
                     s,
                     &ssh(),
@@ -1081,6 +1108,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                     commands::work::ConfirmSessionWorkArgs {
                         session_id: 7,
                         link_id: 5,
+                        force_cross_org: false,
                     },
                     s,
                 ))
@@ -1773,6 +1801,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 session_id: 99,
                 key: Some("ABC-1".into()),
                 item_id: None,
+                force_cross_org: false,
             },
             &st,
         )),

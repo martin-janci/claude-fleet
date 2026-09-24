@@ -16,9 +16,33 @@ pub fn related_sessions(
     args: RelatedSessionsArgs,
     store: &Mutex<Store>,
 ) -> Result<Vec<SessionRow>, IpcError> {
+    related_sessions_scoped(args, store, &crate::service::orgs::OrgScope::All)
+}
+
+/// [`related_sessions`] under an org scope (work graph M5, D7): sessions of
+/// an org isolated from the caller's host are left out, and an anchor that
+/// is one of them reads as missing.
+pub fn related_sessions_scoped(
+    args: RelatedSessionsArgs,
+    store: &Mutex<Store>,
+    scope: &crate::service::orgs::OrgScope,
+) -> Result<Vec<SessionRow>, IpcError> {
     let s = lock(store)?;
-    s.list_related_sessions(args.session_id)
-        .map_err(IpcError::from)
+    if !scope.is_all() {
+        let anchor = s.get_session_by_id(args.session_id)?;
+        if anchor.as_ref().is_some_and(|r| !scope.sees_row(r)) {
+            // Exactly what a missing anchor answers.
+            return Err(IpcError::from(rusqlite::Error::QueryReturnedNoRows));
+        }
+    }
+    let mut rows = s
+        .list_related_sessions(args.session_id)
+        .map_err(IpcError::from)?;
+    rows.retain(|r| scope.sees_row(r));
+    for r in rows.iter_mut() {
+        scope.redact_row(r);
+    }
+    Ok(rows)
 }
 
 /// Session addressing for the control API (MCP-6). Every name-addressed
@@ -64,11 +88,22 @@ pub fn resolve_session_target(
 /// `(session_id, host_alias)` in `details` so the caller can retry with
 /// `session_id`.
 pub fn find_session_by_tmux_name(s: &Store, tmux_name: &str) -> Result<SessionRow, IpcError> {
+    find_session_by_tmux_name_scoped(s, tmux_name, &crate::service::orgs::OrgScope::All)
+}
+
+/// [`find_session_by_tmux_name`] among the sessions `scope` may see (work
+/// graph M5, D7): an isolated org's same-named session neither matches nor
+/// shows up among the ambiguity's candidates.
+pub fn find_session_by_tmux_name_scoped(
+    s: &Store,
+    tmux_name: &str,
+    scope: &crate::service::orgs::OrgScope,
+) -> Result<SessionRow, IpcError> {
     crate::validate::tmux_name_lookup(tmux_name)?;
     let all: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
-        .filter(|r| r.tmux_name == tmux_name)
+        .filter(|r| r.tmux_name == tmux_name && scope.sees_row(r))
         .collect();
     // A ghost left behind on another host must not make a live session
     // ambiguous: prefer running rows, fall back to everything.

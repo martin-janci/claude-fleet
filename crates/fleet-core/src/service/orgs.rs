@@ -28,6 +28,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
+/// Bumped by every org administration change. A long-lived reader of a
+/// scope (an `/events` stream) compares it on each frame and re-reads its
+/// scope when it moved, so a host moved to another org is fenced from the
+/// very next frame, not the next keep-alive beat.
+static ORG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// See [`ORG_GENERATION`].
+pub fn org_generation() -> u64 {
+    ORG_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Who is asking, for every work read and write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrgScope {
@@ -107,11 +118,14 @@ impl OrgScope {
 
     /// Take out of a session row the work data this scope may not read: all
     /// of it for a session outside the scope's orgs, else a link (primary or
-    /// suggestion) whose own org is outside.
+    /// suggestion) whose own org is outside. `work_rejected` — bare keys
+    /// with no org of their own, which only the sidebar's fallback
+    /// recognition reads — never reaches a per-host token.
     pub fn redact_row(&self, row: &mut SessionRow) {
         if self.is_all() {
             return;
         }
+        row.work_rejected.clear();
         if !self.sees_org(row.org_id) {
             row.work = None;
             row.work_suggested = None;
@@ -153,6 +167,7 @@ impl OrgScope {
                 let is_row = map.contains_key("tmux_name")
                     && WORK_FIELDS.iter().any(|k| map.contains_key(*k));
                 if is_row {
+                    map.remove("work_rejected");
                     let org = session_org(map);
                     if !self.sees_org(org) {
                         for k in WORK_FIELDS {
@@ -200,6 +215,84 @@ pub fn not_visible_key(host: &str, key: &str) -> IpcError {
              own host's sessions do, within the host's organisation"
         ),
     )
+}
+
+/// The data-integrity rule (plan §M5.3, for every caller, master too): a
+/// link between a session of one org and work of another is refused unless
+/// `force_cross_org` — it stops Company B's ticket from being attached to a
+/// Company A session by mistake. Unassigned on either side is never a
+/// conflict.
+pub fn check_cross_org(
+    work_org: Option<i64>,
+    session_org: Option<i64>,
+    what: &str,
+    force: bool,
+) -> Result<(), IpcError> {
+    match (work_org, session_org) {
+        (Some(w), Some(sess)) if w != sess && !force => Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "{what} belongs to organisation {w} and the session to organisation {sess}; \
+                 fleet does not link work across organisations by mistake — pass \
+                 force_cross_org: true if this is meant"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "work_org_id": w, "session_org_id": sess, "cross_org": true
+        }))),
+        _ => Ok(()),
+    }
+}
+
+/// Resolve the links' orgs and keep what the scope may read: for a per-host
+/// token, links inside its orgs, and ended (past) links only of its own
+/// host's sessions (M2's fence, kept: the org alone is wider).
+pub fn scope_links(
+    s: &Store,
+    scope: &OrgScope,
+    links: &mut Vec<WorkLinkRow>,
+) -> Result<(), IpcError> {
+    s.fill_link_orgs(links)?;
+    if let Some(h) = scope.host() {
+        links.retain(|l| {
+            scope.sees_link(l) && (l.ended_at.is_none() || l.snap_host.as_deref() == Some(h))
+        });
+    }
+    Ok(())
+}
+
+/// May a per-host token read work `key` (its context, resume plan, or
+/// resume it)? When the key's item is inside its orgs, and some of the
+/// work — a live link on a session of its host, or a past one whose session
+/// ran there — is visible to it. One refusal whether the key exists or not.
+pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcError> {
+    let Some(h) = scope.host() else {
+        return Ok(());
+    };
+    let key = crate::store::normalize_work_ref(key)?;
+    let refuse = || Err(not_visible_key(h, &key));
+    if let Some(item) = s.work_item_by_key(&key)? {
+        if !scope.sees_org(s.item_org(item.id)?) {
+            return refuse();
+        }
+    }
+    let mut live: Vec<WorkLinkRow> = s
+        .live_work_sessions_for_key(&key)?
+        .into_iter()
+        .filter(|(_, r)| r.host_alias == h)
+        .map(|(l, _)| l)
+        .collect();
+    s.fill_link_orgs(&mut live)?;
+    if live.iter().any(|l| scope.sees_link(l)) {
+        return Ok(());
+    }
+    let mut ended = s.ended_work_links_for_key(&key)?;
+    scope_links(s, scope, &mut ended)?;
+    if ended.is_empty() {
+        refuse()
+    } else {
+        Ok(())
+    }
 }
 
 /// One entry of `work { action: scopes }`: a named org, or — zero-config —
@@ -442,6 +535,9 @@ pub fn admin(
             to_json(&s.require_tracker(id)?)?
         }
     };
+    // Before the announcement: a stream that reads the moved rows must
+    // already see a new generation and re-read its scope.
+    ORG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     s.announce_org_moves(&before)?;
     Ok(out)
 }

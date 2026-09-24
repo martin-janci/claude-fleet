@@ -606,6 +606,47 @@ impl Store {
         self.snapshot_org(l)
     }
 
+    /// The org a work target belongs to: an item's (its tracker's); a key's
+    /// through the item it resolves to (`resolve_work_key`), else none.
+    pub fn work_target_org(&self, target: super::WorkTarget<'_>) -> Result<Option<i64>, IpcError> {
+        let item = match target {
+            super::WorkTarget::Item(id) => Some(id),
+            super::WorkTarget::Key(raw) => {
+                self.resolve_work_key(&super::normalize_work_ref(raw)?)?.0
+            }
+            super::WorkTarget::Ref(_) => None,
+        };
+        Ok(item.map(|i| self.item_org(i)).transpose()?.flatten())
+    }
+
+    /// The org a session would have if created now on `host` in
+    /// `project_id` (no worktree yet: the project's path).
+    pub fn org_for_new_session(
+        &self,
+        host: &str,
+        project_id: i64,
+    ) -> Result<Option<i64>, IpcError> {
+        let project: Option<(String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT owner, repo, base_path FROM projects WHERE id = ?1",
+                rusqlite::params![project_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let facts = SessionOrgFacts {
+            host_alias: host,
+            owner: project.as_ref().map(|p| p.0.as_str()),
+            repo: project.as_ref().map(|p| p.1.as_str()),
+            path: project.as_ref().map(|p| p.2.as_str()),
+        };
+        Ok(org_of_session(
+            &facts,
+            &self.list_org_rules()?,
+            self.host_org(host)?,
+        ))
+    }
+
     /// Every session's org, by id (the snapshot `announce_org_moves` diffs).
     pub fn session_orgs(&self) -> Result<std::collections::HashMap<i64, Option<i64>>, IpcError> {
         let mut stmt = self.conn.prepare(concat!(

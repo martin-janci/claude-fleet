@@ -300,6 +300,7 @@ fn select_targets_filters_combined() {
         host: Some("mac".into()),
         project_id: Some(10),
         status: Some("running".into()),
+        scope: None,
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![2]);
 }

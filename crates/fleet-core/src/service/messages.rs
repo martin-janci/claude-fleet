@@ -112,6 +112,18 @@ pub async fn send_message(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<SendMessageResult, IpcError> {
+    send_message_scoped(args, store, ssh, &crate::service::orgs::OrgScope::All).await
+}
+
+/// [`send_message`] under an org scope (work graph M5, decision D7): a
+/// recipient in an org that isolates its sessions from the sender's host
+/// answers exactly as a recipient that does not exist.
+pub async fn send_message_scoped(
+    args: SendMessageArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    scope: &crate::service::orgs::OrgScope,
+) -> Result<SendMessageResult, IpcError> {
     if args.body.is_empty() {
         return Err(IpcError::new(
             codes::E_VALIDATE,
@@ -122,7 +134,46 @@ pub async fn send_message(
     // session addressing ITSELF by `to_addr` must not sail past
     // `E_SELF_TARGET` just because `args.to_session_id` (unused in the
     // address case) happens to be 0.
+    // An address naming a session isolated from the caller answers as an
+    // unknown one — checked BEFORE the address is resolved, whose own
+    // "retired" answer would otherwise tell the two apart.
+    if !scope.is_all() {
+        if let Some(Ok(crate::service::address::Addr::Session { host, name, .. })) =
+            args.to_addr.as_deref().map(crate::service::address::parse)
+        {
+            let s = lock(store)?;
+            if let Some(row) = s.get_session(&name, &host)? {
+                if !scope.sees_row(&row) {
+                    return Err(IpcError::new(
+                        codes::E_PARTICIPANT_UNKNOWN,
+                        format!("no session {name} on {host}"),
+                    ));
+                }
+            }
+        }
+    }
     let to_session_id = resolve_to_session_id(&args, store)?;
+    if !scope.is_all() {
+        let s = lock(store)?;
+        if let Some(to) = s.get_session_by_id(to_session_id)? {
+            if !scope.sees_row(&to) {
+                return Err(
+                    match args.to_addr.as_deref().map(crate::service::address::parse) {
+                        Some(Ok(crate::service::address::Addr::Session { host, name, .. })) => {
+                            IpcError::new(
+                                codes::E_PARTICIPANT_UNKNOWN,
+                                format!("no session {name} on {host}"),
+                            )
+                        }
+                        _ => IpcError::new(
+                            codes::E_NOTFOUND,
+                            format!("to session {to_session_id} not found"),
+                        ),
+                    },
+                );
+            }
+        }
+    }
     if args.from_session_id == to_session_id {
         return Err(IpcError::new(
             codes::E_SELF_TARGET,
@@ -452,14 +503,22 @@ pub struct PeerStatus {
     pub last_activity_at: i64,
 }
 
-pub fn peer_status(session_id: i64, store: &Mutex<Store>) -> Result<PeerStatus, IpcError> {
+pub fn peer_status(
+    session_id: i64,
+    store: &Mutex<Store>,
+    scope: &crate::service::orgs::OrgScope,
+) -> Result<PeerStatus, IpcError> {
     let s = lock(store)?;
-    let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
-        IpcError::new(
-            codes::E_NOTFOUND,
-            format!("session {} not found", session_id),
-        )
-    })?;
+    // An isolated org's session (D7) reads exactly as a missing one.
+    let row = s
+        .get_session_by_id(session_id)?
+        .filter(|r| scope.sees_row(r))
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {} not found", session_id),
+            )
+        })?;
     Ok(PeerStatus {
         session_id: row.id,
         host_alias: row.host_alias,
@@ -1159,11 +1218,16 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let a = seed(&s, "alpha");
         let store = Mutex::new(s);
-        let p = peer_status(a, &store).unwrap();
+        let p = peer_status(a, &store, &crate::service::orgs::OrgScope::All).unwrap();
         assert_eq!((p.session_id, p.tmux_name.as_str()), (a, "alpha"));
         assert_eq!(p.host_alias, "local");
         assert_eq!(p.status, "running");
-        assert_eq!(peer_status(4242, &store).unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(
+            peer_status(4242, &store, &crate::service::orgs::OrgScope::All)
+                .unwrap_err()
+                .code,
+            "E_NOTFOUND"
+        );
     }
 
     // ---- wait_for_reply ----

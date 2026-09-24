@@ -233,6 +233,11 @@ pub enum WorkTarget<'a> {
     Item(i64),
     /// A key or free-form work reference (normalised by [`normalize_work_ref`]).
     Key(&'a str),
+    /// A key linked as a bare reference, never resolved to an item (work
+    /// graph M5): what a per-host token gets when it names a key another
+    /// org's tracker owns — exactly what an unknown key gives it, so the
+    /// answer says nothing about the other org.
+    Ref(&'a str),
 }
 
 /// Normalise a work key / free-form work reference.
@@ -465,6 +470,7 @@ impl Store {
                 Ok((Some(id), None))
             }
             WorkTarget::Key(raw) => self.resolve_work_key(&normalize_work_ref(raw)?),
+            WorkTarget::Ref(raw) => Ok((None, Some(normalize_work_ref(raw)?))),
         }
     }
 

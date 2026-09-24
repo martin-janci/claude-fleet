@@ -512,3 +512,52 @@ fn existing_rows_land_unassigned_and_read_as_before() {
     s.fill_link_orgs(&mut ended).unwrap();
     assert_eq!(ended[0].org_id, None);
 }
+
+/// Work graph M5: a tracker never binds — nor fetches — a bare key for a
+/// session of another org; unassigned and same-org sessions bind as before.
+#[test]
+fn sync_never_binds_or_fetches_across_orgs() {
+    let s = Store::open_in_memory().unwrap();
+    for h in ["ha", "hb", "hn"] {
+        s.upsert_host(h).unwrap();
+    }
+    let a = s.add_org("A", None, false).unwrap();
+    let b = s.add_org("B", None, false).unwrap();
+    s.set_host_org("ha", Some(a.id)).unwrap();
+    s.set_host_org("hb", Some(b.id)).unwrap();
+    let t = s
+        .add_tracker("jira", "B Jira", "https://bravo.atlassian.net")
+        .unwrap();
+    s.set_tracker_org(t.id, Some(b.id)).unwrap();
+    s.set_tracker_probe(
+        t.id,
+        None,
+        &crate::store::TrackerConfig {
+            key_prefixes: vec!["BB".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let sess = |name: &str, host: &str, key: &str| {
+        let id = s
+            .upsert_session(name, host, None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(id, WorkTarget::Key(key), "manual")
+            .unwrap();
+        id
+    };
+    let on_a = sess("a", "ha", "BB-9");
+    let on_b = sess("b", "hb", "BB-8");
+    let on_n = sess("n", "hn", "BB-7");
+    let keys = s.unbound_ref_keys(t.id, 10).unwrap();
+    assert!(!keys.contains(&"BB-9".to_string()), "{keys:?}");
+    assert!(keys.contains(&"BB-8".to_string()) && keys.contains(&"BB-7".to_string()));
+    for (ext, key) in [("9", "BB-9"), ("8", "BB-8"), ("7", "BB-7")] {
+        crate::store::test_support::tracker_item(&s, t.id, ext, key, "t");
+    }
+    s.bind_tracker_refs(t.id).unwrap();
+    let item_of = |sid: i64| s.session_work_links(sid).unwrap()[0].item_id;
+    assert_eq!(item_of(on_a), None, "A's bare key stays bare");
+    assert!(item_of(on_b).is_some());
+    assert!(item_of(on_n).is_some(), "unassigned binds as before");
+}

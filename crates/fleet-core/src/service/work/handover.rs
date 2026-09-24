@@ -577,16 +577,55 @@ pub struct Gathered {
 /// Read `key`'s work from the store: the item, live and ended links, their
 /// conversations and journal. `target` overrides where the git probe looks
 /// (a resume knows); otherwise it is the newest session's worktree.
+///
+/// `reader` is whoever will READ the text (work graph M5): the caller of
+/// `work { context }`, or the host a resume lands on. Only the item, links
+/// and journal inside its orgs go in — another org's session that worked on
+/// the same key contributes nothing, not even a count.
 pub fn gather_stored(
     s: &Store,
     key: &str,
     target: Option<ProbeTarget>,
+    reader: &crate::service::orgs::OrgScope,
 ) -> Result<Gathered, IpcError> {
     let key = crate::store::normalize_work_ref(key)?;
-    let item = s.work_item_by_key(&key)?;
-    let live = s.live_work_sessions_for_key(&key)?;
-    let ended: Vec<WorkLinkRow> = s.ended_work_links_for_key(&key)?;
-    let journal = s.journal_for_key(&key)?;
+    let item = match s.work_item_by_key(&key)? {
+        Some(i) if reader.sees_org(s.item_org(i.id)?) => Some(i),
+        _ => None,
+    };
+    let mut live = s.live_work_sessions_for_key(&key)?;
+    let mut ended: Vec<WorkLinkRow> = s.ended_work_links_for_key(&key)?;
+    let mut journal = s.journal_for_key(&key)?;
+    if !reader.is_all() {
+        for (l, _) in live.iter_mut() {
+            l.org_id = s.link_org(l)?;
+        }
+        live.retain(|(l, _)| reader.sees_link(l));
+        s.fill_link_orgs(&mut ended)?;
+        ended.retain(|l| reader.sees_link(l));
+        // Journal rows follow the conversations of the links kept.
+        let mut convs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (l, row) in &live {
+            convs.extend(l.claude_session_id.clone());
+            for c in s.list_conversations(row.id, 200)? {
+                convs.insert(c.claude_session_id);
+            }
+        }
+        for l in &ended {
+            convs.extend(l.claude_session_id.clone());
+            let ids: Vec<String> = l
+                .snap_claude_ids
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default();
+            convs.extend(ids);
+        }
+        journal.retain(|j| {
+            j.claude_session_id
+                .as_deref()
+                .is_some_and(|c| convs.contains(c))
+        });
+    }
 
     let mut input = HandoverInput {
         key: key.clone(),
@@ -757,10 +796,11 @@ pub async fn gather_handover(
     exec: &dyn SshExec,
     key: &str,
     target: Option<ProbeTarget>,
+    reader: &crate::service::orgs::OrgScope,
 ) -> Result<HandoverInput, IpcError> {
     let Gathered { mut input, target } = {
         let s = lock(store)?;
-        gather_stored(&s, key, target)?
+        gather_stored(&s, key, target, reader)?
     };
     if let Some(t) = target {
         match probe(exec, &t).await {
@@ -971,7 +1011,7 @@ Verify the git state before acting; this summary may be stale. Full context: the
             .unwrap();
         s.delete_session(old).unwrap();
 
-        let g = gather_stored(&s, "abc-1", None).unwrap();
+        let g = gather_stored(&s, "abc-1", None, &crate::service::orgs::OrgScope::All).unwrap();
         let i = &g.input;
         assert_eq!(i.key, "ABC-1");
         assert_eq!(i.title.as_deref(), Some("Fix login"));

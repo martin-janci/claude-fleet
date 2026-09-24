@@ -95,7 +95,7 @@ fn a_row_loses_the_work_its_reader_may_not_see() {
     let mut r = row(Some(1), Some(2));
     a.redact_row(&mut r);
     assert!(r.work.is_none());
-    assert_eq!(r.work_rejected, vec!["X-1".to_string()]);
+    assert!(r.work_rejected.is_empty(), "bare keys never reach a host");
     // Its own org's work stays; the master keeps everything.
     let mut r = row(Some(1), Some(1));
     a.redact_row(&mut r);
@@ -437,4 +437,15 @@ fn a_single_owner_fleet_gets_no_suggestions() {
             .unwrap();
     }
     assert!(org_suggestions(&st, &OrgScope::All).unwrap().is_empty());
+}
+
+#[test]
+fn cross_org_links_need_force_and_unassigned_never_conflicts() {
+    assert!(check_cross_org(Some(1), Some(1), "X-1", false).is_ok());
+    assert!(check_cross_org(None, Some(1), "X-1", false).is_ok());
+    assert!(check_cross_org(Some(2), None, "X-1", false).is_ok());
+    let e = check_cross_org(Some(2), Some(1), "X-1", false).unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN);
+    assert!(e.message.contains("force_cross_org"), "{}", e.message);
+    assert!(check_cross_org(Some(2), Some(1), "X-1", true).is_ok());
 }

@@ -169,9 +169,11 @@ impl FleetTools {
         worktree. Returns JSON array of changed files.")]
     pub(super) async fn repo_changes(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_changes", &format!("session_id={}", args.session_id));
+        self.require_visible_session(&caller, args.session_id)?;
         let v = repo_read::repo_changes(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -182,9 +184,11 @@ impl FleetTools {
         gitignore respected). Returns JSON {entries, truncated}.")]
     pub(super) async fn repo_tree(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_tree", &format!("session_id={}", args.session_id));
+        self.require_visible_session(&caller, args.session_id)?;
         let v = repo_read::repo_tree(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -195,12 +199,14 @@ impl FleetTools {
         JSON {path, content, truncated, binary, size}.")]
     pub(super) async fn repo_file(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<repo_read::RepoFileArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_file",
             &format!("session_id={} path={}", args.session_id, args.path),
         );
+        self.require_visible_session(&caller, args.session_id)?;
         let v = repo_read::repo_file(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -212,6 +218,7 @@ impl FleetTools {
         fresh_for returns only what is new since your last read.")]
     pub(super) async fn repo_diff(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<RepoDiffParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -221,6 +228,7 @@ impl FleetTools {
                 p.session_id, p.path, p.fresh_for
             ),
         );
+        self.require_visible_session(&caller, p.session_id)?;
 
         // fresh_for absent: today's default, byte-identical, no cursor
         // touched — kept as a literal early return so the two paths can
@@ -282,9 +290,11 @@ impl FleetTools {
         to 50 and `skip` pages through older history.")]
     pub(super) async fn repo_log(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<RepoLogParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_log", &format!("session_id={}", p.session_id));
+        self.require_visible_session(&caller, p.session_id)?;
         let v = repo_read::repo_log(
             repo_read::RepoLogArgs {
                 session_id: p.session_id,
@@ -304,9 +314,11 @@ impl FleetTools {
         with ahead/behind. Returns JSON array.")]
     pub(super) async fn repo_branches(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_branches", &format!("session_id={}", args.session_id));
+        self.require_visible_session(&caller, args.session_id)?;
         let v = repo_read::repo_branches(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -317,12 +329,14 @@ impl FleetTools {
         {hash, subject, body, author, date, files}.")]
     pub(super) async fn repo_commit(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<repo_read::RepoCommitArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_commit",
             &format!("session_id={} hash={}", args.session_id, args.hash),
         );
+        self.require_visible_session(&caller, args.session_id)?;
         let v = repo_read::repo_commit(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -333,6 +347,7 @@ impl FleetTools {
         {path, diff, binary, truncated}.")]
     pub(super) async fn repo_commit_diff(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<repo_read::RepoCommitDiffArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -342,6 +357,7 @@ impl FleetTools {
                 args.session_id, args.hash, args.path
             ),
         );
+        self.require_visible_session(&caller, args.session_id)?;
         let v = repo_read::repo_commit_diff(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;

@@ -2918,7 +2918,9 @@ fn the_served_definition_budget_stays_bounded() {
     // path_prefix, host_alias, rule_id); its description was cut to "see
     // action" to pay part of it. No new tool. Measured at 69,012 on
     // 2026-09-24 (+627); plus 100.
-    const BUDGET_BYTES: usize = 69_112;
+    // Work graph M5.3: `work_link` gains `force_cross_org` (the cross-org
+    // integrity override). Measured at 69,099 on 2026-09-24 (+87); plus 100.
+    const BUDGET_BYTES: usize = 69_199;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -4083,14 +4085,18 @@ async fn fresh_for_is_opt_in_and_the_default_answer_is_byte_identical() {
     // list_sessions: fully defaulted, so an empty object round-trips.
     let p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
     assert!(p.fresh_for.is_none());
-    t.list_sessions(Parameters(p)).await.unwrap();
+    t.list_sessions(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
     assert_eq!(cursor_count(&t), 0, "list_sessions wrote a cursor unasked");
 
     // session_history
     let p: SessionHistoryParams =
         serde_json::from_value(serde_json::json!({ "session_id": sid, "limit": null })).unwrap();
     assert!(p.fresh_for.is_none());
-    t.session_history(Parameters(p)).await.unwrap();
+    t.session_history(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
     assert_eq!(
         cursor_count(&t),
         0,
@@ -5141,11 +5147,14 @@ async fn a_history_cursor_that_falls_behind_pages_through_everything() {
     let mut more_pages = 0;
     for _ in 0..4 {
         let out = t
-            .session_history(Parameters(SessionHistoryParams {
-                session_id: target,
-                limit: Some(2),
-                fresh_for: Some(reader),
-            }))
+            .session_history(
+                Extension(Caller::master()),
+                Parameters(SessionHistoryParams {
+                    session_id: target,
+                    limit: Some(2),
+                    fresh_for: Some(reader),
+                }),
+            )
             .await
             .unwrap();
         let v = result_json(&out);
@@ -5186,12 +5195,18 @@ async fn a_history_read_that_has_caught_up_answers_unchanged_with_no_rows() {
         limit: Some(50),
         fresh_for: Some(reader),
     };
-    let first = t.session_history(Parameters(params())).await.unwrap();
+    let first = t
+        .session_history(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v = result_json(&first);
     assert_eq!(v["unchanged"], false);
     assert_eq!(v["data"].as_array().unwrap().len(), 1);
 
-    let second = t.session_history(Parameters(params())).await.unwrap();
+    let second = t
+        .session_history(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(v2["unchanged"], true);
     assert_eq!(v2["data"].as_array().unwrap().len(), 0);
@@ -5217,11 +5232,14 @@ async fn two_readers_of_one_targets_history_each_see_the_full_sequence() {
     let t = test_tools(s);
     for reader in [reader_a, reader_b] {
         let out = t
-            .session_history(Parameters(SessionHistoryParams {
-                session_id: target,
-                limit: Some(50),
-                fresh_for: Some(reader),
-            }))
+            .session_history(
+                Extension(Caller::master()),
+                Parameters(SessionHistoryParams {
+                    session_id: target,
+                    limit: Some(50),
+                    fresh_for: Some(reader),
+                }),
+            )
             .await
             .unwrap();
         let v = result_json(&out);
@@ -5244,11 +5262,14 @@ async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cu
     let t = test_tools(s);
     let missing_reader = 999_999;
     let out = t
-        .session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(50),
-            fresh_for: Some(missing_reader),
-        }))
+        .session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(missing_reader),
+            }),
+        )
         .await
         .unwrap();
     let v = result_json(&out);
@@ -5284,11 +5305,14 @@ async fn session_history_with_an_unknown_reader_terminates_with_the_default_page
     }
     let t = test_tools(s);
     let call = |fresh_for: Option<i64>| {
-        t.session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(2),
-            fresh_for,
-        }))
+        t.session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(2),
+                fresh_for,
+            }),
+        )
     };
     let default_page = result_json(&call(None).await.unwrap());
     for n in 1..=2 {
@@ -5547,11 +5571,14 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     let t = test_tools(s);
 
     let out = t
-        .session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(0),
-            fresh_for: None,
-        }))
+        .session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(0),
+                fresh_for: None,
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -5561,11 +5588,14 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     );
 
     let out = t
-        .session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(-1),
-            fresh_for: None,
-        }))
+        .session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(-1),
+                fresh_for: None,
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -5759,7 +5789,10 @@ async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
         p
     };
 
-    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v1 = result_json(&first);
     assert_eq!(
         v1["unchanged"], false,
@@ -5770,7 +5803,10 @@ async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
         "first read must carry the payload: {v1}"
     );
 
-    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let second = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(
         v2["unchanged"], true,
@@ -5799,7 +5835,10 @@ async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
         p
     };
 
-    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     assert_eq!(result_json(&first)["unchanged"], false);
 
     // A status change on the target row, applied directly — the freshness
@@ -5815,7 +5854,10 @@ async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
         )
         .unwrap();
 
-    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let second = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(
         v2["unchanged"], false,
@@ -5853,7 +5895,10 @@ async fn a_new_session_reusing_a_dead_readers_id_gets_a_full_first_list_sessions
         p.fresh_for = Some(reader);
         p
     };
-    let first = t.list_sessions(Parameters(params(reviewer))).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params(reviewer)))
+        .await
+        .unwrap();
     assert_eq!(result_json(&first)["unchanged"], false);
 
     // The reviewer is killed and reaped; a new one is spawned at once, well
@@ -5878,7 +5923,11 @@ async fn a_new_session_reusing_a_dead_readers_id_gets_a_full_first_list_sessions
         )
         .unwrap();
 
-    let v = result_json(&t.list_sessions(Parameters(params(reborn))).await.unwrap());
+    let v = result_json(
+        &t.list_sessions(Extension(Caller::master()), Parameters(params(reborn)))
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         v["unchanged"], false,
         "a new session's FIRST read is never unchanged: {v}"
@@ -5913,13 +5962,19 @@ async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
     let filter_a: ListSessionsParams =
         serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
             .unwrap();
-    let out_a1 = t.list_sessions(Parameters(filter_a)).await.unwrap();
+    let out_a1 = t
+        .list_sessions(Extension(Caller::master()), Parameters(filter_a))
+        .await
+        .unwrap();
     assert_eq!(result_json(&out_a1)["unchanged"], false);
 
     let filter_a_repeat: ListSessionsParams =
         serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
             .unwrap();
-    let out_a2 = t.list_sessions(Parameters(filter_a_repeat)).await.unwrap();
+    let out_a2 = t
+        .list_sessions(Extension(Caller::master()), Parameters(filter_a_repeat))
+        .await
+        .unwrap();
     assert_eq!(
         result_json(&out_a2)["unchanged"],
         true,
@@ -5930,7 +5985,10 @@ async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
     // first read, never `unchanged` from filter_a's cursor.
     let filter_b: ListSessionsParams =
         serde_json::from_value(serde_json::json!({ "fresh_for": reader })).unwrap();
-    let out_b1 = t.list_sessions(Parameters(filter_b)).await.unwrap();
+    let out_b1 = t
+        .list_sessions(Extension(Caller::master()), Parameters(filter_b))
+        .await
+        .unwrap();
     assert_eq!(
         result_json(&out_b1)["unchanged"],
         false,
@@ -5968,7 +6026,10 @@ async fn list_sessions_with_an_unknown_fresh_for_answers_full_and_writes_no_curs
     // Make the assertion able to fail: the read itself must succeed even
     // though the reader does not exist — a missing ReaderUnknown guard would
     // otherwise visibly insert a row here rather than silently no-op.
-    let out = t.list_sessions(Parameters(p)).await.unwrap();
+    let out = t
+        .list_sessions(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
     let v = result_json(&out);
     assert_eq!(v["cursor_reset"], "reader_unknown");
     assert_eq!(v["unchanged"], false);
@@ -6156,7 +6217,10 @@ async fn list_sessions_fresh_for_is_unchanged_when_only_row_order_flips() {
         p
     };
 
-    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     assert_eq!(result_json(&first)["unchanged"], false);
 
     // Only `last_activity_at` moves — no field the slim shape (or the hash)
@@ -6172,7 +6236,10 @@ async fn list_sessions_fresh_for_is_unchanged_when_only_row_order_flips() {
         .unwrap();
     assert!(a != b, "sanity: two distinct rows");
 
-    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let second = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(
         v2["unchanged"], true,
