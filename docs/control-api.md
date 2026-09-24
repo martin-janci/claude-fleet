@@ -700,11 +700,13 @@ recipient address over 256 bytes, and a `reply_to` whose parent came from a
 third fleet (`E_INVALID`). The reply, once the remote session
 sends one, arrives through the normal `wait_for_reply` / `inbox` path like
 any other message, with `from_addr` set to the sender's
-`<fleet>/session/<host>/<name>` and marked as untrusted input. If the peer
-never takes the message — the link is refused, removed, or the message
-outlives the link's 7-day retention — the sender's session timeline gets a
-`message_undeliverable` event instead of a reply. See `docs/hub.md` →
-*Link two hubs*.
+`<fleet>/session/<host>/<name>` and marked as untrusted input. A link going
+`refused` (a revoked token, a fleet-id mismatch) does not by itself fail a
+waiting message — its pending rows stay attached for up to 7 days so a
+re-pair within that window still delivers them. Only removing the link
+(`fleet-hub peer remove`) or the message outliving that 7-day retention
+turns it into a `message_undeliverable` event on the sender's session
+timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
 
 ## Provisioning hosts
 

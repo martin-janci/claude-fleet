@@ -343,10 +343,15 @@ Pending rows, `peer_state`, the pinned `fleet_id` and `after` all live in
   `wait_ms + 10 s`, HTTP 5xx, a malformed response): exponential backoff from
   1 s, doubling to a 60 s cap, with ±20 % jitter. It resets after one
   successful exchange. `state = retrying`, `last_error` set.
-- **Refusal** (HTTP 401/403, `E_FORBIDDEN`, a `fleet_id` mismatch, `proto`
+- **Refusal** (HTTP 401, a structured tool refusal — `E_FORBIDDEN` /
+  `E_UNAUTHORIZED`, `isError` plus a code — a `fleet_id` mismatch, `proto`
   refused, the peer not knowing `peer_exchange`): terminal. `state = refused`,
   or `incompatible` for the last two, and the loop exits. `peer add` again
-  (re-pair), or upgrading the older hub, is the way back. A terminal link's
+  (re-pair), or upgrading the older hub, is the way back. A bare HTTP 403 with
+  no such body — the shape a proxy in front of the listener sends, not the
+  hub's own authorize middleware — is a transport failure instead (retried
+  with backoff, above): only the hub's own answer is authoritative that the
+  token itself is bad. A terminal link's
   pending rows stay pending until the 7-day sweep, so a re-pair within a week
   still delivers them. When a new token's first exchange returns a `fleet_id`
   that already has a non-revoked `dialer` row in state `refused` or
@@ -374,9 +379,12 @@ retired-participant sweeps in `service/gc.rs`) gains one step:
 
 ### Clocks and ordering
 
-A remote `sent_at` is kept for display. Ordering, the inbox, retention and
-cursors all use the local id and the local insert time, so a peer's skewed clock
-cannot reorder an inbox or dodge the sweep.
+A remote `sent_at` is informational only: it travels on the wire (so a future
+consumer could log it) but nothing on the receiving hub stores or shows it —
+not the row, not the inbox, not the transcript. Ordering, the inbox, retention
+and cursors all use the local id and the local insert time, so a peer's
+skewed clock cannot reorder an inbox or dodge the sweep, and there is no
+displayed timestamp for it to lie about either.
 
 ### Limits a peer cannot bypass
 
@@ -451,6 +459,54 @@ Controller rulings during the build changed the design above as follows
   a link cannot thread onto a third fleet's message.
 - **Size caps:** `PEER_PAGE_MAX_BYTES`, `PEER_ADDR_MAX`, no `question` (§3
   Limits).
+- **A reply must thread onto a message both ends actually share.** The
+  sender's check is `(involves the sender) AND
+  message_involves_participant(parent, recipient)` — a parent received
+  from the recipient already satisfies the second half, since its
+  `from_participant` is the recipient. The receiver's own-fleet branch of
+  `reply_to` accepts only a local id that went outbound *on this link*
+  (`peer_state IS NOT NULL` and the recipient's `peer_link_id` matches),
+  not any local message the recipient happens to be part of — so a reply
+  can thread onto the two fleets' own conversation, never onto a third
+  fleet's traffic or a purely local thread that merely shares a
+  participant.
+- **A forged untrusted-block closer is neutralised, not trusted.** After
+  stripping a peer body's own leading marker lines, every remaining line
+  that equals or starts with the untrusted-content marker is prefixed
+  `> ` before storage, so a body cannot manufacture the marker's closing
+  line and have the rest of itself read as fleet's own words.
+- **Wakes are bounded per exchange, not per recipient.** Nudging every
+  new message's recipient in one exchange is capped at `WAKE_TIMEOUT` (5 s)
+  total; a session too busy to respond in time just misses that exchange's
+  nudge, not the message.
+- **An immediately-empty parked answer still backs off.** A long-poll that
+  was actually parked (`wait_ms > 0`) and returns with nothing in it in
+  under `EMPTY_POLL_FLOOR` (1 s) — a peer or proxy answering every parked
+  call at once — is followed by the ordinary backoff before the next call,
+  the same as a transport failure, so two such dialers cannot spin each
+  other.
+- **`last_exchange_at` moves on success only,** never on a failed or
+  refused attempt, so it means what an operator reading `peer list` expects
+  it to mean. `fleet_health`'s `peer_links_down` also now counts a live
+  *listener* link as down — a dialer link already shows its trouble in
+  `state` — when its client token has been revoked or it has gone
+  `LISTENER_STALE_SECS` (120 s) with no served exchange.
+- **`fleet-hub client revoke` on a listener's peer token acts immediately,
+  not just on the next exchange.** A call already parked in
+  `peer_exchange` returns at once instead of waiting out `wait_ms`, and a
+  further `send_message` to that fleet is refused `E_UNSUPPORTED`. Unlike
+  `fleet-hub peer remove`, revoking the token does not touch the link's
+  pending rows — they stay attached for a re-pair within the retention
+  window, same as any other terminal link (§3 Retry).
+- **Fleet-id pinning at mint time was considered and declined.** Trust in a
+  link is established once, at the handshake: a pairing code only reaches
+  someone who can run commands on the *other* hub, and the first exchange
+  pins whichever `fleet_id` that hub answers with. A separate allowlist of
+  expected fleet ids was not built, because a fleet id is not secret and
+  requiring one in advance would mean the listener's operator already knows
+  the dialer's id before pairing — which the code exists to avoid needing.
+  This could still be added later as an extra check, not a replacement for
+  the handshake pin.
 
 ## 5. Components
 

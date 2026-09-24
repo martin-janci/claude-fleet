@@ -50,7 +50,7 @@ impl TokenMode {
     }
 
     /// A paired client row's mode: `full`, `peer`, else `readonly`.
-    pub fn parse_client(s: &str) -> TokenMode {
+    fn parse_client(s: &str) -> TokenMode {
         match s {
             "peer" => TokenMode::Peer,
             other => TokenMode::parse(other),

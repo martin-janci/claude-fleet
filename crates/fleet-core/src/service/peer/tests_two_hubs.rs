@@ -462,9 +462,10 @@ async fn a_dialer_that_crashed_before_its_watermark_stores_the_batch_once() {
     p.cancel.cancel();
     assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
     // The crash: A's watermark never committed, so B never saw it.
+    let token = p.token_of(p.link);
     p.a.lock()
         .unwrap()
-        .set_peer_link_progress(p.link, 0, None, 0)
+        .set_dialer_link_progress(p.link, &token, 0, None, 0)
         .unwrap();
     p.b.lock()
         .unwrap()
@@ -1063,6 +1064,156 @@ async fn a_link_that_cannot_be_read_says_so_and_recovers() {
     p.until("connected", || p.row().state == "connected").await;
     p.cancel.cancel();
     h.await.unwrap();
+}
+
+// ---- review fixes (dialer) ------------------------------------------------------
+
+/// A peer that answers every call at once, as `fleet-b` speaking `proto`,
+/// with nothing in it. Records each call's `wait_ms`.
+struct AnswersEmpty {
+    proto: u32,
+    waits: Mutex<Vec<u64>>,
+}
+
+impl AnswersEmpty {
+    fn new(proto: u32) -> Arc<Self> {
+        Arc::new(Self {
+            proto,
+            waits: Mutex::new(vec![]),
+        })
+    }
+    fn calls(&self) -> usize {
+        self.waits.lock().unwrap().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerCall for AnswersEmpty {
+    async fn exchange(
+        &self,
+        req: &ExchangeRequest,
+        _timeout: Duration,
+    ) -> Result<ExchangeResponse, CallError> {
+        self.waits.lock().unwrap().push(req.wait_ms);
+        Ok(ExchangeResponse {
+            proto: self.proto,
+            fleet_id: "fleet-b".into(),
+            results: vec![],
+            messages: vec![],
+            more: false,
+        })
+    }
+}
+
+/// G3: a peer (or a proxy, or a second dialer on the same link releasing
+/// this one's parked call) that answers every parked long-poll at once with
+/// an empty page must not spin the dialer: an empty parked answer faster
+/// than the floor is followed by the backoff.
+// multi_thread: a hot loop must not starve the test's own clock.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_always_empty_instant_answer_does_not_spin_the_dialer() {
+    let (a, a_ssh) = hub("fleet-a");
+    let link = a
+        .lock()
+        .unwrap()
+        .insert_dialer_link("https://b.example", "t")
+        .unwrap();
+    let peer = AnswersEmpty::new(PROTO);
+    let cancel = CancellationToken::new();
+    let h = tokio::spawn(run_link(
+        a.clone(),
+        a_ssh,
+        link,
+        "t".into(),
+        peer.clone(),
+        cancel.clone(),
+    ));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let calls = peer.calls();
+    let parked = peer
+        .waits
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|w| **w > 0)
+        .count();
+    // Stopped BEFORE any assertion: a spinning loop never yields, and a
+    // panic here would leave the runtime's drop waiting on it forever.
+    cancel.cancel();
+    assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+    assert!(parked >= 1, "the loop parked at least once: {calls} calls");
+    assert!(
+        calls <= 6,
+        "{calls} calls in 3 s against an always-empty peer"
+    );
+    let row = a.lock().unwrap().peer_link(link).unwrap().unwrap();
+    assert_eq!(row.state, "connected", "{:?}", row.last_error);
+}
+
+/// G26(d): a peer that answers in a proto this hub does not speak (the
+/// response itself, not a refusal code) ends the link `incompatible`, says
+/// which proto on the row, and pins no fleet.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_answering_in_another_proto_is_incompatible() {
+    let (a, a_ssh) = hub("fleet-a");
+    let link = a
+        .lock()
+        .unwrap()
+        .insert_dialer_link("https://b.example", "t")
+        .unwrap();
+    let peer = AnswersEmpty::new(PROTO + 1);
+    let exit = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::spawn(run_link(
+            a.clone(),
+            a_ssh,
+            link,
+            "t".into(),
+            peer.clone(),
+            CancellationToken::new(),
+        )),
+    )
+    .await
+    .expect("the loop stops")
+    .unwrap();
+    assert_eq!(exit, LinkExit::Incompatible);
+    assert_eq!(peer.calls(), 1, "not retried");
+    let row = a.lock().unwrap().peer_link(link).unwrap().unwrap();
+    assert_eq!(row.state, "incompatible");
+    assert!(row.fleet_id.is_none(), "{:?}", row.fleet_id);
+    assert_eq!(
+        row.last_error.as_deref(),
+        Some(format!("the peer speaks proto {}, not {PROTO}", PROTO + 1).as_str())
+    );
+}
+
+/// G10, the dialer's half over a real listener: B already dials A, so A's
+/// handshake at B conflicts on B's side. B answers E_FORBIDDEN, and A's link
+/// ends `refused` instead of retrying forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listener_already_dialling_us_refuses_the_link_terminally() {
+    let p = pair();
+    {
+        let s = p.b.lock().unwrap();
+        let b_dials_a = s.insert_dialer_link("https://a.example", "tb").unwrap();
+        s.adopt_dialer_fleet(b_dials_a, "fleet-a").unwrap();
+    }
+    let exit = tokio::time::timeout(Duration::from_secs(5), p.start())
+        .await
+        .expect("the loop stops")
+        .unwrap();
+    assert_eq!(exit, LinkExit::Refused);
+    let row = p.row();
+    assert_eq!(row.state, "refused");
+    assert!(
+        row.last_error
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("E_FORBIDDEN"),
+        "{:?}",
+        row.last_error
+    );
+    assert_eq!(p.call.calls.load(Ordering::SeqCst), 1, "not retried");
 }
 
 // ---- the supervisor -----------------------------------------------------------

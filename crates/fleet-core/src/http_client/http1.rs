@@ -1,6 +1,6 @@
 //! Shared HTTP/1.1 response-head parsing and chunked-transfer decoding for
-//! the two hand-rolled clients in this module tree: [`super::remote`]'s
-//! one-shot `POST /mcp` and [`super::events`]'s long-lived `GET /events`.
+//! the two hand-rolled clients: `http_client`'s one-shot `POST /mcp` and
+//! the desktop's (`src-tauri` `backend::events`) long-lived `GET /events`.
 //!
 //! Both parse a response head (status line, `Transfer-Encoding: chunked`)
 //! and undo chunking; what differs is how each gets its bytes in the first

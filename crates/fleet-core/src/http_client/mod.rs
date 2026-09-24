@@ -11,7 +11,8 @@ pub mod http1;
 mod tests;
 
 /// What the hub answered: the HTTP status and the body exactly as received,
-/// SSE framing still intact. Interpreting it is [`HubBackend`]'s job.
+/// SSE framing still intact. Interpreting it is the job of the desktop's
+/// `HubBackend` (`src-tauri`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubResponse {
     pub status: u16,
@@ -223,7 +224,8 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> Duplex for 
 /// against the real function rather than against this list. Everything else
 /// `open_stream` can return (`the hub answered 503 to GET /events`, `read
 /// from …`, `the hub closed the connection before answering`) describes a hub
-/// that IS reachable, and must not arm [`HubBackend::offline_error`].
+/// that IS reachable, and must not arm `HubBackend::offline_error` (in
+/// `src-tauri`).
 ///
 /// It errs open: `connect`'s two configuration-shaped failures (an
 /// unparseable certificate name, a TLS root store that would not load) are
@@ -305,7 +307,8 @@ impl HubTransport for TcpTransport {
             body.len()
         );
         // Unbounded here on purpose: the caller that knows the tool
-        // ([`HubBackend::call_text`]) is the one that times the exchange.
+        // (`HubBackend::call_text`, in `src-tauri`) is the one that times
+        // the exchange.
         let raw = exchange(&at, &request).await?;
         split_response(&raw)
     }
