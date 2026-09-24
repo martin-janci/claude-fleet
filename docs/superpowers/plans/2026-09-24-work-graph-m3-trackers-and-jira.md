@@ -369,3 +369,26 @@ CREATE TABLE IF NOT EXISTS tracker_views(
 | D3 | Any write-back in M3? | No: read-only |
 | new | Default views? | `mine` + `sprint` (where present) + favourites |
 | new | Can an in-session agent `lookup` tickets it is not linked to? | No in M3; revisit with M5 orgs |
+
+## Revisions
+
+- **2026-09-24, M3.0 — transport: option A (lift the existing client).**
+  `fleet-core/src/net/` now holds the hand-rolled HTTP/1.1 client the desktop
+  used to reach a hub: `http1` (head parsing, chunked decoding, moved from
+  `src-tauri/src/backend/http1.rs` with its tests), `tls` (the cached
+  `tokio-rustls` + ring + `rustls-native-certs` connector, moved from
+  `backend/remote.rs` with its two source-guard tests), `conn` (connect and
+  one `Connection: close` exchange, which `remote.rs` now delegates to) and
+  `https` (the `HttpTransport` trait, `DirectTransport`, `FakeTransport`).
+  **Why A:** it adds **zero** packages to `Cargo.lock` — both crates were
+  already in the tree through `src-tauri`, `fleet-hub` and `fleet-agent`, so
+  `Cargo.lock` gains two dependency edges and nothing else, and `cargo deny
+  check` stays `advisories ok, bans ok, licenses ok, sources ok`. B was not
+  trialled: `reqwest` is in the lock only behind a Tauri target that is not
+  compiled here, so B would add its client half (`hyper-util` client,
+  `hyper-rustls`, `tower`/`tower-http` bits, `ipnet`, …) for no capability A
+  lacks. `DirectTransport` refuses plaintext and any host its policy does not
+  allow before connecting, never follows a redirect (a 3xx is returned),
+  caps the body (4 MiB) and bounds the whole exchange (20 s; 5 s connect and
+  handshake). The hub image already installs `ca-certificates`
+  (`crates/fleet-hub/Dockerfile`), which `rustls-native-certs` reads.
