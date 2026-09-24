@@ -1252,6 +1252,22 @@ pub fn mark_untrusted(text: &str, from: &str) -> String {
     format!("{}\n{text}", untrusted_marker(from))
 }
 
+/// `[claude-fleet` opens every fleet marker line; third-party text must not
+/// be able to write one — a fake end-of-untrusted line would let what
+/// follows pass as fleet's own. Shared by the work handover and the tracker
+/// ticket paths (work graph M2 / M3).
+pub fn defuse(s: &str) -> String {
+    s.replace("[claude-fleet", "(claude-fleet")
+}
+
+/// Third-party text fenced on both sides: the marker line, the text with
+/// every marker defused, then [`UNTRUSTED_END`]. At most `max` characters of
+/// the TEXT are kept, so the end marker always survives.
+pub fn fence_untrusted(text: &str, from: &str, max: usize) -> String {
+    let body: String = defuse(text).chars().take(max).collect();
+    format!("{}\n{UNTRUSTED_END}", mark_untrusted(&body, from))
+}
+
 /// The body without its leading [`mark_untrusted`] line (D8 / Q2).
 ///
 /// The DELIVERED text always keeps the marker — that is the whole point of it.

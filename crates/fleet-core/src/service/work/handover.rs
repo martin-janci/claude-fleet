@@ -366,12 +366,9 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
-/// `[claude-fleet` opens every fleet marker line; third-party text must not
-/// be able to write one (a fake end-of-untrusted line would let what follows
-/// pass as fleet's).
-fn defuse(s: &str) -> String {
-    s.replace("[claude-fleet", "(claude-fleet")
-}
+/// See [`crate::mcp::guard::defuse`] (moved there so the tracker ticket
+/// paths share it, M3 review).
+use crate::mcp::guard::defuse;
 
 /// One line of third-party text: control characters and newlines become
 /// spaces, runs collapse, capped at `max` chars.

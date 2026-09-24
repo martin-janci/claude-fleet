@@ -302,8 +302,11 @@ pub async fn lookup(
             .collect(),
         None => Vec::new(),
     };
+    // An agent reads it: fenced on both sides, markers defused (M3 review).
     let description = meta.description.map(|d| match scope {
-        Scope::Host(_) => crate::mcp::guard::mark_untrusted(&d, "a tracker ticket"),
+        Scope::Host(_) => {
+            crate::mcp::guard::fence_untrusted(&d, "a tracker ticket", super::DESCRIPTION_MAX_CHARS)
+        }
         Scope::All => d,
     });
     Ok(Ticket {
@@ -557,9 +560,25 @@ pub async fn plan_start(
     })
 }
 
-/// The ticket context a brief start queues: fleet's own lines, then the
-/// description inside the untrusted-input marker.
+/// One line of tracker text (a title, a status name) for fleet's own
+/// lines: control characters and newlines flattened, markers defused, capped
+/// — a newline in a Jira title must not be able to write a line of its own.
+fn tracker_line(s: &str, max: usize) -> String {
+    let flat: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::mcp::guard::defuse(&flat).chars().take(max).collect()
+}
+
+/// The ticket context a brief start queues: fleet's own lines (tracker text
+/// in them flattened and defused), then the description fenced on both
+/// sides. The description is what gets cut to fit
+/// [`BRIEF_MAX_CHARS`](crate::service::work::handover::BRIEF_MAX_CHARS), so
+/// the end marker always survives.
 pub fn ticket_brief(store: &Mutex<Store>, plan: &StartPlan) -> Result<String, IpcError> {
+    const FROM: &str = "the tracker ticket's description";
     let s = lock(store)?;
     let item = plan
         .item_id
@@ -569,32 +588,32 @@ pub fn ticket_brief(store: &Mutex<Store>, plan: &StartPlan) -> Result<String, Ip
     let meta = plan.item_id.map(|id| s.work_item_meta(id)).transpose()?;
     let mut out = format!("You are starting work on {}", plan.key);
     if !plan.title.is_empty() {
-        out.push_str(&format!(": {}", plan.title));
+        out.push_str(&format!(": {}", tracker_line(&plan.title, 200)));
     }
     out.push('\n');
     if let Some(i) = &item {
         if let Some(st) = &i.status_name {
-            out.push_str(&format!("Status: {st}\n"));
+            out.push_str(&format!("Status: {}\n", tracker_line(st, 80)));
         }
         if let Some(u) = &i.url {
-            out.push_str(&format!("Ticket: {u}\n"));
+            out.push_str(&format!("Ticket: {}\n", tracker_line(u, 300)));
         }
     }
     out.push_str(&format!("Branch: {}\n", plan.branch));
     if let Some(d) = meta.and_then(|m| m.description) {
-        out.push('\n');
-        out.push_str(&crate::mcp::guard::mark_untrusted(
-            &d,
-            "the tracker ticket's description",
-        ));
-        out.push('\n');
-        out.push_str(crate::mcp::guard::UNTRUSTED_END);
-        out.push('\n');
+        let overhead = out.chars().count()
+            + crate::mcp::guard::fence_untrusted("", FROM, 0)
+                .chars()
+                .count()
+            + 2;
+        let budget = crate::service::work::handover::BRIEF_MAX_CHARS.saturating_sub(overhead);
+        if budget > 0 {
+            out.push('\n');
+            out.push_str(&crate::mcp::guard::fence_untrusted(&d, FROM, budget));
+            out.push('\n');
+        }
     }
-    Ok(out
-        .chars()
-        .take(crate::service::work::handover::BRIEF_MAX_CHARS)
-        .collect())
+    Ok(out)
 }
 
 /// The short prompt typed once the REPL is ready (the brief rides the

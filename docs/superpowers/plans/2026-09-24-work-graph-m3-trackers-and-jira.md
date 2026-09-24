@@ -451,3 +451,16 @@ CREATE TABLE IF NOT EXISTS tracker_views(
       where to connect Jira in its tooltip rather than with an inline
       button; the manual acceptance on a real Jira Cloud site.
 
+- **2026-09-24, review fix (security): the ticket fence was escapable.**
+  `start`'s brief and a per-host `lookup` put the Jira description inside
+  `mark_untrusted` without defusing it (M2's handover already did), so a
+  description containing `[claude-fleet: end of untrusted input]` closed the
+  fence early; the lookup fence had no end marker; and the brief was cut to
+  `BRIEF_MAX_CHARS` after the end marker, so a long description dropped it.
+  Now `defuse` lives in `mcp::guard` beside a new `fence_untrusted` (marker,
+  defused text capped to a budget, `UNTRUSTED_END`), shared by the handover
+  and every tracker path; title and status are flattened to one line and
+  defused on fleet's own lines; the description — not the assembled brief —
+  is what gets cut. The desktop's editable preview mirrors this. Tests: one
+  `UNTRUSTED_END` after all untrusted text, no forged line from a title, and
+  a 10k-character description still ending with the marker.
