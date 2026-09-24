@@ -26,11 +26,10 @@
 //! Events only on a real change: the store compares before it writes.
 
 use super::{
-    list_all, provider_for, Fetched, ItemRef, TrackerError, TrackerProvider, ViewDef,
-    WorkItemSnapshot,
+    list_all, needs_credential, provider_for, Fetched, Incremental, ItemRef, TrackerError,
+    TrackerNet, TrackerProvider, ViewDef, WorkItemSnapshot,
 };
 use crate::ipc_error::lock;
-use crate::net::https::HttpTransport;
 use crate::store::{Store, TrackerItemWrite, TrackerRow};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,7 +74,7 @@ pub struct TrackerPass {
 /// The sync's in-memory state: single-flight, back-off, the last whole
 /// listing per view, and keys a tracker said it does not know.
 pub struct TrackerSync {
-    transport: Arc<dyn HttpTransport>,
+    net: TrackerNet,
     running: AtomicBool,
     not_before: Mutex<HashMap<i64, i64>>,
     last_full: Mutex<HashMap<(i64, String), i64>>,
@@ -96,9 +95,9 @@ fn jitter(secs: u64) -> u64 {
 }
 
 impl TrackerSync {
-    pub fn new(transport: Arc<dyn HttpTransport>) -> Self {
+    pub fn new(net: TrackerNet) -> Self {
         TrackerSync {
-            transport,
+            net,
             running: AtomicBool::new(false),
             not_before: Mutex::new(HashMap::new()),
             last_full: Mutex::new(HashMap::new()),
@@ -204,10 +203,11 @@ impl TrackerSync {
                     .map_err(|e| TrackerError::Invalid(e.message))?,
             )
         };
-        if cred.is_none() {
+        if cred.is_none() && needs_credential(t) {
             return Err(TrackerError::Unconfigured);
         }
-        let provider = provider_for(t, cred, Arc::clone(&self.transport));
+        let provider = provider_for(t, cred, &self.net)?;
+        let incremental = provider.caps().incremental;
         // (id, updated) seen this pass: the overlap's repeats are dropped.
         let mut seen: HashSet<(String, Option<i64>)> = HashSet::new();
 
@@ -220,18 +220,22 @@ impl TrackerSync {
                 .and_then(|m| m.get(&(t.id, v.view_id.clone())).copied());
             let full =
                 v.watermark.is_none() || last_full.is_none_or(|at| now - at >= FULL_EVERY_SECS);
-            let since = if full {
-                None
-            } else {
-                v.watermark.map(|w| w - OVERLAP_SECS)
-            };
             let def = ViewDef {
                 id: v.view_id.clone(),
                 label: v.label.clone(),
                 query: v.query.clone(),
             };
-            let items = match list_all(provider.as_ref(), &def, since).await {
-                Ok(items) => items,
+            let listed = read_view(
+                provider.as_ref(),
+                &def,
+                incremental,
+                full,
+                v.watermark,
+                v.sync_mark.as_deref(),
+            )
+            .await;
+            let (items, full, mark) = match listed {
+                Ok(r) => r,
                 Err(TrackerError::Forbidden(_)) => {
                     // C28 / plan: a 403 on one view disables that view only.
                     if let Ok(s) = lock(store) {
@@ -250,6 +254,11 @@ impl TrackerSync {
                     continue;
                 }
             };
+            if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
+                if let Ok(s) = lock(store) {
+                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
+                }
+            }
             let newest = items.iter().filter_map(|i| i.updated).max();
             let ids: Vec<String> = items.iter().map(|i| i.external_id.clone()).collect();
             self.store_items(t.id, items, store, &mut seen, pass)?;
@@ -386,6 +395,53 @@ impl TrackerSync {
     }
 }
 
+/// One view's items for this pass: `(items, listed whole, new sync mark)`.
+///
+/// * A watermark provider lists whole, or from `watermark - OVERLAP_SECS`.
+/// * A sync-token provider lists whole when `full` (and asks for a first
+///   token when it has none); otherwise it reads the changes since its
+///   token, and an expired token (Asana: 412 after about a day) turns into
+///   one whole listing plus the fresh token the tracker handed back.
+async fn read_view(
+    p: &dyn TrackerProvider,
+    def: &ViewDef,
+    incremental: Incremental,
+    full: bool,
+    watermark: Option<i64>,
+    mark: Option<&str>,
+) -> Result<(Vec<WorkItemSnapshot>, bool, Option<String>), TrackerError> {
+    match incremental {
+        Incremental::SyncToken if !full && mark.is_some() => {
+            let ch = p.changes(def, mark).await?;
+            if !ch.expired {
+                return Ok((ch.items, false, ch.mark));
+            }
+            let items = list_all(p, def, None).await?;
+            Ok((items, true, ch.mark))
+        }
+        Incremental::SyncToken => {
+            let items = list_all(p, def, None).await?;
+            let fresh = if mark.is_none() {
+                // The token names "now": taken after the listing, a change
+                // in between is read twice (deduped), never missed.
+                p.changes(def, None).await.ok().and_then(|c| c.mark)
+            } else {
+                None
+            };
+            Ok((items, true, fresh))
+        }
+        Incremental::None => Ok((list_all(p, def, None).await?, true, None)),
+        Incremental::Watermark => {
+            let since = if full {
+                None
+            } else {
+                watermark.map(|w| w - OVERLAP_SECS)
+            };
+            Ok((list_all(p, def, since).await?, full, None))
+        }
+    }
+}
+
 /// A provider snapshot → the store's write shape.
 pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
     TrackerItemWrite {
@@ -416,14 +472,17 @@ pub async fn fetch_one(
     t: &TrackerRow,
     reference: ItemRef,
     store: &Mutex<Store>,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<Option<i64>, TrackerError> {
     let cred = {
         let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
         s.resolve_tracker_credential(t.id)
             .map_err(|e| TrackerError::Invalid(e.message))?
     };
-    let provider: Box<dyn TrackerProvider> = provider_for(t, cred, transport);
+    if cred.is_none() && needs_credential(t) {
+        return Err(TrackerError::Unconfigured);
+    }
+    let provider: Box<dyn TrackerProvider> = provider_for(t, cred, net)?;
     let got = provider.fetch(std::slice::from_ref(&reference)).await?;
     let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
     for f in got {
@@ -458,7 +517,7 @@ pub fn interval(store: &Mutex<Store>) -> Option<Duration> {
 /// token is observed between passes only, like the reconcile tick's.
 pub fn spawn_tracker_sync(
     store: Arc<Mutex<Store>>,
-    transport: Arc<dyn HttpTransport>,
+    net: TrackerNet,
     token: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let Some(period) = interval(&store) else {
@@ -466,7 +525,7 @@ pub fn spawn_tracker_sync(
         return None;
     };
     tracing::info!("tracker sync every {}s", period.as_secs());
-    let sync = Arc::new(TrackerSync::new(transport));
+    let sync = Arc::new(TrackerSync::new(net));
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

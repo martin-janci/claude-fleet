@@ -827,9 +827,16 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     );
     // Trackers (work graph M3.3): the hub owns its fleet, so it syncs them
     // (`work.sync_interval_secs`, `0` = off). A paired desktop never does.
+    // `via_host` / `via_cli` trackers (M6) run `curl` / `gh` on a host over
+    // the hub's own SSH.
+    fleet_core::service::trackers::install_default_net(
+        fleet_core::service::trackers::TrackerNet::real(Some(
+            Arc::clone(&ssh) as Arc<dyn fleet_core::ssh::SshExec>
+        )),
+    );
     let tracker_handle = fleet_core::service::trackers::sync::spawn_tracker_sync(
         Arc::clone(&store),
-        fleet_core::service::trackers::direct_transport(),
+        fleet_core::service::trackers::default_net(),
         ticks_cancel.clone(),
     );
 

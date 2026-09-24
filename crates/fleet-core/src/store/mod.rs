@@ -47,8 +47,8 @@ pub use sessions::PromptAckState;
 pub use tracker_items::{ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use trackers::{
     is_allowed_tracker_host, normalize_site_url, validate_credential_ref, Secret, TrackerConfig,
-    TrackerCredential, TrackerRow, TrackerViewRow, TRACKER_AUTH_KINDS, TRACKER_PROVIDERS,
-    TRACKER_STATES,
+    TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, TRACKER_AUTH_KINDS,
+    TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
     normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, WORK_LINK_SOURCES,

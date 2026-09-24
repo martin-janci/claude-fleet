@@ -25,8 +25,8 @@
 //! * **Descriptions** are ADF; only a plain-text excerpt is kept.
 
 use super::{
-    Caps, Fetched, ItemRef, Page, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider,
-    ViewDef, WorkItemSnapshot, DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
+    Caps, Fetched, Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo,
+    TrackerProvider, ViewDef, WorkItemSnapshot, DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request, Response, TransportError};
 use crate::store::{TrackerConfig, TrackerCredential};
@@ -479,7 +479,9 @@ impl TrackerProvider for JiraCloud {
             hierarchy: true,
             iterations: true,
             human_keys: true,
-            incremental: true,
+            repo_relative: false,
+            multi_container: false,
+            incremental: Incremental::Watermark,
             write: false,
         }
     }
@@ -597,10 +599,33 @@ impl TrackerProvider for JiraCloud {
     }
 
     async fn fetch(&self, refs: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
-        let mut out = Vec::with_capacity(refs.len());
-        for chunk in refs.chunks(BULK_MAX) {
+        // A URL on this site names its key; a repo number is never Jira's.
+        let site_host = self.site.trim_start_matches("https://").to_string();
+        let asked: Vec<(ItemRef, Option<ItemRef>)> = refs
+            .iter()
+            .map(|r| {
+                let norm = match r {
+                    ItemRef::Id(_) | ItemRef::Key(_) => Some(r.clone()),
+                    ItemRef::Url(u) => u
+                        .strip_prefix("https://")
+                        .and_then(|rest| rest.split_once('/'))
+                        .filter(|(h, _)| h.eq_ignore_ascii_case(&site_host))
+                        .and_then(|(_, path)| key_in_path(path))
+                        .map(ItemRef::Key),
+                    ItemRef::RepoNumber { .. } => None,
+                };
+                (r.clone(), norm)
+            })
+            .collect();
+        let mut answers: HashMap<usize, Fetched> = HashMap::new();
+        let askable: Vec<(usize, ItemRef)> = asked
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, n))| n.clone().map(|n| (i, n)))
+            .collect();
+        for chunk in askable.chunks(BULK_MAX) {
             let body = json!({
-                "issueIdsOrKeys": chunk.iter().map(ItemRef::as_str).collect::<Vec<_>>(),
+                "issueIdsOrKeys": chunk.iter().map(|(_, r)| r.reference()).collect::<Vec<_>>(),
                 "fields": self.fields(),
             });
             let v = self
@@ -619,9 +644,8 @@ impl TrackerProvider for JiraCloud {
                     by_id.insert(s.external_id.clone(), s);
                 }
             }
-            for r in chunk {
+            for (i, r) in chunk {
                 let hit = match r {
-                    ItemRef::Id(id) => by_id.get(id).cloned(),
                     ItemRef::Key(k) => {
                         let k = k.to_ascii_uppercase();
                         match by_key.get(&k) {
@@ -640,20 +664,26 @@ impl TrackerProvider for JiraCloud {
                             None => None,
                         }
                     }
+                    other => by_id.get(&other.reference()).cloned(),
                 };
-                out.push(match hit {
-                    Some(s) => Fetched::Found(Box::new(s)),
-                    None => Fetched::Unavailable {
-                        reference: r.as_str().to_string(),
-                        reason: NOT_FOUND_OR_NO_PERMISSION.into(),
-                    },
-                });
+                if let Some(s) = hit {
+                    answers.insert(*i, Fetched::Found(Box::new(s)));
+                }
             }
         }
-        Ok(out)
+        Ok(asked
+            .into_iter()
+            .enumerate()
+            .map(|(i, (r, _))| {
+                answers.remove(&i).unwrap_or(Fetched::Unavailable {
+                    reference: r.reference(),
+                    reason: NOT_FOUND_OR_NO_PERMISSION.into(),
+                })
+            })
+            .collect())
     }
 
-    fn recognize(&self, text: &str) -> Vec<ItemRef> {
+    fn recognize(&self, text: &str, _ctx: RefCtx<'_>) -> Vec<ItemRef> {
         let mut out: Vec<ItemRef> = Vec::new();
         let site_host = self.site.trim_start_matches("https://");
         for word in

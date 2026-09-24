@@ -10,13 +10,12 @@
 //! No `.await` holds the store lock: each action reads what it needs, drops
 //! the guard, talks to the tracker, then locks again to write.
 
-use super::{provider_for, TrackerError};
+use super::{needs_credential, provider_for, TrackerError, TrackerNet};
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::net::https::HttpTransport;
 use crate::store::{Store, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
@@ -226,20 +225,22 @@ pub fn admin_sync(
 pub async fn test_tracker(
     id: i64,
     store: &Mutex<Store>,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<TestReport, IpcError> {
     let (row, cred) = {
         let s = lock(store)?;
         (s.require_tracker(id)?, s.resolve_tracker_credential(id)?)
     };
-    let provider = provider_for(&row, cred, transport);
-    let probed = match provider.probe().await {
-        Ok(info) => {
-            let views = provider.views(&info.config).await;
-            views.map(|v| (info, v))
+    let probed = async {
+        if cred.is_none() && needs_credential(&row) {
+            return Err(TrackerError::Unconfigured);
         }
-        Err(e) => Err(e),
-    };
+        let provider = provider_for(&row, cred, net)?;
+        let info = provider.probe().await?;
+        let views = provider.views(&info.config).await?;
+        Ok((info, views))
+    }
+    .await;
     let s = lock(store)?;
     let report = match probed {
         Ok((info, views)) => {
@@ -293,6 +294,7 @@ mod tests {
     use super::*;
     use crate::net::https::{FakeTransport, Method, Response};
     use serde_json::json;
+    use std::sync::Arc;
 
     const TOKEN: &str = "ATATT3xFfGF0-admin-test-token-not-real";
 
@@ -453,7 +455,9 @@ mod tests {
             "/filter/favourite",
             Ok(Response::json(200, &fixture("filter_favourite.json"))),
         );
-        let r = test_tracker(id, &st, Arc::new(f.clone())).await.unwrap();
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f.clone())))
+            .await
+            .unwrap();
         assert!(r.ok, "{:?}", r.error);
         assert_eq!(r.tracker.state, "ok");
         assert_eq!(r.tracker.config.key_prefixes, vec!["TEAM"]);
@@ -470,7 +474,9 @@ mod tests {
         let (st, id) = added();
         let f = FakeTransport::new();
         f.once(Method::Get, "/myself", Ok(Response::new(401, "")));
-        let r = test_tracker(id, &st, Arc::new(f)).await.unwrap();
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f)))
+            .await
+            .unwrap();
         assert!(!r.ok);
         assert_eq!(r.tracker.state, "auth_failed");
         let err = r.error.unwrap();

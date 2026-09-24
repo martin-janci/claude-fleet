@@ -125,7 +125,7 @@ pub async fn test_tracker(
     admin::test_tracker(
         args.tracker_id,
         &store,
-        fleet_core::service::trackers::direct_transport(),
+        &fleet_core::service::trackers::default_net(),
     )
     .await
 }
@@ -236,7 +236,7 @@ pub async fn start_work(
 
 pub(crate) mod routed {
     use super::*;
-    use fleet_core::service::trackers::{direct_transport, tickets};
+    use fleet_core::service::trackers::{default_net, tickets};
     use fleet_core::service::work::{WorkArgs, WorkLinkArgs};
 
     pub async fn list_trackers(
@@ -294,13 +294,7 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("work_lookup", &wire).await,
             None => {
-                tickets::lookup(
-                    store,
-                    &args.reference,
-                    tickets::Scope::All,
-                    direct_transport(),
-                )
-                .await
+                tickets::lookup(store, &args.reference, tickets::Scope::All, &default_net()).await
             }
         }
     }
@@ -335,7 +329,7 @@ pub(crate) mod routed {
                     reg,
                     &fleet_core::service::work::start_args(&wire),
                     tickets::Scope::All,
-                    direct_transport(),
+                    &default_net(),
                 )
                 .await
             }

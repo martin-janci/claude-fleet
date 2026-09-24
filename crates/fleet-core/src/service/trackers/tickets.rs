@@ -23,8 +23,8 @@
 use super::jira::parse_ticket_url;
 use super::sync::fetch_one;
 use super::ItemRef;
+use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::net::https::HttpTransport;
 use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -229,7 +229,7 @@ pub async fn lookup(
     store: &Mutex<Store>,
     reference: &str,
     scope: Scope<'_>,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<Ticket, IpcError> {
     let (tracker, key) = {
         let s = lock(store)?;
@@ -260,7 +260,7 @@ pub async fn lookup(
                 )
                 .with_details(serde_json::json!({ "state": t.state })));
             }
-            fetch_one(&t, ItemRef::Key(key.clone()), store, transport)
+            fetch_one(&t, ItemRef::parse(&key), store, net)
                 .await
                 .map_err(|e| e.to_ipc())?
                 .ok_or_else(|| {
@@ -394,7 +394,7 @@ pub async fn plan_start(
     store: &Mutex<Store>,
     args: &StartArgs,
     scope: Scope<'_>,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<StartPlan, IpcError> {
     let (key, title, item_id) = match (args.item_id, args.reference.as_deref()) {
         (Some(id), None) => {
@@ -415,7 +415,7 @@ pub async fn plan_start(
             })?;
             (key, item.title, Some(id))
         }
-        (None, Some(r)) => match lookup(store, r, scope, transport).await {
+        (None, Some(r)) => match lookup(store, r, scope, net).await {
             Ok(t) => (
                 t.item.key.clone().unwrap_or_else(|| r.to_string()),
                 t.item.title,
@@ -681,9 +681,9 @@ pub async fn start_work(
     reg: &Arc<crate::cancel::CancellationRegistry>,
     args: &StartArgs,
     scope: Scope<'_>,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
-    let plan = plan_start(store, args, scope, transport).await?;
+    let plan = plan_start(store, args, scope, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),
         (None, true) => Some(ticket_brief(store, &plan)?),

@@ -622,7 +622,7 @@ impl FleetTools {
                     &self.store,
                     reference,
                     tracker_scope(&caller),
-                    crate::service::trackers::direct_transport(),
+                    &crate::service::trackers::default_net(),
                 )
                 .await
                 .map_err(to_mcp_err)?;
@@ -705,7 +705,7 @@ impl FleetTools {
                 &self.reg,
                 &crate::service::work::start_args(&args),
                 tracker_scope(&caller),
-                crate::service::trackers::direct_transport(),
+                &crate::service::trackers::default_net(),
             )
             .await
             .map_err(to_mcp_err)?;
@@ -741,13 +741,10 @@ impl FleetTools {
                 let id = args
                     .tracker_id
                     .ok_or_else(|| mcp_err("E_INVALID", "test needs tracker_id", None))?;
-                let report = a::test_tracker(
-                    id,
-                    &self.store,
-                    crate::service::trackers::direct_transport(),
-                )
-                .await
-                .map_err(to_mcp_err)?;
+                let report =
+                    a::test_tracker(id, &self.store, &crate::service::trackers::default_net())
+                        .await
+                        .map_err(to_mcp_err)?;
                 ok_json(&report)
             }
             AdminAction::Remove => {

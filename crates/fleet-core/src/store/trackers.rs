@@ -74,6 +74,37 @@ pub struct TrackerConfig {
     pub sprint_field: Option<String>,
 }
 
+/// What the ADMIN set for a tracker (migration 050, work graph M6), kept
+/// apart from [`TrackerConfig`], which every probe replaces. Never a secret.
+/// Unknown fields are ignored and every field defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerSettings {
+    /// GitHub: the repositories (`owner/repo`, lower case) whose issues the
+    /// views cover. Empty: `assignee:@me` across the site's owner scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    /// Asana: section name (lower case) → `todo` | `in_progress` | `done`.
+    /// Inferred on the first sync, correctable in Settings.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub section_map: std::collections::BTreeMap<String, String>,
+    /// A person confirmed (or edited) `section_map`; inference stops.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub section_map_confirmed: bool,
+    /// Jira Data Center: an extra CA (PEM) the site's certificate chains to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_ca: Option<String>,
+    /// Jira Data Center: the admin allows a site that resolves to a
+    /// loopback, private or link-local address (refused by default: SSRF).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_private_network: bool,
+}
+
+impl TrackerSettings {
+    pub fn is_default(&self) -> bool {
+        *self == TrackerSettings::default()
+    }
+}
+
 /// A tracker as every read path sees it. No secret: see the module docs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackerRow {
@@ -109,6 +140,9 @@ pub struct TrackerRow {
     /// The account the credential belongs to (Jira: the email). Not a secret.
     #[serde(default)]
     pub username: Option<String>,
+    /// What the admin set (M6); absent from an older hub.
+    #[serde(default, skip_serializing_if = "TrackerSettings::is_default")]
+    pub settings: TrackerSettings,
 }
 
 /// One query a sync runs.
@@ -124,6 +158,10 @@ pub struct TrackerViewRow {
     pub watermark: Option<i64>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// An opaque sync token (M6: Asana's events API), for a provider whose
+    /// incremental reads are not a time watermark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_mark: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -321,7 +359,7 @@ fn secret_hint(value: &str) -> Option<String> {
 
 const TRACKER_COLUMNS: &str = "t.id, t.provider, t.name, t.instance_id, t.site_url, t.transport, \
      t.config, t.state, t.last_sync_at, t.last_error, t.created_at, \
-     s.auth_kind, s.username, s.value, s.credential_ref";
+     s.auth_kind, s.username, s.value, s.credential_ref, t.settings";
 
 fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
     let config: Option<String> = r.get(6)?;
@@ -350,6 +388,10 @@ fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
         credential_hint: hint,
         auth_kind: r.get(11)?,
         username: r.get(12)?,
+        settings: r
+            .get::<_, Option<String>>(15)?
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default(),
     })
     // `value` is dropped here: it was read only to compute the hint.
 }
@@ -362,6 +404,7 @@ fn map_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerViewRow> {
         query: r.get(3)?,
         watermark: r.get(4)?,
         enabled: r.get::<_, i64>(5)? != 0,
+        sync_mark: r.get(6)?,
     })
 }
 
@@ -695,7 +738,8 @@ impl Store {
 
     pub fn list_tracker_views(&self, tracker_id: i64) -> Result<Vec<TrackerViewRow>, IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT tracker_id, view_id, label, query, watermark, enabled FROM tracker_views \
+            "SELECT tracker_id, view_id, label, query, watermark, enabled, sync_mark \
+             FROM tracker_views \
              WHERE tracker_id = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(rusqlite::params![tracker_id], map_view)?;
@@ -718,6 +762,7 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT(tracker_id, view_id) DO UPDATE SET label = excluded.label, \
                    watermark = CASE WHEN query IS excluded.query THEN watermark END, \
+                   sync_mark = CASE WHEN query IS excluded.query THEN sync_mark END, \
                    query = excluded.query",
                 rusqlite::params![tracker_id, id, label, query],
             )?;
@@ -752,6 +797,38 @@ impl Store {
             rusqlite::params![tracker_id, view_id, watermark],
         )?;
         Ok(())
+    }
+
+    /// Store (or clear) a view's sync token.
+    pub fn set_tracker_view_mark(
+        &self,
+        tracker_id: i64,
+        view_id: &str,
+        mark: Option<&str>,
+    ) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE tracker_views SET sync_mark = ?3 WHERE tracker_id = ?1 AND view_id = ?2",
+            rusqlite::params![tracker_id, view_id, mark],
+        )?;
+        Ok(())
+    }
+
+    /// Replace what the admin set. `true` when it changed.
+    pub fn set_tracker_settings(
+        &self,
+        id: i64,
+        settings: &TrackerSettings,
+    ) -> Result<bool, IpcError> {
+        self.require_tracker(id)?;
+        let json = (!settings.is_default())
+            .then(|| serde_json::to_string(settings))
+            .transpose()
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
+        let n = self.conn.execute(
+            "UPDATE trackers SET settings = ?1 WHERE id = ?2 AND settings IS NOT ?1",
+            rusqlite::params![json, id],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn set_tracker_view_enabled(

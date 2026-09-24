@@ -6,6 +6,7 @@ use super::*;
 use crate::events::RecordingEventBus;
 use crate::net::https::{FakeTransport, Method, Response};
 use crate::service::trackers::jira::VIEW_MINE;
+use crate::service::trackers::TrackerNet;
 use crate::store::{TrackerConfig, WorkTarget};
 use serde_json::{json, Value};
 
@@ -72,7 +73,7 @@ impl Fx {
     }
 
     fn sync(&self, clock: fn() -> i64) -> TrackerSync {
-        TrackerSync::new(Arc::new(self.fake.clone())).with_clock(clock)
+        TrackerSync::new(TrackerNet::fake(Arc::new(self.fake.clone()))).with_clock(clock)
     }
 
     fn row(&self) -> TrackerRow {
@@ -439,7 +440,8 @@ async fn a_429_waits_out_retry_after_then_resumes() {
     // Still inside Retry-After: skipped.
     assert!(early.run_pass(&fx.store).await.unwrap()[0].skipped);
     // Past it (and past any jitter): runs, and the tracker is ok again.
-    let later = TrackerSync::new(Arc::new(fx.fake.clone())).with_clock(|| T0 + 3600);
+    let later =
+        TrackerSync::new(TrackerNet::fake(Arc::new(fx.fake.clone()))).with_clock(|| T0 + 3600);
     // A new sync has no memory of the wait; carry it over as a restart would
     // lose it anyway — what matters is that a pass after the wait succeeds.
     let p = later.run_pass(&fx.store).await.unwrap().remove(0);
@@ -509,4 +511,103 @@ fn the_interval_setting_defaults_turns_off_and_has_a_floor() {
         .set_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS, "5")
         .unwrap();
     assert_eq!(interval(&st), Some(Duration::from_secs(60)));
+}
+
+/// A provider whose views are read by sync token (M6.0's opaque mark).
+struct TokenProvider {
+    expired: bool,
+}
+
+#[async_trait::async_trait]
+impl TrackerProvider for TokenProvider {
+    fn caps(&self) -> crate::service::trackers::Caps {
+        crate::service::trackers::Caps {
+            incremental: Incremental::SyncToken,
+            ..Default::default()
+        }
+    }
+    async fn probe(&self) -> Result<crate::service::trackers::TrackerInfo, TrackerError> {
+        unreachable!()
+    }
+    async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+        unreachable!()
+    }
+    async fn list(
+        &self,
+        _: &ViewDef,
+        since: Option<i64>,
+        _: Option<String>,
+    ) -> Result<crate::service::trackers::Page, TrackerError> {
+        assert_eq!(since, None, "a token provider lists whole");
+        Ok(crate::service::trackers::Page {
+            items: vec![snap("whole")],
+            next: None,
+        })
+    }
+    async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+        unreachable!()
+    }
+    fn recognize(&self, _: &str, _: crate::service::trackers::RefCtx<'_>) -> Vec<ItemRef> {
+        vec![]
+    }
+    async fn changes(
+        &self,
+        _: &ViewDef,
+        mark: Option<&str>,
+    ) -> Result<crate::service::trackers::Changes, TrackerError> {
+        Ok(crate::service::trackers::Changes {
+            items: if mark.is_some() && !self.expired {
+                vec![snap("changed")]
+            } else {
+                vec![]
+            },
+            mark: Some("tok-2".into()),
+            expired: mark.is_none() || self.expired,
+        })
+    }
+}
+
+fn snap(id: &str) -> WorkItemSnapshot {
+    WorkItemSnapshot {
+        external_id: id.into(),
+        updated: Some(1),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
+    let def = ViewDef {
+        id: "project:1".into(),
+        label: "P".into(),
+        query: "1".into(),
+    };
+    let ids = |v: &[WorkItemSnapshot]| v.iter().map(|i| i.external_id.clone()).collect::<Vec<_>>();
+    let p = TokenProvider { expired: false };
+    // No token yet: a whole listing, then a first token.
+    let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (ids(&items), full, mark.as_deref()),
+        (vec!["whole".into()], true, Some("tok-2"))
+    );
+    // A live token: only the changes, and the next token.
+    let (items, full, mark) =
+        read_view(&p, &def, Incremental::SyncToken, false, None, Some("tok-1"))
+            .await
+            .unwrap();
+    assert_eq!(
+        (ids(&items), full, mark.as_deref()),
+        (vec!["changed".into()], false, Some("tok-2"))
+    );
+    // An expired token: one whole listing, and the fresh token.
+    let p = TokenProvider { expired: true };
+    let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, Some("old"))
+        .await
+        .unwrap();
+    assert_eq!(
+        (ids(&items), full, mark.as_deref()),
+        (vec!["whole".into()], true, Some("tok-2"))
+    );
 }

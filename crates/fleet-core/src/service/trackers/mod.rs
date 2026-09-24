@@ -9,31 +9,56 @@
 //! falls through the cache. Nothing in M1/M2 waits on a tracker.
 
 pub mod admin;
+#[cfg(test)]
+pub mod conformance;
 pub mod jira;
 pub mod sync;
 pub mod tickets;
 
-use crate::net::https::{DirectTransport, HttpTransport};
+use crate::net::https::{DirectTransport, HostPolicy, HttpTransport};
 use crate::store::{TrackerConfig, TrackerCredential, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// What a provider can do; the UI degrades on what is missing.
+/// How a provider reads only what changed (M6.0).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Incremental {
+    /// A time watermark per view (`updated >= since`), minus an overlap.
+    #[default]
+    Watermark,
+    /// An opaque per-view sync token ([`TrackerProvider::changes`]); an
+    /// expired token means one whole listing (Asana's events API).
+    SyncToken,
+    /// Every pass lists every view whole.
+    None,
+}
+
+/// What a provider can do; the UI degrades on what is missing (M6.0).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Caps {
-    /// `jql` for Jira.
+    /// `jql` (Jira), `gql` (Linear, GitHub), `search`, or none.
     #[serde(default)]
     pub query_lang: Option<String>,
+    /// Items have parents (epics, sub-issues, subtasks).
     #[serde(default)]
     pub hierarchy: bool,
+    /// Sprints / cycles.
     #[serde(default)]
     pub iterations: bool,
-    /// Items have human keys (`ABC-123`), not only ids.
+    /// Items have human keys (`ABC-123`) with prefixes the probe learns;
+    /// without them, detection is by URL (and repo-relative `#n`) only.
     #[serde(default)]
     pub human_keys: bool,
+    /// A bare `#123` names an item of the session's own `owner/repo`.
     #[serde(default)]
-    pub incremental: bool,
-    /// Always false in M3: read-only.
+    pub repo_relative: bool,
+    /// One item can sit in several containers (Asana projects).
+    #[serde(default)]
+    pub multi_container: bool,
+    #[serde(default)]
+    pub incremental: Incremental,
+    /// Always false in M3–M6: read-only.
     #[serde(default)]
     pub write: bool,
 }
@@ -117,19 +142,68 @@ pub enum Fetched {
 /// `Unavailable.reason` for a 404 or an id missing from a bulk answer.
 pub const NOT_FOUND_OR_NO_PERMISSION: &str = "not_found_or_no_permission";
 
-/// A reference to an item recognised in text.
+/// A reference to an item recognised in text (or stored on a link).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ItemRef {
+    /// The tracker's own id (`external_id`).
     Id(String),
+    /// A human key (`ABC-123`), or the canonical reference of a provider
+    /// without human keys (`owner/repo#42`, `asana:<gid>`).
     Key(String),
+    /// An issue number in a repository (`owner/repo`, lower case).
+    RepoNumber { repo: String, n: u64 },
+    /// An item's web URL, as pasted.
+    Url(String),
 }
 
 impl ItemRef {
-    pub fn as_str(&self) -> &str {
+    /// The canonical text of the reference: what `Fetched::Unavailable`
+    /// carries back and what a link's `ref_key` holds.
+    pub fn reference(&self) -> String {
         match self {
-            ItemRef::Id(s) | ItemRef::Key(s) => s,
+            ItemRef::Id(s) | ItemRef::Key(s) | ItemRef::Url(s) => s.clone(),
+            ItemRef::RepoNumber { repo, n } => format!("{repo}#{n}"),
         }
     }
+
+    /// A stored reference (`ref_key`, a lookup's text) as an [`ItemRef`]:
+    /// `owner/repo#n` is a repo number, a URL is a URL, anything else a key.
+    pub fn parse(r: &str) -> ItemRef {
+        let r = r.trim();
+        if r.starts_with("https://") || r.starts_with("http://") {
+            return ItemRef::Url(r.to_string());
+        }
+        if let Some((repo, n)) = r.rsplit_once('#') {
+            if repo.contains('/') {
+                if let Ok(n) = n.parse::<u64>() {
+                    return ItemRef::RepoNumber {
+                        repo: repo.to_ascii_lowercase(),
+                        n,
+                    };
+                }
+            }
+        }
+        ItemRef::Key(r.to_string())
+    }
+}
+
+/// What recognition knows besides the text (M6.0).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefCtx<'a> {
+    /// The session's GitHub `owner/repo`, for a bare `#123`.
+    pub repo: Option<&'a str>,
+}
+
+/// What [`TrackerProvider::changes`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// Items that changed since the mark (already normalised).
+    pub items: Vec<WorkItemSnapshot>,
+    /// The mark to pass next time (opaque, per provider).
+    pub mark: Option<String>,
+    /// The mark was missing or had expired: the caller lists the view
+    /// whole once, then continues from `mark`.
+    pub expired: bool,
 }
 
 /// One page of a view.
@@ -241,32 +315,158 @@ pub trait TrackerProvider: Send + Sync {
     ) -> Result<Page, TrackerError>;
     /// Items by id or key; every reference gets an answer.
     async fn fetch(&self, refs: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError>;
-    /// Item references in free text: this site's URLs, and keys with a
-    /// known prefix.
-    fn recognize(&self, text: &str) -> Vec<ItemRef>;
+    /// Item references in free text: this site's URLs, keys with a known
+    /// prefix, and (where `caps.repo_relative`) a bare `#n` of `ctx.repo`.
+    fn recognize(&self, text: &str, ctx: RefCtx<'_>) -> Vec<ItemRef>;
+    /// What changed in `view` since `mark`, for a provider whose
+    /// `caps.incremental` is [`Incremental::SyncToken`]. The default says
+    /// the view has no token, so the caller lists it whole.
+    async fn changes(&self, _view: &ViewDef, _mark: Option<&str>) -> Result<Changes, TrackerError> {
+        Ok(Changes {
+            expired: true,
+            ..Default::default()
+        })
+    }
 }
 
-/// The provider for `row`, over `transport`. `cred` is `None` when no
-/// credential is set; every call then fails [`TrackerError::Unconfigured`].
+/// The provider for `row`, over the transport `net` picks for it. `cred` is
+/// `None` when no credential is set; a provider that needs one then fails
+/// every call [`TrackerError::Unconfigured`] (GitHub through `gh` needs
+/// none: the host's own `gh` login is used).
 pub fn provider_for(
     row: &TrackerRow,
     cred: Option<TrackerCredential>,
-    transport: Arc<dyn HttpTransport>,
-) -> Box<dyn TrackerProvider> {
-    // `provider` is validated on insert; jira is the only one in M3.
-    Box::new(jira::JiraCloud::new(
-        &row.site_url,
-        row.config.clone(),
-        cred,
-        transport,
-    ))
+    net: &TrackerNet,
+) -> Result<Box<dyn TrackerProvider>, TrackerError> {
+    let transport = net.transport_for(row)?;
+    Ok(match row.provider.as_str() {
+        "jira" => Box::new(jira::JiraCloud::new(
+            &row.site_url,
+            row.config.clone(),
+            cred,
+            transport,
+        )),
+        other => {
+            return Err(TrackerError::Refused(format!(
+                "this build has no {other:?} tracker provider"
+            )))
+        }
+    })
 }
 
-/// The real transport: HTTPS from this process, fenced to tracker hosts.
-pub fn direct_transport() -> Arc<dyn HttpTransport> {
-    Arc::new(DirectTransport::new(Arc::new(
-        crate::store::is_allowed_tracker_host,
-    )))
+/// Whether a provider needs a credential stored in fleet. GitHub through
+/// `gh` uses the host's own login, so fleet never holds its token.
+pub fn needs_credential(row: &TrackerRow) -> bool {
+    !matches!(
+        TransportKind::parse(&row.transport),
+        Ok(TransportKind::ViaCli(_))
+    )
+}
+
+/// Where a tracker's requests leave from (`trackers.transport`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportKind {
+    /// HTTPS from this process (the hub or a standalone desktop).
+    Direct,
+    /// `curl` on that host, the token piped on stdin (M6.3).
+    ViaHost(String),
+    /// A trusted CLI on that host (`gh`), with its own login (M6.1).
+    ViaCli(String),
+}
+
+impl TransportKind {
+    pub fn parse(s: &str) -> Result<TransportKind, TrackerError> {
+        let s = s.trim();
+        if s.is_empty() || s == "direct" {
+            return Ok(TransportKind::Direct);
+        }
+        let alias = |a: &str| -> Result<String, TrackerError> {
+            crate::validate::host_alias(a)
+                .map(|_| a.to_string())
+                .map_err(|e| TrackerError::Refused(e.message))
+        };
+        if let Some(a) = s.strip_prefix("via_host:") {
+            return Ok(TransportKind::ViaHost(alias(a)?));
+        }
+        if let Some(a) = s.strip_prefix("via_cli:") {
+            return Ok(TransportKind::ViaCli(alias(a)?));
+        }
+        Err(TrackerError::Refused(format!(
+            "unknown tracker transport {s:?}"
+        )))
+    }
+}
+
+/// What a tracker's transport is built from: the process's own HTTPS, and
+/// SSH for `via_host` / `via_cli`. Tests put a fake in front of all of it.
+#[derive(Clone, Default)]
+pub struct TrackerNet {
+    /// Every request goes here instead (tests).
+    fake: Option<Arc<dyn HttpTransport>>,
+    ssh: Option<Arc<dyn crate::ssh::SshExec>>,
+}
+
+impl TrackerNet {
+    /// The real thing: direct HTTPS fenced per provider, and `ssh` (when
+    /// this process has hosts) for `via_host` / `via_cli`.
+    pub fn real(ssh: Option<Arc<dyn crate::ssh::SshExec>>) -> Self {
+        TrackerNet { fake: None, ssh }
+    }
+
+    /// Every tracker, whatever its transport, talks to `t` (tests).
+    pub fn fake(t: Arc<dyn HttpTransport>) -> Self {
+        TrackerNet {
+            fake: Some(t),
+            ssh: None,
+        }
+    }
+
+    /// Real transport selection over a scripted SSH (tests of `via_host` /
+    /// `via_cli`).
+    pub fn with_ssh(ssh: Arc<dyn crate::ssh::SshExec>) -> Self {
+        TrackerNet {
+            fake: None,
+            ssh: Some(ssh),
+        }
+    }
+
+    /// The transport `row` says, with the provider's host fence.
+    pub fn transport_for(&self, row: &TrackerRow) -> Result<Arc<dyn HttpTransport>, TrackerError> {
+        if let Some(f) = &self.fake {
+            return Ok(Arc::clone(f));
+        }
+        let policy = host_policy(row);
+        match TransportKind::parse(&row.transport)? {
+            TransportKind::Direct => Ok(Arc::new(DirectTransport::new(policy))),
+            TransportKind::ViaHost(h) | TransportKind::ViaCli(h) => {
+                Err(TrackerError::Refused(match &self.ssh {
+                    None => format!("this process has no SSH to reach {h} with"),
+                    Some(_) => format!("this build cannot reach a tracker through {h} yet"),
+                }))
+            }
+        }
+    }
+}
+
+static DEFAULT_NET: std::sync::OnceLock<TrackerNet> = std::sync::OnceLock::new();
+
+/// Install the process's tracker network once at startup (the hub and a
+/// standalone desktop, with their SSH client, so `via_host` / `via_cli`
+/// trackers work). A second call is ignored.
+pub fn install_default_net(net: TrackerNet) {
+    let _ = DEFAULT_NET.set(net);
+}
+
+/// The process's tracker network: what [`install_default_net`] set, else
+/// direct HTTPS only.
+pub fn default_net() -> TrackerNet {
+    DEFAULT_NET.get().cloned().unwrap_or_default()
+}
+
+/// The hosts a tracker's requests may go to: its provider's API only (the
+/// SSRF fence, enforced by every transport before anything is sent).
+pub fn host_policy(_row: &TrackerRow) -> HostPolicy {
+    Arc::new(crate::store::is_allowed_tracker_host)
 }
 
 /// Most pages one view listing reads in one pass.
