@@ -295,6 +295,7 @@ export const ROUTED_ACTIONS = [
   'link_session_work',
   'reject_session_work',
   'unlink_session_work',
+  'start_work',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

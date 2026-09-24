@@ -639,13 +639,24 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Stamp a finished sync pass.
-    pub fn set_tracker_synced(&self, id: i64, at: i64) -> Result<(), IpcError> {
+    /// Stamp a finished sync pass. `true` for the tracker's FIRST sync —
+    /// the one moment worth a `work:tracker` frame on its own (the UI's
+    /// retro-link reveal); later stamps are read, not pushed.
+    pub fn set_tracker_synced(&self, id: i64, at: i64) -> Result<bool, IpcError> {
+        let first: bool = self
+            .conn
+            .query_row(
+                "SELECT last_sync_at IS NULL FROM trackers WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
         self.conn.execute(
             "UPDATE trackers SET last_sync_at = ?1 WHERE id = ?2",
             rusqlite::params![at, id],
         )?;
-        Ok(())
+        Ok(first)
     }
 
     /// Replace what a probe learned. `true` when anything changed.

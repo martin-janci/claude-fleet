@@ -165,8 +165,8 @@ impl TrackerSync {
                 }
                 if let Ok(s) = lock(store) {
                     let changed = s.set_tracker_state(t.id, "ok", None).unwrap_or(false);
-                    let _ = s.set_tracker_synced(t.id, now);
-                    if changed {
+                    let first = s.set_tracker_synced(t.id, now).unwrap_or(false);
+                    if changed || first {
                         let _ = s.emit_tracker(t.id);
                     }
                 }

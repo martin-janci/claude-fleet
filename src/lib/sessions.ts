@@ -142,6 +142,14 @@ export interface SessionWork {
   title: string;
   /** `manual` | `started` | `agent` — tolerant: a newer hub may add more. */
   source: string;
+  /** The tracker item's status (work graph M3); absent for a bare key, a
+   *  local item, or a hub older than M3. `todo` | `in_progress` | `done`. */
+  status_category?: string | null;
+  /** The tracker's own status name ("In Review"). */
+  status_name?: string | null;
+  url?: string | null;
+  /** The tracker no longer answers for the item (deleted or not visible). */
+  unavailable?: boolean;
 }
 
 type UsageFields = Partial<

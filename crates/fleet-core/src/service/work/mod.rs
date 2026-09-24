@@ -94,6 +94,12 @@ pub struct WorkLinkArgs {
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
+    /// Start: session name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Start: worktree name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 /// `work { action: context }`: the full handover context of a key.
@@ -222,6 +228,8 @@ pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::Sta
         host_alias: args.host_alias.clone(),
         with_brief: args.with_brief.unwrap_or(false) || args.brief.is_some(),
         brief: args.brief.clone(),
+        name: args.name.clone(),
+        worktree: args.worktree.clone(),
     }
 }
 

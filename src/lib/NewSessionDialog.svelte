@@ -27,6 +27,7 @@
   } from './fleet_settings';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
 
   let {
     project,
@@ -34,6 +35,7 @@
     onCancel,
     initialName,
     initialHost,
+    ticket,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -46,6 +48,10 @@
     /** Preselect this host (e.g. where Add project just put the project);
      *  wins over the remembered choices while it is pickable. */
     initialHost?: string;
+    /** Start work on this ticket (work graph M3): the dialog offers "Brief
+     *  Claude with the ticket" with an editable preview, and creating goes
+     *  through `start_work`, which links the session `started`. */
+    ticket?: TicketRow;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -297,6 +303,8 @@
     // a local row id that would be foreign (and rejected) on that host; the
     // scan-then-repair effects below correct this the moment real rows land.
     if (chosenHost !== 'local') return null;
+    // A ticket start works on its own branch (`slug(key + title)`).
+    if (ticket) return null;
     const remembered = rememberedFor(chosenHost);
     if (remembered === 'new') return null;
     if (typeof remembered === 'number' && project.worktrees.some((w) => w.id === remembered)) {
@@ -318,6 +326,8 @@
     const rows = hostWorktrees.rows;
     const current = untrack(() => chosenWorktreeId);
     if (current !== null && rows.some((w) => w.id === current)) return;
+    // A ticket start stays on its own new branch until someone picks a row.
+    if (current === null && untrack(() => ticket) && untrack(() => newWorktreeName)) return;
     const remembered = rememberedFor(untrack(() => chosenHost));
     const pick =
       (typeof remembered === 'number' && rows.find((w) => w.id === remembered)) ||
@@ -641,8 +651,73 @@
     });
   }
 
+  // ── Ticket start (work graph M3) ──
+  // With a ticket, creating is `start_work`: the same session, linked
+  // `started`, and — when "Brief Claude" is on — the ticket's context queued
+  // for the first hook (the description fenced as untrusted). The preview is
+  // editable; an untouched preview lets the backend build the canonical one.
+  let briefOn = $state(true);
+  let briefEdited = $state(false);
+  let briefDraft = $state('');
+  const briefBranch = $derived(
+    inNewMode ? finalizeBranchSlug(newWorktreeName) : (chosenWorktree?.name ?? ''),
+  );
+  const briefPreview = $derived(ticket ? ticketBriefPreview(ticket, briefBranch) : '');
+  const briefText = $derived(briefEdited ? briefDraft : briefPreview);
+  function onBriefInput(v: string) {
+    briefDraft = v;
+    briefEdited = true;
+  }
+  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+
+  async function submitTicket(t: TicketRow) {
+    if (startBlocked) return;
+    if (inNewMode) {
+      const cleaned = finalizeBranchSlug(newWorktreeName);
+      if (cleaned !== newWorktreeName) newWorktreeName = cleaned;
+      if (!newWorktreeName.trim()) {
+        error = 'Worktree name required';
+        return;
+      }
+    }
+    const submittedHost = chosenHost;
+    const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
+    busy = true;
+    error = null;
+    const r = await startWork({
+      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      project_id: project.project.id,
+      host_alias: submittedHost,
+      name: friendlyName.trim() || undefined,
+      worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
+      with_brief: briefOn,
+      brief: briefOn && briefEdited ? briefDraft : undefined,
+    });
+    busy = false;
+    if (!r.ok) {
+      const d = r.error.details as { session_id?: number } | null | undefined;
+      if (r.error.code === 'E_EXISTS' && d?.session_id != null) {
+        const live = $sessions.find((x) => x.id === d.session_id);
+        if (live) {
+          selectSessionExplicitly(live);
+          onCancel();
+          return;
+        }
+      }
+      if (destroyed) pushError(r.error, 'Start work failed');
+      else error = r.error.message;
+      return;
+    }
+    remember(submittedHost, submittedWorktreeId);
+    onCreate(r.value);
+  }
+
   async function submit() {
     if (busy) return;
+    if (ticket && chosenKind === 'work') {
+      await submitTicket(ticket);
+      return;
+    }
     // The Create button's `disabled` reads the same derived, but Enter in
     // any field (`onKeydown` below) calls `submit()` directly — the handler
     // must refuse too, or a blocked hub client could still route
@@ -788,6 +863,33 @@
         {/if}
       </p>
     {/if}
+    {#if ticket}
+      <div class="ticket-box" data-testid="ticket-box">
+        <p class="work-note">
+          <span class="k">ticket</span> <code>{ticket.key}</code>
+          {ticket.title}{#if ticket.status_name}<span class="muted"> — {ticket.status_name}</span>{/if}
+        </p>
+        {#if chosenKind === 'work'}
+          <label class="brief-toggle">
+            <input type="checkbox" data-testid="ticket-brief-on" bind:checked={briefOn} />
+            Brief Claude with the ticket
+          </label>
+          {#if briefOn}
+            <textarea
+              class="brief"
+              data-testid="ticket-brief"
+              rows="6"
+              value={briefText}
+              oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
+            ></textarea>
+            <p class="muted small">
+              Delivered with the first prompt (never typed into the pane). The description is
+              the ticket author's text and stays fenced as untrusted.
+            </p>
+          {/if}
+        {/if}
+      </div>
+    {/if}
     {#if resumeOpen && plannedKey}
       <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
@@ -898,9 +1000,11 @@
       <button
         class="primary"
         onclick={submit}
-        disabled={(inNewMode && !newWorktreeName.trim()) || newSessionBlocked !== null}
-        title={newSessionBlocked ?? ''}
-      >Create</button>
+        data-testid="create-btn"
+        disabled={(inNewMode && !newWorktreeName.trim()) ||
+          (ticket && chosenKind === 'work' ? startBlocked !== null : newSessionBlocked !== null)}
+        title={(ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
+      >{ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
     {/if}
   </div>
 </div>
@@ -1016,4 +1120,26 @@
   }
   .actions button.primary { border-color: var(--accent); }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .ticket-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .brief-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+  }
+  .brief {
+    font: inherit;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.72rem;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+  }
+  .small {
+    font-size: 0.7rem;
+  }
 </style>

@@ -478,3 +478,44 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
     // ABC-2 has a live session (the link above): E_EXISTS comes first.
     assert_eq!(e.unwrap_err().code, codes::E_EXISTS);
 }
+
+#[tokio::test]
+async fn a_person_can_rename_the_session_and_worktree_a_start_makes() {
+    let fx = Fx::new();
+    let base = StartArgs {
+        reference: Some("ABC-3".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            name: Some("Login fix".into()),
+            worktree: Some("abc-3-login".into()),
+            ..base.clone()
+        },
+        Scope::All,
+        fx.transport(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (plan.name.as_str(), plan.branch.as_str()),
+        ("Login fix", "abc-3-login")
+    );
+    for bad in ["main", "has space", "../x"] {
+        let e = plan_start(
+            &fx.store,
+            &StartArgs {
+                worktree: Some(bad.into()),
+                ..base.clone()
+            },
+            Scope::All,
+            fx.transport(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{bad}");
+    }
+}

@@ -260,3 +260,84 @@ describe('QuickSwitcher', () => {
     expect(get(selectedSession)?.id).toBe(2);
   });
 });
+
+// ---- tickets (work graph M3) -------------------------------------------------
+
+import { invoke as __invoke } from '@tauri-apps/api/core';
+import { trackers as __trackers } from './trackers';
+
+describe('QuickSwitcher tickets', () => {
+  const ticket = (key: string, over: Record<string, unknown> = {}) => ({
+    id: 100 + Number(key.split('-')[1]),
+    tracker_id: 1,
+    source: 'jira',
+    key,
+    title: `${key} title`,
+    status_category: 'todo',
+    status_name: 'To Do',
+    created_at: 1,
+    updated_at: 1,
+    ...over,
+  });
+  let calls: [string, unknown][] = [];
+  beforeEach(() => {
+    calls = [];
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      calls.push([cmd, args]);
+      const view = (args as { args?: { view?: string } } | undefined)?.args?.view;
+      if (cmd === 'work_tickets' && view === 'mine') return [ticket('ABC-1'), ticket('ABC-2', { live_session_ids: [6] })];
+      if (cmd === 'work_tickets') return [];
+      if (cmd === 'start_work') return { ...rows[0], id: 999 };
+      return null;
+    });
+  });
+
+  it('lists My work under its heading, below sessions; Enter jumps to a live one', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(2));
+    expect(screen.getByText('My work')).toBeTruthy();
+    await fireEvent.input(input, { target: { value: 'ABC-2' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(selectedSession)?.id).toBe(6);
+  });
+
+  it('Enter on a ticket with no session opens the dialog prefilled with the ticket', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(2));
+    await fireEvent.input(input, { target: { value: 'abc-1' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    const req = get(newSessionRequest);
+    expect(req?.initialName).toBe('ABC-1 ABC-1 title');
+    expect(req?.ticket?.key).toBe('ABC-1');
+  });
+
+  it('Ctrl+Enter on a ticket starts it with the defaults, without the dialog', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(2));
+    await fireEvent.input(input, { target: { value: 'abc-1' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+    await vi.waitFor(() => expect(calls.some(([c]) => c === 'start_work')).toBe(true));
+    const [, args] = calls.find(([c]) => c === 'start_work')!;
+    expect((args as { args: unknown }).args).toEqual({ item_id: 101, with_brief: true });
+    expect(get(newSessionRequest)).toBeNull();
+  });
+
+  it('a pasted ticket URL offers a lookup row', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'https://acme.atlassian.net/browse/ABC-77' } });
+    await tick();
+    expect(screen.getByTestId('switcher-lookup')).toBeTruthy();
+  });
+});

@@ -189,6 +189,12 @@ pub struct StartWorkArgs {
     /// The brief as a person edited it in the preview.
     #[serde(default)]
     pub brief: Option<String>,
+    /// The session name as edited in the dialog.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The worktree name as edited in the dialog.
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 #[tauri::command]
@@ -316,6 +322,8 @@ pub(crate) mod routed {
             host_alias: args.host_alias.clone(),
             with_brief: args.with_brief.then_some(true),
             brief: args.brief.clone(),
+            name: args.name.clone(),
+            worktree: args.worktree.clone(),
             ..Default::default()
         };
         match backend.hub() {

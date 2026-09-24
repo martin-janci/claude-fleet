@@ -329,6 +329,11 @@ pub struct StartArgs {
     pub with_brief: bool,
     /// The brief as a person edited it (implies `with_brief`).
     pub brief: Option<String>,
+    /// The session's name as a person edited it (default `KEY title`).
+    pub name: Option<String>,
+    /// The worktree (branch) name as a person edited it (default
+    /// `slug(key + title)`); an existing worktree of that name is reused.
+    pub worktree: Option<String>,
 }
 
 /// Where a start lands and what it is called.
@@ -505,14 +510,43 @@ pub async fn plan_start(
             ));
         }
     }
-    let branch = branch_slug(&key, &title);
+    let branch = match args
+        .worktree
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+    {
+        Some(w) => {
+            crate::validate::git_ref(w)?;
+            if w == "main" || w == "master" {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "worktree name must not be 'main' or 'master'",
+                ));
+            }
+            w.to_string()
+        }
+        None => branch_slug(&key, &title),
+    };
     let worktree_id = s
         .list_worktrees_on_host(&host_alias)?
         .into_iter()
         .find(|w| w.project_id == project_id && w.name == branch)
         .map(|w| w.id);
+    let name = match args
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        Some(n) => {
+            crate::validate::friendly_name(n)?;
+            n.to_string()
+        }
+        None => start_name(&key, &title),
+    };
     Ok(StartPlan {
-        name: start_name(&key, &title),
+        name,
         key,
         title,
         item_id,

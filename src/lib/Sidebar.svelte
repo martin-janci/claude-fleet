@@ -47,7 +47,8 @@
     type SessionPredicate,
     type WorkGroup,
   } from './sidebar_index';
-  import { workGroupPrSummary, workKeyFor, worktreeBranchById } from './work_keys';
+  import { workGroupPrSummary, workGroupTicket, workKeyFor, worktreeBranchById } from './work_keys';
+  import { statusDotClass, unavailableLabel } from './trackers';
   import {
     ciStatusColor,
     ciStatusLabel,
@@ -929,6 +930,7 @@
         {#each workGroups as g (g.key)}
           {@const isCollapsed = collapsedWork.has(g.key)}
           {@const pr = workGroupPrSummary(g.sessions)}
+          {@const ticket = workGroupTicket(g.key, g.sessions)}
           <li class="proj">
             <div
               class="proj-row work-row"
@@ -943,7 +945,21 @@
               }}
             >
               <span class="caret" class:collapsed={isCollapsed}>▾</span>
-              <span class="label"><span class="work-key">{g.key}</span></span>
+              <span class="label"
+                ><span class="work-key" class:unavailable={ticket?.status?.unavailable}
+                  >{g.key}</span
+                >{#if ticket?.status && !ticket.status.unavailable}<span
+                    class="work-dot {statusDotClass(ticket.status.category)}"
+                    data-testid="work-header-dot"
+                    title={ticket.status.name ?? ticket.status.category}
+                  ></span>{/if}{#if ticket?.title}<span
+                    class="work-title"
+                    data-testid="work-header-title"
+                    title={ticket.status?.unavailable
+                      ? `${ticket.title} — ${unavailableLabel('not_found_or_no_permission')}`
+                      : ticket.title}>{ticket.title}</span
+                  >{/if}</span
+              >
               {#if pr.prCount > 0}
                 <span
                   class="work-pr"
@@ -1351,6 +1367,32 @@
   .work-key {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-weight: 600;
+  }
+  .work-key.unavailable {
+    text-decoration: line-through;
+    opacity: 0.6;
+  }
+  .work-dot {
+    display: inline-block;
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    margin-left: 0.3rem;
+    background: var(--fg-muted);
+    vertical-align: middle;
+  }
+  .work-dot.dot-progress {
+    background: var(--accent, #3b82f6);
+  }
+  .work-dot.dot-done {
+    background: var(--ok, #22c55e);
+  }
+  .work-title {
+    margin-left: 0.4rem;
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .done-row {
     display: flex;

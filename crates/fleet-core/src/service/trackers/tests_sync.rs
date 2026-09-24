@@ -134,6 +134,15 @@ async fn a_first_pass_lists_views_whole_and_sets_the_watermark() {
         fx.bus.names().iter().filter(|n| **n == "work:item").count(),
         7
     );
+    // The first sync is announced once (the UI's retro-link reveal).
+    assert_eq!(
+        fx.bus
+            .names()
+            .iter()
+            .filter(|n| **n == "work:tracker")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -487,7 +487,7 @@ Parameters: `action`, `auth_kind`, `confirm_nonce`, `credential_ref`, `name`, `p
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket.
 
-Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `project_id`, `session_id`, `source`, `url`, `with_brief`
+Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 

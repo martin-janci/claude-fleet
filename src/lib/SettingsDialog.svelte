@@ -1,4 +1,5 @@
 <script lang="ts">
+  import WorkSettings from './WorkSettings.svelte';
   import { onMount, tick } from 'svelte';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
@@ -729,6 +730,8 @@
         </div>
       </div>
     </section>
+
+    <WorkSettings />
 
     {#if !ownsFleet}
       <section class="block" data-testid="automation-remote-section">

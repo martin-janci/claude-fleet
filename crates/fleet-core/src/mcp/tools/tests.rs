@@ -2878,7 +2878,9 @@ fn the_served_definition_budget_stays_bounded() {
     // (tracker_id, view, query, limit, url) and `work_link` gains start
     // (url, project_id, with_brief) — eight parameters on the two existing
     // tools, no new tool. Measured at 68,066 on 2026-09-24; plus 100.
-    const BUDGET_BYTES: usize = 68_166;
+    // M3.5: start's `name` / `worktree`, so the New-session dialog's edits
+    // reach a ticket start. Measured at 68,213 on 2026-09-24; plus 100.
+    const BUDGET_BYTES: usize = 68_313;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
