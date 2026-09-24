@@ -43,6 +43,7 @@ mod lifecycle;
 mod messaging;
 mod orchestration;
 mod params;
+mod peer;
 mod present;
 mod repo;
 mod session_ops;
@@ -264,6 +265,7 @@ impl FleetTools {
             + Self::orchestration_router()
             + Self::repo_router()
             + Self::assets_router()
+            + Self::peer_router()
     }
 }
 

@@ -719,6 +719,48 @@ fn set_secret_value_never_reaches_the_persisted_audit_trail() {
     assert_eq!(detail, "set_secret by master: host_alias=mefistos name=FOO");
 }
 
+/// SEC: a linked hub's message bodies ride `peer_exchange`'s `send` array,
+/// and `redact_args` only redacts top-level string keys — an array is
+/// rendered as raw JSON, so up to the summary cap of a peer's body would
+/// land on the controller's timeline, once per long-poll. `peer_exchange`
+/// therefore writes no audit row at all; its own `audit` log line carries
+/// counts only.
+#[test]
+fn peer_exchange_bodies_never_reach_the_persisted_audit_trail() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({
+        "proto": 1,
+        "fleet_id": "fleet-a",
+        "send": [{
+            "id": 1, "from_addr": "fleet-a/session/h/a1",
+            "to_addr": "fleet-b/session/local/ctl", "body": "the secret peer body",
+            "kind": "message", "sent_at": 0
+        }],
+        "results": [{ "id": 2, "status": "rejected", "code": "E_X", "message": "peer words" }]
+    });
+    persist_audit(
+        &store,
+        crate::mcp::auth::PEER_TOOL,
+        args.as_object(),
+        &client_caller("hub-a", TokenMode::Peer),
+    );
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    assert!(
+        !events.iter().any(|e| e.kind == "mcp_call"),
+        "peer_exchange must not persist an audit row: {events:?}"
+    );
+}
+
 #[test]
 fn ok_json_never_emits_an_empty_text_block() {
     // Even degenerate values must serialize to a non-empty text block, so a
@@ -1516,6 +1558,7 @@ fn router_sum_serves_every_tool() {
         include_str!("orchestration.rs"),
         include_str!("repo.rs"),
         include_str!("assets.rs"),
+        include_str!("peer.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -1525,7 +1568,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 81);
+    assert_eq!(served, 82);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2312,15 +2355,16 @@ fn the_served_tool_list_matches_the_call_gates() {
 }
 
 /// A peer token (a linked hub) reaches exactly one tool — `peer_exchange` —
-/// and nothing else reaches that tool. Until Task 7 adds the tool itself,
-/// the router carries no `peer_exchange` entry, so this loop covers every
-/// registered tool; Task 7 must skip `peer_exchange` in this loop once it
-/// exists.
+/// and nothing else reaches that tool. The loop covers every other
+/// registered tool.
 #[test]
 fn a_peer_token_reaches_only_peer_exchange_and_nothing_else_reaches_it() {
     let peer = client_caller("hub-b", TokenMode::Peer);
     for t in FleetTools::tool_router_for_doc().list_all() {
         let name = t.name.to_string();
+        if name == crate::mcp::auth::PEER_TOOL {
+            continue;
+        }
         assert!(
             enforce_mode(&peer, &name).is_err(),
             "a peer token must be refused {name}"
@@ -2331,6 +2375,7 @@ fn a_peer_token_reaches_only_peer_exchange_and_nothing_else_reaches_it() {
         );
     }
     assert!(enforce_mode(&peer, crate::mcp::auth::PEER_TOOL).is_ok());
+    assert!(present::visible_to(&peer, crate::mcp::auth::PEER_TOOL));
     for (label, c) in every_caller_kind() {
         if c.mode == TokenMode::Peer {
             continue;
@@ -2350,7 +2395,12 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
             .collect()
     };
     let master = served(&Caller::master());
-    assert_eq!(master.len(), all.len(), "the master token sees everything");
+    assert_eq!(
+        master.len(),
+        all.len() - 1,
+        "the master token sees everything but peer_exchange"
+    );
+    assert!(!master.iter().any(|n| n == crate::mcp::auth::PEER_TOOL));
 
     let readonly = served(&host_caller("hosta", TokenMode::Readonly));
     assert!(
@@ -2858,6 +2908,12 @@ fn the_served_definition_budget_stays_bounded() {
         (
             "client full",
             definition_bytes(&client_caller("phone", TokenMode::Full)),
+        ),
+        // `peer_exchange` alone: served to a peer token and nothing else, so
+        // it never counts against the master budget above.
+        (
+            "peer",
+            definition_bytes(&client_caller("hub-b", TokenMode::Peer)),
         ),
     ] {
         println!("{label}: {n} tools / {b} bytes (~{} tokens)", b * 10 / 37);

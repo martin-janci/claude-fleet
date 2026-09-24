@@ -504,6 +504,13 @@ pub(super) fn persist_audit(
     args: Option<&JsonObject>,
     caller: &Caller,
 ) {
+    // `peer_exchange` carries a linked hub's message bodies inside its `send`
+    // array, which `redact_args` (top-level keys only) would render as raw
+    // JSON onto the controller's timeline — once per long-poll. It writes no
+    // row; its own `audit` log line carries counts only.
+    if tool == crate::mcp::auth::PEER_TOOL {
+        return;
+    }
     let Ok(s) = store.lock() else { return };
     let Some(session_id) = find_audit_session(&s, args) else {
         return;

@@ -333,6 +333,10 @@ Index by area (names only; see the reference for details):
   `fleet-hub pair`, `fleet-hub client list`, `fleet-hub client revoke` and
   `fleet-hub client trust|untrust` commands are thin wrappers around these
   four.
+- **Hub links** — `peer_exchange` (hub-to-hub federation: a linked hub's
+  `peer` token long-polls it to trade messages and acknowledgements; the one
+  tool a peer token reaches, and no other token reaches it, so it is listed
+  to peer tokens only).
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →

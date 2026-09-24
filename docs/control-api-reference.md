@@ -193,6 +193,12 @@ Mint a single-use pairing code for a new client device (a phone, a laptop browse
 
 Parameters: `mode`, `name`, `trusted`, `ttl_s`
 
+### `peer_exchange`
+
+Hub-to-hub link exchange (peer tokens only): deliver messages and acks, receive this hub's messages for the caller. Long-polls up to wait_ms. See docs/hub.md, Link two hubs.
+
+Parameters: `after`, `fleet_id`, `proto`, `results`, `send`, `wait_ms`
+
 ### `peer_status`
 
 What is a peer session doing? Returns claude_status, current_activity, stuck_kind, context_pct (plus host/name/status) for one session. Cheap pre-check before send_message or broadcast_prompt.

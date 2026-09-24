@@ -49,9 +49,11 @@ pub struct WireResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExchangeRequest {
+    /// Wire protocol version; must be 1.
     pub proto: u32,
     /// The calling hub's fleet id.
     pub fleet_id: String,
+    /// Messages for this hub's sessions, at most 50.
     #[serde(default)]
     pub send: Vec<WireMessage>,
     /// Highest id of yours the caller has stored.
