@@ -234,6 +234,16 @@ pub struct SessionRow {
     /// that omits it.
     #[serde(default)]
     pub pending_input: Option<PendingInput>,
+    /// The session's primary work link (migration 046), read-only here: it
+    /// is set through `work_link`. `None` when the session has none.
+    /// `serde(default)` so a peer older than the work graph parses the row.
+    #[serde(default)]
+    pub work: Option<WorkSummary>,
+    /// Keys this session's user said it does NOT work on (sticky rejections,
+    /// migration 046). A client that recognises keys itself (the sidebar's
+    /// branch/tag fallback) must not show these. Empty for most rows.
+    #[serde(default)]
+    pub work_rejected: Vec<String>,
 }
 
 impl SessionRow {
@@ -275,7 +285,22 @@ pub(super) const SESSION_COLUMNS: &str =
      usage_input_tokens, usage_output_tokens, usage_cache_write_tokens, usage_cache_read_tokens, \
      usage_cost_micros, usage_model, usage_updated_at, \
      model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id, \
-     pending_input, row_version, lost_reason";
+     pending_input, row_version, lost_reason, \
+     (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
+                         'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
+                         'source', l.source) \
+        FROM participants p \
+        JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
+                         AND l.is_primary = 1 AND l.state = 'confirmed' \
+        LEFT JOIN work_items i ON i.id = l.item_id \
+       WHERE p.session_id = sessions.id AND p.retired_at IS NULL LIMIT 1) AS work, \
+     (SELECT json_group_array(COALESCE(i.key, l.ref_key)) \
+        FROM participants p \
+        JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
+                         AND l.state = 'rejected' \
+        LEFT JOIN work_items i ON i.id = l.item_id \
+       WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
+         AND COALESCE(i.key, l.ref_key) IS NOT NULL) AS work_rejected";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -358,7 +383,15 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         },
         pending_input: decode_pending_input(row.get(51)?),
         lost_reason: row.get(53)?,
+        work: decode_work(row.get(54)?),
+        work_rejected: decode_tags(row.get(55)?),
     })
+}
+
+/// Decode the primary-work subselect of `SESSION_COLUMNS` (a JSON object, or
+/// NULL when the session has no primary link). Malformed text reads as none.
+pub(super) fn decode_work(raw: Option<String>) -> Option<WorkSummary> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
 }
 
 /// Decode the `sessions.pending_input` JSON column. NULL or malformed text

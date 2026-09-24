@@ -247,6 +247,8 @@ mod tests {
             usage: Default::default(),
             context: Default::default(),
             pending_input: None,
+            work: None,
+            work_rejected: vec![],
         }
     }
 

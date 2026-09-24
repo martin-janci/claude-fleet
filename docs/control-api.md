@@ -321,6 +321,33 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
   `list_tasks`, `cancel_task`, `set_session_tags`.
+- **Work** — `work` (read: `{session_id}` → that session's live work links,
+  primary first; `{key}` → ended links to the key, each with the snapshot of
+  the session that did it), `work_link` (`{session_id, action}`: `link` a key
+  or `item_id` — it becomes the session's primary work, `source` `manual` by
+  default or `agent` from the in-session agent; `reject` — a sticky "not
+  this"; `unlink` a `link_id`). Returns the updated row; a session row's
+  `work` carries its primary link. A per-host token reads and decides only
+  its own host's sessions. With neither `session_id` nor `key`, `work`
+  lists the links that ended within `work.recent_days`.
+  Resume and work memory (roadmap M2): `work { action: "context", key }` is
+  the full handover context of a key — its sessions, conversations, the
+  last progress line and compaction summary Claude wrote (from the work
+  journal, which outlives the sessions), plus a live read-only git probe;
+  third-party text is fenced as untrusted. `work { action: "resume_plan",
+  key, link_id?, host_alias?, with_brief? }` says what a resume would do:
+  live sessions (Jump, never a second one), the ended candidates, where it
+  lands, and per mode (`last` | `brief` | `fresh`) whether it is possible
+  and why not. `work_link { action: "resume", key, mode, link_id?,
+  host_alias?, brief? }` starts it: `last` continues the conversation in its
+  worktree (recreated from the branch when it is gone), `brief` starts fresh
+  with the handover brief delivered through the first hook's
+  `additionalContext` (never typed into the pane; a short start prompt is
+  typed only into a ready REPL, never into the trust dialog), `fresh` starts
+  clean. `work { action: "purge_impact", project_id, host_aliases }` names
+  the keys a purge would leave without resumable conversations. A per-host
+  token reads context and plans only for work that ran on its host, and
+  resumes only onto it.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
@@ -388,8 +415,7 @@ dialog — derived alongside `current_activity` on the same reconcile pass.
 
 Responses are sized for MCP token limits: `list_sessions` and `list_projects`
 return slim summary rows by default and accept `limit` (`list_sessions` also
-takes `view: "phone"`, a named projection to the 14 columns a phone's session
-list draws, and `list_projects` takes `has_sessions: true`, which keeps only
+takes `view: "phone"`, a named projection to the columns the phone app reads, and `list_projects` takes `has_sessions: true`, which keeps only
 the projects a live session can name — see *Asking for fewer columns* in
 `docs/hub.md`); `list_worktrees`
 answers `{total, worktrees}` with slim rows, at most 100 of them (`limit`,

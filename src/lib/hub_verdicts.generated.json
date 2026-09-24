@@ -78,6 +78,7 @@
     "ensure_operator",
     "health_check",
     "kill_session",
+    "link_session_work",
     "list_accounts",
     "list_host_worktrees",
     "list_hosts",
@@ -92,6 +93,7 @@
     "probe_host",
     "recreate_session",
     "refresh_projects",
+    "reject_session_work",
     "related_sessions",
     "rename_session",
     "repo_branches",
@@ -105,14 +107,19 @@
     "resolve_move",
     "restart_session",
     "restore_host_sessions",
+    "resume_work",
     "safe_kill_session",
     "send_prompt",
     "session_activity",
     "session_conversation",
     "session_conversations",
     "session_history",
+    "session_work_links",
     "set_session_friendly_name",
-    "spawn_review"
+    "spawn_review",
+    "unlink_session_work",
+    "work_purge_impact",
+    "work_resume_plan"
   ],
   "routed_unless": [
     {

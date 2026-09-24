@@ -1020,6 +1020,26 @@
           onchange={(e) => onLimitHoursChange(SETTING_KEYS.reportsMaxAgeSecs, 'Error reports max age', e)} />
         <span class="hook-desc" id="reports-max-age-desc">hours an error/warn report is kept before the age sweep deletes it (0 = never)</span>
       </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-journal-days">work memory</label>
+        <input class="port" id="work-journal-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workJournalDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-journal-days-desc"
+          data-testid="work-journal-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workJournalDays, 'Work memory', e)} />
+        <span class="hook-desc" id="work-journal-days-desc">days the resume journal of unlinked conversations is kept (0 = forever; linked work is always kept)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-recent-days">recent work</label>
+        <input class="port" id="work-recent-days" type="number" min="1" max="365" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRecentDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-recent-days-desc"
+          data-testid="work-recent-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRecentDays, 'Recent work', e)} />
+        <span class="hook-desc" id="work-recent-days-desc">days ended work with no live session still gets a sidebar group (by work)</span>
+      </div>
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
 

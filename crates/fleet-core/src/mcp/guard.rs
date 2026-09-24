@@ -521,6 +521,23 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Work links (roadmap M1b.2). A per-host token reads and decides only
+    // its own host's sessions (`require_host`).
+    ToolPolicy {
+        name: "work",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // `resume` starts a session: the lifecycle deadline.
+    ToolPolicy {
+        name: "work_link",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // repo.rs
     ToolPolicy {
         name: "list_projects",

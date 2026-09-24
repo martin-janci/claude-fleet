@@ -72,7 +72,9 @@ use serde_json::Value;
 ///   rather than offering it again;
 /// * `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
 ///   `usage_model` — the session screen's status strip: elapsed time, cost
-///   and model.
+///   and model;
+/// * `work` — the session's primary work link (key, title): the row's key
+///   chip and the grouping by work. Small, and null for most rows.
 ///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
@@ -107,6 +109,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "turn_seq",
     "usage_cost_micros",
     "usage_model",
+    "work",
 ];
 
 /// A named projection a caller may ask `list_sessions` for.

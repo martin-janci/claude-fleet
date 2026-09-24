@@ -210,9 +210,50 @@
       "project",
       "worktrees"
     ],
+    "PurgeImpact": [
+      "keys"
+    ],
     "RepoTree": [
       "entries",
       "truncated"
+    ],
+    "ResumePlan": [
+      "branch",
+      "brief",
+      "candidates",
+      "host_alias",
+      "hosts",
+      "key",
+      "link_id",
+      "live",
+      "modes",
+      "project_id",
+      "title",
+      "worktree",
+      "worktree_present"
+    ],
+    "ResumePlan.candidates": [
+      "branch",
+      "conversations",
+      "ended_at",
+      "host_alias",
+      "last_claude_session_id",
+      "link_id",
+      "name",
+      "pr_url",
+      "resumable",
+      "worktree"
+    ],
+    "ResumePlan.live": [
+      "friendly_name",
+      "host_alias",
+      "session_id",
+      "tmux_name"
+    ],
+    "ResumePlan.modes": [
+      "mode",
+      "ok",
+      "reason"
     ],
     "SessionEvent": [
       "at",
@@ -275,6 +316,8 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "work",
+      "work_rejected",
       "worktree_id",
       "worktree_key"
     ],
@@ -296,6 +339,28 @@
       "cost_micros",
       "input_tokens",
       "output_tokens"
+    ],
+    "WorkLinkRow": [
+      "created_at",
+      "decided_at",
+      "ended_at",
+      "id",
+      "is_primary",
+      "item_id",
+      "participant_id",
+      "ref_key",
+      "resumable",
+      "role",
+      "snap_branch",
+      "snap_claude_ids",
+      "snap_host",
+      "snap_name",
+      "snap_pr_url",
+      "snap_project_id",
+      "snap_tmux",
+      "snap_worktree",
+      "source",
+      "state"
     ],
     "WorktreeOccupancy": [
       "occupants",

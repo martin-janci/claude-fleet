@@ -34,6 +34,9 @@
   import { hubConnection } from './hub_connection';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import { pendingInputFor } from './pending_input';
+  import { describeWorkKey, type WorkKey } from './work_keys';
+  import { linkSessionWork, rejectSessionWork, unlinkSessionWork } from './work';
+  import type { Result } from './result';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -49,6 +52,8 @@
     relatedCount,
     nowSec,
     readOnly = false,
+    workKey = null,
+    workOf = undefined,
     onSelectSession,
     onKeySession,
     toggleSelected,
@@ -75,6 +80,14 @@
      *  chip only, no rename / restart / recreate / kill actions. Selecting
      *  still works. */
     readOnly?: boolean;
+    /** The row's work key (work_keys.ts), drawn as a chip after the name.
+     *  Null when it has none, or when the row already sits under its work
+     *  group's header, which names the key. */
+    workKey?: WorkKey | null;
+    /** The row's work key whether or not the chip shows it (inside a work
+     *  group the header names it): what the work menu's "Not this" / "Clear"
+     *  act on. Defaults to `workKey`. */
+    workOf?: WorkKey | null;
     onSelectSession: (sess: SessionRow, e?: MouseEvent) => void;
     /** Handles Enter/Space on the ROW. It must ignore events that bubbled
      *  up from a nested control (the action cluster, the select box, the
@@ -165,6 +178,67 @@
   const ghostDismissBlocked = $derived(
     hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection),
   );
+  const workBlocked = $derived(hubActionBlocked('link_session_work', $hubStatus, $hubConnection));
+
+  // ── Work menu (roadmap M1b.2): set the row's work, "Not this", "Clear". ──
+  const rowWork = $derived(workOf === undefined ? workKey : workOf);
+  let workMenuOpen = $state(false);
+  let workDraft = $state('');
+  let workBusy = $state(false);
+
+  function toggleWorkMenu(e: Event) {
+    e.stopPropagation();
+    workMenuOpen = !workMenuOpen;
+    workDraft = '';
+  }
+
+  async function workAction(
+    run: () => Promise<Result<unknown>>,
+    failure: string,
+  ) {
+    if (workBusy) return;
+    workBusy = true;
+    const r = await run();
+    workBusy = false;
+    if (!r.ok) {
+      pushError(r.error, failure);
+      return;
+    }
+    workMenuOpen = false;
+    workDraft = '';
+  }
+
+  function setWork(e?: Event) {
+    e?.stopPropagation();
+    const key = workDraft.trim();
+    if (!key) return;
+    void workAction(() => linkSessionWork(sess.id, { key }), 'Set work failed');
+  }
+
+  function rejectWork(e: Event) {
+    e.stopPropagation();
+    const w = rowWork;
+    if (!w) return;
+    // A linked item is rejected by id (its key may be null); anything else
+    // by the key the row shows.
+    const ref = w.source === 'link' && sess.work?.item_id != null
+      ? { item_id: sess.work.item_id }
+      : { key: w.key };
+    void workAction(() => rejectSessionWork(sess.id, ref), 'Not this failed');
+  }
+
+  function clearWork(e: Event) {
+    e.stopPropagation();
+    const linkId = sess.work?.link_id;
+    if (linkId == null) return;
+    void workAction(() => unlinkSessionWork(sess.id, linkId), 'Clear work failed');
+  }
+
+  function onWorkKey(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (e.key === 'Enter') setWork(e);
+    else if (e.key === 'Escape') workMenuOpen = false;
+  }
 </script>
 
 <div
@@ -287,6 +361,9 @@
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
           <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
+          {#if workKey}
+            <span class="work-chip" data-testid="work-chip" title={describeWorkKey(workKey)}>{workKey.key}</span>
+          {/if}
           {#if sess.stuck_kind}
             <!-- Stuck outranks claude_status: one red chip, no green "working"
                  next to it to soften the signal. -->
@@ -330,6 +407,15 @@
             >↻</button>
             <button
               class="icon-btn small"
+              data-testid="work-menu"
+              onclick={toggleWorkMenu}
+              disabled={workBlocked !== null}
+              title={workBlocked ?? 'Work: set, "Not this", clear'}
+              aria-label="Work"
+              aria-expanded={workMenuOpen}
+            >#</button>
+            <button
+              class="icon-btn small"
               data-testid="edit-label"
               onclick={(e) => beginLabelEdit(sess, e)}
               disabled={labelBlocked !== null}
@@ -367,6 +453,51 @@
             {/if}
           </div>
         </div>
+        {#if workMenuOpen}
+          <!-- Every control stops its click: the panel sits inside the row,
+               whose own click selects the session. -->
+          <div
+            class="work-menu"
+            data-testid="work-menu-panel"
+            role="group"
+            aria-label="Work for {primaryName}"
+          >
+            <input
+              class="work-input"
+              data-testid="work-input"
+              aria-label="Work key or name"
+              onclick={(e) => e.stopPropagation()}
+              placeholder={rowWork ? `Replace ${rowWork.key}…` : 'ABC-123 or a name'}
+              bind:value={workDraft}
+              onkeydown={onWorkKey}
+              disabled={workBusy}
+            />
+            <button
+              class="work-btn"
+              data-testid="work-set"
+              disabled={workBusy || !workDraft.trim()}
+              onclick={setWork}
+            >Set</button>
+            {#if rowWork}
+              <button
+                class="work-btn"
+                data-testid="work-reject"
+                disabled={workBusy}
+                title="{rowWork.key} is not this session's work; it will not be suggested again"
+                onclick={rejectWork}
+              >Not {rowWork.key}</button>
+              {#if rowWork.source === 'link' && sess.work}
+                <button
+                  class="work-btn"
+                  data-testid="work-unlink"
+                  disabled={workBusy}
+                  title="Remove the link (it may be recognised again)"
+                  onclick={clearWork}
+                >Clear</button>
+              {/if}
+            {/if}
+          </div>
+        {/if}
         {#if answerView}
           <!-- Claude is asking this row a question. The "Needs you" filter
                shows exactly these rows, so the answer belongs here and not
@@ -655,6 +786,34 @@
     flex-shrink: 0;
     white-space: nowrap;
     text-transform: uppercase;
+  }
+  .work-menu {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: center;
+    padding: 0.2rem 0 0.1rem;
+  }
+  .work-input {
+    flex: 1 1 8rem;
+    min-width: 0;
+    font-size: 0.7rem;
+    padding: 0.1rem 0.3rem;
+  }
+  .work-btn {
+    font-size: 0.65rem;
+    padding: 0.05rem 0.35rem;
+    white-space: nowrap;
+  }
+  .work-chip {
+    flex: 0 0 auto;
+    font-size: 0.65rem;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    padding: 0 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    white-space: nowrap;
   }
   .pr-link {
     font-size: 0.65rem;

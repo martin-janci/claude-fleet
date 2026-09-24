@@ -445,6 +445,63 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "session_work_links",
+            "work",
+            json!({ "session_id": 7, "key": null }),
+            // `work` answers null-stripped rows.
+            r#"[{"id":1,"ref_key":"ABC-1","state":"confirmed","source":"manual","is_primary":true,"created_at":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::session_work_links(
+                    b,
+                    fleet_core::service::work::WorkArgs {
+                        session_id: Some(7),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_resume_plan",
+            "work",
+            json!({ "session_id": null, "key": "ABC-1", "action": "resume_plan",
+                    "host_alias": "h", "with_brief": true }),
+            r#"{"key":"ABC-1","modes":[{"mode":"last","ok":true}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_resume_plan(
+                    b,
+                    commands::work::WorkResumePlanArgs {
+                        key: "ABC-1".into(),
+                        link_id: None,
+                        host_alias: Some("h".into()),
+                        with_brief: true,
+                    },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_purge_impact",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "purge_impact",
+                    "project_id": 3, "host_aliases": ["h"] }),
+            r#"{"keys":["ABC-1"]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_purge_impact(
+                    b,
+                    commands::work::WorkPurgeImpactArgs {
+                        project_id: 3,
+                        host_aliases: vec!["h".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "session_history",
             "session_history",
             // The clamp runs on this side, so the hub is asked for the same
@@ -831,6 +888,88 @@ fn routed_mutation_cases() -> Vec<Case> {
                         host_alias: "trn".into(),
                         tmux_name: "demo".into(),
                         friendly_name: "the demo".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "link_session_work",
+            "work_link",
+            // A person on the desktop: the source is always `manual`.
+            json!({ "session_id": 7, "action": "link", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": "manual" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::link_session_work(
+                    b,
+                    commands::work::LinkSessionWorkArgs {
+                        session_id: 7,
+                        key: Some("ABC-1".into()),
+                        item_id: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_work",
+            "work_link",
+            // Only the resume fields travel; an older hub never sees them
+            // for the other work_link commands.
+            json!({ "session_id": null, "action": "resume", "key": "ABC-1", "item_id": null,
+                    "link_id": 4, "source": null, "mode": "brief", "brief": "edited" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_work(
+                    b,
+                    commands::work::ResumeWorkArgs {
+                        key: "ABC-1".into(),
+                        mode: "brief".into(),
+                        link_id: Some(4),
+                        host_alias: None,
+                        brief: Some("edited".into()),
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reject_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "reject", "key": null, "item_id": 3,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::reject_session_work(
+                    b,
+                    commands::work::RejectSessionWorkArgs {
+                        session_id: 7,
+                        key: None,
+                        item_id: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unlink_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "unlink", "key": null, "item_id": null,
+                    "link_id": 5, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::unlink_session_work(
+                    b,
+                    commands::work::UnlinkSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
                     },
                     s,
                 ))
@@ -1476,6 +1615,58 @@ fn standalone_reads_still_come_from_the_local_store() {
     ))
     .expect("history");
     assert!(events.is_empty());
+}
+
+/// The work-link commands answer from the local store when standalone.
+/// Proof without seeding a session (no public way from this crate): the read
+/// comes back empty and every decision answers the local store's
+/// `E_NOTFOUND` for an unknown session — the hub arm would have returned a
+/// payload instead.
+#[test]
+fn standalone_work_links_are_decided_in_the_local_store() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+    let links = block_on(commands::work::routed::session_work_links(
+        &local,
+        fleet_core::service::work::WorkArgs {
+            session_id: Some(99),
+            ..Default::default()
+        },
+        &st,
+    ))
+    .expect("links");
+    assert!(links.is_empty());
+    let errs = [
+        block_on(commands::work::routed::link_session_work(
+            &local,
+            commands::work::LinkSessionWorkArgs {
+                session_id: 99,
+                key: Some("ABC-1".into()),
+                item_id: None,
+            },
+            &st,
+        )),
+        block_on(commands::work::routed::reject_session_work(
+            &local,
+            commands::work::RejectSessionWorkArgs {
+                session_id: 99,
+                key: Some("ABC-1".into()),
+                item_id: None,
+            },
+            &st,
+        )),
+        block_on(commands::work::routed::unlink_session_work(
+            &local,
+            commands::work::UnlinkSessionWorkArgs {
+                session_id: 99,
+                link_id: 1,
+            },
+            &st,
+        )),
+    ];
+    for r in errs {
+        assert_eq!(r.expect_err("unknown session").code, codes::E_NOTFOUND);
+    }
 }
 
 /// The SSH-backed reads take the local path too. Proof without a network:
@@ -2791,6 +2982,7 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
+    ("commands/work.rs", include_str!("../commands/work.rs")),
     (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),

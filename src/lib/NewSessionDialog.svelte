@@ -1,6 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { listHostWorktrees, type ProjectTreeRow, type WorktreeRow } from './projects';
+  import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
+  import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
+  import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
+  import ResumeDialog from './ResumeDialog.svelte';
+  import { selectSessionExplicitly } from './selection';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
@@ -362,6 +366,51 @@
   });
 
   const friendlySlug = $derived(finalizeBranchSlug(friendlyName));
+
+  // ── Work key (roadmap M1) ──
+  // The ticket / workstream key this session will carry, read from the
+  // branch it will run on: the new branch (which follows the Name field, so
+  // "ABC-123 Fix login" gives `abc-123-fix-login`) or the picked worktree's.
+  // The sidebar groups by it (work_keys.ts). When a live session already
+  // carries the same key, say so and offer to open it instead of starting a
+  // duplicate — never block: a second session on a ticket is legitimate.
+  const plannedKey = $derived(
+    inNewMode
+      ? extractWorkKey(newWorktreeName)
+      : extractWorkKey(chosenWorktree?.branch ?? chosenWorktree?.name ?? null),
+  );
+  const branchById = $derived(worktreeBranchById($projects));
+  const duplicateOf = $derived(
+    plannedKey
+      ? ($sessions.find(
+          (s) =>
+            s.status !== 'ghost' &&
+            s.kind !== 'external' &&
+            workKeyFor(s, branchById)?.key === plannedKey,
+        ) ?? null)
+      : null,
+  );
+  // A key with only PAST work (M2.5): say so and offer to resume it rather
+  // than start from nothing. Read from the hub per key; an older hub has no
+  // answer and the note stays the plain one.
+  let pastOfKey = $state<{ key: string; links: WorkLink[] } | null>(null);
+  let resumeOpen = $state(false);
+  $effect(() => {
+    const key = plannedKey;
+    if (!key || duplicateOf) return;
+    void endedWorkLinks(key).then((r) => {
+      if (plannedKey !== key) return;
+      pastOfKey = r.ok && Array.isArray(r.value) && r.value.length > 0 ? { key, links: r.value } : null;
+    });
+  });
+  const pastWork = $derived(
+    pastOfKey && pastOfKey.key === plannedKey && !duplicateOf ? pastOfKey.links : null,
+  );
+  function openDuplicate() {
+    if (!duplicateOf) return;
+    selectSessionExplicitly(duplicateOf);
+    onCancel();
+  }
   const termSuffix = $derived(chosenKind === 'shell' ? '-term' : '');
 
   // The tmux name: `dev-<owner>-<repo>--<worktree>` (or the bare base for
@@ -539,6 +588,9 @@
   }
 
   function onFriendlyNameInput(value: string) {
+    // A pasted ticket URL becomes its key, ready for a title to follow.
+    const fromUrl = keyFromTicketUrl(value);
+    if (fromUrl) value = `${fromUrl} `;
     friendlyName = value;
     // Clearing the field hands it back to the generator.
     nameDirty = value.trim() !== '';
@@ -713,6 +765,32 @@
         aria-label="Roll a new name"
       >🎲</button>
     </div>
+    {#if plannedKey}
+      <p class="work-note" data-testid="work-note">
+        <span class="k">work</span> <code>{plannedKey}</code>
+        {#if duplicateOf}
+          <span class="dup" data-testid="work-duplicate">
+            — already running as <b>{duplicateOf.friendly_name ?? duplicateOf.tmux_name}</b>
+            on {duplicateOf.host_alias}.
+            <button type="button" class="linkish" data-testid="open-duplicate" onclick={openDuplicate}
+              >Open it</button
+            >
+          </span>
+        {:else if pastWork}
+          <span class="dup" data-testid="work-past">
+            — has previous work ({pastWorkSummary(pastWork, now * 1000)}).
+            <button type="button" class="linkish" data-testid="resume-past" onclick={() => (resumeOpen = true)}
+              >Resume</button
+            >
+          </span>
+        {:else}
+          <span class="muted">— sessions on this branch group under it (sidebar: by work)</span>
+        {/if}
+      </p>
+    {/if}
+    {#if resumeOpen && plannedKey}
+      <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
+    {/if}
 
     <label for="kind-picker">Type</label>
     <div class="kind-row" id="kind-picker" role="group">
@@ -866,6 +944,21 @@
     min-width: 0;
   }
   .name-row { display: flex; gap: 0.3rem; }
+  .work-note {
+    margin: 0;
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+  }
+  .work-note .dup { color: var(--fg); }
+  .work-note .linkish {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: inherit;
+    text-decoration: underline;
+  }
   .name-row input { flex: 1 1 auto; }
   .dice {
     font-size: 1rem;

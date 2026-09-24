@@ -589,6 +589,12 @@ impl Store {
             "UPDATE sessions SET kind = ?1, reviews_session_id = ?2 WHERE id = ?3",
             rusqlite::params![kind, reviews_session_id, id],
         )?;
+        // A review inherits the reviewed session's primary work (M2.2).
+        if let Some(parent) = reviews_session_id {
+            if let Err(e) = self.inherit_work(id, parent, "review") {
+                tracing::warn!(session_id = id, error = %e.message, "[work] review inherit failed");
+            }
+        }
         self.emit_session(id)?;
         Ok(())
     }
@@ -894,6 +900,64 @@ impl Store {
             );
         }
         self.emit_session(id)
+    }
+
+    /// Carry the row `(host_alias, old)` over to `new` after fleet renamed its
+    /// tmux session (`rename_session`). Returns the renamed row, or `None`
+    /// when no row held `old`.
+    ///
+    /// Without this a rename was a delete plus an insert: reconcile keys rows
+    /// on `(host_alias, tmux_name)`, so the pass after the rename INSERTed a
+    /// fresh row under `new` and ghosted — then reaped — the old one, and with
+    /// it the session's id, participant (its inbox and address), timeline and
+    /// conversations. Renaming the row in place keeps all of them.
+    ///
+    /// * A row still holding `new` is stale by construction: tmux refused the
+    ///   rename if a live session had that name, so whatever row carries it
+    ///   (a ghost fleet killed or lost) is dismissed through
+    ///   [`Self::delete_session`] first, or the UPDATE would hit the unique
+    ///   key.
+    /// * `last_reconciled_at = now` puts the renamed row under the BE-3
+    ///   guard: a pass whose probe listed tmux before the rename (and so
+    ///   lacks `new` in its keep set) cannot ghost it.
+    /// * `old` is remembered like a kill: that same stale pass still lists
+    ///   `old`, and with no row left under that name it would insert the
+    ///   session a second time.
+    pub fn rename_session_row(
+        &self,
+        host_alias: &str,
+        old: &str,
+        new: &str,
+        now: i64,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        if old == new {
+            return self.get_session(old, host_alias);
+        }
+        let stale: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
+                rusqlite::params![host_alias, new],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = stale {
+            self.delete_session(id)?;
+        }
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                "UPDATE sessions SET tmux_name=?3, last_reconciled_at=?4 \
+                 WHERE host_alias=?1 AND tmux_name=?2 RETURNING id",
+                rusqlite::params![host_alias, old, new, now],
+                |r| r.get(0),
+            )
+            .optional()?;
+        self.note_kill(host_alias, old, now);
+        match id {
+            Some(id) => self.emit_session(id),
+            None => Ok(None),
+        }
     }
 
     /// Hard-delete one session row (ghost dismissal) together with what dies

@@ -382,6 +382,8 @@ describe('NewSessionDialog', () => {
 
 import { sessions } from './sessions';
 import { isGeneratedName } from './names';
+import { get } from 'svelte/store';
+import { selectedSession } from './selection';
 
 function okRow(over: Partial<sessionsModule.SessionRow> = {}): sessionsModule.SessionRow {
   return {
@@ -1427,5 +1429,92 @@ describe('NewSessionDialog: a creation that fails after the dialog is closed', (
     await tick();
     expect(get(toasts)).toHaveLength(0);
     spy.mockRestore();
+  });
+});
+
+describe('NewSessionDialog — work key (roadmap M1)', () => {
+  beforeEach(() => {
+    sessions.set([]);
+  });
+
+  it('a key in the name becomes the new branch and is announced as the work', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'ABC-123 Fix login' } });
+    await tick();
+    expect((screen.getByTestId('new-worktree-name') as HTMLInputElement).value).toBe('abc-123-fix-login');
+    expect(screen.getByTestId('work-note')).toHaveTextContent('ABC-123');
+    expect(screen.queryByTestId('work-duplicate')).toBeNull();
+  });
+
+  it('no key, no note', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'fix the login' } });
+    await tick();
+    expect(screen.queryByTestId('work-note')).toBeNull();
+  });
+
+  it('warns when a live session already carries the key, and can open it instead', async () => {
+    const onCancel = vi.fn();
+    const running = okRow({ id: 77, tmux_name: 'dev-other', host_alias: 'mefistos', tags: ['ABC-123'] });
+    sessions.set([running, okRow({ id: 78, tmux_name: 'dev-gone', tags: ['ABC-123'], status: 'ghost' })]);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'ABC-123 again' } });
+    await tick();
+    const dup = screen.getByTestId('work-duplicate');
+    expect(dup).toHaveTextContent('dev-other');
+    expect(dup).toHaveTextContent('mefistos');
+    await fireEvent.click(screen.getByTestId('open-duplicate'));
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(get(selectedSession)?.id).toBe(77);
+  });
+
+  it('a key with only past work offers to resume it (M2.5)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'session_work_links') {
+        const key = (a as { args?: { key?: string } })?.args?.key;
+        return key === 'ABC-123'
+          ? [
+              { id: 1, ref_key: 'ABC-123', state: 'confirmed', source: 'manual', created_at: 1, ended_at: now - 2 * 86400 },
+              { id: 2, ref_key: 'ABC-123', state: 'confirmed', source: 'manual', created_at: 1, ended_at: now - 5 * 86400 },
+            ]
+          : [];
+      }
+      if (cmd === 'work_resume_plan') return { key: 'ABC-123', modes: [{ mode: 'last', ok: true }], live: [] };
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'ABC-123 again' } });
+    await tick();
+    const past = await screen.findByTestId('work-past');
+    expect(past).toHaveTextContent('2 sessions, last 2d ago');
+    expect(screen.queryByTestId('work-duplicate')).toBeNull();
+    await fireEvent.click(screen.getByTestId('resume-past'));
+    expect(await screen.findByTestId('resume-dialog')).toBeTruthy();
+  });
+
+  it('a pasted ticket URL becomes its key, ready for a title', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('friendly-name'), {
+      target: { value: 'https://acme.atlassian.net/browse/ABC-123' },
+    });
+    await tick();
+    expect((screen.getByTestId('friendly-name') as HTMLInputElement).value).toBe('ABC-123 ');
+    expect((screen.getByTestId('new-worktree-name') as HTMLInputElement).value).toBe('abc-123');
   });
 });

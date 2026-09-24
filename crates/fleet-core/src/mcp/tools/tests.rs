@@ -85,6 +85,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "session_conversation",
         "wait_for_task",
         "list_tasks",
+        "work",
     ] {
         assert!(enforce_mode(&ro, t).is_ok(), "{t} is a read");
     }
@@ -97,6 +98,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "dispatch_task",
         "cancel_task",
         "set_session_tags",
+        "work_link",
     ] {
         let err = enforce_mode(&ro, t).expect_err(t);
         assert!(
@@ -902,6 +904,93 @@ fn forbidden(e: McpError) {
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
 }
 
+/// Work links are session-addressed: a per-host token decides and reads only
+/// its own host's sessions, and never another host's past work by key.
+#[tokio::test]
+async fn work_tools_are_gated_to_the_callers_host() {
+    use crate::service::work::{WorkArgs, WorkLinkArgs};
+    let (s, _, on_b) = two_host_store();
+    let t = test_tools(s);
+    let link = |key: &str| WorkLinkArgs {
+        session_id: Some(on_b),
+        action: "link".into(),
+        key: Some(key.into()),
+        ..Default::default()
+    };
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.work_link(Extension(a.clone()), Parameters(link("ABC-1")))
+            .await
+            .unwrap_err(),
+    );
+    forbidden(
+        t.work(
+            Extension(a.clone()),
+            Parameters(WorkArgs {
+                session_id: Some(on_b),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    let b = host_caller("hostb", TokenMode::Full);
+    let row = result_json(
+        &t.work_link(Extension(b.clone()), Parameters(link("abc-1")))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(row["work"]["key"], "ABC-1");
+    // The session ends; its link is past work on hostb.
+    {
+        let st = t.store.lock().unwrap();
+        st.delete_session(on_b).unwrap();
+    }
+    let by_key = |c: Caller| {
+        t.work(
+            Extension(c),
+            Parameters(WorkArgs {
+                key: Some("ABC-1".into()),
+                ..Default::default()
+            }),
+        )
+    };
+    let seen = result_json(&by_key(b.clone()).await.unwrap());
+    assert_eq!(seen.as_array().map(Vec::len), Some(1), "{seen}");
+    let hidden = result_json(&by_key(a.clone()).await.unwrap());
+    assert_eq!(hidden, serde_json::json!([]));
+
+    // M2.4: the resume plan and context of that work are hostb's to read,
+    // and hosta cannot resume it.
+    let plan = |c: Caller| {
+        t.work(
+            Extension(c),
+            Parameters(WorkArgs {
+                key: Some("ABC-1".into()),
+                action: Some("resume_plan".into()),
+                ..Default::default()
+            }),
+        )
+    };
+    let p = result_json(&plan(b).await.unwrap());
+    assert_eq!(p["key"], "ABC-1");
+    assert!(p["modes"].as_array().is_some_and(|m| m.len() == 3), "{p}");
+    forbidden(plan(a.clone()).await.unwrap_err());
+    forbidden(
+        t.work_link(
+            Extension(a),
+            Parameters(WorkLinkArgs {
+                action: "resume".into(),
+                key: Some("ABC-1".into()),
+                mode: Some("fresh".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     let (s, pid, on_b) = two_host_store();
@@ -1505,7 +1594,8 @@ fn capture_default_cap_matches_docs() {
 /// count is 73 with `list_host_worktrees`, 74 with `resolve_move`, and 80
 /// with restore_host_sessions/discover_lost_sessions. The fleet-mesh
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
-/// the merged count is 81.)
+/// the merged count is 81, and 83 with the work graph's `work` /
+/// `work_link`.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1525,7 +1615,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 81);
+    assert_eq!(served, 83);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2767,7 +2857,21 @@ fn the_served_definition_budget_stays_bounded() {
     // budget, over the ~1 KB guideline), trimmed to "Your session id: only
     // what's new since your last read." on all five, re-measured at 64,732.
     // Raised to that plus the customary 100.
-    const BUDGET_BYTES: usize = 64_832;
+    //
+    // Raised for the work graph (roadmap M1b.2, review C21): two tools,
+    // `work` (read) and `work_link` (link / reject / unlink), with one-line
+    // descriptions and one-clause parameter docs. The surface had 100 bytes
+    // of headroom and two new tools cannot fit in that whatever the wording.
+    // Measured at 65,687 on 2026-09-24; raised to that plus the customary
+    // 100. M0.6 (tighten the existing descriptions) is still open and is
+    // where this is paid back.
+    //
+    // Raised again for work graph M2.4: the `work` read actions (context,
+    // resume_plan, purge_impact) and `work_link { action: resume }` go on
+    // the two existing tools (no new tool), but their eight parameters cost
+    // schema bytes whatever the wording; descriptions stay one clause.
+    // Measured at 66,421 on 2026-09-24; raised to that plus 100.
+    const BUDGET_BYTES: usize = 66_521;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3861,6 +3965,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "turn_seq",
             "usage_cost_micros",
             "usage_model",
+            "work",
         ]
     );
 }
@@ -5485,6 +5590,17 @@ fn the_phone_view_drops_the_columns_no_screen_reads() {
     for kept in PHONE_SESSION_FIELDS {
         assert!(obj.contains_key(*kept), "{kept} fell out of the phone view");
     }
+}
+
+/// The phone's tags editor starts from the row's `tags` and
+/// `set_session_tags` replaces the whole list, so a view without them made a
+/// phone that added one tag delete all the others.
+#[test]
+fn the_phone_view_keeps_tags_so_a_phone_edit_does_not_wipe_them() {
+    let mut rows = one_full_row();
+    rows[0]["tags"] = serde_json::json!(["mobile", "wip"]);
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    assert_eq!(rows[0]["tags"], serde_json::json!(["mobile", "wip"]));
 }
 
 /// A projection that is not an array of rows is left alone rather than

@@ -678,7 +678,7 @@ columns the phone app reads — the session list's `id`, `tmux_name`,
 `last_activity_at`, `ci_status`, `pending_input`, `needs_attention`, and the
 session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
 `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
-`usage_model`. The first cut — the list's sixteen alone — measured
+`usage_model`, plus the work graph's `work` (the row's primary work link). The first cut — the list's sixteen alone — measured
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
 44-session fleet; the card's nine are short scalars and do not change that
 picture. The first cut left the card's columns out, and a phone that
@@ -694,7 +694,11 @@ same reason: it carries the dialog a blocked session is waiting on and its
 options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
 is there for the mirror of that reason: projected away, the view would hand a
-phone the columns to re-derive the answer instead of the answer.
+phone the columns to re-derive the answer instead of the answer. `tags`
+is there because the phone's tag editor starts from them and
+`set_session_tags` replaces the whole list: without them a phone that added
+one tag deleted the rest. `work` (the primary work link: key, title) is the
+row's key chip and what the list groups by work on.
 
 `list_projects { has_sessions: true }` keeps only the projects that hold a
 live session — the rows a client needs to turn a session's `project_id` into
@@ -1021,9 +1025,13 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
 | — | — | `reports.max_rows` | `5000` |
 | — | — | `reports.max_age_secs` | `604800` |
+| — | — | `work.journal_days` | `90` |
+| — | — | `work.recent_days` | `14` |
 
-The two `reports.*` settings have no flag: set them over the API with
-`set_setting`.
+The `reports.*` and `work.*` settings have no flag: set them over the API
+with `set_setting`. `work.journal_days` is how long work memory (the
+journal behind resume and the handover brief) is kept for conversations no
+confirmed work link references; `0` keeps it forever.
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all
@@ -1282,7 +1290,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 133 commands, 42 route to a hub tool, 1 routes except for one argument shape, 69 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 140 commands, 49 route to a hub tool, 1 routes except for one argument shape, 69 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

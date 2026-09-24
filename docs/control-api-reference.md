@@ -471,6 +471,18 @@ Find your own fleet row from your tmux session name (`tmux display-message -p '#
 
 Parameters: `tmux_name`
 
+### `work`
+
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact.
+
+Parameters: `action`, `host_alias`, `host_aliases`, `key`, `link_id`, `project_id`, `session_id`, `with_brief`
+
+### `work_link`
+
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'), unlink (link_id). Returns the updated row. resume {key, mode}: new session on past work.
+
+Parameters: `action`, `brief`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `session_id`, `source`
+
 ## Tauri IPC commands
 
 Frontend commands registered in `src/lib.rs`:
@@ -495,6 +507,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
+- `commands::work::session_work_links`
+- `commands::work::link_session_work`
+- `commands::work::reject_session_work`
+- `commands::work::unlink_session_work`
+- `commands::work::work_resume_plan`
+- `commands::work::resume_work`
+- `commands::work::work_purge_impact`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`

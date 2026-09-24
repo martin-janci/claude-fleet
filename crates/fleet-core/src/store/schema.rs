@@ -118,6 +118,18 @@ fn messages_have_participant_columns(conn: &Connection) -> rusqlite::Result<bool
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 047: `work_links` already has its
+/// `role` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
+/// [`Migration`].
+fn work_links_has_role(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'role'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -377,6 +389,24 @@ const MIGRATIONS: &[Migration] = &[
     // `read_cursors` (smart caching, cycle 2): CREATE TABLE / INDEX IF NOT
     // EXISTS only, so re-running it is a no-op — no `already_applied` guard.
     Migration::plain(44, include_str!("../../migrations/044_read_cursors.sql")),
+    // A participant for every session row, minted by trigger on INSERT, plus
+    // a backfill. `CREATE TRIGGER IF NOT EXISTS` and an `INSERT ... WHERE
+    // NOT IN`, so re-running it is a no-op — no `already_applied` guard.
+    Migration::plain(
+        45,
+        include_str!("../../migrations/045_session_participants.sql"),
+    ),
+    // Work graph M1b: `work_items`, `work_links` and the trigger that ends a
+    // link (with its snapshot) when the session's participant retires. All
+    // `IF NOT EXISTS`, so re-running it is a no-op.
+    Migration::plain(46, include_str!("../../migrations/046_work_graph.sql")),
+    // Work graph M2: `work_journal` (+ its conversation triggers), and
+    // `work_links.role` / `.resumable` — ADD COLUMNs, so the 038-043 guard.
+    Migration {
+        version: 47,
+        sql: include_str!("../../migrations/047_work_journal.sql"),
+        already_applied: Some(work_links_has_role),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1939,13 +1969,26 @@ mod tests {
     /// ...)` is itself idempotent: re-running just that statement, and
     /// separately a full guarded second pass through `migrate()`, must not
     /// duplicate the row.
+    /// Insert a bare `sessions` row with raw SQL. For a store held at an old
+    /// schema version: `upsert_session` reads the row back through
+    /// `SESSION_COLUMNS`, which names tables (participants, work_links) that
+    /// an old version does not have yet.
+    fn raw_session(s: &Store, name: &str) -> i64 {
+        s.conn
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES (?1, 'h', 1, 1, 'running')",
+                rusqlite::params![name],
+            )
+            .unwrap();
+        s.conn.last_insert_rowid()
+    }
+
     #[test]
     fn migration_043_backfills_existing_sessions() {
         let old = store_at_version(42);
         old.upsert_host("h").unwrap();
-        let sid = old
-            .upsert_session("sess", "h", None, None, 1, 1, "running", None)
-            .unwrap();
+        let sid = raw_session(&old, "sess");
 
         old.migrate().expect("043 backfill");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
@@ -2005,5 +2048,39 @@ mod tests {
             count, 1,
             "guarded second pass over 043 must not duplicate the participant"
         );
+    }
+
+    /// Migration 045 backfills the sessions created after 043 that never
+    /// messaged anyone (and so never got a participant), and from then on the
+    /// trigger mints one per insert. Re-running it duplicates nothing.
+    #[test]
+    fn migration_045_gives_every_session_a_participant() {
+        let old = store_at_version(44);
+        old.upsert_host("h").unwrap();
+        let quiet = raw_session(&old, "quiet");
+        let count = |s: &Store, sid: i64| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM participants WHERE session_id = ?1",
+                    rusqlite::params![sid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count(&old, quiet), 0, "044 minted nothing on insert");
+
+        old.migrate().expect("045");
+        assert_eq!(count(&old, quiet), 1, "the backfill gave it one");
+        let later = old
+            .upsert_session("later", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(count(&old, later), 1, "the trigger mints on insert");
+
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 45;")
+            .unwrap();
+        old.migrate().expect("re-run 045");
+        assert_eq!(count(&old, quiet), 1);
+        assert_eq!(count(&old, later), 1);
     }
 }

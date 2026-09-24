@@ -32,10 +32,9 @@ feels different". A stale label is annoying; a flapping label is worse.
 
 ## How to run
 
-The session's `tmux_name` is reliable identity. The `host_alias` is
-**configuration** — whatever the user chose in the claude-fleet host picker,
-not derivable from `hostname`. Always discover the alias from the source of
-truth; never guess.
+The session's `tmux_name` is reliable identity, and fleet resolves it for you.
+The `host_alias` is **configuration** (whatever the user chose in the
+claude-fleet host picker, not derivable from `hostname`), so never guess it.
 
 1. **Read your tmux session name.** Single Bash call:
 
@@ -43,14 +42,13 @@ truth; never guess.
    tmux display-message -p '#S'
    ```
 
-2. **Discover the alias programmatically.** Call
-   `mcp__claude-fleet__list_sessions {}` and find the row whose `tmux_name`
-   exactly matches your `<#S>`. Take that row's `host_alias`.
+2. **Find your own row.** Call `mcp__claude-fleet__whoami { tmux_name: "<#S>" }`.
+   It returns your single session row; take its `id`. It is a few dozen
+   tokens, where `list_sessions` returns the whole fleet (thousands).
 
-   If multiple rows match the same `tmux_name` (rare: same name on different
-   hosts), prefer the row with `status: "running"` and, if still ambiguous,
-   the one whose `project_id` matches your current working directory's
-   project. If you still cannot pin one row, see "Cannot resolve" below.
+   If it answers `E_AMBIGUOUS` (the same name on several hosts), its details
+   list `{session_id, host_alias}` candidates: pick the one on the host you
+   are running on — if you cannot tell, see "Cannot resolve" below.
 
 3. **Pick a 3–6 word label.** Imperative phrase, no quotes/punctuation, no
    ticket IDs or branch names. Examples:
@@ -59,20 +57,22 @@ truth; never guess.
    - `migrate auth middleware`
    - `review hardening spec`
 
-4. **Set the name.** One MCP call with the discovered alias:
+4. **Set the name.** One MCP call with the id from step 2:
 
    ```
    mcp__claude-fleet__set_friendly_name {
-     host_alias: "<discovered alias>",
-     tmux_name: "<#S>",
+     session_id: <id>,
      friendly_name: "<label>"
    }
    ```
 
-Three tool calls total on a fresh fire: Bash + list_sessions +
-set_friendly_name. A heartbeat that confirms the current label is still
-right costs zero new MCP calls — the decision is read-only against
-transcript state.
+   Remember the `id` for later fires in this conversation (heartbeat,
+   after `/clear`): then only step 4 is needed.
+
+Three tool calls on the first fire: Bash + whoami + set_friendly_name. Later
+fires in the same conversation need one. A heartbeat that confirms the
+current label is still right costs zero MCP calls — the decision is read-only
+against transcript state.
 
 Do not try a hostname-based "fast path" first — `hostname -s` returns the OS
 hostname, not the claude-fleet alias, and the two diverge whenever the user
@@ -88,26 +88,28 @@ Pass an empty string as `friendly_name` to clear it (the row falls back to
 
 ## Cannot resolve
 
-If `list_sessions` returns zero rows matching your `tmux_name`, this tmux
-session is not registered with claude-fleet (you're running outside the
-fleet, or the fleet backend hasn't reconciled yet). Skip the label silently —
-the sidebar doesn't have a row to update anyway.
+If `whoami` answers `E_NOTFOUND`, this tmux session is not registered with
+claude-fleet (you're running outside the fleet, or the fleet backend hasn't
+reconciled yet). Skip the label silently — the sidebar doesn't have a row to
+update anyway.
 
-If `set_friendly_name` returns `E_FORBIDDEN`, this host's control-API token is
-`readonly`: the label is a write to the session row, so it is refused. Skip
+If `whoami` or `set_friendly_name` returns `E_FORBIDDEN`, this host's
+control-API token is `readonly`: the label is a write to the session row, so
+it is refused either way. Skip
 the label silently and do **not** retry — a permission answer never becomes a
 different answer.
 
-If multiple rows match and you cannot disambiguate, emit a single short
+If `whoami` is ambiguous and you cannot pick your host, emit a single short
 notice to the user and stop:
 
 > claude-fleet: multiple sessions match tmux_name `<name>`; cannot pick one
 > for the friendly-name label. Please set it manually from the app or via
-> `set_friendly_name` with the correct `host_alias`.
+> `set_friendly_name` with the correct `session_id`.
 
 ## Token discipline
 
-Fresh fire: three tool calls (Bash + list_sessions + set_friendly_name).
-Heartbeat: zero MCP calls if the label still matches. No hostname-guessing
-fast path — that path silently breaks on renamed hosts and wastes a call
-when it does. Do not chat about the label.
+First fire: three tool calls (Bash + whoami + set_friendly_name); later fires
+in the same conversation: one (set_friendly_name with the remembered id).
+Heartbeat: zero MCP calls if the label still matches. Never `list_sessions`
+for this — it returns the whole fleet to find one row. No hostname-guessing
+fast path. Do not chat about the label.
