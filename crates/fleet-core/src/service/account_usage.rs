@@ -1774,15 +1774,19 @@ curl() { echo HIJACKED; }
         /// `None` when a needed tool is missing on this machine: the test
         /// skips, except under CI where it must fail loudly.
         fn new(json_tool: &str) -> Option<Self> {
-            use std::os::unix::fs::PermissionsExt;
+            use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
             let dir = tempfile::tempdir().unwrap();
             let bin = dir.path().join("bin");
             for d in ["bin", "cfg", "tmp", "log", "home"] {
                 std::fs::create_dir(dir.path().join(d)).unwrap();
             }
-            let exe = |p: &Path, body: &str| {
-                std::fs::write(p, body).unwrap();
-                std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // The probe guard goes straight after the shebang, so the
+            // probe exec inside `write_exec` never reaches a body's own
+            // side effects (these shims append to `$FAKE_LOG`, and tests
+            // assert on exactly what landed there).
+            let exe = |name: &str, body: &str| {
+                let (shebang, rest) = body.split_once('\n').expect("a shim starts with a shebang");
+                write_exec(&bin, name, &format!("{shebang}\n{PROBE_GUARD}{rest}"));
             };
             let needed = [
                 "cat", "sed", "grep", "head", "tail", "tr", "date", "rm", "dirname", "cksum",
@@ -1800,14 +1804,14 @@ curl() { echo HIJACKED; }
                 return missing(json_tool);
             };
             exe(
-                &bin.join(json_tool),
+                json_tool,
                 &SHIM.replace("@@REAL@@", &quote(&real.to_string_lossy())),
             );
-            exe(&bin.join("curl"), FAKE_CURL);
+            exe("curl", FAKE_CURL);
             // Some `mktemp`s (macOS) ignore $TMPDIR; pin the script's temp
             // dir inside the sandbox so the leak scan covers it.
             exe(
-                &bin.join("mktemp"),
+                "mktemp",
                 &format!(
                     "#!/bin/sh\n[ \"$1\" = -d ] || exit 1\nexec {} -d \"$TMPDIR/tmp.XXXXXXXX\"\n",
                     quote(&find_tool("mktemp").unwrap().to_string_lossy())

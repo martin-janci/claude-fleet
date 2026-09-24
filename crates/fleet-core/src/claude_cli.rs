@@ -458,12 +458,14 @@ mod tests {
     #[cfg(unix)]
     mod purge_exec {
         use super::super::*;
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+        use std::os::unix::fs::symlink;
         use std::path::{Path, PathBuf};
         use std::process::Output;
 
-        const STUB: &str = r#"#!/bin/sh
-[ "$#" -eq 5 ] && [ "$1 $2 $3 $4" = "project purge --yes --" ] || { echo "bad argv: $*" >&2; exit 64; }
+        /// Body only — [`Sandbox::new`] prepends the shebang and
+        /// [`PROBE_GUARD`], which must answer before the argv check below.
+        const STUB: &str = r#"[ "$#" -eq 5 ] && [ "$1 $2 $3 $4" = "project purge --yes --" ] || { echo "bad argv: $*" >&2; exit 64; }
 printf '%s\n' "$5" >> "$CF_STUB_LOG"
 if [ -n "$CF_STUB_NOTFOUND" ]; then case "$5" in *"$CF_STUB_NOTFOUND"*)
   echo "No Claude Code project state found for $5 under /stub/.claude." >&2; exit 1 ;; esac; fi
@@ -484,9 +486,7 @@ echo "Purged $5"
                 let root = std::fs::canonicalize(dir.path()).unwrap();
                 let bin = root.join("bin");
                 std::fs::create_dir(&bin).unwrap();
-                let stub = bin.join("claude");
-                std::fs::write(&stub, STUB).unwrap();
-                std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+                write_exec(&bin, "claude", &format!("#!/bin/sh\n{PROBE_GUARD}{STUB}"));
                 std::fs::create_dir(root.join("work")).unwrap();
                 Sandbox { _dir: dir, root }
             }

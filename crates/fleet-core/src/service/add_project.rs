@@ -1957,11 +1957,8 @@ mod tests {
     /// caller). Never anything that could pass for the real CLI: the point
     /// is that no test here ever spawns the actual `gh`.
     fn write_stub_gh(dir: &Path, body: &str) {
-        let path = dir.join("gh");
-        std::fs::write(&path, format!("#!/bin/bash\n{body}")).unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+        write_exec(dir, "gh", &format!("#!/bin/bash\n{PROBE_GUARD}{body}"));
     }
 
     /// Point `local_projects_root`/`project_base_for` at `root` for `store`,
