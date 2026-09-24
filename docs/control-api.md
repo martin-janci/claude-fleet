@@ -688,6 +688,21 @@ after_message_id?, timeout_s? }`) long-polls the inbox for the next message
 newer than `after_message_id`, the same bounded-wait budget as
 `wait_for_session`.
 
+**Across a hub link.** When `to_addr` names another fleet
+(`<fleet>/session/<host>/<name>`) and this hub has a live peer link to it,
+`send_message` queues the message on the link's outbox and returns at once —
+delivery happens on the dialer's next exchange, typically within a few
+seconds. `deliver: true` is refused (`E_UNSUPPORTED`: "deliver types into a
+pane; a hub never types into another fleet's panes") — there is no pane on
+the other side of a link to type into. The reply, once the remote session
+sends one, arrives through the normal `wait_for_reply` / `inbox` path like
+any other message, with `from_addr` set to the sender's
+`<fleet>/session/<host>/<name>` and marked as untrusted input. If the peer
+never takes the message — the link is refused, removed, or the message
+outlives the link's 7-day retention — the sender's session timeline gets a
+`message_undeliverable` event instead of a reply. See `docs/hub.md` →
+*Link two hubs*.
+
 ## Provisioning hosts
 
 `provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs these steps:
