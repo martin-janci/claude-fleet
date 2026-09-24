@@ -27,6 +27,7 @@ mod test_support;
 mod timeline;
 mod usage;
 mod work;
+mod work_journal;
 
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
@@ -42,6 +43,9 @@ pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
 pub use work::{
     normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, WORK_LINK_SOURCES,
+};
+pub use work_journal::{
+    JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };
 
 pub struct Store {

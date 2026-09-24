@@ -1013,9 +1013,13 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
 | — | — | `reports.max_rows` | `5000` |
 | — | — | `reports.max_age_secs` | `604800` |
+| — | — | `work.journal_days` | `90` |
+| — | — | `work.recent_days` | `14` |
 
-The two `reports.*` settings have no flag: set them over the API with
-`set_setting`.
+The `reports.*` and `work.*` settings have no flag: set them over the API
+with `set_setting`. `work.journal_days` is how long work memory (the
+journal behind resume and the handover brief) is kept for conversations no
+confirmed work link references; `0` keeps it forever.
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all

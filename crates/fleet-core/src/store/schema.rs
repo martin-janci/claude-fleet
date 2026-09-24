@@ -118,6 +118,18 @@ fn messages_have_participant_columns(conn: &Connection) -> rusqlite::Result<bool
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 047: `work_links` already has its
+/// `role` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
+/// [`Migration`].
+fn work_links_has_role(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'role'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -388,6 +400,13 @@ const MIGRATIONS: &[Migration] = &[
     // link (with its snapshot) when the session's participant retires. All
     // `IF NOT EXISTS`, so re-running it is a no-op.
     Migration::plain(46, include_str!("../../migrations/046_work_graph.sql")),
+    // Work graph M2: `work_journal` (+ its conversation triggers), and
+    // `work_links.role` / `.resumable` — ADD COLUMNs, so the 038-043 guard.
+    Migration {
+        version: 47,
+        sql: include_str!("../../migrations/047_work_journal.sql"),
+        already_applied: Some(work_links_has_role),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

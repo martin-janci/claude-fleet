@@ -155,6 +155,14 @@ pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
 /// Rows older than this are swept on the tick; `0` disables the age sweep.
 pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
 
+/// Work memory retention (work graph M2): journal rows older than this many
+/// days are swept, except those of a conversation a confirmed work link
+/// references. `0` keeps everything.
+pub const WORK_JOURNAL_DAYS: &str = "work.journal_days";
+/// How far back (days) the sidebar looks for work that has only ended
+/// sessions, so reopened work has a group to show in.
+pub const WORK_RECENT_DAYS: &str = "work.recent_days";
+
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
     Spec {
@@ -312,6 +320,16 @@ pub const SPECS: &[Spec] = &[
         key: REPORTS_MAX_AGE_SECS,
         default: "604800",
         kind: Kind::Secs,
+    },
+    Spec {
+        key: WORK_JOURNAL_DAYS,
+        default: "90",
+        kind: Kind::Int { min: 0, max: 3650 },
+    },
+    Spec {
+        key: WORK_RECENT_DAYS,
+        default: "14",
+        kind: Kind::Int { min: 1, max: 365 },
     },
 ];
 

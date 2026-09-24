@@ -37,7 +37,7 @@ pub fn apply_hook(
         Some("UserPromptSubmit") => apply_prompt_submit_hook(store, payload, ctx),
         Some("SessionStart") => apply_session_start_hook(store, payload, ctx),
         Some("PreCompact") => apply_pre_compact_hook(store, payload, ctx),
-        Some("PostCompact") => apply_post_compact_hook(store, payload, ctx),
+        Some("PostCompact") => apply_post_compact_hook(store, ssh, payload, ctx),
         Some("SessionEnd") => apply_session_end_hook(store, payload, ctx),
         Some("StopFailure") => apply_stop_failure_hook(store, ssh, payload, ctx),
         Some("Notification") => apply_notification_hook(store, payload, ctx),
@@ -670,9 +670,12 @@ fn apply_pre_compact_hook(
 /// The PostCompact hook: counts the compaction on the conversation it names
 /// (deduped against `SessionStart(compact)`, which also fires), marks the
 /// context stale when that is the current conversation, ends the
-/// `compacting` activity and records `compact_done`.
+/// `compacting` activity and records `compact_done`. A counted compaction
+/// also journals Claude's own summary of it, read off the transcript tail in
+/// the background (work graph M2.1).
 fn apply_post_compact_hook(
     store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Result<(), IpcError> {
@@ -693,6 +696,8 @@ fn apply_post_compact_hook(
             compact_trigger(payload),
         );
     }
+    drop(s);
+    crate::service::work::harvest::spawn_harvest_compact_summary(store, ssh, row.id, id);
     Ok(())
 }
 
@@ -747,6 +752,12 @@ fn apply_stop_hook(
             "turn_done",
             detail.as_deref(),
         );
+        // Work memory (M2.1): the same detail, kept past the session.
+        if let Some(d) = detail.as_deref() {
+            if let Err(e) = s.journal_for_session(before.id, &session_id, "progress", "hook", d) {
+                tracing::debug!(error = %e.message, "[journal] progress not stored");
+            }
+        }
         let has_open_tasks = s
             .open_tasks_for_worker(before.id)
             .map(|v| !v.is_empty())
@@ -2525,6 +2536,38 @@ mod tests {
         assert_eq!(done.detail.as_deref().map(str::len), Some(200));
         assert_eq!(done.claude_session_id.as_deref(), Some(OLD));
         assert_eq!(s.list_conversations(id, 1).unwrap()[0].turns, 1);
+    }
+
+    #[test]
+    fn stop_journals_progress_and_session_end_the_conversation() {
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let host = host_caller("local");
+        let mut prompt = make_payload("UserPromptSubmit", OLD);
+        prompt.prompt = Some("fix the login bug".into());
+        apply_hook(&store, &make_ssh(), &prompt, &ctx(&host, Some("%3"))).unwrap();
+        for msg in ["step one done", "step one done", "", "step two done"] {
+            let mut stop = make_payload("Stop", OLD);
+            stop.last_assistant_message = Some(msg.into());
+            apply_hook(&store, &make_ssh(), &stop, &ctx(&host, Some("%3"))).unwrap();
+        }
+        let mut end = make_payload("SessionEnd", OLD);
+        end.reason = Some("logout".into());
+        apply_hook(&store, &make_ssh(), &end, &ctx(&host, Some("%3"))).unwrap();
+        let s = store.lock().unwrap();
+        s.delete_session(id).unwrap();
+        let rows = s.journal_for_conversations(&[OLD.to_string()]).unwrap();
+        let progress: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == "progress")
+            .map(|r| r.body.as_deref().unwrap())
+            .collect();
+        assert_eq!(progress, vec!["step one done", "step two done"]);
+        let conv = rows.iter().find(|r| r.kind == "conversation").unwrap();
+        assert_eq!(conv.body.as_deref(), Some("fix the login bug"));
+        let meta: serde_json::Value = serde_json::from_str(conv.meta.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["end_reason"], "logout");
+        assert_eq!(meta["turns"], 4);
     }
 
     #[test]

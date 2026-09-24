@@ -250,6 +250,12 @@ pub struct GcReport {
     /// shipped outage against an older hub.
     #[serde(default)]
     pub swept_read_cursors: usize,
+    /// Work-journal rows past `work.journal_days` swept this sweep
+    /// (`Store::sweep_work_journal`; rows of confirmed work are kept). Not
+    /// gated on `gc.enabled`, like the two sweeps above. `#[serde(default)]`
+    /// for the same wire reason.
+    #[serde(default)]
+    pub swept_journal: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -365,6 +371,24 @@ pub async fn sweep_with(
         Ok(s) => s.sweep_orphan_read_cursors().unwrap_or(0),
         Err(_) => 0,
     };
+    // Work memory retention (work graph M2.1): same best-effort, ungated
+    // shape. Journal rows of a conversation a confirmed link references are
+    // never swept.
+    report.swept_journal = match store.lock() {
+        Ok(s) => {
+            let days = crate::service::settings::resolve(
+                crate::service::settings::WORK_JOURNAL_DAYS,
+                s.get_setting(crate::service::settings::WORK_JOURNAL_DAYS)
+                    .ok()
+                    .flatten()
+                    .as_deref(),
+            )
+            .parse::<i64>()
+            .unwrap_or(90);
+            s.sweep_work_journal(now, days).unwrap_or(0)
+        }
+        Err(_) => 0,
+    };
     report
 }
 
@@ -412,6 +436,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             failed = report.failed,
             swept_participants = report.swept_participants,
             swept_read_cursors = report.swept_read_cursors,
+            swept_journal = report.swept_journal,
             "[gc] sweep"
         );
     }
@@ -715,6 +740,7 @@ mod tests {
                 failed: 0,
                 swept_participants: 0,
                 swept_read_cursors: 0,
+                swept_journal: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -739,6 +765,7 @@ mod tests {
                 failed: 0,
                 swept_participants: 0,
                 swept_read_cursors: 0,
+                swept_journal: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -793,6 +820,7 @@ mod tests {
                 failed: 0,
                 swept_participants: 1,
                 swept_read_cursors: 0,
+                swept_journal: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -848,6 +876,7 @@ mod tests {
                 failed: 0,
                 swept_participants: 1,
                 swept_read_cursors: 0,
+                swept_journal: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );

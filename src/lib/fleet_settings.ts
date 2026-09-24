@@ -34,6 +34,8 @@ export const SETTING_KEYS = {
   usagePricesJson: 'usage.prices_json',
   reportsMaxRows: 'reports.max_rows',
   reportsMaxAgeSecs: 'reports.max_age_secs',
+  workJournalDays: 'work.journal_days',
+  workRecentDays: 'work.recent_days',
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -105,6 +107,8 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'usage.prices_json': '{}',
   'reports.max_rows': '5000',
   'reports.max_age_secs': '604800',
+  'work.journal_days': '90',
+  'work.recent_days': '14',
 };
 
 export type FleetSettings = Record<string, string>;
