@@ -13,4 +13,4 @@
 ALTER TABLE tracker_views ADD COLUMN sync_mark TEXT;
 ALTER TABLE trackers ADD COLUMN settings TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (50);
+INSERT OR IGNORE INTO schema_version (version) VALUES (51);

@@ -12,17 +12,96 @@ import type { WorkKey } from './work_keys';
  *  (the "N stuck" and "needs attention" pills). `null` = no extra filter. */
 export type SessionPredicate = ((s: SessionRow) => boolean) | null;
 
-/** True when the row passes the host, bg-agent and optional extra filters. */
+/** The org scope a view is narrowed to (work graph M5): the chosen scope
+ *  id and how to read a session's. `null` = every scope. */
+export type ScopeFilter = { id: string; of: (s: SessionRow) => string } | null;
+
+/** One row of any list the filters apply to — a live session, a ticket, a
+ *  past (ended) link — reduced to what a filter reads. */
+export interface FilterRow {
+  /** The session's host (a past link: its snapshot's); null for a ticket. */
+  host: string | null;
+  /** Its org scope (`org:<id>`, `owner:<name>`, `unassigned`), or `*`
+   *  for a row no scope can claim (passes every scope filter). */
+  scope: string;
+  /** A session's kind (`bg` rows follow the bg toggle). */
+  kind?: string;
+  trackerId?: number | null;
+  /** todo | in_progress | done. */
+  statusCategory?: string | null;
+  assignees?: readonly string[];
+  /** A live session works on it. */
+  live: boolean;
+  /** Ended / past work. */
+  archived: boolean;
+  /** The session itself, for the needs-you predicate. */
+  session?: SessionRow;
+}
+
+/** Every filter of the sidebar, ⌘K and the work views, composed. A field
+ *  left undefined does not filter. */
+export interface RowFilters {
+  host?: string; // 'all' | alias
+  scope?: string; // 'all' | scope id
+  showBgAgents?: boolean;
+  tracker?: number | 'all';
+  status?: string; // 'all' | category
+  assignee?: string; // 'all' | name
+  hasSession?: 'any' | 'yes' | 'no';
+  /** Include archived (past) rows. Default true. */
+  archived?: boolean;
+  /** The needs-you (or any other) predicate over the row's session. */
+  predicate?: SessionPredicate;
+}
+
+/** THE one filter predicate (work graph M5.5): project mode, work mode and
+ *  ⌘K all call it, so the filters can never diverge. Every clause must hold. */
+export function rowMatches(r: FilterRow, f: RowFilters): boolean {
+  if (f.host && f.host !== 'all' && r.host !== null && r.host !== f.host) return false;
+  // `*`: a row that belongs to no scope (a ticket of an unassigned
+  // tracker) is not narrowed away by one.
+  if (f.scope && f.scope !== 'all' && r.scope !== '*' && r.scope !== f.scope) return false;
+  if (f.showBgAgents === false && r.kind === 'bg') return false;
+  if (f.tracker !== undefined && f.tracker !== 'all' && r.trackerId !== f.tracker) return false;
+  if (f.status && f.status !== 'all' && r.statusCategory !== f.status) return false;
+  if (f.assignee && f.assignee !== 'all' && !(r.assignees ?? []).includes(f.assignee)) return false;
+  if (f.hasSession === 'yes' && !r.live) return false;
+  if (f.hasSession === 'no' && r.live) return false;
+  if (f.archived === false && r.archived) return false;
+  if (f.predicate) {
+    if (!r.session || !f.predicate(r.session)) return false;
+  }
+  return true;
+}
+
+/** A live session as a [`FilterRow`]. */
+export function sessionFilterRow(s: SessionRow, scopeOf?: (s: SessionRow) => string): FilterRow {
+  return {
+    host: s.host_alias,
+    scope: scopeOf ? scopeOf(s) : 'all',
+    kind: s.kind,
+    statusCategory: s.work?.status_category ?? null,
+    live: true,
+    archived: false,
+    session: s,
+  };
+}
+
+/** True when the row passes the host, bg-agent, scope and optional extra
+ *  filters — `rowMatches` over the session. */
 export function sessionVisible(
   s: SessionRow,
   hostFilter: string,
   showBgAgents: boolean,
   predicate: SessionPredicate = null,
+  scope: ScopeFilter = null,
 ): boolean {
-  if (hostFilter !== 'all' && s.host_alias !== hostFilter) return false;
-  if (!showBgAgents && s.kind === 'bg') return false;
-  if (predicate && !predicate(s)) return false;
-  return true;
+  return rowMatches(sessionFilterRow(s, scope?.of), {
+    host: hostFilter,
+    scope: scope?.id ?? 'all',
+    showBgAgents,
+    predicate,
+  });
 }
 
 /** project_id → sessions visible under the current host / bg-agent filter
@@ -32,12 +111,13 @@ export function buildSessionsByProject(
   hostFilter: string,
   showBgAgents: boolean,
   predicate: SessionPredicate = null,
+  scope: ScopeFilter = null,
 ): Map<number, SessionRow[]> {
   const m = new Map<number, SessionRow[]>();
   for (const s of sessions) {
     if (s.kind === 'external') continue;
     if (s.project_id == null) continue;
-    if (!sessionVisible(s, hostFilter, showBgAgents, predicate)) continue;
+    if (!sessionVisible(s, hostFilter, showBgAgents, predicate, scope)) continue;
     if (!m.has(s.project_id)) m.set(s.project_id, []);
     m.get(s.project_id)!.push(s);
   }
@@ -54,9 +134,14 @@ export function buildSessionsByProject(
 export function buildOutsideFleet(
   sessions: readonly SessionRow[],
   hostFilter: string,
+  scope: ScopeFilter = null,
 ): SessionRow[] {
   return sessions
-    .filter((s) => s.kind === 'external' && (hostFilter === 'all' || s.host_alias === hostFilter))
+    .filter(
+      (s) =>
+        s.kind === 'external' &&
+        rowMatches(sessionFilterRow(s, scope?.of), { host: hostFilter, scope: scope?.id ?? 'all' }),
+    )
     .slice()
     .sort((a, b) => b.created_at - a.created_at || b.id - a.id);
 }
@@ -112,6 +197,7 @@ export function buildSessionsByWork(
   showBgAgents: boolean,
   predicate: SessionPredicate,
   keyOf: (s: SessionRow) => WorkKey | null,
+  scope: ScopeFilter = null,
 ): { groups: WorkGroup[]; keyed: Map<number, WorkKey> } {
   const keyed = new Map<number, WorkKey>();
   const byKey = new Map<string, SessionRow[]>();
@@ -120,7 +206,7 @@ export function buildSessionsByWork(
     const k = keyOf(s);
     if (!k) continue;
     keyed.set(s.id, k);
-    if (!sessionVisible(s, hostFilter, showBgAgents, predicate)) continue;
+    if (!sessionVisible(s, hostFilter, showBgAgents, predicate, scope)) continue;
     if (!byKey.has(k.key)) byKey.set(k.key, []);
     byKey.get(k.key)!.push(s);
   }

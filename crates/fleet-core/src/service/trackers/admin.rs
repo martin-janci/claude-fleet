@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove
+    /// list|add|update|set_credential|test|remove|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,6 +55,30 @@ pub struct WorkAdminArgs {
     /// For remove.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
+    /// Org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    /// Hex colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// D7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolate_sessions: Option<bool>,
+    /// Rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+    /// Rule or host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// Rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
 }
 
 impl fmt::Debug for WorkAdminArgs {
@@ -74,6 +98,14 @@ impl fmt::Debug for WorkAdminArgs {
             .field("credential_ref", &self.credential_ref)
             .field("transport", &self.transport)
             .field("settings", &self.settings)
+            .field("org_id", &self.org_id)
+            .field("color", &self.color)
+            .field("isolate_sessions", &self.isolate_sessions)
+            .field("owner", &self.owner)
+            .field("repo", &self.repo)
+            .field("path_prefix", &self.path_prefix)
+            .field("host_alias", &self.host_alias)
+            .field("rule_id", &self.rule_id)
             .finish()
     }
 }
@@ -83,7 +115,9 @@ impl WorkAdminArgs {
     pub fn audit_summary(&self) -> String {
         format!(
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
-             credential_ref={:?} transport={:?} settings={} secret={}",
+             credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
+             rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
+             isolate_sessions={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -100,7 +134,14 @@ impl WorkAdminArgs {
                 "set"
             } else {
                 "unset"
-            }
+            },
+            self.org_id,
+            self.rule_id,
+            self.host_alias,
+            self.owner,
+            self.repo,
+            self.path_prefix,
+            self.isolate_sessions,
         )
     }
 
@@ -123,10 +164,45 @@ pub enum AdminAction {
     SetCredential,
     Test,
     Remove,
+    /// Work graph M5: org administration (`service::orgs::admin`).
+    Org(crate::service::orgs::OrgAction),
 }
 
 impl AdminAction {
+    /// Every action name `parse` accepts (aliases aside), for the isolation
+    /// matrix and the error sentence.
+    pub const NAMES: &'static [&'static str] = &[
+        "list",
+        "add",
+        "update",
+        "set_credential",
+        "test",
+        "remove",
+        "list_orgs",
+        "add_org",
+        "update_org",
+        "remove_org",
+        "add_rule",
+        "remove_rule",
+        "assign_host",
+        "unassign_host",
+        "assign_tracker",
+    ];
+
+    /// Actions that destroy something and pass the confirmation gate.
+    pub fn is_removal(self) -> bool {
+        matches!(
+            self,
+            AdminAction::Remove
+                | AdminAction::Org(crate::service::orgs::OrgAction::RemoveOrg)
+                | AdminAction::Org(crate::service::orgs::OrgAction::RemoveRule)
+        )
+    }
+
     pub fn parse(s: &str) -> Result<Self, IpcError> {
+        if let Some(o) = crate::service::orgs::OrgAction::parse(s) {
+            return Ok(AdminAction::Org(o));
+        }
         Ok(match s {
             "list" | "list_trackers" => AdminAction::List,
             "add" | "add_tracker" => AdminAction::Add,
@@ -138,8 +214,8 @@ impl AdminAction {
                 return Err(IpcError::new(
                     codes::E_INVALID,
                     format!(
-                        "unknown work_admin action {other:?}; one of list, add, update, \
-                         set_credential, test, remove"
+                        "unknown work_admin action {other:?}; one of {}",
+                        AdminAction::NAMES.join(", ")
                     ),
                 ))
             }
@@ -336,6 +412,7 @@ pub fn admin_sync(
             codes::E_INTERNAL,
             "test is asynchronous; use test_tracker",
         )),
+        AdminAction::Org(o) => crate::service::orgs::admin(o, args, &s),
     }
 }
 

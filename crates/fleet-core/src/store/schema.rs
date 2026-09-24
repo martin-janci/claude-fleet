@@ -154,7 +154,18 @@ fn work_links_has_evidence(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 050: `trackers` already has its
+/// `already_applied` guard of migration 050 (work graph M5): its last ADD
+/// COLUMN (`work_links.snap_org_id`) present means the whole migration is.
+fn work_links_has_snap_org(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'snap_org_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 051: `trackers` already has its
 /// `settings` column (the last of the two it adds).
 fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -456,12 +467,21 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/049_work_detection.sql"),
         already_applied: Some(work_links_has_evidence),
     },
-    // Work graph M6: `tracker_views.sync_mark` (sync tokens) and
-    // `trackers.settings` (admin-owned provider settings) — ADD COLUMNs, so
+    // Work graph M5: `orgs`, `org_rules`, `hosts.org_id`,
+    // `work_links.snap_org_id` and its retirement trigger — ADD COLUMNs, so
     // the same guard.
     Migration {
         version: 50,
-        sql: include_str!("../../migrations/050_tracker_providers.sql"),
+        sql: include_str!("../../migrations/050_orgs.sql"),
+        already_applied: Some(work_links_has_snap_org),
+    },
+    // Work graph M6: `tracker_views.sync_mark` (sync tokens) and
+    // `trackers.settings` (admin-owned provider settings) — ADD COLUMNs, so
+    // the same guard. (Written as 050 on the M6 branch; renumbered when M5,
+    // which took 050, was merged.)
+    Migration {
+        version: 51,
+        sql: include_str!("../../migrations/051_tracker_providers.sql"),
         already_applied: Some(trackers_has_settings),
     },
 ];
@@ -2044,7 +2064,9 @@ mod tests {
     #[test]
     fn migration_043_backfills_existing_sessions() {
         let old = store_at_version(42);
-        old.upsert_host("h").unwrap();
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
+            .unwrap();
         let sid = raw_session(&old, "sess");
 
         old.migrate().expect("043 backfill");
@@ -2113,7 +2135,9 @@ mod tests {
     #[test]
     fn migration_045_gives_every_session_a_participant() {
         let old = store_at_version(44);
-        old.upsert_host("h").unwrap();
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
+            .unwrap();
         let quiet = raw_session(&old, "quiet");
         let count = |s: &Store, sid: i64| -> i64 {
             s.conn
@@ -2222,12 +2246,12 @@ mod tests {
             .unwrap();
         assert_eq!(branch.as_deref(), Some("abc-2-x"));
     }
-    /// Migration 050 (work graph M6): a tracker with views keeps them and
+    /// Migration 051 (work graph M6): a tracker with views keeps them and
     /// its watermark, gains an empty sync mark and settings, and a re-run
     /// (the guard) keeps what was written since.
     #[test]
-    fn migration_050_adds_sync_marks_and_settings_and_reruns_safely() {
-        let old = store_at_version(49);
+    fn migration_051_adds_sync_marks_and_settings_and_reruns_safely() {
+        let old = store_at_version(50);
         old.conn
             .execute_batch(
                 "INSERT INTO trackers (id, provider, name, site_url, created_at) \
@@ -2236,7 +2260,7 @@ mod tests {
                  VALUES (3, 'mine', 'My work', 'q', 1700000000);",
             )
             .unwrap();
-        old.migrate().expect("050 on an existing DB");
+        old.migrate().expect("051 on an existing DB");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let views = old.list_tracker_views(3).unwrap();
         assert_eq!(views[0].watermark, Some(1_700_000_000));
@@ -2247,9 +2271,9 @@ mod tests {
         );
         old.set_tracker_view_mark(3, "mine", Some("tok-1")).unwrap();
         old.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 50;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 51;")
             .unwrap();
-        old.migrate().expect("re-running 050 is safe");
+        old.migrate().expect("re-running 051 is safe");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         assert_eq!(
             old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),

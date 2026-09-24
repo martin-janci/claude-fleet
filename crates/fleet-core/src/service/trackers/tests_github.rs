@@ -337,6 +337,7 @@ async fn a_via_cli_tracker_runs_gh_on_its_host_with_no_token() {
         credential_hint: None,
         auth_kind: None,
         username: None,
+        org_id: None,
         settings: TrackerSettings::default(),
     };
     assert!(!crate::service::trackers::needs_credential(&row));
@@ -365,9 +366,10 @@ async fn a_via_cli_tracker_runs_gh_on_its_host_with_no_token() {
 mod flow {
     use super::*;
     use crate::ipc_error::codes;
+    use crate::service::orgs::OrgScope;
     use crate::service::trackers::admin::{admin_sync, test_tracker, WorkAdminArgs};
     use crate::service::trackers::sync::TrackerSync;
-    use crate::service::trackers::tickets::{lookup, plan_start, Scope, StartArgs};
+    use crate::service::trackers::tickets::{lookup, plan_start, StartArgs};
     use crate::store::{Store, WorkTarget};
     use std::sync::Mutex;
 
@@ -536,7 +538,7 @@ mod flow {
         let t = lookup(
             &st,
             "https://github.com/acme/api/issues/42",
-            Scope::All,
+            &OrgScope::All,
             &net,
         )
         .await
@@ -544,9 +546,14 @@ mod flow {
         assert_eq!(t.item.id, item.id);
         assert_eq!(t.live_session_ids, vec![sid]);
         // A URL no GitHub tracker covers says so.
-        let e = lookup(&st, "https://github.com/other/x/issues/1", Scope::All, &net)
-            .await
-            .unwrap_err();
+        let e = lookup(
+            &st,
+            "https://github.com/other/x/issues/1",
+            &OrgScope::All,
+            &net,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(e.code, codes::E_NOTFOUND);
         assert!(e.message.contains("github"), "{}", e.message);
         // Starting sub-issue #44 lands in the repository's own project.
@@ -557,7 +564,7 @@ mod flow {
                 host_alias: Some("h".into()),
                 ..Default::default()
             },
-            Scope::All,
+            &OrgScope::All,
             &net,
         )
         .await

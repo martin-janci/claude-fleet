@@ -15,16 +15,19 @@
 //!   `started`, and — with a brief — queue the ticket's context (third-party
 //!   text inside `mark_untrusted`) for the first hook.
 //!
-//! **The interim fence (plan decision 6).** Until orgs exist, a host-bound
+//! **The fence** (M3's decision 6, bounded by the org since M5). A host-bound
 //! caller (an in-session Claude's per-host token) sees only the tracker
-//! items linked to sessions on its own host; anything else is `E_FORBIDDEN`
-//! with a sentence that says why. Master and paired clients see everything.
+//! items linked to sessions on its own host whose org is the host's or
+//! unassigned; a key or URL outside that is `E_FORBIDDEN` with one sentence
+//! whether or not it exists, an item id outside it is "not found" exactly
+//! as an unknown id is. Master and paired clients see everything.
 
 use super::jira::parse_ticket_url;
 use super::sync::fetch_one;
 use super::ItemRef;
 use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::orgs::{self, OrgScope};
 use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -54,32 +57,39 @@ pub struct Ticket {
     pub views: Vec<String>,
 }
 
-/// Who is asking, for the fence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope<'a> {
-    /// Master or a paired client: everything.
-    All,
-    /// A per-host token: items linked to sessions on this host only.
-    Host(&'a str),
-}
-
-impl Scope<'_> {
-    fn allowed(&self, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
-        match self {
-            Scope::All => Ok(None),
-            Scope::Host(h) => Ok(Some(s.work_item_ids_on_host(h)?.into_iter().collect())),
+/// The items a caller may read, or `None` for all of them.
+///
+/// A per-host token (work graph M5, composing M3's interim fence — the plan's
+/// decision 6 — with the org boundary): an item linked to a session on its
+/// own host AND whose org is the host's or unassigned. The host fence is
+/// kept because the org scope alone is wider (every host of an org would
+/// read every ticket any of them works on); the org fence is added because
+/// the host fence alone would let a host read another org's ticket that a
+/// person force-linked on it.
+fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
+    let Some(h) = scope.host() else {
+        return Ok(None);
+    };
+    let mut out = HashSet::new();
+    for id in s.work_item_ids_on_host(h)? {
+        if scope.sees_org(s.item_org(id)?) {
+            out.insert(id);
         }
     }
+    Ok(Some(out))
 }
 
-fn forbidden(host: &str, what: &str) -> IpcError {
-    IpcError::new(
-        codes::E_FORBIDDEN,
-        format!(
-            "{what} is not linked to any session on {host}; a per-host token sees only the \
-             tickets its own host's sessions work on (tracker isolation before orgs)"
-        ),
-    )
+/// The live sessions working on `key` that the scope may see (D7: an
+/// isolated org's session is not named to a host outside it).
+fn live_ids(s: &Store, scope: &OrgScope, key: Option<&str>) -> Result<Vec<i64>, IpcError> {
+    let Some(k) = key else {
+        return Ok(Vec::new());
+    };
+    Ok(s.live_work_sessions_for_key(k)?
+        .into_iter()
+        .filter(|(_, r)| scope.sees_row(r))
+        .map(|(_, r)| r.id)
+        .collect())
 }
 
 fn views_of(
@@ -116,10 +126,10 @@ pub fn tickets(
     view: Option<&str>,
     query: Option<&str>,
     limit: Option<usize>,
-    scope: Scope<'_>,
+    scope: &OrgScope,
 ) -> Result<Vec<Ticket>, IpcError> {
     let s = lock(store)?;
-    let allowed = scope.allowed(&s)?;
+    let allowed = allowed(scope, &s)?;
     let trackers = s.list_trackers()?;
     let now = crate::service::catalog::now_secs();
     let q = query
@@ -151,14 +161,7 @@ pub fn tickets(
                 continue;
             }
         }
-        let live = match item.key.as_deref() {
-            Some(k) => s
-                .live_work_sessions_for_key(k)?
-                .into_iter()
-                .map(|(_, r)| r.id)
-                .collect(),
-            None => Vec::new(),
-        };
+        let live = live_ids(&s, scope, item.key.as_deref())?;
         out.push(Ticket {
             item,
             live_session_ids: live,
@@ -173,11 +176,11 @@ pub fn tickets(
 }
 
 /// `work { action: trackers }`: every tracker (no secrets), or for a
-/// host-bound caller only those with an item linked on its host.
-pub fn trackers(store: &Mutex<Store>, scope: Scope<'_>) -> Result<Vec<TrackerRow>, IpcError> {
+/// host-bound caller only those with a visible item linked on its host.
+pub fn trackers(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<TrackerRow>, IpcError> {
     let s = lock(store)?;
     let all = s.list_trackers()?;
-    let Some(allowed) = scope.allowed(&s)? else {
+    let Some(allowed) = allowed(scope, &s)? else {
         return Ok(all);
     };
     let mut ids = HashSet::new();
@@ -249,21 +252,30 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
 pub async fn lookup(
     store: &Mutex<Store>,
     reference: &str,
-    scope: Scope<'_>,
+    scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<Ticket, IpcError> {
     let (tracker, key) = {
         let s = lock(store)?;
-        recognise(&s, reference)?
+        match recognise(&s, reference) {
+            Ok(r) => r,
+            // Which sites are connected is not a host token's to learn: an
+            // unknown site answers as an invisible key does.
+            Err(e) if e.code == codes::E_NOTFOUND && scope.host().is_some() => {
+                let h = scope.host().unwrap_or_default();
+                return Err(orgs::not_visible_key(h, reference.trim()));
+            }
+            Err(e) => return Err(e),
+        }
     };
     let cached = lock(store)?.tracker_item_for_key(&key)?;
     let item_id = match cached {
         Some(item) => item.id,
         None => {
-            if let Scope::Host(h) = scope {
+            if let Some(h) = scope.host() {
                 // Nothing cached is linked anywhere, let alone on this host;
                 // do not let a host token make the hub fetch arbitrary keys.
-                return Err(forbidden(h, &key));
+                return Err(orgs::not_visible_key(h, &key));
             }
             let t = tracker.ok_or_else(|| {
                 IpcError::new(
@@ -293,12 +305,12 @@ pub async fn lookup(
         }
     };
     let s = lock(store)?;
-    if let Some(allowed) = scope.allowed(&s)? {
+    if let Some(allowed) = allowed(scope, &s)? {
         if !allowed.contains(&item_id) {
-            let Scope::Host(h) = scope else {
-                unreachable!()
-            };
-            return Err(forbidden(h, &key));
+            return Err(orgs::not_visible_key(
+                scope.host().unwrap_or_default(),
+                &key,
+            ));
         }
     }
     let item = s
@@ -315,20 +327,13 @@ pub async fn lookup(
         t.as_ref(),
         crate::service::catalog::now_secs(),
     );
-    let live = match item.key.as_deref() {
-        Some(k) => s
-            .live_work_sessions_for_key(k)?
-            .into_iter()
-            .map(|(_, r)| r.id)
-            .collect(),
-        None => Vec::new(),
-    };
+    let live = live_ids(&s, scope, item.key.as_deref())?;
     // An agent reads it: fenced on both sides, markers defused (M3 review).
     let description = meta.description.map(|d| match scope {
-        Scope::Host(_) => {
+        OrgScope::Host { .. } => {
             crate::mcp::guard::fence_untrusted(&d, "a tracker ticket", super::DESCRIPTION_MAX_CHARS)
         }
-        Scope::All => d,
+        OrgScope::All => d,
     });
     Ok(Ticket {
         item,
@@ -358,6 +363,9 @@ pub struct StartArgs {
     /// The worktree (branch) name as a person edited it (default
     /// `slug(key + title)`); an existing worktree of that name is reused.
     pub worktree: Option<String>,
+    /// Link across orgs anyway (work graph M5): the ticket's org differs
+    /// from the org the new session would belong to.
+    pub force_cross_org: bool,
 }
 
 /// Where a start lands and what it is called.
@@ -440,23 +448,19 @@ pub fn start_name(key: &str, title: &str) -> String {
 pub async fn plan_start(
     store: &Mutex<Store>,
     args: &StartArgs,
-    scope: Scope<'_>,
+    scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<StartPlan, IpcError> {
     let (key, title, item_id) = match (args.item_id, args.reference.as_deref()) {
         (Some(id), None) => {
             let s = lock(store)?;
-            let item = s.get_work_item(id)?.ok_or_else(|| {
-                IpcError::new(codes::E_NOTFOUND, format!("work item {id} not found"))
-            })?;
-            if let Some(allowed) = scope.allowed(&s)? {
-                if !allowed.contains(&id) {
-                    let Scope::Host(h) = scope else {
-                        unreachable!()
-                    };
-                    return Err(forbidden(h, &format!("work item {id}")));
-                }
+            // Out of scope reads exactly as unknown: no existence oracle.
+            if allowed(scope, &s)?.is_some_and(|a| !a.contains(&id)) {
+                return Err(orgs::not_found("work item", id));
             }
+            let item = s
+                .get_work_item(id)?
+                .ok_or_else(|| orgs::not_found("work item", id))?;
             let key = item.key.clone().ok_or_else(|| {
                 IpcError::new(codes::E_INVALID, "that work item has no key to start from")
             })?;
@@ -483,6 +487,14 @@ pub async fn plan_start(
     };
     let s = lock(store)?;
     if let Some((_, row)) = s.live_work_sessions_for_key(&key)?.into_iter().next() {
+        if !scope.sees_row(&row) {
+            // Still one live session per key, but an isolated org's session
+            // is not named to a host outside it (D7).
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!("{key} already has a live session"),
+            ));
+        }
         return Err(IpcError::new(
             codes::E_EXISTS,
             format!(
@@ -546,10 +558,10 @@ pub async fn plan_start(
             .with_details(serde_json::json!({ "candidates": candidates })));
         }
     };
-    let host_alias = match (&args.host_alias, &scope) {
+    let host_alias = match (&args.host_alias, scope.host()) {
         (Some(h), _) => h.clone(),
-        (None, Scope::Host(h)) => h.to_string(),
-        (None, Scope::All) => match seen
+        (None, Some(h)) => h.to_string(),
+        (None, None) => match seen
             .filter(|p| p.0 == project_id && !p.1.is_empty())
             .map(|p| p.1)
             .or(s.last_host_for_project(project_id)?)
@@ -570,13 +582,19 @@ pub async fn plan_start(
             }
         },
     };
-    if let Scope::Host(h) = scope {
+    if let Some(h) = scope.host() {
         if host_alias != h {
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
                 format!("a per-host token starts work only on its own host ({h})"),
             ));
         }
+    }
+    // Data integrity, for every caller (M5): a ticket of one org is not
+    // attached to a session of another by mistake.
+    if let Some(id) = item_id {
+        let session_org = s.org_for_new_session(&host_alias, project_id)?;
+        orgs::check_cross_org(s.item_org(id)?, session_org, &key, args.force_cross_org)?;
     }
     let branch = match args
         .worktree
@@ -681,6 +699,17 @@ pub fn ticket_brief(store: &Mutex<Store>, plan: &StartPlan) -> Result<String, Ip
     Ok(out)
 }
 
+/// May the ticket's text reach a Claude on the plan's host? Only when the
+/// item's org is inside that host's scope (M5).
+pub fn brief_visible_on(store: &Mutex<Store>, plan: &StartPlan) -> Result<bool, IpcError> {
+    let Some(id) = plan.item_id else {
+        return Ok(true);
+    };
+    let s = lock(store)?;
+    let target = OrgScope::for_host(&s, &plan.host_alias)?;
+    Ok(target.sees_org(s.item_org(id)?))
+}
+
 /// The short prompt typed once the REPL is ready (the brief rides the
 /// hook's `additionalContext`).
 pub fn start_prompt(key: &str) -> String {
@@ -745,14 +774,16 @@ pub async fn start_work(
     ssh: &Arc<crate::ssh::SshClient>,
     reg: &Arc<crate::cancel::CancellationRegistry>,
     args: &StartArgs,
-    scope: Scope<'_>,
+    scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
     let plan = plan_start(store, args, scope, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),
-        (None, true) => Some(ticket_brief(store, &plan)?),
-        (None, false) => None,
+        // The brief is read by the new session's Claude: never another
+        // org's ticket text, even on a forced cross-org start.
+        (None, true) if brief_visible_on(store, &plan)? => Some(ticket_brief(store, &plan)?),
+        (None, _) => None,
     };
     let (row, queued) = start_with(store, &plan, brief, |a| {
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)

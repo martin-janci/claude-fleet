@@ -161,6 +161,9 @@ pub struct TrackerRow {
     /// The account the credential belongs to (Jira: the email). Not a secret.
     #[serde(default)]
     pub username: Option<String>,
+    /// The org its items belong to (work graph M5); `None` = unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
     /// What the admin set (M6); absent from an older hub.
     #[serde(default, skip_serializing_if = "TrackerSettings::is_default")]
     pub settings: TrackerSettings,
@@ -656,7 +659,7 @@ fn secret_hint(value: &str) -> Option<String> {
 
 const TRACKER_COLUMNS: &str = "t.id, t.provider, t.name, t.instance_id, t.site_url, t.transport, \
      t.config, t.state, t.last_sync_at, t.last_error, t.created_at, \
-     s.auth_kind, s.username, s.value, s.credential_ref, t.settings";
+     s.auth_kind, s.username, s.value, s.credential_ref, t.org_id, t.settings";
 
 fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
     let config: Option<String> = r.get(6)?;
@@ -685,8 +688,9 @@ fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
         credential_hint: hint,
         auth_kind: r.get(11)?,
         username: r.get(12)?,
+        org_id: r.get(15)?,
         settings: r
-            .get::<_, Option<String>>(15)?
+            .get::<_, Option<String>>(16)?
             .and_then(|c| serde_json::from_str(&c).ok())
             .unwrap_or_default(),
     })

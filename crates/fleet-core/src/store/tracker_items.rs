@@ -470,16 +470,65 @@ impl Store {
         let keys: Vec<String> = stmt
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(keys
-            .into_iter()
-            .filter(|k| may_answer(&trackers, tracker_id, k))
-            .take(limit)
-            .collect())
+        let mut out = Vec::new();
+        for k in keys {
+            // Work graph M5: a tracker fetches a key only for a session its
+            // org may bind to — never on behalf of another org's session,
+            // which would make one company's credentials answer (and so
+            // reveal) keys another company's sessions merely mentioned.
+            if may_answer(&trackers, tracker_id, &k) && self.ref_bindable_by(tracker_id, &k)? {
+                out.push(k);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// May `tracker_id`'s items bind the bare link `link`? Not when the
+    /// link's session is in one org and the tracker in another.
+    fn link_bindable_to(&self, link: i64, tracker_id: i64) -> Result<bool, IpcError> {
+        let Some(l) = self.get_work_link(link)? else {
+            return Ok(false);
+        };
+        let tracker_org: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT org_id FROM trackers WHERE id = ?1",
+                rusqlite::params![tracker_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let link_org = self.link_org(&l)?;
+        Ok(!matches!((tracker_org, link_org), (Some(t), Some(o)) if t != o))
+    }
+
+    /// Some bare link to `key` may bind to `tracker_id`'s items.
+    fn ref_bindable_by(&self, tracker_id: i64, key: &str) -> Result<bool, IpcError> {
+        let ids: Vec<i64> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM work_links WHERE item_id IS NULL AND ref_key = ?1")?;
+            let rows = stmt.query_map(rusqlite::params![key], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for id in ids {
+            if self.link_bindable_to(id, tracker_id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Bind every bare `ref_key` link this tracker can answer (see the
     /// module docs). Returns the live sessions whose row changed; each gets
     /// `session:updated`.
+    ///
+    /// A bare link whose session is in another org than the tracker stays
+    /// bare (work graph M5): binding it would make a cross-org link nobody
+    /// asked for.
     pub fn bind_tracker_refs(&self, tracker_id: i64) -> Result<Vec<i64>, IpcError> {
         let trackers = self.list_trackers()?;
         let candidates: Vec<(i64, String)> = {
@@ -492,7 +541,9 @@ impl Store {
         let mut touched = Vec::new();
         let tx = self.conn.unchecked_transaction()?;
         for (link, key) in candidates {
-            if !may_answer(&trackers, tracker_id, &key) {
+            if !may_answer(&trackers, tracker_id, &key)
+                || !self.link_bindable_to(link, tracker_id)?
+            {
                 continue;
             }
             let key = super::work::canonical_key(&key);

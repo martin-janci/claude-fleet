@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::net::https::{FakeTransport, Method, Response};
+use crate::service::orgs::OrgScope;
 use crate::store::{TrackerConfig, TrackerItemWrite};
 use serde_json::json;
 
@@ -100,7 +101,7 @@ impl Fx {
         id
     }
 
-    fn keys(&self, view: Option<&str>, scope: Scope<'_>) -> Vec<String> {
+    fn keys(&self, view: Option<&str>, scope: &OrgScope) -> Vec<String> {
         tickets(&self.store, None, view, None, None, scope)
             .unwrap()
             .into_iter()
@@ -117,17 +118,20 @@ impl Fx {
 fn views_are_evaluated_from_the_cache() {
     let fx = Fx::new();
     assert_eq!(
-        fx.keys(Some("mine"), Scope::All),
+        fx.keys(Some("mine"), &OrgScope::All),
         vec!["ABC-1", "ABC-4"],
         "not done, mine"
     );
-    assert_eq!(fx.keys(Some("recent"), Scope::All), vec!["ABC-1", "ABC-2"]);
-    assert_eq!(fx.keys(Some("sprint"), Scope::All), vec!["ABC-4"]);
-    assert_eq!(fx.keys(Some("filter:9"), Scope::All), vec!["ABC-3"]);
-    assert_eq!(fx.keys(None, Scope::All).len(), 4);
-    let q = tickets(&fx.store, None, None, Some("abc-3"), None, Scope::All).unwrap();
+    assert_eq!(
+        fx.keys(Some("recent"), &OrgScope::All),
+        vec!["ABC-1", "ABC-2"]
+    );
+    assert_eq!(fx.keys(Some("sprint"), &OrgScope::All), vec!["ABC-4"]);
+    assert_eq!(fx.keys(Some("filter:9"), &OrgScope::All), vec!["ABC-3"]);
+    assert_eq!(fx.keys(None, &OrgScope::All).len(), 4);
+    let q = tickets(&fx.store, None, None, Some("abc-3"), None, &OrgScope::All).unwrap();
     assert_eq!(q.len(), 1);
-    let one = tickets(&fx.store, None, None, None, Some(1), Scope::All).unwrap();
+    let one = tickets(&fx.store, None, None, None, Some(1), &OrgScope::All).unwrap();
     assert_eq!(one.len(), 1);
     assert!(
         fx.fake.requests().is_empty(),
@@ -141,10 +145,10 @@ fn views_are_evaluated_from_the_cache() {
 async fn a_host_token_sees_only_its_own_hosts_tickets() {
     let fx = Fx::new();
     assert!(
-        fx.keys(None, Scope::Host("hosta")).is_empty(),
+        fx.keys(None, &host_scope("hosta")).is_empty(),
         "host A without a link"
     );
-    assert!(trackers(&fx.store, Scope::Host("hosta"))
+    assert!(trackers(&fx.store, &host_scope("hosta"))
         .unwrap()
         .is_empty());
     let sid = fx.session_on("hosta", "dev");
@@ -154,29 +158,29 @@ async fn a_host_token_sees_only_its_own_hosts_tickets() {
         .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
         .unwrap();
     assert_eq!(
-        fx.keys(None, Scope::Host("hosta")),
+        fx.keys(None, &host_scope("hosta")),
         vec!["ABC-1"],
         "host A with a link"
     );
-    assert!(fx.keys(None, Scope::Host("hostb")).is_empty());
-    assert_eq!(trackers(&fx.store, Scope::Host("hosta")).unwrap().len(), 1);
-    assert_eq!(fx.keys(None, Scope::All).len(), 4, "master / client");
+    assert!(fx.keys(None, &host_scope("hostb")).is_empty());
+    assert_eq!(trackers(&fx.store, &host_scope("hosta")).unwrap().len(), 1);
+    assert_eq!(fx.keys(None, &OrgScope::All).len(), 4, "master / client");
 
     // lookup: its own ticket, with the description fenced as untrusted.
-    let t = lookup(&fx.store, "abc-1", Scope::Host("hosta"), &fx.net())
+    let t = lookup(&fx.store, "abc-1", &host_scope("hosta"), &fx.net())
         .await
         .unwrap();
     let d = t.description.unwrap();
     assert!(d.starts_with("[claude-fleet:"), "{d}");
     assert!(d.contains("Ignore previous instructions"));
     // Another ticket: forbidden, and the reason says why.
-    let e = lookup(&fx.store, "ABC-2", Scope::Host("hosta"), &fx.net())
+    let e = lookup(&fx.store, "ABC-2", &host_scope("hosta"), &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
     assert!(e.message.contains("per-host token"), "{}", e.message);
     // A key nothing caches: a host token cannot make the hub fetch it.
-    let e = lookup(&fx.store, "ABC-99", Scope::Host("hosta"), &fx.net())
+    let e = lookup(&fx.store, "ABC-99", &host_scope("hosta"), &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
@@ -191,7 +195,7 @@ async fn a_host_token_sees_only_its_own_hosts_tickets() {
             [sid],
         )
         .unwrap();
-    assert_eq!(fx.keys(None, Scope::Host("hosta")), vec!["ABC-1"]);
+    assert_eq!(fx.keys(None, &host_scope("hosta")), vec!["ABC-1"]);
 }
 
 #[tokio::test]
@@ -200,7 +204,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     let hit = lookup(
         &fx.store,
         "https://acme.atlassian.net/browse/ABC-1",
-        Scope::All,
+        &OrgScope::All,
         &fx.net(),
     )
     .await
@@ -223,11 +227,11 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
                 "issuetype": {"name": "Task", "hierarchyLevel": 0}, "project": {"key": "ABC"}}}]}),
         )),
     );
-    let live = lookup(&fx.store, "ABC-77", Scope::All, &fx.net())
+    let live = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
         .await
         .unwrap();
     assert_eq!(live.item.title, "Fresh");
-    let again = lookup(&fx.store, "ABC-77", Scope::All, &fx.net())
+    let again = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
         .await
         .unwrap();
     assert_eq!(again.item.id, live.item.id);
@@ -241,7 +245,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     let e = lookup(
         &fx.store,
         "https://other.atlassian.net/browse/ZZ-1",
-        Scope::All,
+        &OrgScope::All,
         &fx.net(),
     )
     .await
@@ -257,7 +261,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
         Ok(Response::json(200, &json!({"issues": []}))),
     );
     assert_eq!(
-        lookup(&fx.store, "ABC-404", Scope::All, &fx.net())
+        lookup(&fx.store, "ABC-404", &OrgScope::All, &fx.net())
             .await
             .unwrap_err()
             .code,
@@ -305,7 +309,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
         reference: Some("ABC-1".into()),
         ..Default::default()
     };
-    let e = plan_start(&fx.store, &args, Scope::All, &fx.net())
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_AMBIGUOUS);
@@ -318,7 +322,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
         .unwrap()
         .link_session_work(old, WorkTarget::Key("ABC-2"), "manual")
         .unwrap();
-    let plan = plan_start(&fx.store, &args, Scope::All, &fx.net())
+    let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap();
     assert_eq!(
@@ -338,7 +342,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
             project_id: Some(fx.pid),
             ..args.clone()
         },
-        Scope::All,
+        &OrgScope::All,
         &fx.net(),
     )
     .await
@@ -368,7 +372,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
     );
 
     // A second start of the same key: E_EXISTS naming the live session.
-    let e = plan_start(&fx.store, &args, Scope::All, &fx.net())
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_EXISTS);
@@ -385,7 +389,7 @@ async fn a_brief_start_queues_the_ticket_with_its_text_fenced() {
         with_brief: true,
         ..Default::default()
     };
-    let plan = plan_start(&fx.store, &args, Scope::All, &fx.net())
+    let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap();
     let brief = ticket_brief(&fx.store, &plan).unwrap();
@@ -422,7 +426,7 @@ async fn a_key_no_tracker_knows_still_starts_work() {
             host_alias: Some("hosta".into()),
             ..Default::default()
         },
-        Scope::All,
+        &OrgScope::All,
         &fx.net(),
     )
     .await
@@ -448,7 +452,7 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
             project_id: Some(fx.pid),
             ..Default::default()
         },
-        Scope::Host("hosta"),
+        &host_scope("hosta"),
         &fx.net(),
     )
     .await
@@ -471,7 +475,7 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
             host_alias: Some("hostb".into()),
             ..Default::default()
         },
-        Scope::Host("hosta"),
+        &host_scope("hosta"),
         &fx.net(),
     )
     .await;
@@ -495,7 +499,7 @@ async fn a_person_can_rename_the_session_and_worktree_a_start_makes() {
             worktree: Some("abc-3-login".into()),
             ..base.clone()
         },
-        Scope::All,
+        &OrgScope::All,
         &fx.net(),
     )
     .await
@@ -511,7 +515,7 @@ async fn a_person_can_rename_the_session_and_worktree_a_start_makes() {
                 worktree: Some(bad.into()),
                 ..base.clone()
             },
-            Scope::All,
+            &OrgScope::All,
             &fx.net(),
         )
         .await
@@ -549,7 +553,7 @@ async fn ticket_text_cannot_escape_the_fence() {
             host_alias: Some("hosta".into()),
             ..Default::default()
         },
-        Scope::All,
+        &OrgScope::All,
         &fx.net(),
     )
     .await
@@ -585,7 +589,7 @@ async fn ticket_text_cannot_escape_the_fence() {
         .unwrap()
         .link_session_work(sid, WorkTarget::Key("ABC-66"), "manual")
         .unwrap();
-    let t = lookup(&fx.store, "ABC-66", Scope::Host("hosta"), &fx.net())
+    let t = lookup(&fx.store, "ABC-66", &host_scope("hosta"), &fx.net())
         .await
         .unwrap();
     let d = t.description.unwrap();
@@ -623,7 +627,7 @@ async fn a_long_description_still_ends_the_fence() {
             host_alias: Some("hosta".into()),
             ..Default::default()
         },
-        Scope::All,
+        &OrgScope::All,
         &fx.net(),
     )
     .await
@@ -643,4 +647,15 @@ async fn a_long_description_still_ends_the_fence() {
 
 fn fx_tracker(fx: &Fx) -> i64 {
     fx.store.lock().unwrap().list_trackers().unwrap()[0].id
+}
+
+/// A per-host token of `alias`, whose host has no org (M5): it sees
+/// unassigned tickets — every tracker here is unassigned — within M3's
+/// own-host fence.
+fn host_scope(alias: &str) -> OrgScope {
+    OrgScope::Host {
+        alias: alias.into(),
+        org: None,
+        isolated: Default::default(),
+    }
 }

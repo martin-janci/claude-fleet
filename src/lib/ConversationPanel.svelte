@@ -1935,10 +1935,21 @@
               <button type="button" class="blocked-btn" data-testid="conv-open-terminal" onclick={onOpenTerminal}>Open terminal</button>
             {/if}
           </div>
-        {:else if indicator}
-          <div class="indicator" data-testid="conv-indicator" data-kind={indicator.kind} role="status">
+        {:else}
+          <!-- Always mounted, faded out when idle: the row keeps its height so
+               the thread does not jump each time a turn starts or ends. -->
+          <div
+            class="indicator"
+            class:is-idle={!indicator}
+            data-testid={indicator ? 'conv-indicator' : undefined}
+            data-kind={indicator?.kind ?? 'idle'}
+            role={indicator ? 'status' : undefined}
+            aria-hidden={indicator ? undefined : 'true'}
+          >
             <span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="indicator-label">{indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicatorLabel}</span>
+            <span class="indicator-label"
+              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicatorLabel}</span
+            >
           </div>
         {/if}
         {#if probeUnsupported}
@@ -2150,9 +2161,14 @@
           <div class="drop-veil" aria-hidden="true">Drop to attach</div>
         {/if}
       </div>
-      {#if statusNote}
-        <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
-      {/if}
+      <!-- Always mounted (one line reserved) so the composer does not grow
+           and shrink as the session flips between working and idle. -->
+      <div
+        class="composer-status"
+        class:is-idle={!statusNote}
+        data-testid={statusNote ? 'conv-composer-status' : undefined}
+        aria-hidden={statusNote ? undefined : 'true'}
+      >{statusNote ?? '\u00a0'}</div>
     </form>
   {:else if showComposer && !canPrompt}
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
@@ -2437,6 +2453,10 @@
     margin: 0.35rem 0 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
+    transition: opacity 0.2s ease;
+  }
+  .composer-status.is-idle {
+    opacity: 0;
   }
   .indicator {
     display: flex;
@@ -2445,6 +2465,14 @@
     padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
     font-size: 0.8rem;
+    transition: opacity 0.2s ease;
+  }
+  .indicator.is-idle {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .indicator.is-idle .pulse i {
+    animation-play-state: paused;
   }
   .indicator[data-kind='sent'] {
     font-style: italic;

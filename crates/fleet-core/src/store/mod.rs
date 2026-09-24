@@ -13,6 +13,7 @@ mod clients;
 mod conversations;
 mod hosts_accounts;
 mod layers;
+mod orgs;
 mod participants;
 mod projects;
 mod read_cursors;
@@ -37,6 +38,10 @@ pub use clients::{
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
+pub use orgs::{
+    normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
+    SessionOrgFacts, ORG_NAME_MAX_CHARS,
+};
 pub use participants::{ParticipantRow, RETIRED_RETENTION_SECS};
 pub use read_cursors::CursorRow;
 pub use reports::{ReportFilter, ReportRow};

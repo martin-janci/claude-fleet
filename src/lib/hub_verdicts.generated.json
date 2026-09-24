@@ -1,10 +1,14 @@
 {
   "local_only": [
     "add_host",
+    "add_org",
+    "add_org_rule",
     "add_project",
     "add_tracker",
     "assets_inventory",
     "assets_scan_hosts",
+    "assign_host_org",
+    "assign_tracker_org",
     "catalog_add_resource",
     "catalog_apply_sync",
     "catalog_commit_pending",
@@ -54,6 +58,8 @@
     "purge_project",
     "refresh_account_usage",
     "remove_host",
+    "remove_org",
+    "remove_org_rule",
     "remove_tracker",
     "repo_checkout",
     "repo_checkout_commit",
@@ -73,6 +79,7 @@
     "set_tracker_credential",
     "test_tracker",
     "tunnel_status",
+    "update_org",
     "update_tracker"
   ],
   "routed": [
@@ -88,6 +95,7 @@
     "list_accounts",
     "list_host_worktrees",
     "list_hosts",
+    "list_orgs",
     "list_projects",
     "list_sessions",
     "list_tasks",
@@ -97,6 +105,7 @@
     "new_bg_session",
     "new_session",
     "operator_status",
+    "org_suggestions",
     "probe_host",
     "recreate_session",
     "refresh_projects",
@@ -130,6 +139,7 @@
     "work_lookup",
     "work_purge_impact",
     "work_resume_plan",
+    "work_scopes",
     "work_tickets"
   ],
   "routed_unless": [

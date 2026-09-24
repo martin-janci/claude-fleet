@@ -156,6 +156,14 @@ impl Store {
             return Ok(false);
         }
         let now = now_unix();
+        // Work graph M5: a guess never crosses orgs. Detection neither
+        // proposes nor auto-links another org's item on this session; a
+        // person can, with `force_cross_org`.
+        let session_org = self.session_org(session_id)?;
+        let crosses = |item: Option<i64>| -> Result<bool, IpcError> {
+            let Some(i) = item else { return Ok(false) };
+            Ok(matches!((self.item_org(i)?, session_org), (Some(a), Some(b)) if a != b))
+        };
         let tx = self.conn.unchecked_transaction()?;
         let mut created: Vec<(String, i64)> = Vec::new();
         for c in changes {
@@ -171,6 +179,9 @@ impl Store {
                     evidence,
                 } => {
                     let (item_id, ref_key) = self.detected_target(target, *tracker_id)?;
+                    if crosses(item_id)? {
+                        continue;
+                    }
                     let state = match state {
                         NewState::Suggested => "suggested",
                         NewState::Confirmed => "confirmed",
@@ -214,6 +225,18 @@ impl Store {
                     strength,
                     evidence,
                 } => {
+                    let item: Option<i64> = self
+                        .conn
+                        .query_row(
+                            "SELECT item_id FROM work_links WHERE id = ?1",
+                            rusqlite::params![link_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    if crosses(item)? {
+                        continue;
+                    }
                     let old = self.link_evidence(*link_id)?;
                     self.conn.execute(
                         "UPDATE work_links SET state = 'confirmed', rule = ?2, strength = ?3, \

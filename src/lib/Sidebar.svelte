@@ -28,6 +28,7 @@
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter } from './hosts';
+  import { effectiveScope, scopeOf, orgColorById, orgColorOf, projectOwners } from './orgs';
   import { onboardingDismissed } from './onboarding';
   import {
     hostsViewOpen,
@@ -42,8 +43,10 @@
     buildRelatedCountById,
     buildSessionsByWork,
     sessionVisible,
+    rowMatches,
     sortProjectsBySeverity,
     sortWorkGroups,
+    type FilterRow,
     type SessionPredicate,
     type WorkGroup,
   } from './sidebar_index';
@@ -167,6 +170,12 @@
     return () => clearInterval(t);
   });
   const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
+  // The org scope (work graph M5): a view filter composed into every
+  // builder below through `rowMatches`. `null` while no scope is chosen or
+  // the selector is hidden (fewer than two scopes).
+  const scopeSel = $derived(
+    $effectiveScope === 'all' ? null : { id: $effectiveScope, of: $scopeOf },
+  );
   const rowPredicate = $derived.by((): SessionPredicate => {
     if (!needsYouOnly) return null;
     const opts = attentionOpts;
@@ -348,7 +357,7 @@
   // counters must keep reporting while a triage filter is active, and the
   // project sort must weigh every visible session, not just the filtered ones.
   const hostVisibleSessions = $derived(
-    $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents)),
+    $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents, null, scopeSel)),
   );
   // countNeedsYou() classifies each row, and classify() files an external
   // (Outside fleet) row as working/idle, so a read-only row never inflates
@@ -389,8 +398,13 @@
   const branchById = $derived(worktreeBranchById($projects));
   const workIndex = $derived(
     $sidebarGroupBy === 'work'
-      ? buildSessionsByWork($sessions, $hostFilter, $showBgAgents, rowPredicate, (s) =>
-          workKeyFor(s, branchById),
+      ? buildSessionsByWork(
+          $sessions,
+          $hostFilter,
+          $showBgAgents,
+          rowPredicate,
+          (s) => workKeyFor(s, branchById),
+          scopeSel,
         )
       : null,
   );
@@ -440,8 +454,10 @@
     const out: { key: string; links: WorkLink[] }[] = [];
     for (const [key, links] of $pastWork) {
       if (live.has(key) || links.length === 0) continue;
-      // Hosts outside the filter hide their past work too.
-      const shown = links.filter((l) => $hostFilter === 'all' || l.snap_host === $hostFilter);
+      // Hosts (and scopes) outside the filter hide their past work too.
+      const shown = links.filter((l) =>
+        rowMatches(pastFilterRow(l), { host: $hostFilter, scope: $effectiveScope }),
+      );
       if (shown.length === 0) continue;
       if (
         q &&
@@ -453,6 +469,17 @@
     }
     return out.sort((a, b) => (b.links[0].ended_at ?? 0) - (a.links[0].ended_at ?? 0));
   });
+  /** A past (ended) link as a filter row: its snapshot's host, and its
+   *  org — else its snapshot project's owner — as its scope. */
+  function pastFilterRow(l: WorkLink): FilterRow {
+    const owner = l.snap_project_id != null ? $projectOwners.get(l.snap_project_id) : undefined;
+    return {
+      host: l.snap_host ?? null,
+      scope: l.org_id != null ? `org:${l.org_id}` : owner ? `owner:${owner}` : 'unassigned',
+      live: false,
+      archived: true,
+    };
+  }
   function toggleIn(set: Set<string>, key: string): Set<string> {
     const next = new Set(set);
     if (next.has(key)) next.delete(key);
@@ -472,7 +499,7 @@
   // value is read directly in the template so Svelte tracks it reactively —
   // using a plain function via {@const} doesn't establish the dependency.
   const filteredSessionsByProject = $derived(
-    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, treePredicate),
+    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, treePredicate, scopeSel),
   );
 
 
@@ -495,14 +522,14 @@
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
-        sessionVisible(s, $hostFilter, $showBgAgents, treePredicate),
+        sessionVisible(s, $hostFilter, $showBgAgents, treePredicate, scopeSel),
     ),
   );
 
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
-  const outsideFleet = $derived(buildOutsideFleet($sessions, $hostFilter));
+  const outsideFleet = $derived(buildOutsideFleet($sessions, $hostFilter, scopeSel));
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
@@ -881,6 +908,7 @@
       {askRecreate}
       {askRestart}
       {askKill}
+      orgColor={orgColorOf(sess, $orgColorById)}
     />
   {/snippet}
 
@@ -931,10 +959,16 @@
           {@const isCollapsed = collapsedWork.has(g.key)}
           {@const pr = workGroupPrSummary(g.sessions)}
           {@const ticket = workGroupTicket(g.key, g.sessions)}
+          {@const groupColor = orgColorOf(
+            { org_id: g.sessions[0]?.work?.org_id ?? g.sessions[0]?.org_id ?? null },
+            $orgColorById,
+          )}
           <li class="proj">
             <div
               class="proj-row work-row"
               data-testid="work-row"
+              data-org-color={groupColor ?? undefined}
+              style:box-shadow={groupColor ? `inset 3px 0 0 ${groupColor}` : undefined}
               title="Sessions whose tag, branch or worktree names {g.key}"
               role="button"
               tabindex="0"

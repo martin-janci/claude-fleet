@@ -622,6 +622,40 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
 /// every block non-empty.
 pub(super) const EMPTY_RESULT_PLACEHOLDER: &str = "(no output)";
 
+/// Apply `f` to every JSON text block of a result, re-serialising only the
+/// blocks it changed (a non-JSON block is left alone).
+pub(super) fn rewrite_json_content(
+    result: &mut CallToolResult,
+    mut f: impl FnMut(&mut serde_json::Value),
+) {
+    for c in result.content.iter_mut() {
+        let Some(t) = c.as_text() else {
+            continue;
+        };
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&t.text) else {
+            continue;
+        };
+        let before = v.clone();
+        f(&mut v);
+        if v != before {
+            *c = text_content(v.to_string());
+        }
+    }
+    if let Some(sc) = result.structured_content.as_mut() {
+        f(sc);
+    }
+}
+
+/// Fail closed: drop every work field of every session row in a result.
+fn strip_all_work(result: &mut CallToolResult) {
+    let nobody = crate::service::orgs::OrgScope::Host {
+        alias: String::new(),
+        org: None,
+        isolated: Default::default(),
+    };
+    rewrite_json_content(result, |v| nobody.redact_json(v, &|_| Some(i64::MIN)));
+}
+
 /// Build a text content block guaranteed to be non-empty. Empty or
 /// whitespace-only text is replaced with [`EMPTY_RESULT_PLACEHOLDER`]. Every
 /// tool result must go through here (directly or via [`ok_json`]) so the fleet
@@ -996,6 +1030,73 @@ impl FleetTools {
     ) -> Result<(String, String), McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         resolve_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
+    }
+
+    /// Decision D7 on a session-addressed read a per-host token may make of
+    /// any host's session (history, repo reads): a session of an org
+    /// isolated from the caller's answers exactly as a missing one.
+    pub(super) fn require_visible_session(
+        &self,
+        caller: &Caller,
+        session_id: i64,
+    ) -> Result<(), McpError> {
+        if caller.host_alias.is_none() {
+            return Ok(());
+        }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+        match s
+            .get_session_by_id(session_id)
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?
+        {
+            Some(row) if !scope.sees_row(&row) => Err(mcp_err(
+                codes::E_NOTFOUND,
+                format!("session {session_id} not found"),
+                None,
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// The org boundary's backstop over EVERY tool result a per-host token
+    /// receives (work graph M5): each session row anywhere in the JSON loses
+    /// the work its reader may not see (`OrgScope::redact_json`), the row's
+    /// org read from the store by id, never from the payload — a projection
+    /// that dropped `org_id` cannot make a row look unassigned. Fails
+    /// closed: if the scope or a row's org cannot be read, every work field
+    /// goes.
+    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
+        let Ok(s) = self.store.lock() else {
+            strip_all_work(result);
+            return;
+        };
+        let scope = match caller.org_scope(&s) {
+            Ok(sc) => sc,
+            Err(_) => {
+                drop(s);
+                strip_all_work(result);
+                return;
+            }
+        };
+        if scope.is_all() {
+            return;
+        }
+        // An org no scope can hold: any failed lookup reads as "not yours".
+        const UNREADABLE: i64 = i64::MIN;
+        let org_of = |m: &serde_json::Map<String, serde_json::Value>| -> Option<i64> {
+            let own = m.get("org_id").and_then(serde_json::Value::as_i64);
+            match m.get("id").and_then(serde_json::Value::as_i64) {
+                // A row that is gone (a kill's answer) keeps the org it was
+                // serialised with.
+                Some(id) => match s.session_org(id) {
+                    Ok(Some(o)) => Some(o),
+                    Ok(None) => own,
+                    Err(_) => Some(UNREADABLE),
+                },
+                None => Some(UNREADABLE),
+            }
+        };
+        rewrite_json_content(result, |v| scope.redact_json(v, &org_of));
     }
 
     /// [`Self::resolve_target`] returning the whole row.

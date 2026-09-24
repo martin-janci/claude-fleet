@@ -228,6 +228,9 @@ pub struct StartWorkArgs {
     /// The worktree name as edited in the dialog.
     #[serde(default)]
     pub worktree: Option<String>,
+    /// Start on another org's ticket anyway (work graph M5).
+    #[serde(default)]
+    pub force_cross_org: bool,
 }
 
 #[tauri::command]
@@ -282,7 +285,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("list_trackers", &args).await,
-            None => tickets::trackers(store, tickets::Scope::All),
+            None => tickets::trackers(store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
@@ -307,7 +310,7 @@ pub(crate) mod routed {
                 args.view.as_deref(),
                 args.query.as_deref(),
                 args.limit,
-                tickets::Scope::All,
+                &fleet_core::service::orgs::OrgScope::All,
             ),
         }
     }
@@ -327,7 +330,13 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("work_lookup", &wire).await,
             None => {
-                tickets::lookup(store, &args.reference, tickets::Scope::All, &default_net()).await
+                tickets::lookup(
+                    store,
+                    &args.reference,
+                    &fleet_core::service::orgs::OrgScope::All,
+                    &default_net(),
+                )
+                .await
             }
         }
     }
@@ -351,6 +360,7 @@ pub(crate) mod routed {
             brief: args.brief.clone(),
             name: args.name.clone(),
             worktree: args.worktree.clone(),
+            force_cross_org: args.force_cross_org.then_some(true),
             ..Default::default()
         };
         match backend.hub() {
@@ -361,7 +371,7 @@ pub(crate) mod routed {
                     ssh,
                     reg,
                     &fleet_core::service::work::start_args(&wire),
-                    tickets::Scope::All,
+                    &fleet_core::service::orgs::OrgScope::All,
                     &default_net(),
                 )
                 .await

@@ -104,6 +104,7 @@ pub(crate) fn sample_session() -> SessionRow {
             key: Some("ABC-123".into()),
             title: "Login".into(),
             source: "manual".into(),
+            org_id: Some(2),
             ..Default::default()
         }),
         work_rejected: vec!["XYZ-9".into()],
@@ -115,8 +116,10 @@ pub(crate) fn sample_session() -> SessionRow {
             rule: Some("R5".into()),
             preselected: true,
             suggestions: 1,
+            org_id: Some(2),
             ..Default::default()
         }),
+        org_id: Some(2),
     }
 }
 
@@ -134,6 +137,7 @@ pub(crate) fn sample_host() -> HostRow {
         // Consistent with the `ssh_alias` above: this sample is an SSH host.
         // `transport` is not an `Option`, so either value pins the same key.
         transport: "ssh".into(),
+        org_id: Some(2),
     }
 }
 
@@ -374,6 +378,7 @@ fn sample_work_link() -> WorkLinkRow {
         })],
         preselected: false,
         end_reason: Some("branch_changed".into()),
+        org_id: Some(2),
     }
 }
 
@@ -757,7 +762,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_seven() {
+fn a_session_rows_wire_names_are_these_exact_fifty_eight() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -786,6 +791,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_seven() {
         "lost_reason",
         "model",
         "notes",
+        "org_id",
         "parent_session_id",
         "pending_input",
         "pr_url",
@@ -818,7 +824,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_seven() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 57, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 58, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

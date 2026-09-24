@@ -18,6 +18,9 @@ pub mod jira_common;
 pub mod jira_dc;
 pub mod linear;
 pub mod sync;
+#[cfg(test)]
+#[path = "tests_isolation_providers.rs"]
+mod tests_isolation_providers;
 pub mod tickets;
 
 use crate::net::https::{DirectTransport, HostPolicy, HttpTransport};
