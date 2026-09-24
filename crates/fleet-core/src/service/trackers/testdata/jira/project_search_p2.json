@@ -1,0 +1,10 @@
+{
+  "self": "https://acme.atlassian.net/rest/api/3/project/search?maxResults=100&startAt=1",
+  "maxResults": 1,
+  "startAt": 1,
+  "total": 2,
+  "isLast": true,
+  "values": [
+    { "id": "10001", "key": "team", "name": "Team Space", "projectTypeKey": "software", "simplified": true, "style": "next-gen" }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "issues": [
+    {
+      "id": "10100",
+      "key": "ABC-100",
+      "fields": {
+        "summary": "Billing migration",
+        "status": { "name": "In Progress", "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" } },
+        "resolution": null,
+        "issuetype": { "id": "10000", "name": "Epic", "hierarchyLevel": 1, "subtask": false },
+        "assignee": { "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001", "displayName": "Dana Dev" },
+        "updated": "2026-09-20T09:00:00.000+0200",
+        "project": { "id": "10000", "key": "ABC" },
+        "description": null,
+        "customfield_10020": null
+      }
+    },
+    {
+      "id": "10101",
+      "key": "ABC-101",
+      "fields": {
+        "summary": "Move invoices to the new ledger",
+        "status": { "name": "In Review", "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" } },
+        "resolution": null,
+        "issuetype": { "id": "10001", "name": "Story", "hierarchyLevel": 0, "subtask": false },
+        "parent": { "id": "10100", "key": "ABC-100", "fields": { "summary": "Billing migration" } },
+        "assignee": { "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001", "displayName": "Dana Dev" },
+        "updated": "2026-09-20T10:15:30.123+0200",
+        "project": { "id": "10000", "key": "ABC" },
+        "customfield_10020": [
+          { "id": 7, "name": "ABC Sprint 6", "state": "closed", "boardId": 2 },
+          { "id": 8, "name": "ABC Sprint 7", "state": "active", "boardId": 2 }
+        ],
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            { "type": "heading", "attrs": { "level": 2 }, "content": [ { "type": "text", "text": "Context" } ] },
+            { "type": "paragraph", "content": [
+              { "type": "text", "text": "Invoices still live in " },
+              { "type": "text", "text": "legacy_ledger", "marks": [ { "type": "code" } ] },
+              { "type": "text", "text": ". Ask " },
+              { "type": "mention", "attrs": { "id": "557058:x", "text": "@Pat Ops" } },
+              { "type": "hardBreak" },
+              { "type": "text", "text": "See " },
+              { "type": "inlineCard", "attrs": { "url": "https://acme.atlassian.net/browse/ABC-90" } }
+            ] },
+            { "type": "bulletList", "content": [
+              { "type": "listItem", "content": [ { "type": "paragraph", "content": [ { "type": "text", "text": "copy rows" } ] } ] },
+              { "type": "listItem", "content": [ { "type": "paragraph", "content": [ { "type": "text", "text": "switch reads" } ] } ] }
+            ] }
+          ]
+        }
+      }
+    },
+    {
+      "id": "10102",
+      "key": "ABC-102",
+      "fields": {
+        "summary": "Fix rounding in totals",
+        "status": { "name": "Done", "statusCategory": { "id": 3, "key": "done", "name": "Done" } },
+        "resolution": { "id": "10000", "name": "Done" },
+        "issuetype": { "id": "10004", "name": "Bug", "hierarchyLevel": 0 },
+        "assignee": { "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001", "displayName": "Dana Dev" },
+        "updated": "2026-09-19T16:00:00.000+0200",
+        "project": { "id": "10000", "key": "ABC" },
+        "description": null
+      }
+    }
+  ],
+  "nextPageToken": "Cg1BQkMtMTAyOjE3MjY",
+  "isLast": false
+}

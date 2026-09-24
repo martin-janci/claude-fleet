@@ -1,0 +1,10 @@
+{
+  "self": "https://acme.atlassian.net/rest/api/3/project/search?maxResults=100&startAt=0",
+  "maxResults": 1,
+  "startAt": 0,
+  "total": 2,
+  "isLast": false,
+  "values": [
+    { "id": "10000", "key": "ABC", "name": "Alpha Build Crew", "projectTypeKey": "software", "simplified": false, "style": "classic" }
+  ]
+}

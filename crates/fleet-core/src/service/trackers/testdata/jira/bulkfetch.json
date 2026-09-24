@@ -1,0 +1,22 @@
+{
+  "expand": "schema,names",
+  "issues": [
+    {
+      "id": "10101",
+      "key": "ABC-101",
+      "fields": {
+        "summary": "Move invoices to the new ledger",
+        "status": { "name": "Done", "statusCategory": { "id": 3, "key": "done", "name": "Done" } },
+        "resolution": { "name": "Done" },
+        "issuetype": { "name": "Story", "hierarchyLevel": 0 },
+        "parent": { "id": "10100", "key": "ABC-100" },
+        "assignee": { "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001", "displayName": "Dana Dev" },
+        "updated": "2026-09-21T11:00:00.000+0200",
+        "project": { "key": "ABC" }
+      }
+    }
+  ],
+  "issueErrors": [
+    { "issueIdsOrKeys": ["10999"], "errorMessage": "Issue does not exist or you do not have permission to see it." }
+  ]
+}

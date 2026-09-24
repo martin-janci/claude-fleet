@@ -1,0 +1,17 @@
+{
+  "issues": [
+    {
+      "id": "30005",
+      "key": "NEW-5",
+      "fields": {
+        "summary": "Moved between projects",
+        "status": { "name": "To Do", "statusCategory": { "key": "new" } },
+        "resolution": null,
+        "issuetype": { "name": "Task", "hierarchyLevel": 0 },
+        "updated": "2026-09-21T12:00:00.000Z",
+        "project": { "key": "NEW" }
+      }
+    }
+  ],
+  "issueErrors": []
+}

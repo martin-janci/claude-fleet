@@ -50,6 +50,7 @@ pub mod sessions;
 pub mod settings;
 pub mod tasks;
 pub mod tick;
+pub mod trackers;
 pub mod transcript;
 pub mod tunnel;
 pub mod usage;

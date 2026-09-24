@@ -1,0 +1,4 @@
+[
+  { "id": "10200", "name": "Team bugs", "jql": "project = TEAM AND type = Bug ORDER BY priority DESC", "favourite": true },
+  { "id": "10201", "name": "Release blockers", "jql": "labels = blocker", "favourite": true }
+]
