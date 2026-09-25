@@ -758,14 +758,18 @@ impl Store {
     ) -> Result<bool, IpcError> {
         // A carry is a decision fleet makes for the person: it settles a
         // live suggestion of the same target rather than sitting beside it.
+        // The same target is the same item however it was spelled (by id,
+        // or by its key), as `decide_session_work` matches it.
         self.conn.execute(
             "DELETE FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
-               AND state = 'suggested' AND item_id IS ?2 AND ref_key IS ?3",
+               AND state = 'suggested' \
+               AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2))",
             rusqlite::params![participant, item_id, ref_key],
         )?;
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
-               AND ended_at IS NULL AND item_id IS ?2 AND ref_key IS ?3)",
+               AND ended_at IS NULL \
+               AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)))",
             rusqlite::params![participant, item_id, ref_key],
             |r| r.get(0),
         )?;
@@ -1436,6 +1440,45 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].ref_key.as_deref(), Some("DEF-2"), "primary stays");
         assert!(!links[1].is_primary);
+    }
+
+    /// A tracker item is one target however it is spelled: a rejection made
+    /// by item id blocks a carry that names its key, and a repoint merge
+    /// does not stack a by-id link beside a by-key one.
+    #[test]
+    fn a_carry_and_a_repoint_match_the_item_under_either_spelling() {
+        let s = Store::open_in_memory().unwrap();
+        let t = s
+            .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+            .unwrap();
+        let item = super::super::test_support::tracker_item(&s, t.id, "10001", "ABC-1", "Pay");
+
+        let rejecting = with_conversation(&s, "rej", "c-x");
+        s.reject_session_work(rejecting, WorkTarget::Item(item))
+            .unwrap();
+        assert!(
+            !s.link_resumed_work(rejecting, "ABC-1").unwrap(),
+            "a carry by key is blocked by the rejection by id"
+        );
+        let links = s.session_work_links(rejecting).unwrap();
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].state, "rejected");
+        let row = s.get_session_by_id(rejecting).unwrap().unwrap();
+        assert_eq!(row.work, None);
+
+        let src = seed(&s, "src");
+        let dst = seed(&s, "dst");
+        s.link_session_work(src, WorkTarget::Item(item), "manual")
+            .unwrap();
+        s.link_session_work(dst, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let p = s.participant_for_session(src).unwrap().unwrap().id;
+        s.repoint_participant(p, dst).unwrap();
+        s.delete_session(src).unwrap();
+        let links = s.session_work_links(dst).unwrap();
+        assert_eq!(links.len(), 1, "one link to the item: {links:?}");
+        assert_eq!(links[0].item_id, Some(item));
+        assert!(links[0].is_primary);
     }
 
     #[test]

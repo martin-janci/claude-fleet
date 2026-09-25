@@ -208,7 +208,32 @@ pub(super) async fn send_prompt_inner(
     };
     let buffer = format!("fleet-{}", uuid::Uuid::new_v4().simple());
     let script = build_send_script(tmux_name, pane_id.as_deref(), &body, &buffer, submit);
-    run_tmux_script(host_alias, ssh, &script).await?;
+    // The work loop guard (`work::detect::loop_guard`) tells fleet's own
+    // prompt from the person's by comparing the UserPromptSubmit hook's text
+    // with `last_prompt`, and Claude Code fires that hook the moment Enter
+    // lands in the pane — before the send below has returned. So the stamp
+    // goes on FIRST, under the lock, and comes off again when the send
+    // fails: a prompt that never landed is not remembered as sent.
+    let prior = if is_prompt(&body) {
+        stamp_last_prompt_ahead(store, host_alias, tmux_name, &body)
+    } else {
+        None
+    };
+    if let Err(e) = run_tmux_script(host_alias, ssh, &script).await {
+        if let Some((id, previous)) = prior {
+            if let Ok(s) = lock(store) {
+                if let Err(e) = s.restore_last_prompt(id, previous.as_deref()) {
+                    tracing::warn!(
+                        host = %host_alias,
+                        session = %tmux_name,
+                        error = %e,
+                        "[prompt] restore_last_prompt failed"
+                    );
+                }
+            }
+        }
+        return Err(e);
+    }
     // Task G: record the prompt on the session's timeline (detail truncated to
     // ~120 chars). Append-only + best-effort: never fail the send on this.
     // A bare Enter (empty body: the Conversation tab's "Press Enter" chip
@@ -413,6 +438,35 @@ fn is_derived_junk_name(current: &str) -> bool {
         || words
             .first()
             .is_some_and(|w| LABEL_STOP_FIRST_WORD.contains(&w.as_str()))
+}
+
+/// Stamp `last_prompt` BEFORE the send (see [`send_prompt_inner`]): the
+/// loop guard must already see the prompt when the UserPromptSubmit hook
+/// arrives. Returns the row id and the value it replaced, for the rollback
+/// when the send fails; `None` when there is no row (nothing was stamped).
+/// Best-effort like [`record_prompt_outcome`], which stamps the same value
+/// again after the send.
+fn stamp_last_prompt_ahead(
+    store: &Mutex<Store>,
+    host_alias: &str,
+    tmux_name: &str,
+    prompt: &str,
+) -> Option<(i64, Option<String>)> {
+    let prompt = crate::mcp::guard::strip_marker(prompt);
+    let s = lock(store).ok()?;
+    let row = s.get_session(tmux_name, host_alias).ok().flatten()?;
+    match s.set_last_prompt(row.id, prompt) {
+        Ok(_) => Some((row.id, row.last_prompt)),
+        Err(e) => {
+            tracing::warn!(
+                host = %host_alias,
+                session = %tmux_name,
+                error = %e,
+                "[prompt] set_last_prompt (ahead of the send) failed"
+            );
+            None
+        }
+    }
 }
 
 /// Post-send bookkeeping (PROD-4 / PROD-5): stamp `last_prompt`, and give a
@@ -838,6 +892,55 @@ mod prompt_tests {
         .await
         .expect_err("text and keys");
         assert_eq!(both.code, crate::ipc_error::codes::E_VALIDATE);
+    }
+
+    /// The loop guard's stamp goes on ahead of the send and comes off again
+    /// when the send fails: a session no tmux can find keeps the
+    /// `last_prompt` it had (here one it had none of, and one it had), and
+    /// nothing is recorded as sent. Needs no tmux: the failure is the point.
+    #[tokio::test]
+    async fn a_failed_send_rolls_the_early_last_prompt_stamp_back() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let sid = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session(
+                "fleet-test-no-such-session",
+                "local",
+                None,
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap()
+        };
+        let ssh = Arc::new(SshClient::new());
+        let args = || SendPromptArgs {
+            host_alias: "local".into(),
+            tmux_name: "fleet-test-no-such-session".into(),
+            prompt: "Continue ABC-1: fix the login".into(),
+            submit: true,
+            keys: None,
+        };
+        send_prompt(args(), &store, &ssh)
+            .await
+            .expect_err("no such tmux session");
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(sid).unwrap().unwrap();
+            assert_eq!(row.last_prompt, None, "rolled back to none: {row:?}");
+            s.set_last_prompt(sid, "the one before").unwrap();
+        }
+        send_prompt(args(), &store, &ssh)
+            .await
+            .expect_err("no such tmux session");
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.last_prompt.as_deref(), Some("the one before"));
+        let hist = s.list_session_events(sid, 10).unwrap();
+        assert!(!hist.iter().any(|e| e.kind == "prompt_sent"), "{hist:?}");
     }
 
     /// PARITY with `keys_press_a_key_without_a_marker_and_without_recording_
