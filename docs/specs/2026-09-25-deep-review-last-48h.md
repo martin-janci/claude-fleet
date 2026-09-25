@@ -24,6 +24,23 @@ Statuses below: **Confirmed** = no verifier could refute it; **Plausible** = ver
 | `cargo fmt --check` | clean |
 | `src-tauri` build / `verdict_gen` / `reference_is_current` | not runnable here (no Tauri system libs); the conventions audit cross-checked the generated JSON, the refusal table and the control-API reference by hand and found them current |
 
+## Fix status (same day)
+
+Every confirmed finding below was fixed on this branch in 78 commits (93 files, about +6.5k / −0.8k lines), one commit per finding, grouped into nine parallel batches and merged in priority order: the two highs first, then the org-boundary and work-graph mediums, then the tracker, network, federation and frontend items, then the test-quality items and the follow-up notes. Each fix carries a test that fails without it; the two highs and the cross-tenant items were reproduced before and after.
+
+**Deliberately not changed, and why:**
+
+- *A host with no org can bind its bare links to any org's tracker.* The verifiers split on this one: the mechanism is real, but the M5 plan and `docs/hub.md` document it ("assign every host of a company before connecting a second company's tracker"). Binding is unchanged; the hub documentation now says so in one sentence, and the isolation fixture's trackers gained key prefixes so the bind check is no longer vacuous.
+- *Org admin Tauri commands stay synchronous.* Their per-row work now runs in one transaction, which removes the fsync cost that made them slow; turning the commands themselves `async` needs a desktop build to verify, which this environment cannot produce.
+- *`move_session` across an org boundary warns instead of refusing.* Refusing would need a `force_cross_org` argument on a Tauri command and a hub tool, which cannot be regenerated and contract-tested here. The move now reports the crossing in its warnings and the M5 plan records the decision.
+- *The dialer watermark.* The dialer cannot know the peer's id space, so the fix went where the damage persisted: a re-pair merge now resets the watermark, and accepted ids the dialer never sent are logged.
+
+**Validation on the final head** (`36cc395`): `pnpm test` 2844 tests in 156 files pass and `pnpm check` is clean (the frontend is unchanged since that run); `cargo test` for fleet-core, fleet-hub, fleet-proto and fleet-agent passes 3312 tests with the same 4 root-only chmod failures main already had; `reference_is_current` passes after regeneration; clippy with `-D warnings` and `cargo fmt --check` are clean on all four crates. Not verifiable here: the `src-tauri` crate (no Tauri libraries), so `src-tauri/src/commands/mcp.rs` (the hook install now honours the SessionStart setting) and the hub-contract golden must be checked by CI; `scripts/hub-e2e.sh` gained sidecar-mode checks that were only syntax-checked.
+
+**Two things the fixes found on the way:** the crash-row federation test read B's outbox after spawning the restarted dialer and failed under load (now asserts before the spawn), and the `inbox` description grew past the served-definition budget (trimmed).
+
+**Follow-ups worth a look but out of scope:** the 28 frontend `*.test.ts` files added in the window were never quality-audited; `src-tauri/src/backend/tests_remote.rs` lost 448 lines whose counterparts in `http_client/tests_transport.rs` were only skimmed; CLAUDE.md's prose still names 056 as the latest migration (057 re-issues the read-cursor trigger).
+
 ## Headline
 
 The window is large but the code is in good shape: two high-severity defects, both new, both with a small fix; a cluster of medium-severity org-boundary and work-graph state bugs that deserve attention before the org feature is relied on across companies; and a long tail of low-severity edge cases, mostly in the new tracker providers and the via-host transport. Nothing found is a credential leak or an authentication bypass. The federation code held up well: every federation finding beyond two lows was refuted against the spec's documented decisions.
