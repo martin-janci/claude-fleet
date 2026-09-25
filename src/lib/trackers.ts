@@ -233,15 +233,46 @@ export function removeTracker(trackerId: number): Promise<Result<null>> {
 /** Every tracker, as the last read or `work:tracker` frame left it. */
 export const trackers = writable<TrackerRow[]>([]);
 
-/** Reload the trackers; a hub older than M3 has no answer and leaves []. */
+let loadSeq = 0;
+// Frames and the list race: a `work:tracker` frame that lands while a
+// list_trackers answer is in flight is newer than that answer. Every frame
+// bumps `frameSeq` and notes it per tracker, so a load can tell which rows
+// a frame overtook.
+let frameSeq = 0;
+const framedAt = new Map<number, number>();
+
+/** Reload the trackers; a hub older than M3 has no answer and leaves [].
+ *  A stale answer never overwrites a newer one, and a row a frame updated
+ *  (or removed) after the request started keeps the frame's version. */
 export async function loadTrackers(): Promise<void> {
+  const seq = ++loadSeq;
+  const since = frameSeq;
   const r = await listTrackers();
-  if (r.ok && Array.isArray(r.value)) trackers.set(r.value);
+  if (seq !== loadSeq || !r.ok || !Array.isArray(r.value)) return;
+  const listed = r.value;
+  trackers.update((cur) => {
+    if (frameSeq === since) return listed;
+    const overtaken = (id: number) => (framedAt.get(id) ?? 0) > since;
+    const byId = new Map(cur.map((t) => [t.id, t]));
+    const out: TrackerRow[] = [];
+    for (const row of listed) {
+      if (!overtaken(row.id)) out.push(row);
+      else {
+        const kept = byId.get(row.id);
+        if (kept) out.push(kept); // a frame removed it otherwise
+      }
+    }
+    const seen = new Set(listed.map((t) => t.id));
+    for (const t of cur) if (!seen.has(t.id) && overtaken(t.id)) out.push(t);
+    return out;
+  });
 }
 
 /** Called once per flush with every `work:*` frame. Returns the trackers
  *  whose FIRST sync just finished (`last_sync_at` went from none to a
- *  value), for the retro-link reveal. */
+ *  value), for the retro-link reveal. A tracker the store has not seen
+ *  yet (its frame beat the first list) is not a first sync: the frame
+ *  carries whatever date it already had. */
 export function applyWorkEvents(events: readonly WorkEvent[]): TrackerRow[] {
   const firstSync: TrackerRow[] = [];
   trackers.update((cur) => {
@@ -249,12 +280,14 @@ export function applyWorkEvents(events: readonly WorkEvent[]): TrackerRow[] {
     for (const e of events) {
       if (e.type === 'tracker') {
         const prev = next.find((t) => t.id === e.row.id);
-        if ((!prev || prev.last_sync_at == null) && e.row.last_sync_at != null) {
+        if (prev && prev.last_sync_at == null && e.row.last_sync_at != null) {
           firstSync.push(e.row);
         }
         next = prev ? next.map((t) => (t.id === e.row.id ? e.row : t)) : [...next, e.row];
+        framedAt.set(e.row.id, ++frameSeq);
       } else if (e.type === 'tracker_removed') {
         next = next.filter((t) => t.id !== e.id);
+        framedAt.set(e.id, ++frameSeq);
       }
     }
     return next;
