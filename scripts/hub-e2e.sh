@@ -908,6 +908,10 @@ else
   until_ok 50 '! wtmux has-session -t "=$TCL" 2>/dev/null'
   check "its tmux session is gone" '! wtmux has-session -t "=$TCL" 2>/dev/null' "$(wtmux ls 2>&1)"
   check "the dirty one is not discarded: safe kill asks its Claude to commit first" '[ "$(jt "$ap" "[.results[] | select(.session_id == ${SDI:-0})][0].outcome")" = safe_kill_requested ] && wtmux has-session -t "=$TDI" 2>/dev/null && [ -f "$WDI/uncommitted.txt" ]' "${ap:0:800}"
+  # The prompt's own echo carries both markers (its FAILED one with the
+  # placeholder); only the fake Claude's reply below it may count.
+  until_ok 75 '[ "$(wrow "$SDI" | jq -r .safe_kill_state)" != requested ]'
+  check "safe kill records the reason Claude gave, not the prompt's placeholder" '[ "$(wrow "$SDI" | jq -r .safe_kill_state)" = failed ] && [ "$(wrow "$SDI" | jq -r .safe_kill_detail)" = "e2e keeps uncommitted.txt uncommitted" ] && wtmux has-session -t "=$TDI" 2>/dev/null && [ -f "$WDI/uncommitted.txt" ]' "$(wrow "$SDI" | jq -c "{safe_kill_state, safe_kill_detail}")"
   check "a protected session in the same batch is refused, the rest still applied" '[ "$(jt "$ap" "[.results[] | select(.session_id == ${SST:-0})][0].ok")" = false ] && jt "$ap" "[.results[] | select(.session_id == ${SST:-0})][0].error" | grep -q protected' "${ap:0:800}"
 
   # --- 7. the org boundary over the wire ------------------------------------

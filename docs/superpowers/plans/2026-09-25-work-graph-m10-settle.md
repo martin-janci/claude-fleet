@@ -242,6 +242,13 @@ M10.6 (independent; reuses M10.2's fake tracker)
   - **Found and fixed.** A session started in a worktree never had
     `sessions.worktree_id` (only an explicit repair set it), so tidy-up
     could only archive a `work_link start`ed session. `new_session` now
-    links it.
+    links it. And the safe-kill marker scan read the prompt's own echo as
+    the reply: the prompt carries both markers on two lines, so the "two
+    hits" rule was met before Claude answered, and the last hit (the
+    prompt's `<one-line reason>` placeholder) was recorded as the failure.
+    The scan now anchors below the echo's FAILED line; with no echo in the
+    capture (a paste Claude Code folds away) any marker is the reply, which
+    the old rule, needing two, never saw. The fake Claude refuses a safe
+    kill with a reason, and the e2e checks that reason is what is recorded.
   - Pass counts: 121 checks before (118 + 3 needing `ssh-keygen`); 122
-    without `WBIN`, 176 with it, all passing.
+    without `WBIN`, 177 with it, all passing.

@@ -12,11 +12,13 @@
 #   * On start it POSTs the SessionStart hook, prints the REPL chrome fleet
 #     waits for (`? for shortcuts`), then reads prompts from the pane.
 #   * Each prompt (the lines of one paste, gathered until 0.5 s of quiet)
-#     is POSTed as UserPromptSubmit, then answered with a Stop hook whose
-#     `last_assistant_message` is the reply. A prompt carrying a hand-off
+#     is POSTed as UserPromptSubmit, then answered: the reply is printed,
+#     then a Stop hook POSTed whose `last_assistant_message` is the reply. A prompt carrying a hand-off
 #     request's `WORK_HANDOVER_BEGIN_<nonce>` is answered with a hand-off
-#     between that request's two marker lines (M9.3); anything else gets a
-#     one-line acknowledgement.
+#     between that request's two marker lines (M9.3); a safe-kill request
+#     (`SAFE_REMOVE_READY_<nonce>`) is refused with that request's FAILED
+#     marker and a reason, since the e2e keeps the dirty tree dirty; anything
+#     else gets a one-line acknowledgement.
 #   * Every hook's HTTP status and response body is appended to
 #     $FAKE_CLAUDE_LOG_DIR/<id>/hooks.log, every prompt to prompts.log, so
 #     the script can assert what fleet handed Claude (the queued brief rides
@@ -65,7 +67,11 @@ while IFS= read -r line; do
   printf '%s\n=====\n' "$prompt" >>"$log/prompts.log"
   hook UserPromptSubmit ",\"prompt\":$(printf '%s' "$prompt" | jstr)"
   nonce=$(printf '%s' "$prompt" | grep -oE 'WORK_HANDOVER_BEGIN_[0-9a-f]+' | head -1 | sed 's/^WORK_HANDOVER_BEGIN_//')
-  if [ -n "$nonce" ]; then
+  sk=$(printf '%s' "$prompt" | grep -oE 'SAFE_REMOVE_READY_[0-9a-f]+' | head -1 | sed 's/^SAFE_REMOVE_READY_//')
+  if [ -n "$sk" ]; then
+    reply="I cannot persist this work: the e2e keeps it uncommitted.
+SAFE_REMOVE_FAILED_$sk: e2e keeps uncommitted.txt uncommitted"
+  elif [ -n "$nonce" ]; then
     reply="Here is the hand-off.
 WORK_HANDOVER_BEGIN_$nonce
 E2E-HANDOVER-NOTE: the redirect fix is on the branch; left: the tests.
@@ -74,6 +80,8 @@ Anything else?"
   else
     reply="fake claude read your prompt ($(printf '%s' "$prompt" | wc -c | tr -d ' ') bytes)"
   fi
-  hook Stop ",\"last_assistant_message\":$(printf '%s' "$reply" | jstr)"
+  # The reply is on screen before the Stop, as with Claude Code: a Stop
+  # handler may read the pane (the safe-kill marker scan does).
   printf '%s\n? for shortcuts\n' "$reply"
+  hook Stop ",\"last_assistant_message\":$(printf '%s' "$reply" | jstr)"
 done
