@@ -118,9 +118,16 @@ pub async fn add(
 }
 
 /// `fleet-hub peer list`: this hub's links, one per line, never a token.
+///
+/// A pure read beside a live daemon, so the database is opened **read-only
+/// and unmigrated** ([`Store::open_read_only`], as `pair` and `token show`
+/// do): a CLI built from a newer commit than the running `fleet-hub serve`
+/// must not reshape the schema under it to print a status table. `add` and
+/// `remove` write, and keep the migrating open.
 pub fn list(opts: &HubOptions, env: &HashMap<String, String>) -> Result<ExitCode, String> {
-    existing_db(&crate::config::resolve_data_dir(opts, env))?;
-    let store = open_store(opts, env)?;
+    let db = existing_db(&crate::config::resolve_data_dir(opts, env))?;
+    let store = fleet_core::store::Store::open_read_only(&db)
+        .map_err(|e| format!("failed to read the hub database at {}: {e}", db.display()))?;
     let rows = store.peer_link_summaries().map_err(|e| e.message)?;
     out::line(&link_table(&rows));
     Ok(ExitCode::SUCCESS)
@@ -304,6 +311,45 @@ mod tests {
             t.contains("fleet-b") && t.contains("connected") && t.contains('2'),
             "{t}"
         );
+    }
+
+    /// `peer list` reads beside a live daemon and must not run this
+    /// binary's migrations against the daemon's database. The migrating
+    /// open (`open_store`) tightens `state.db` to 0600 as its first act;
+    /// the read-only open never touches the file's mode — so a file left
+    /// wider stays wider across a `list`, which is the observable
+    /// difference between the two opens here. A missing database is
+    /// refused, never created.
+    #[cfg(unix)]
+    #[test]
+    fn peer_list_reads_the_database_without_the_migrating_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let env = HashMap::new();
+        let err = list(&opts, &env).unwrap_err();
+        assert!(err.contains("run fleet-hub init first"), "{err}");
+        assert!(
+            !dir.path().join("state.db").exists(),
+            "list must not create a database"
+        );
+
+        drop(open_store(&opts, &env).unwrap());
+        let db = dir.path().join("state.db");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(list(&opts, &env).is_ok());
+        let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o644,
+            "the migrating open would have tightened the file: list used it"
+        );
+        // Whereas a writing subcommand's open does.
+        drop(open_store(&opts, &env).unwrap());
+        let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     /// G15: if this hub's own store cannot be opened, `add` must never have

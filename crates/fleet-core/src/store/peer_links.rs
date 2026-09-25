@@ -335,7 +335,10 @@ impl Store {
                             codes::E_FORBIDDEN,
                             format!(
                                 "fleet {fleet_id} is already linked to another peer token; \
-                                 revoke that client first (fleet-hub client revoke <name>)"
+                                 revoke that client first (fleet-hub client revoke <name>), \
+                                 then mint a new pairing code (fleet-hub pair --mode peer) \
+                                 for the other hub to add — this refusal is final for the \
+                                 token that was refused"
                             ),
                         ));
                     }
@@ -1035,6 +1038,10 @@ mod tests {
             "{}",
             e.message
         );
+        // The refusal is terminal for the dialer that got it (E_FORBIDDEN
+        // is never retried), so revoking afterwards revives nothing: the
+        // message must say a NEW code is needed once the revoke is done.
+        assert!(e.message.contains("new pairing code"), "{}", e.message);
         assert_eq!(s.peer_link(link.id).unwrap().unwrap().client_id, Some(c1));
     }
 
