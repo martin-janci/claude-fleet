@@ -587,6 +587,22 @@ acceptance is still to do.
   operator's instructions say how to tidy through `work { tidy }` /
   `work_link { tidy_apply }` without ever turning a safe kill into a kill.
 
+### M10: settle, prove, and reach the phone
+
+Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
+
+- **Review leftovers:** the M9.3 / M9.6 should-fix items, per-caller
+  isolation rows.
+- **End to end:** `hub-e2e.sh` covers the work graph against a loopback fake
+  tracker.
+- **Acceptance:** one written manual acceptance run, for the user to execute.
+- **Recorded gaps closed or decided:** Today → Tidy-up, filter chrome, the
+  remote SessionStart numbers (D5), M4.6 (D14).
+- **Phone:** Today and the ticket card, read-only (D15).
+- **Replay ring:** pressure measured before anything is changed.
+
+**Value:** the work graph is proven end to end and has no silent "not done".
+
 ## Critical path and parallelism
 
 ```
@@ -707,4 +723,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: the two M9 follow-ups on M7 (Today → Tidy up, the operator's
   "Tidy up done tickets"); frontend and the operator's CLAUDE.md only — no
   new action, no budget change.
-
+- 2026-09-25: M10 planned (`plans/2026-09-25-work-graph-m10-settle.md`):
+  review leftovers, a work-graph e2e, the written acceptance, the recorded
+  gaps, the phone's M9 moments, replay-ring measurement. New decisions
+  D14–D16; D5 re-asked with remote numbers.
