@@ -6,8 +6,10 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import WorkSettings from './WorkSettings.svelte';
+import { get } from 'svelte/store';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { trackers, type TrackerRow } from './trackers';
+import { toasts } from './toasts';
 
 const TOKEN = 'ATATT3xFfGF0-ui-test-token';
 
@@ -53,6 +55,7 @@ function route(listed: TrackerRow[], extra: Record<string, unknown> = {}) {
 beforeEach(() => {
   hubStatus.set({ ...STANDALONE });
   trackers.set([]);
+  toasts.set([]);
 });
 
 describe('Settings → Work, standalone', () => {
@@ -65,6 +68,28 @@ describe('Settings → Work, standalone', () => {
     expect(screen.getByTestId('tracker-expired').textContent).toMatch(/expire within a year/);
     expect(screen.getAllByTestId('tracker-row')[0].textContent).toContain('synced 4 min ago');
     expect(screen.getAllByTestId('tracker-test')).toHaveLength(2);
+  });
+
+  it('Test and Remove act on that tracker and re-read the list; a failed test is a toast', async () => {
+    const inv = route([row()], {
+      test_tracker: { tracker: row({ state: 'auth_failed' }), ok: false, error: 'the tracker refused the credential' },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    const listed = () => inv.mock.calls.filter((c) => c[0] === 'list_trackers').length;
+    const before = listed();
+    await fireEvent.click(screen.getByTestId('tracker-test'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('test_tracker', { args: { tracker_id: 4 } }));
+    await waitFor(() =>
+      expect(get(toasts).map((t) => [t.kind, t.message])).toEqual([['error', 'the tracker refused the credential']]),
+    );
+    await waitFor(() => expect(listed()).toBe(before + 1));
+    expect(screen.getByTestId('tracker-test')).toHaveTextContent('Test');
+    await fireEvent.click(screen.getByTestId('tracker-remove'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('remove_tracker', { args: { tracker_id: 4 } }));
+    await waitFor(() => expect(listed()).toBe(before + 2));
+    // Neither ever carries a credential.
+    for (const [cmd] of inv.mock.calls) expect(cmd).not.toBe('set_tracker_credential');
   });
 
   it('connects Jira from a pasted ticket URL, an email and a token — in that order', async () => {
