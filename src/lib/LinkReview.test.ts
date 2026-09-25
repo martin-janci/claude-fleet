@@ -72,6 +72,24 @@ describe('LinkReview', () => {
     expect(screen.queryByTestId('link-review-sheet')).toBeNull();
   });
 
+  it('j from a focused button still moves the cursor', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const close = screen.getByTestId('link-review-close');
+    close.focus();
+    const j = new KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true });
+    close.dispatchEvent(j);
+    await tick();
+    expect(j.defaultPrevented).toBe(true);
+    // Enter on the sheet now decides row 1, the cursor row.
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'Enter' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 2, link_id: 12 },
+    });
+  });
+
   it('Enter/Backspace/y/n from a focused button are not sheet chords', async () => {
     sessions.set(rows());
     render(LinkReview);

@@ -86,6 +86,40 @@ describe('TidyReview', () => {
     expect(get(sessionFocus)).toBeNull();
   });
 
+  it('a refused focus (stale row) never claims ownership, so closing keeps another focus', async () => {
+    candidates = [cand(1), cand(2)];
+    // Only session 1 is in the store; row 2 is a stale candidate.
+    sessions.set([{ id: 1, tmux_name: 's1', host_alias: 'h' } as SessionRow]);
+    sessionFocus.set({ id: 1, label: 'elsewhere' });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const stale = screen.getAllByTestId('tidy-row')[1];
+    await fireEvent.click(stale.querySelector('.name')!);
+    expect(get(sessionFocus)).toEqual({ id: 1, label: 'elsewhere' });
+    await fireEvent.click(screen.getByTestId('tidy-cancel'));
+    await tick();
+    expect(get(sessionFocus)).toEqual({ id: 1, label: 'elsewhere' });
+    sessionFocus.set(null);
+  });
+
+  it('j and k still move the cursor from a focused control', async () => {
+    candidates = [cand(1), cand(2)];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+    checks[0].focus();
+    const j = new KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true });
+    checks[0].dispatchEvent(j);
+    await tick();
+    expect(j.defaultPrevented).toBe(true);
+    // Space on the sheet toggles the cursor row, now row 1.
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: ' ' });
+    expect(checks[0].checked).toBe(true);
+    expect(checks[1].checked).toBe(false);
+  });
+
   it('shows nothing when there is nothing to tidy or reopened', async () => {
     await mount();
     expect(screen.queryByTestId('tidy-pill')).toBeNull();
