@@ -49,6 +49,9 @@ export interface TrackerSettings {
   extra_ca?: string | null;
   /** Jira Data Center: the site may resolve to a private address. */
   allow_private_network?: boolean;
+  /** GitHub Enterprise Server (work graph M11.4): the instance `gh
+   *  --hostname` is pointed at, `host[:port]`. Absent: github.com. */
+  hostname?: string | null;
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */
@@ -229,6 +232,27 @@ export function removeTracker(trackerId: number): Promise<Result<null>> {
   return invokeCmd<null>('remove_tracker', { args: { tracker_id: trackerId } });
 }
 
+/** One tracker's last sync pass (work graph M11.4): in the syncing
+ *  process's memory only, so it is empty after a restart. Mirrors
+ *  `SyncMetrics` in `service/trackers/sync.rs`. */
+export interface SyncMetrics {
+  tracker_id: number;
+  /** Unix seconds; null: no pass since the process started. */
+  last_pass_at?: number | null;
+  duration_ms?: number;
+  items_listed?: number;
+  items_changed?: number;
+  frames_emitted?: number;
+  /** Redacted, one line, capped. */
+  last_error?: string | null;
+}
+
+/** The sync's counters per tracker. Admin (`work_admin { status }`):
+ *  LocalOnly on a paired desktop. */
+export function trackerSyncMetrics(): Promise<Result<SyncMetrics[]>> {
+  return invokeCmd<SyncMetrics[]>('tracker_sync_metrics');
+}
+
 // ---------------------------------------------------------------------------
 // Stores
 
@@ -394,12 +418,44 @@ export function providerInfo(provider: string | null | undefined): ProviderInfo 
   return provider && provider in PROVIDERS ? PROVIDERS[provider as ProviderId] : null;
 }
 
+/** A GitHub Enterprise host name (mirrors `ghes_host_ok` in
+ *  `store/trackers.rs`): two or more DNS labels, the last not all digits (no
+ *  IP literal), not `localhost`, not github.com itself. */
+export function ghesHostOk(host: string): boolean {
+  const labels = host.split('.');
+  return (
+    host.length <= 253 &&
+    labels.length >= 2 &&
+    labels.every((l) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(l)) &&
+    !/^\d+$/.test(labels[labels.length - 1]) &&
+    host !== 'localhost' &&
+    !host.endsWith('.localhost') &&
+    !['github.com', 'www.github.com', 'api.github.com', 'metadata.google.internal'].includes(host) &&
+    !host.startsWith('github.com.') &&
+    !host.endsWith('.github.com') &&
+    !host.includes('.github.com.')
+  );
+}
+
+/** The enterprise instance a GitHub tracker reads (`hostname`, or its
+ *  site's host), or null for github.com. */
+export function ghesHostname(t: TrackerRow): string | null {
+  if (t.provider !== 'github') return null;
+  if (t.settings?.hostname) return t.settings.hostname;
+  const host = t.site_url.match(/^https:\/\/([^/]+)/)?.[1]?.toLowerCase() ?? '';
+  return host && host !== 'github.com' && host !== 'www.github.com' ? host : null;
+}
+
 /** What a pasted URL names: the provider, the site to add, and the key it
- *  points at (if any). Data Center cannot be told from a URL: pick it. The
- *  backend fences every site the same way (`normalize_provider_site`). */
+ *  points at (if any). Data Center cannot be told from a URL: pick it. A
+ *  GitHub-shaped issue URL (`/<owner>/<repo>/issues/<n>`) on any other host
+ *  is offered as GitHub Enterprise Server, its `hostname` prefilled (work
+ *  graph M11.4) — a guess the person confirms, since Gitea and friends share
+ *  the shape. The backend fences every site the same way
+ *  (`normalize_provider_site`, `validate_ghes_hostname`). */
 export function inferProvider(
   text: string,
-): { provider: ProviderId; site: string; key: string } | null {
+): { provider: ProviderId; site: string; key: string; hostname?: string } | null {
   const jira = parseJiraTicketUrl(text);
   if (jira) return { provider: 'jira', ...jira };
   let u: URL;
@@ -408,13 +464,15 @@ export function inferProvider(
   } catch {
     return null;
   }
-  if (u.protocol !== 'https:' || u.username || u.password || u.port) return null;
+  if (u.protocol !== 'https:' || u.username || u.password) return null;
   const host = u.hostname.toLowerCase();
   const segs = u.pathname.split('/').filter(Boolean);
+  const name = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+  // An enterprise instance may listen on its own port; nothing else may.
+  if (u.port) return ghesFromUrl(host, u.port, segs, name);
   if (/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.atlassian\.net$/.test(host) && segs.length === 0) {
     return { provider: 'jira', site: `https://${host}`, key: '' };
   }
-  const name = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
   if (host === 'github.com' || host === 'www.github.com') {
     const [o, r, kind, n] = segs;
     if (!o) return { provider: 'github', site: 'https://github.com', key: '' };
@@ -448,7 +506,30 @@ export function inferProvider(
     const key = kind === 'issue' && /^[A-Za-z][A-Za-z0-9_]{1,9}-\d{1,7}$/.test(k ?? '') ? k.toUpperCase() : '';
     return { provider: 'linear', site: `https://linear.app/${ws.toLowerCase()}`, key };
   }
-  return null;
+  return ghesFromUrl(host, '', segs, name);
+}
+
+/** A GitHub Enterprise issue URL: `/<owner>/<repo>/issues/<n>` on a host
+ *  that could be an instance. */
+function ghesFromUrl(
+  host: string,
+  port: string,
+  segs: string[],
+  name: RegExp,
+): { provider: ProviderId; site: string; key: string; hostname: string } | null {
+  const [o, r, kind, n] = segs;
+  if (!ghesHostOk(host) || host.endsWith('.atlassian.net') || host === 'app.asana.com' || host === 'linear.app') {
+    return null;
+  }
+  if (!o || !r || !name.test(o) || !name.test(r) || kind !== 'issues' || !/^\d{1,9}$/.test(n ?? '')) {
+    return null;
+  }
+  return {
+    provider: 'github',
+    site: `https://${host}/${o.toLowerCase()}`,
+    key: `${host}/${o}/${r}#${n}`.toLowerCase(),
+    hostname: port ? `${host}:${port}` : host,
+  };
 }
 
 /** A key as the UI shows it: an Asana task's opaque `asana:<gid>` becomes a
@@ -458,9 +539,12 @@ export function displayKey(key: string): string {
   return gid ? `Asana …${gid.slice(-6)}` : key;
 }
 
-/** `owner/repo#n` → the lower-case `owner/repo`, else null. */
+/** `owner/repo#n` → the lower-case `owner/repo`; an enterprise
+ *  `host/owner/repo#n` → `host/owner/repo`; else null. */
 export function githubRepo(key: string): string | null {
-  const m = key.match(/^([A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*)#\d{1,9}$/);
+  const m = key.match(
+    /^((?:[A-Za-z0-9.-]+\/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*)#\d{1,9}$/,
+  );
   return m ? m[1].toLowerCase() : null;
 }
 
@@ -483,13 +567,22 @@ export function keyFamily(key: string | null | undefined): string | null {
  *  an `asana:<gid>` every Asana tracker, a ticket key the trackers whose
  *  probed prefixes have it. */
 export function trackerClaims(key: string, list: readonly TrackerRow[]): TrackerRow[] {
-  const repo = githubRepo(key);
-  if (repo) {
+  const full = githubRepo(key);
+  if (full) {
+    const parts = full.split('/');
+    const host = parts.length === 3 ? parts[0] : null;
+    const repo = parts.slice(-2).join('/');
     return list.filter((t) => {
       if (t.provider !== 'github') return false;
+      // The same instance first (work graph M11.4): github.com's acme/api
+      // is not an enterprise instance's.
+      const site = t.site_url.replace(/\/+$/, '').match(/^https:\/\/([^/]+)(?:\/(.+))?$/);
+      const siteHost = (site?.[1] ?? '').toLowerCase();
+      const tHost = siteHost === 'github.com' || siteHost === 'www.github.com' ? null : siteHost;
+      if (tHost !== host) return false;
       const repos = t.settings?.repos ?? [];
       if (repos.length > 0) return repos.some((r) => r.toLowerCase() === repo);
-      const owner = t.site_url.replace(/\/+$/, '').match(/^https:\/\/github\.com\/(.+)$/)?.[1];
+      const owner = site?.[2];
       return !owner || repo.split('/')[0] === owner.toLowerCase();
     });
   }
@@ -531,6 +624,21 @@ export function sectionMapRows(t: TrackerRow): { section: string; category: stri
 export function trackerStale(t: TrackerRow, nowSec: number, intervalSecs: number): boolean {
   if (intervalSecs <= 0 || t.last_sync_at == null) return false;
   return nowSec - t.last_sync_at > 2 * intervalSecs;
+}
+
+/** One line for a tracker's last sync pass ("last pass 1.2 s · 40 listed ·
+ *  3 changed · 12 frames"), or null when no pass has run since the syncing
+ *  process started. */
+export function describeSyncMetrics(m: SyncMetrics | null | undefined): string | null {
+  if (!m || m.last_pass_at == null) return null;
+  const ms = m.duration_ms ?? 0;
+  const took = ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+  return [
+    `last pass ${took}`,
+    `${m.items_listed ?? 0} listed`,
+    `${m.items_changed ?? 0} changed`,
+    `${m.frames_emitted ?? 0} frames`,
+  ].join(' · ');
 }
 
 /** "synced 4 min ago" / "never synced". */

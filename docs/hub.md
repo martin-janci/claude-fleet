@@ -778,6 +778,7 @@ fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123   # Jira Cloud
 fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
 fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
 fleet-hub tracker list
+fleet-hub tracker status          # each tracker's last sync pass (in memory)
 fleet-hub tracker remove 1        # its items stay, marked unavailable
 ```
 
@@ -828,6 +829,41 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
   trackers claim is never bound automatically.
 
+### GitHub Enterprise Server
+
+An enterprise instance is a GitHub tracker with a `hostname`: paste an issue
+URL on it and say it is GitHub (its host cannot be told from the URL), or
+give the host with `--hostname`, which implies `--provider github`:
+
+```sh
+fleet-hub tracker add https://ghe.corp.example/acme --via-cli devbox \
+  --hostname ghe.corp.example:8443
+fleet-hub tracker test 4
+```
+
+`gh` on that host must be logged in to the instance (`gh auth login
+--hostname ghe.corp.example:8443`); fleet runs `gh api --hostname <it>
+graphql` there, the hostname `shell::quote`d, and nothing but the instance's
+`https://<host>/api/graphql` is ever asked for. The hostname is admin-set
+(`work_admin` is master-only) and fenced by name: a DNS name of two or more
+labels with an optional port — no scheme, path, userinfo, IP literal,
+`localhost`, or github.com lookalike. Fleet itself never connects to it
+(`gh` on the host does, through that host's resolver), so there is no
+resolve-then-refuse step as for Data Center: the fence is the name. The
+site's host is the hostname's; its keys are `host/owner/repo#n`, so the same
+repository name on github.com and on the instance is never the same work, and
+only a configured instance's URLs and `host/owner/repo#n` references are
+recognised.
+
+### Sync metrics
+
+`fleet-hub tracker status` (`work_admin { action: status }`, master-only, and
+Settings → Work on the machine that syncs) shows each tracker's last pass:
+its duration, the items the tracker listed or fetched, the items that
+changed, the event frames the pass emitted, and the error it ended with
+(redacted, one line). They are kept in memory only and start empty after a
+restart.
+
 ### Reaching a tracker from a host: `via_host`
 
 A tracker only one machine can reach (a VPN, an internal network), or one
@@ -863,7 +899,7 @@ fleet-hub tracker test 3
 ### What to know
 
 - **Sites are fenced** per provider — `*.atlassian.net`, `api.github.com`
-  (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
+  or the enterprise instance's `/api/graphql` (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
   — and redirects are never followed: a tracker's URL is where the hub sends
   a credential from its own network position.
 - **States.** An expired or refused credential sets `auth_failed` and polling
@@ -1663,7 +1699,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 174 commands, 70 route to a hub tool, 1 routes except for one argument shape, 82 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1746,6 +1782,7 @@ Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument sh
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
 | `update_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |

