@@ -358,11 +358,18 @@ fn state_candidates(
         c.untracked = r.contains('#') && !github_tracker;
         pr.push(c);
     }
+    // A PR text naming more than the dump guard's worth of work (a release
+    // PR, an audit) is a reference list: none of it is this session's work,
+    // and dropping it here withdraws what a shorter text proposed (R7).
+    let text_distinct: BTreeSet<&str> = sig.text.iter().map(String::as_str).collect();
+    let no_refs = Vec::new();
+    let text = if text_distinct.len() > DUMP_GUARD_MAX {
+        &no_refs
+    } else {
+        &sig.text
+    };
     let mut events = Vec::new();
-    for (signal, refs) in [
-        (Signal::PrText, &sig.text),
-        (Signal::Trailer, &sig.trailers),
-    ] {
+    for (signal, refs) in [(Signal::PrText, text), (Signal::Trailer, &sig.trailers)] {
         for r in refs {
             let target = match (r.strip_prefix('#'), st.repo.as_deref()) {
                 (Some(n), Some(repo)) => format!("{}#{n}", repo.to_ascii_lowercase()),
@@ -608,6 +615,39 @@ pub fn on_prompt(
         }
     };
     run(s, &st, &tv, events)
+}
+
+/// The agent's answer to the classification nudge (work graph M4.6):
+/// `work_link { action: link, source: agent_inferred }`. Never a decision —
+/// one [`Signal::AgentInferred`] event through the same resolver run as a
+/// prompt, which makes it a pre-selected suggestion (R11) and keeps R9: a
+/// pair the person rejected is not proposed again. `target` is normalised
+/// (`ABC-7`); `tracker_id` binds it when the caller named an item.
+pub fn on_agent_inference(
+    s: &Store,
+    session_id: i64,
+    target: &str,
+    tracker_id: Option<i64>,
+) -> Result<bool, IpcError> {
+    let Some(st) = s.detection_state(session_id)? else {
+        return Ok(false);
+    };
+    let tv = tracker_view(s, st.repo.clone())?;
+    let now = crate::service::catalog::now_secs();
+    let ev = evidence(
+        Signal::AgentInferred,
+        target,
+        now,
+        st.claude_session_id.as_deref(),
+    );
+    let mut c = candidate(
+        target.to_string(),
+        Signal::AgentInferred,
+        Strength::Inferred,
+        ev,
+    );
+    c.tracker_id = tracker_id;
+    run(s, &st, &tv, vec![c])
 }
 
 /// A person confirmed or rejected suggestion `link_id`. Confirming a branch

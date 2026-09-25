@@ -1097,6 +1097,15 @@
           onchange={() => toggleSetting(SETTING_KEYS.workSessionStartContext)} />
         Give Claude the linked ticket at session start (makes the start hook wait up to 2 s when the hub is down; applies when hooks are reinstalled)
       </label>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.workClassifyNudge)}
+          disabled={automationBusy}
+          data-testid="work-classify-nudge"
+          onchange={() => toggleSetting(SETTING_KEYS.workClassifyNudge)} />
+        After three prompts with no ticket, ask Claude once which of your few open tickets it is on (only ever a suggestion)
+      </label>
       <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
       <div class="mcp-field">
         <label class="lbl" for="work-tidy-done-days">tidy: done for</label>

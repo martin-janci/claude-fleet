@@ -357,3 +357,24 @@ describe('the sheet feeds the one composer its live state', () => {
     expect(get(agentPanelOpen)).toBe(false);
   });
 });
+
+// Work graph M9: operator commands fill the operator's composer, never send.
+describe('operator commands', () => {
+  it('"Tidy up done tickets" puts its request in the box and sends nothing', async () => {
+    render(AgentPanel);
+    for (let i = 0; i < 4; i++) {
+      await tick();
+      await Promise.resolve();
+    }
+    const cmd = screen
+      .getAllByTestId('agent-command')
+      .find((b) => b.textContent === 'Tidy up done tickets')!;
+    await fireEvent.click(cmd);
+    await tick();
+    await tick();
+    const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
+    expect(box.value).toContain('`work` tool, action `tidy`');
+    expect(box.value).toContain('`tidy_apply`');
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+});

@@ -505,6 +505,13 @@ async fn a_dialer_that_drops_its_parked_call_to_send_loses_nothing() {
     p.parked().await;
     let dropped = p.call.dropped.load(Ordering::SeqCst);
     p.send_a_to_b("a1").await;
+    // B sends only once the dialer has dropped its parked call to carry
+    // a1: sent sooner, b1 answers that call and a1 rides the next one, so
+    // nothing is ever dropped.
+    p.until("the parked call was dropped to carry a1", || {
+        p.call.dropped.load(Ordering::SeqCst) > dropped
+    })
+    .await;
     p.send_b_to_a("b1").await;
     p.send_a_to_b("a2").await;
     p.until("both sides have theirs", || {

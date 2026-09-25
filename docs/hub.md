@@ -619,6 +619,18 @@ What a client may do:
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
   this option keeps marking everything, which is the safe direction.
 
+**Work on a phone** (the work graph, M8). A client token is served `work`
+and — `full` only — `work_link`, and never `work_admin`, so tracker
+administration stays on the desktop. With it the phone shows each session's
+ticket and groups by it, confirms or rejects a suggestion, starts and resumes
+work from a ticket, and (M8.6) reads *Today* (`work today`), a ticket's
+acceptance criteria (`work card`) and past work (`resume_plan`), asks a
+session for a handover note (`work_link handover`, `full`), and labels and
+filters by organisation (`work orgs`). A client token is never org-scoped
+(the org fence of M5 is for per-host tokens, the ones agents hold), so the
+org chips on a phone are a way of reading the fleet, not a fence. Every one of these is gated on the hub's own
+`tools/list`, action by action, so an older hub simply shows less.
+
 `revoke` takes effect on the client's very next request — the auth layer only
 resolves live rows — and an open event stream ends within one heartbeat
 (15 s). The row is kept, revoked, for the audit trail, and the name becomes

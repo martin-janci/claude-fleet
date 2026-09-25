@@ -303,3 +303,46 @@ export function inScope(
     return !r || scopeOf(r) === scope;
   });
 }
+
+/**
+ * A request to open the Tidy-up sheet from elsewhere (the Today view's Stale
+ * section, work graph M9): `sessionIds` are ticked and the cursor starts on
+ * the first of them; an empty list keeps the sheet's own preselection. The
+ * sheet lives in the sidebar, so App expands a collapsed sidebar on a
+ * request, and the sheet takes it once it has candidates. A request older
+ * than {@link TIDY_REQUEST_TTL_MS} is dropped rather than opening the sheet
+ * out of the blue later.
+ */
+export interface TidyRequest {
+  sessionIds: number[];
+  at: number;
+}
+
+export const TIDY_REQUEST_TTL_MS = 15_000;
+
+export const tidyRequest = writable<TidyRequest | null>(null);
+
+export function requestTidy(sessionIds: number[] = [], now: number = Date.now()): void {
+  tidyRequest.set({ sessionIds, at: now });
+}
+
+/** Whether a request is still worth honouring at `now`. */
+export function tidyRequestLive(r: TidyRequest | null, now: number = Date.now()): r is TidyRequest {
+  return r !== null && now - r.at <= TIDY_REQUEST_TTL_MS;
+}
+
+/** Which rows a sheet opened by `r` ticks: the requested ones it can act on,
+ *  or — with none requested — the usual preselection. */
+export function requestedTicks(cands: readonly TidyCandidate[], r: TidyRequest): Set<number> {
+  if (r.sessionIds.length === 0) return new Set(cands.filter(preselected).map((c) => c.session_id));
+  const want = new Set(r.sessionIds);
+  return new Set(
+    cands.filter((c) => want.has(c.session_id) && choicesFor(c).length > 0).map((c) => c.session_id),
+  );
+}
+
+/** The candidates behind the given sessions (the Today view's Stale rows). */
+export function candidatesFor(cands: readonly TidyCandidate[], sessionIds: readonly number[]): TidyCandidate[] {
+  const ids = new Set(sessionIds);
+  return cands.filter((c) => ids.has(c.session_id));
+}

@@ -343,8 +343,13 @@ acceptance on a real fleet is still to do.
 - **M4.5** (51fc47b): SessionStart work context behind
   `work.session_start_context`, **off**; measured and recorded (D5 stays
   the user's).
-- **Not done:** M4.6 (the classification nudge), suggestions on the phone
-  (M8), the remote-host SessionStart measurement.
+- **M4.6** (landed 2026-09-25, OFF behind `work.classify_nudge`): the
+  opt-in classification nudge — one ≤ 400-char note per conversation after
+  three link-less turns with 1–5 candidates in the host's scope; Claude's
+  answer (`source: agent_inferred`) is a pre-selected suggestion only (R11).
+  See the M4 plan's Revisions.
+- **Not done:** the remote-host SessionStart measurement. (Suggestions on
+  the phone landed with M8.)
 
 **Value:** most sessions are linked correctly without touching anything, and
 every link says why. **Tests:** the resolver table (conflicts, a sticky reject,
@@ -527,6 +532,13 @@ fleet-mobile's `claude/cloud-fleet-work-graph-m8` is superseded by it. Note
 the plan's Revisions item 4 (an absent `work` on a row means none), which
 #32 follows.
 
+**M8.6** (the phone catches up with M4.6, M5 and M9.1–M9.3): `org_id` joins
+`PHONE_SESSION_FIELDS` (hub side, no contract bump); on fleet-mobile the
+*Today* sheet with *Copy standup*, a ticket's acceptance criteria and past
+work, *Ask for a handover* followed on the timeline, org labels and an org
+filter, and the `agent_inferred` wording — on fleet-mobile's
+`claude/cloud-fleet-work-graph-m8-6`, per the M8 plan's §M8.6.
+
 ### M9: beyond
 
 The ideas the review ranked, for when M1–M8 have settled.
@@ -580,8 +592,12 @@ acceptance is still to do.
   sibling per repo on one branch, per-repo duplicate guard; *Also start in*
   in the New-session dialog.
 - **Not built, by decision:** write-back (D3 none), dead-session summaries
-  (D10 off), webhook nudges (D13 no). Today's **Stale** links to M7's
-  Tidy-up sheet once M7 merges.
+  (D10 off), webhook nudges (D13 no).
+- **Follow-ups on M7** (after #268): Today's **Stale** section opens M7's
+  Tidy-up sheet with its stale candidates picked; the agent panel's
+  **Tidy up done tickets** command fills the operator's composer, and the
+  operator's instructions say how to tidy through `work { tidy }` /
+  `work_link { tidy_apply }` without ever turning a safe kill into a kill.
 
 ## Critical path and parallelism
 
@@ -700,4 +716,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   `confirm: true` since M7 (its tidy kills); M9.7's start / resume gate
   therefore runs only for the operator, so a person's start is never gated.
   Tool budget 70,865 (measured 70,765).
+- 2026-09-25: the two M9 follow-ups on M7 (Today → Tidy up, the operator's
+  "Tidy up done tickets"); frontend and the operator's CLAUDE.md only — no
+  new action, no budget change.
 

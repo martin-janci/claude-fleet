@@ -7,7 +7,7 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import TidyReview from './TidyReview.svelte';
-import { EMPTY_REPORT, reopenedLoads, reopenedWork, tidyReport, type TidyCandidate } from './tidy';
+import { EMPTY_REPORT, reopenedLoads, reopenedWork, requestTidy, tidyReport, tidyRequest, type TidyCandidate } from './tidy';
 import { toasts } from './toasts';
 import { get } from 'svelte/store';
 import { sessionFocus } from './session_focus';
@@ -175,5 +175,25 @@ describe('TidyReview', () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith('dismiss_reopened', { args: { item_id: 7 } }),
     );
+  });
+
+  it('a request from the Today view opens the sheet with just those sessions ticked (M9)', async () => {
+    candidates = [cand(1), cand(2), cand(3, { reason: 'pr_merged_idle' })];
+    await mount();
+    requestTidy([3]);
+    await waitFor(() => expect(screen.getByTestId('tidy-sheet')).toBeTruthy());
+    const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+    expect(checks.map((c) => c.checked)).toEqual([false, false, true]);
+    expect(get(tidyRequest)).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+  });
+
+  it('an old request is dropped instead of opening the sheet later', async () => {
+    candidates = [cand(1)];
+    requestTidy([1], Date.now() - 60_000);
+    await mount();
+    await tick();
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+    expect(get(tidyRequest)).toBeNull();
   });
 });

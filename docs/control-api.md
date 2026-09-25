@@ -368,6 +368,11 @@ Index by area (names only; see the reference for details):
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
   sole branch key in that project link by itself (master or client token;
   refused to a per-host token). Prompts are never stored — only matches.
+  `work_link { action: "link", source: "agent_inferred", key }` is Claude's
+  answer to the opt-in classification nudge (`work.classify_nudge`, M4.6):
+  not a decision but a pre-selected suggestion (rule R11, strength
+  `inferred`) that a person confirms or rejects; a rejected pair stays
+  rejected. `source: "agent"` remains a confirmed declaration.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
   on a paired desktop the Settings → Work section says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,
