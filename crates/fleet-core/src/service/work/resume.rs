@@ -503,6 +503,39 @@ pub fn resume_session_args(
     })
 }
 
+/// Keys with a resume between its re-checked guards and its link, process
+/// wide: a second resume of one of them meanwhile is refused with
+/// `E_EXISTS` (the store lock is not held across the spawn, so the guards
+/// alone would let two callers spawn two sessions on one conversation).
+static IN_FLIGHT: Mutex<std::collections::BTreeSet<String>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// One key's claim; released on drop, whatever the resume's outcome.
+struct InFlight(String);
+
+impl InFlight {
+    fn claim(key: &str) -> Result<Self, IpcError> {
+        let mut set = IN_FLIGHT
+            .lock()
+            .map_err(|_| IpcError::new(codes::E_LOCK, "the resume registry is poisoned"))?;
+        if !set.insert(key.to_string()) {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!("{key} is being resumed already; wait for that session, then jump to it"),
+            ));
+        }
+        Ok(InFlight(key.to_string()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Ok(mut set) = IN_FLIGHT.lock() {
+            set.remove(&self.0);
+        }
+    }
+}
+
 /// The brief a caller edited, blank counting as none: the Resume dialog
 /// sends `""` for a cleared textarea, and a blank body could only fail
 /// after the session exists. None here means the plan builds the brief.
@@ -567,8 +600,53 @@ where
             ));
         }
     }
-    let new_args = {
+    let (new_args, _claim) = {
         let s = lock(store)?;
+        // The plan's guards (no live session for the key; for `last`, the
+        // conversation held by no session on the host) ran under an earlier
+        // lock, and the spawn runs off it: re-check now, and hold the key
+        // until the new session is linked, so a concurrent resume of the
+        // same key (desktop and phone, a double click) is refused instead
+        // of resuming one conversation twice.
+        let fresh = plan_resume(
+            &s,
+            &plan.key,
+            plan.link_id,
+            args.host_alias.as_deref(),
+            scope,
+        )?;
+        if let Some(l) = fresh.live.first() {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "{} is live in {} on {} — jump to it",
+                    plan.key,
+                    l.friendly_name.as_deref().unwrap_or(&l.tmux_name),
+                    l.host_alias
+                ),
+            ));
+        }
+        if args.mode == "last" {
+            let held = fresh
+                .candidates
+                .iter()
+                .find(|c| Some(c.link_id) == plan.link_id)
+                .and_then(|c| c.last_claude_session_id.clone())
+                .zip(plan.host_alias.as_deref())
+                .map(|(id, h)| s.session_with_claude_id(h, &id))
+                .transpose()?
+                .flatten();
+            if let Some(r) = held {
+                return Err(IpcError::new(
+                    codes::E_EXISTS,
+                    format!(
+                        "session {} still holds that conversation; restore or jump to it",
+                        r.tmux_name
+                    ),
+                ));
+            }
+        }
+        let claim = InFlight::claim(&plan.key)?;
         let new_args = resume_session_args(&s, &plan, &args.mode)?;
         // The resumed session links the work: the same integrity rule as a
         // link, for every caller (M5).
@@ -585,7 +663,7 @@ where
                 args.force_cross_org,
             )?;
         }
-        new_args
+        (new_args, claim)
     };
     let row = spawn(new_args).await?;
     let handover = {
@@ -1044,11 +1122,65 @@ mod tests {
         .await
         .expect("the row, not an error after the spawn");
         assert!(handover.is_some(), "the plan's brief was queued");
-        assert_eq!(row.work.as_ref().and_then(|w| w.key.as_deref()), Some("ABC-1"));
+        assert_eq!(
+            row.work.as_ref().and_then(|w| w.key.as_deref()),
+            Some("ABC-1")
+        );
         let s = st.lock().unwrap();
         let queued = s.undelivered_handovers(row.id).unwrap();
         let body = queued[0].body.as_deref().unwrap_or_default();
         assert!(body.contains("ABC-1"), "built, not the blank: {body:?}");
+    }
+
+    /// Two resumes of one key in flight together (desktop and phone, a
+    /// double click): the second is refused while the first is between
+    /// its guards and its link, and once the first's session is live the
+    /// plan offers Jump instead. One conversation, one session.
+    #[tokio::test]
+    async fn a_concurrent_resume_of_the_same_key_is_refused() {
+        let (st, _) = fixture();
+        let ssh = Arc::new(SshClient::new());
+        let args = ResumeArgs {
+            key: "abc-1".into(),
+            mode: "last".into(),
+            ..Default::default()
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let st1 = Arc::clone(&st);
+        let first = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+            // Parked mid-spawn (tmux is slow) until the second call answered.
+            rx.await.unwrap();
+            let s = st1.lock().unwrap();
+            let id = s
+                .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, a.resume_claude_session_id.as_deref().unwrap())
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        });
+        let second = async {
+            let err = resume_with(&st, &ssh, &args, &OrgScope::All, |_| async {
+                panic!("the second resume never spawns")
+            })
+            .await
+            .unwrap_err();
+            tx.send(()).unwrap();
+            err
+        };
+        let (first, err) = tokio::join!(first, second);
+        assert_eq!(err.code, codes::E_EXISTS, "{}", err.message);
+        assert!(err.message.contains("being resumed"), "{}", err.message);
+        let (row, _) = first.expect("the first resume completes");
+        assert_eq!(row.tmux_name, "dev-new");
+        // Afterwards the key is live: a resume is blocked by the plan (Jump),
+        // and the in-flight claim is released.
+        let err = resume_with(&st, &ssh, &args, &OrgScope::All, |_| async {
+            panic!("a live key never spawns")
+        })
+        .await
+        .unwrap_err();
+        assert!(err.message.contains("jump"), "{}", err.message);
+        assert!(IN_FLIGHT.lock().unwrap().is_empty());
     }
 
     #[test]
