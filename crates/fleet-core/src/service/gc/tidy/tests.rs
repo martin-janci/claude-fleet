@@ -323,9 +323,24 @@ fn a_work_row_without_a_tracked_worktree_is_only_archived() {
 
 #[test]
 fn unreachable_hosts_and_offline_rows_are_skipped() {
-    let mut s = done_session(1);
-    s.row.host_alias = "remote".into();
-    assert!(run(&[s], &cfg()).is_empty());
+    // The control: this row on the reachable host is the candidate.
+    assert_eq!(
+        reasons(&run(&[done_session(1)], &cfg())),
+        vec![(1, TidyReason::DoneIdle, TidyAction::SafeKill)]
+    );
+    let mut remote = done_session(1);
+    remote.row.host_alias = "remote".into();
+    // Offline rows on the reachable host: one stopped, and one lost — a
+    // ghost with no Claude session to resume, which the ghost arm has no
+    // suggestion for either.
+    let mut stopped = done_session(2);
+    stopped.row.status = "stopped".into();
+    let mut lost = done_session(3);
+    lost.row.status = "ghost".into();
+    lost.row.lost_at = Some(NOW - (14 * DAY - 2 * HOUR));
+    lost.row.claude_session_id = None;
+    let got = run(&[remote, stopped, lost], &cfg());
+    assert!(got.is_empty(), "{:?}", reasons(&got));
 }
 
 #[test]
