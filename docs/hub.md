@@ -1922,8 +1922,11 @@ deliberately.
   from a desktop can carry it switched on; `fleet-hub serve` logs a warning
   at startup when it is.
 - **The operator's starts and kills.** The UX agent's operator session
-  must have its session starts (`new_session`, `new_shell_session`,
-  `work_link` `start` / `resume`) and kills approved by a person, whatever
+  must have its session starts and restarts (`new_session`,
+  `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task` with
+  `new_worker`, `restore_host_sessions` other than a `dry_run`,
+  `recreate_session`, `restart_session`, `work_link` `start` / `resume`)
+  and kills approved by a person, whatever
   `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
   no approver, so an operator homed on a hub-served fleet is refused those
   calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from
