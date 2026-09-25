@@ -64,6 +64,44 @@ describe('ResumeDialog', () => {
     expect((screen.getByTestId('resume-brief') as HTMLTextAreaElement).value).toBe('# Handover: ABC-1');
   });
 
+  it('an absent transcript reads as the reason and lands on the brief; a failed check only warns', async () => {
+    const reason = "the conversation's transcript is no longer on h";
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_resume_plan')
+        return plan({
+          modes: [
+            { mode: 'last', ok: false, reason },
+            { mode: 'brief', ok: true },
+            { mode: 'fresh', ok: true },
+          ],
+        });
+      return null;
+    });
+    const { unmount } = render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
+    await settle();
+    expect(screen.getByTestId('resume-mode-last').closest('label')).toHaveTextContent(reason);
+    expect((screen.getByTestId('resume-mode-brief') as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByTestId('resume-warning')).toBeNull();
+    unmount();
+
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_resume_plan')
+        return plan({
+          modes: [
+            { mode: 'last', ok: true },
+            { mode: 'brief', ok: true },
+            { mode: 'fresh', ok: true },
+          ],
+          warnings: ['could not check the transcript on h'],
+        });
+      return null;
+    });
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
+    await settle();
+    expect(screen.getByTestId('resume-warning')).toHaveTextContent('could not check the transcript on h');
+    expect((screen.getByTestId('resume-mode-last') as HTMLInputElement).checked).toBe(true);
+  });
+
   it('the edited brief is what the resume sends', async () => {
     const row = session('h', 'dev-new', { id: 42 });
     vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
