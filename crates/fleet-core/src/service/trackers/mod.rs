@@ -447,6 +447,41 @@ impl TrackerNet {
         TrackerNet { fake: None, ssh }
     }
 
+    /// [`TrackerNet::real`], unless `e2e_url` (the process's
+    /// [`crate::net::E2E_TRACKER_ENV`]) is set: then, in a build with the
+    /// `e2e` feature, every tracker talks to that loopback fake (work graph
+    /// M10.2); in any other build it is refused, so a hub never starts
+    /// believing it talks to a fake it does not.
+    pub fn from_env(
+        ssh: Option<Arc<dyn crate::ssh::SshExec>>,
+        e2e_url: Option<&str>,
+    ) -> Result<Self, String> {
+        let Some(url) = e2e_url.filter(|u| !u.is_empty()) else {
+            return Ok(Self::real(ssh));
+        };
+        #[cfg(feature = "e2e")]
+        {
+            let t = crate::net::e2e_tracker::LoopbackTransport::new(url)?;
+            tracing::warn!(
+                "{} is set: every tracker request goes to the loopback fake at {url}",
+                crate::net::E2E_TRACKER_ENV
+            );
+            Ok(Self {
+                fake: Some(Arc::new(t)),
+                ssh,
+            })
+        }
+        #[cfg(not(feature = "e2e"))]
+        {
+            let _ = (ssh, url);
+            Err(format!(
+                "{} is set, but this build has no end-to-end fake tracker \
+                 (build with `--features e2e`, debug only); unset it",
+                crate::net::E2E_TRACKER_ENV
+            ))
+        }
+    }
+
     /// Every tracker, whatever its transport, talks to `t` (tests).
     pub fn fake(t: Arc<dyn HttpTransport>) -> Self {
         TrackerNet {
@@ -767,5 +802,34 @@ mod tests {
         assert_eq!(e.code, crate::ipc_error::codes::E_TRACKER);
         assert!(!e.message.contains("bWVAeD"), "{}", e.message);
         assert!(TrackerError::Auth("x".into()).explain().contains("expire"));
+    }
+}
+
+#[cfg(test)]
+mod tests_e2e_override {
+    use super::TrackerNet;
+
+    #[test]
+    fn no_override_is_the_real_net() {
+        assert!(TrackerNet::from_env(None, None).is_ok());
+        assert!(TrackerNet::from_env(None, Some("")).is_ok());
+    }
+
+    /// Work graph M10.2: without the `e2e` feature the fake tracker override
+    /// is refused, never silently ignored.
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn a_build_without_the_feature_refuses_the_override() {
+        let err = TrackerNet::from_env(None, Some("http://127.0.0.1:9"))
+            .err()
+            .expect("refused");
+        assert!(err.contains(crate::net::E2E_TRACKER_ENV), "{err}");
+    }
+
+    #[cfg(feature = "e2e")]
+    #[test]
+    fn a_build_with_the_feature_takes_a_loopback_override_only() {
+        assert!(TrackerNet::from_env(None, Some("http://127.0.0.1:9")).is_ok());
+        assert!(TrackerNet::from_env(None, Some("http://example.com:9")).is_err());
     }
 }

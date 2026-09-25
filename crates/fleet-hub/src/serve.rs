@@ -690,6 +690,13 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // The one store in the process that publishes: `serve` is where a paired
     // client can be listening on `GET /events`. Every other subcommand is a
     // one-shot with no subscribers and keeps the silent bus.
+    // Work graph M10.2: the end-to-end fake tracker. Checked before anything
+    // is opened or bound, so a build that cannot honour it refuses to start
+    // instead of syncing real trackers the operator thought were fake.
+    let e2e_tracker = env
+        .get(fleet_core::net::E2E_TRACKER_ENV)
+        .map(String::as_str);
+    fleet_core::service::trackers::TrackerNet::from_env(None, e2e_tracker)?;
     let bus = Arc::new(BroadcastEventBus::default());
     let (r, store) = resolve_with_store(opts, env, Arc::clone(&bus) as Arc<dyn EventBus>)?;
     match fleet_core::logging::init_in_with(&r.log_dir, true) {
@@ -840,9 +847,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // `via_host` / `via_cli` trackers (M6) run `curl` / `gh` on a host over
     // the hub's own SSH.
     fleet_core::service::trackers::install_default_net(
-        fleet_core::service::trackers::TrackerNet::real(Some(
-            Arc::clone(&ssh) as Arc<dyn fleet_core::ssh::SshExec>
-        )),
+        fleet_core::service::trackers::TrackerNet::from_env(
+            Some(Arc::clone(&ssh) as Arc<dyn fleet_core::ssh::SshExec>),
+            e2e_tracker,
+        )?,
     );
     let tracker_handle = fleet_core::service::trackers::sync::spawn_tracker_sync(
         Arc::clone(&store),
@@ -1057,6 +1065,29 @@ mod tests {
         let (r, _store) =
             resolve_with_store(&opts, &HashMap::new(), Arc::new(NoopEventBus)).unwrap();
         assert_eq!(r.public_url.as_deref(), Some("https://fleet.example.com"));
+    }
+
+    /// Work graph M10.2: a hub built without the `e2e` feature (every
+    /// release, and the default debug build) refuses to start with the fake
+    /// tracker override set, before it opens its store or binds a port.
+    #[cfg(not(feature = "e2e"))]
+    #[tokio::test]
+    async fn serve_refuses_the_e2e_tracker_override_without_the_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let env = HashMap::from([(
+            fleet_core::net::E2E_TRACKER_ENV.to_string(),
+            "http://127.0.0.1:9".to_string(),
+        )]);
+        let err = serve(&opts, &env).await.unwrap_err();
+        assert!(err.contains(fleet_core::net::E2E_TRACKER_ENV), "{err}");
+        assert!(
+            !dir.path().join("state.db").exists(),
+            "refused before the store was opened"
+        );
     }
 
     #[test]

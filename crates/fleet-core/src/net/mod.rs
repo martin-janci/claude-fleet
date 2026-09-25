@@ -14,7 +14,14 @@
 //!   (M6.1) and `curl` (M6.3).
 
 pub mod conn;
+#[cfg(any(test, feature = "e2e"))]
+pub mod e2e_tracker;
 pub mod http1;
 pub mod https;
 pub mod tls;
 pub mod via_host;
+
+/// The loopback base (`http://127.0.0.1:<port>`) the end-to-end fake tracker
+/// listens on (work graph M10.2, [`e2e_tracker`] under the `e2e` feature).
+/// Named in every build so one without the feature can refuse it.
+pub const E2E_TRACKER_ENV: &str = "FLEET_E2E_TRACKER_URL";

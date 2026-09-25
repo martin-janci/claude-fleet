@@ -12,6 +12,12 @@ authors = ["martin-janci"]
 edition = "2021"
 license = "MIT"
 
+[features]
+# Work graph M10.2: honour FLEET_E2E_TRACKER_URL, sending every tracker
+# request to a loopback fake (scripts/hub-e2e.sh). Debug builds only: the
+# module refuses to compile without debug_assertions. Off everywhere else.
+e2e = []
+
 [dependencies]
 sysinfo = "0.33"
 serde = { version = "1", features = ["derive"] }

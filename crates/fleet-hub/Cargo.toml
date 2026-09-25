@@ -6,6 +6,12 @@ authors = ["martin-janci"]
 edition = "2021"
 license = "MIT"
 
+[features]
+# `cargo build -p fleet-hub --features e2e`: the binary scripts/hub-e2e.sh
+# drives for its work-graph leg (a loopback fake tracker). Never for release;
+# see fleet-core's `e2e` feature.
+e2e = ["fleet-core/e2e"]
+
 [[bin]]
 name = "fleet-hub"
 path = "src/main.rs"
