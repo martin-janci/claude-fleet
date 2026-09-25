@@ -542,3 +542,77 @@ fn a_promoted_suggestion_takes_the_promoting_signals_source_so_r7_ends_it() {
     let row = f.s.get_session_by_id(sid).unwrap().unwrap();
     assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-2"));
 }
+
+/// A moved issue (ABC-1 became NEW-1; ABC-1 is an alias) is one target:
+/// a branch still named after the alias links it once, under the item's
+/// current key, and every later run finds that link instead of adding
+/// another; a rejection made under the current key blocks the alias
+/// candidate (R9).
+#[test]
+fn an_alias_candidate_meets_the_link_and_the_rejection_of_the_items_current_key() {
+    let f = fx();
+    trust(&f);
+    let tracker = f.s.list_trackers().unwrap()[0].id;
+    f.s.set_tracker_probe(
+        tracker,
+        None,
+        &TrackerConfig {
+            key_prefixes: vec!["ABC".into(), "NEW".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let item = tracker_item(&f.s, tracker, "77", "ABC-1");
+    assert_eq!(
+        tracker_item(&f.s, tracker, "77", "NEW-1"),
+        item,
+        "the key moved; the item stayed"
+    );
+    assert_eq!(
+        f.s.get_work_item(item).unwrap().unwrap().aliases,
+        vec!["ABC-1".to_string()]
+    );
+
+    let sid = session(&f, "dev", "c1");
+    assert!(f.s.set_current_branch(sid, "abc-1-fix").unwrap());
+    assert!(resolve_session(&f.s, sid).unwrap());
+    let want = vec![(
+        "NEW-1".to_string(),
+        "confirmed".to_string(),
+        "branch".to_string(),
+        Some("R3".to_string()),
+    )];
+    assert_eq!(links(&f.s, sid), want, "linked once, under the current key");
+    let ls = f.s.session_work_links(sid).unwrap();
+    assert_eq!(
+        (ls[0].item_id, ls[0].ref_key.as_deref()),
+        (Some(item), Some("NEW-1"))
+    );
+    // The next Stop: the same branch, the same link — nothing to add.
+    assert!(!resolve_session(&f.s, sid).unwrap(), "idempotent");
+    on_prompt(&f.s, sid, "still on ABC-1", false).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        want,
+        "the alias in a prompt is the same link"
+    );
+
+    // Rejected under the current key: the alias candidate is never proposed.
+    let other = session(&f, "other", "c2");
+    f.s.reject_session_work(other, WorkTarget::Key("NEW-1"))
+        .unwrap();
+    f.s.set_current_branch(other, "abc-1-fix").unwrap();
+    resolve_session(&f.s, other).unwrap();
+    on_prompt(&f.s, other, "look at ABC-1", true).unwrap();
+    assert_eq!(
+        links(&f.s, other),
+        vec![("NEW-1".into(), "rejected".into(), "manual".into(), None)]
+    );
+    assert_eq!(
+        f.s.get_session_by_id(other)
+            .unwrap()
+            .unwrap()
+            .work_suggested,
+        None
+    );
+}

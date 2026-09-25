@@ -127,6 +127,38 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The item's CURRENT key for a detected target that names a tracker
+    /// item by an alias (a moved Jira issue), else the target as given. The
+    /// resolver keys links and candidates by one spelling, so a candidate
+    /// seen under an alias meets the link (or the rejection, R9) made for
+    /// the item, instead of being created again on every run.
+    pub fn canonical_work_target(
+        &self,
+        target: &str,
+        tracker_id: Option<i64>,
+    ) -> Result<String, IpcError> {
+        let Ok(key) = super::normalize_work_ref(target) else {
+            return Ok(target.to_string());
+        };
+        let current: Option<String> = match tracker_id {
+            Some(tid) => self
+                .conn
+                .query_row(
+                    "SELECT key FROM work_items WHERE tracker_id = ?1 AND (key = ?2 OR EXISTS \
+                       (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) WHERE value = ?2)) \
+                     ORDER BY (key = ?2) DESC, id LIMIT 1",
+                    rusqlite::params![tid, key],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten(),
+            None => self.tracker_item_for_key(&key)?.and_then(|i| i.key),
+        };
+        Ok(current
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| target.to_string()))
+    }
+
     /// Delivered handover bodies addressed to `participant`, newest first
     /// (the loop guard: text fleet injected must not count as evidence).
     pub fn recent_handover_bodies(
@@ -181,6 +213,20 @@ impl Store {
                     let (item_id, ref_key) = self.detected_target(target, *tracker_id)?;
                     if crosses(item_id)? {
                         continue;
+                    }
+                    // One live link per item and participant, however the
+                    // target was spelled: a second one would sit beside a
+                    // decision (R1 / R9) or double a suggestion.
+                    if let Some(item) = item_id {
+                        let dup: bool = self.conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
+                               AND ended_at IS NULL AND item_id = ?2)",
+                            rusqlite::params![participant, item],
+                            |r| r.get(0),
+                        )?;
+                        if dup {
+                            continue;
+                        }
                     }
                     let state = match state {
                         NewState::Suggested => "suggested",
