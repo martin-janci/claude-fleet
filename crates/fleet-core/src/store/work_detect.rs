@@ -423,6 +423,9 @@ impl Store {
 
     /// End a live session's link because its state signal moved on (R7):
     /// the same snapshot the retirement trigger takes, plus the reason.
+    /// `snap_branch` is the branch the link's own `branch` evidence saw
+    /// (the value that just changed), else the worktree's — never a PR
+    /// closing ref's text, which is a ticket key.
     fn end_live_link(
         &self,
         link_id: i64,
@@ -437,7 +440,10 @@ impl Store {
                snap_name = (SELECT friendly_name FROM sessions WHERE id = ?2), \
                snap_project_id = (SELECT project_id FROM sessions WHERE id = ?2), \
                snap_worktree = (SELECT worktree_key FROM sessions WHERE id = ?2), \
-               snap_branch = COALESCE(json_extract(evidence, '$[0].text'), \
+               snap_branch = COALESCE( \
+                 (SELECT json_extract(j.value, '$.text') FROM json_each(evidence) j \
+                   WHERE json_extract(j.value, '$.signal') = 'branch' \
+                   ORDER BY j.key DESC LIMIT 1), \
                  (SELECT w.branch FROM sessions s JOIN worktrees w ON w.id = s.worktree_id \
                    WHERE s.id = ?2)), \
                snap_pr_url = (SELECT pr_url FROM sessions WHERE id = ?2), \

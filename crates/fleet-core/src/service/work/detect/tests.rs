@@ -616,3 +616,45 @@ fn an_alias_candidate_meets_the_link_and_the_rejection_of_the_items_current_key(
         None
     );
 }
+
+/// R7's snapshot of a link whose only state evidence is a PR closing ref
+/// records the worktree's branch, not the closing ref's text (a ticket
+/// key) — the handover brief and the resume button read `snap_branch` as
+/// a git branch.
+#[test]
+fn ending_a_closing_ref_link_snapshots_the_branch_not_the_ticket_key() {
+    let f = fx();
+    trust(&f);
+    let wt =
+        f.s.upsert_worktree(f.project, "wt", "/src/api/wt", Some("fix-login"))
+            .unwrap();
+    let sid =
+        f.s.upsert_session("dev", "h", Some(f.project), Some(wt), 1, 1, "running", None)
+            .unwrap();
+    f.s.rebind_conversation(sid, "c1", StartSource::Startup, None, None)
+        .unwrap();
+    f.s.set_pr_signals("h", "dev", Some(r#"{"closing":["ABC-1"]}"#))
+        .unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        vec![(
+            "ABC-1".into(),
+            "confirmed".into(),
+            "pr".into(),
+            Some("R3".into())
+        )]
+    );
+    // The PR is gone (closed or re-targeted): the link ends.
+    f.s.set_pr_signals("h", "dev", None).unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    assert!(links(&f.s, sid).is_empty());
+    let ended = f.s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].end_reason.as_deref(), Some("pr_changed"));
+    assert_eq!(
+        ended[0].snap_branch.as_deref(),
+        Some("fix-login"),
+        "the worktree's branch, never the closing ref"
+    );
+}
