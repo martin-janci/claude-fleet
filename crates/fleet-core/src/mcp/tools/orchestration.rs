@@ -847,13 +847,17 @@ impl FleetTools {
         let summary = args.audit_summary();
         audit("work_admin", &summary);
         match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
-            AdminAction::Status => ok_json(
-                &crate::service::work::retention::status(
+            // M11.4's sync metrics and M12.3's retention (rows, dry run,
+            // last sweep), each read under its own short locks.
+            AdminAction::Status => {
+                let trackers = a::admin_sync(&args, &self.store).map_err(to_mcp_err)?;
+                let retention = crate::service::work::retention::status(
                     &self.store,
                     crate::service::catalog::now_secs(),
                 )
-                .map_err(to_mcp_err)?,
-            ),
+                .map_err(to_mcp_err)?;
+                ok_json(&serde_json::json!({ "trackers": trackers, "retention": retention }))
+            }
             AdminAction::SweepNow => ok_json(&crate::service::work::retention::sweep(
                 &self.store,
                 crate::service::catalog::now_secs(),

@@ -22,6 +22,11 @@
 //!   `/1/<ws>/project/<p>/task/<t>`, GitHub `/<o>/<r>/issues/<n>`. The URL's
 //!   host names the tracker when one is configured for it. Text inside any
 //!   URL is not scanned for bare keys.
+//! * GitHub Enterprise Server (M11.4): `https://<host>/<o>/<r>/issues/<n>`
+//!   and a written-out `<host>/<o>/<r>#<n>` name `<host>/<o>/<r>#<n>` — but
+//!   ONLY for a `<host>` a configured GitHub tracker has (`ctx.trackers`):
+//!   the same path on any other host is not a ticket, so an arbitrary URL is
+//!   never taken for a tracker's.
 //! * A bare `#123` names an issue of the session's own `owner/repo`, and only
 //!   when that repo is known.
 
@@ -96,7 +101,8 @@ pub enum MatchKind {
     Key,
     /// A ticket URL.
     Url,
-    /// A bare `#123`, resolved against the session's repo.
+    /// A GitHub issue of a named repository: a bare `#123` resolved against
+    /// the session's repo, or an enterprise `host/owner/repo#123` (M11.4).
     RepoIssue,
 }
 
@@ -308,8 +314,31 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// Recognise one URL: `(key, provider)`.
-fn ticket_url(url: &str) -> Option<(String, &'static str, String)> {
+/// A GitHub owner or repository name as a reference carries it:
+/// `[A-Za-z0-9_.-]`, not starting with a dot or a dash.
+fn github_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && !s.starts_with(['.', '-'])
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// The configured GitHub Enterprise hosts (M11.4): every GitHub tracker's
+/// host that is not github.com, lower case.
+fn ghes_hosts(ctx: &RecognizeCtx) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in ctx.trackers.iter().filter(|t| t.provider == "github") {
+        let h = t.host.to_ascii_lowercase();
+        if !h.is_empty() && h != "github.com" && h != "www.github.com" && !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// Recognise one URL: `(key, provider, host)`.
+fn ticket_url(url: &str, ctx: &RecognizeCtx) -> Option<(String, &'static str, String)> {
     let rest = url.split_once("://")?.1;
     let (authority, tail) = match rest.find(['/', '?', '#']) {
         Some(i) => (&rest[..i], &rest[i..]),
@@ -361,6 +390,24 @@ fn ticket_url(url: &str) -> Option<(String, &'static str, String)> {
         }
         return None;
     }
+    if ghes_hosts(ctx).contains(&host) {
+        if let [o, r, "issues", n, ..] = segs.as_slice() {
+            if github_name(o)
+                && github_name(r)
+                && !n.is_empty()
+                && n.len() <= 9
+                && n.bytes().all(|b| b.is_ascii_digit())
+            {
+                let key = format!(
+                    "{host}/{}/{}#{n}",
+                    o.to_ascii_lowercase(),
+                    r.to_ascii_lowercase()
+                );
+                return Some((key, "github", host));
+            }
+        }
+        return None;
+    }
     for pair in query.split('&') {
         if let Some(v) = pair.strip_prefix("selectedIssue=") {
             if let Some(k) = whole_key(&percent_decode(v)) {
@@ -376,13 +423,54 @@ fn ticket_url(url: &str) -> Option<(String, &'static str, String)> {
     None
 }
 
+/// After an enterprise host at byte `i`: `/owner/repo#n` with no letter,
+/// digit or `_` after the number → `(end, owner, repo, n)`.
+fn ghes_ref_at(text: &str, i: usize) -> Option<(usize, &str, &str, &str)> {
+    let s = text.as_bytes();
+    let name_end = |from: usize| {
+        let mut j = from;
+        while j < s.len() && (is_alnum(s[j]) || matches!(s[j], b'_' | b'.' | b'-')) {
+            j += 1;
+        }
+        j
+    };
+    if s.get(i) != Some(&b'/') {
+        return None;
+    }
+    let o_end = name_end(i + 1);
+    if s.get(o_end) != Some(&b'/') {
+        return None;
+    }
+    let r_end = name_end(o_end + 1);
+    if s.get(r_end) != Some(&b'#') {
+        return None;
+    }
+    let mut k = r_end + 1;
+    while k < s.len() && s[k].is_ascii_digit() {
+        k += 1;
+    }
+    let (o, r, n) = (
+        &text[i + 1..o_end],
+        &text[o_end + 1..r_end],
+        &text[r_end + 1..k],
+    );
+    if !(1..=9).contains(&n.len())
+        || (k < s.len() && (is_alnum(s[k]) || s[k] == b'_'))
+        || !github_name(o)
+        || !github_name(r)
+    {
+        return None;
+    }
+    Some((k, o, r, n))
+}
+
 /// Every reference in `text`, in order of appearance.
 pub fn recognize(text: &str, ctx: &RecognizeCtx) -> Vec<Match> {
     let urls = url_spans(text);
     let mut out: Vec<Match> = Vec::new();
     for &(a, b) in &urls {
         let raw = &text[a..b];
-        if let Some((key, provider, host)) = ticket_url(raw) {
+        if let Some((key, provider, host)) = ticket_url(raw, ctx) {
             let tracker_id = ctx
                 .trackers
                 .iter()
@@ -413,6 +501,40 @@ pub fn recognize(text: &str, ctx: &RecognizeCtx) -> Vec<Match> {
             span: (a, b),
             upper_written: upper,
         });
+    }
+    // `host/owner/repo#n` of a configured enterprise host (M11.4).
+    let lower = text.to_ascii_lowercase();
+    let b = text.as_bytes();
+    for host in ghes_hosts(ctx) {
+        for (a, _) in lower.match_indices(host.as_str()) {
+            if in_url(a)
+                || (a > 0
+                    && (is_alnum(b[a - 1])
+                        || matches!(b[a - 1], b'.' | b'_' | b'-' | b'/' | b':' | b'@')))
+            {
+                continue;
+            }
+            let Some((end, o, r, n)) = ghes_ref_at(text, a + host.len()) else {
+                continue;
+            };
+            out.push(Match {
+                kind: MatchKind::RepoIssue,
+                key: format!(
+                    "{host}/{}/{}#{n}",
+                    o.to_ascii_lowercase(),
+                    r.to_ascii_lowercase()
+                ),
+                tracker_id: ctx
+                    .trackers
+                    .iter()
+                    .find(|t| t.provider == "github" && t.host.eq_ignore_ascii_case(&host))
+                    .map(|t| t.id),
+                provider: Some("github".into()),
+                text: text[a..end].to_string(),
+                span: (a, end),
+                upper_written: false,
+            });
+        }
     }
     if let Some(repo) = ctx.repo.as_deref().filter(|r| r.contains('/')) {
         let s = text.as_bytes();
@@ -446,7 +568,8 @@ pub fn recognize(text: &str, ctx: &RecognizeCtx) -> Vec<Match> {
 }
 
 /// Is the WHOLE of `key` a work reference of a shape fleet recognises: a
-/// ticket key (`ABC-123`, Jira and Linear), a GitHub `owner/repo#n`, or an
+/// ticket key (`ABC-123`, Jira and Linear), a GitHub `owner/repo#n` (or an
+/// enterprise `host/owner/repo#n`), or an
 /// Asana `asana:<gid>`? Every such shape is made of `[A-Za-z0-9:_#./-]`
 /// only, so a key that passes is safe to quote in a prompt typed into a
 /// pane; a free-text key that does not is never interpolated (M9.3).

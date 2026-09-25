@@ -341,6 +341,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: TRACKERS_ARE_ADMIN,
         },
     ),
+    // Work graph M11.4: the sync's per-tracker counters are
+    // `work_admin { action: status }`, master-only like the rest.
+    (
+        "tracker_sync_metrics",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
     // Work graph M12.3: retention is the hub's own sweep; its status and
     // sweep_now are `work_admin`, master-only.
     (
