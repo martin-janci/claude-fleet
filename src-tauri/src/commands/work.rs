@@ -10,17 +10,22 @@
 //! Work graph M7.2 adds the lifecycle: `work_tidy` / `work_reopened` →
 //! `work`, and archive / unarchive / snooze / never / tidy_apply / dismiss →
 //! `work_link`.
+//!
+//! Work graph M11.1 adds local work ("Name this work…"):
+//! `list_local_work_items` → `work { local_items }`, and `name_session_work`
+//! / `rename_work_item` → `work_link { name }`.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::card::TicketCard;
+use fleet_core::service::work::local::LocalWorkItem;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
 use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{ReopenedWork, SessionRow, Store, WorkLinkRow};
+use fleet_core::store::{ReopenedWork, SessionRow, Store, WorkItemRow, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -142,6 +147,51 @@ pub struct TidyApplyArgs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DismissReopenedArgs {
     pub item_id: i64,
+}
+
+/// "Name this work…" (work graph M11.1): new local work with a title (and
+/// an optional key), linked to the session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NameSessionWorkArgs {
+    pub session_id: i64,
+    pub title: String,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// Rename a local work item (a tracker's ticket is refused).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RenameWorkItemArgs {
+    pub item_id: i64,
+    pub title: String,
+}
+
+/// The local work items (work graph M11.1).
+#[tauri::command]
+pub async fn list_local_work_items(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<LocalWorkItem>, IpcError> {
+    routed::list_local_work_items(&backend, &store).await
+}
+
+/// A person names the session's work from the desktop.
+#[tauri::command]
+pub async fn name_session_work(
+    args: NameSessionWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::name_session_work(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn rename_work_item(
+    args: RenameWorkItemArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::rename_work_item(&backend, args, &store).await
 }
 
 /// The tidy-up candidates (work graph M7).
@@ -492,6 +542,63 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("dismiss_reopened", &args).await,
             None => work::dismiss_reopened(&args, store),
+        }
+    }
+
+    pub async fn list_local_work_items(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<LocalWorkItem>, IpcError> {
+        let args = WorkArgs {
+            action: Some("local_items".into()),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("list_local_work_items", &args).await,
+            None => work::local::local_items(store, &fleet_core::service::orgs::OrgScope::All),
+        }
+    }
+
+    pub async fn name_session_work(
+        backend: &FleetBackend,
+        args: NameSessionWorkArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        let args = WorkLinkArgs {
+            session_id: Some(args.session_id),
+            action: "name".into(),
+            key: args.key,
+            title: Some(args.title),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("name_session_work", &args).await,
+            None => work::local::name_session_work(
+                &args,
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+            ),
+        }
+    }
+
+    pub async fn rename_work_item(
+        backend: &FleetBackend,
+        args: RenameWorkItemArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            item_id: Some(args.item_id),
+            action: "name".into(),
+            title: Some(args.title),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("rename_work_item", &args).await,
+            None => work::local::rename_local_item(
+                &args,
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+            ),
         }
     }
 
