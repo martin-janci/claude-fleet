@@ -7,7 +7,6 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import TidyReview from './TidyReview.svelte';
-import { get } from 'svelte/store';
 import { EMPTY_REPORT, reopenedLoads, reopenedWork, requestTidy, tidyReport, tidyRequest, type TidyCandidate } from './tidy';
 import { toasts } from './toasts';
 import { get } from 'svelte/store';
