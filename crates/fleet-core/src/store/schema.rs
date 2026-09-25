@@ -568,6 +568,13 @@ const MIGRATIONS: &[Migration] = &[
         57,
         include_str!("../../migrations/057_read_cursors_trigger.sql"),
     ),
+    // Work graph M12.2 (scale): `work_links(ended_at)` and the handover
+    // loop guard's `work_journal(participant_id)`. `CREATE INDEX IF NOT
+    // EXISTS`, safe to re-run.
+    Migration::plain(
+        58,
+        include_str!("../../migrations/058_work_graph_scale_indexes.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
