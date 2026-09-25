@@ -14,6 +14,23 @@ import { toasts, runToastAction } from './toasts';
 import { describeEvidence, newAutoLinks, autoLinkSnapshot } from './work';
 import { sessionFocus } from './session_focus';
 import { selectedSession, selectSession } from './selection';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+
+/** A desktop paired with a hub whose live link is down: confirm_session_work
+ *  and reject_session_work are routed mutations, blocked with a reason. */
+const remote: HubStatus = {
+  remote: true,
+  url: 'https://fleet.example.com',
+  client_name: 'laptop',
+  client_mode: null,
+  configured_url: 'https://fleet.example.com',
+  configured_client_name: 'laptop',
+  allow_plaintext: false,
+  warning: null,
+  restart_required: false,
+  unavailable: null,
+};
 
 const sg = (link_id: number, key: string): SessionWork => ({
   link_id,
@@ -39,6 +56,8 @@ beforeEach(() => {
   sessions.set([]);
   sessionFocus.set(null);
   selectSession(null);
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
 });
 
 describe('LinkReview', () => {
@@ -248,6 +267,43 @@ describe('LinkReview', () => {
     runToastAction(t[0].id);
     expect(invoke).toHaveBeenCalledWith('reject_session_work', {
       args: { session_id: 1, link_id: 21 },
+    });
+  });
+
+  it('a hub that cannot be reached blocks the sheet: the note, disabled buttons, and no chord', async () => {
+    sessions.set(rows());
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'reconnecting', attempt: 2, retry_in_secs: 5, reason: 'socket closed' });
+    render(LinkReview);
+    // The pill still counts: the suggestions are there to look at.
+    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('2 link suggestions · Review');
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const sheet = screen.getByTestId('link-review-sheet');
+    expect(screen.getByRole('note').textContent).toContain(
+      'https://fleet.example.com is unreachable right now (reconnecting, attempt 2)',
+    );
+    expect(screen.getAllByTestId('link-review-row')).toHaveLength(2);
+    for (const b of [...screen.getAllByTestId('link-review-yes'), ...screen.getAllByTestId('link-review-no')]) {
+      expect((b as HTMLButtonElement).disabled).toBe(true);
+    }
+    for (const key of ['y', 'Enter', 'n', 'Backspace']) {
+      await fireEvent.keyDown(sheet, { key });
+    }
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('confirm_session_work', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+    // Moving and closing are not hub calls: they still work.
+    await fireEvent.keyDown(sheet, { key: 'j' });
+    expect(screen.getAllByTestId('link-review-row')[1].classList.contains('cursor')).toBe(true);
+    // Once the link is back, the sheet decides again without reopening.
+    hubConnection.set({ state: 'connected' });
+    await tick();
+    expect(screen.queryByRole('note')).toBeNull();
+    expect((screen.getAllByTestId('link-review-yes')[0] as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.keyDown(sheet, { key: 'y' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 2, link_id: 12 },
     });
   });
 });
