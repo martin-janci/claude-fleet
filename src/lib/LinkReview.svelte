@@ -61,8 +61,7 @@
     cursor = i;
     const r = pending[i];
     if (!r) return;
-    focused = true;
-    focusSession(r.id, rowName(r));
+    if (focusSession(r.id, rowName(r))) focused = true;
   }
 
   async function decideAt(i: number, yes: boolean) {
@@ -89,7 +88,13 @@
       return;
     }
     const target = e.target as HTMLElement | null;
-    if (target !== e.currentTarget && !target?.classList.contains('review-row')) return;
+    if (target !== e.currentTarget && !target?.classList.contains('review-row')) {
+      // A select owns its keys; any other control keeps its activating keys
+      // (Enter, Space, y/n/Backspace) but j/k and the arrows have no meaning
+      // on a checkbox, link or button, so they still move the cursor.
+      if (target?.tagName === 'SELECT') return;
+      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+    }
     const n = pending.length;
     switch (e.key) {
       case 'j':
