@@ -13,7 +13,7 @@ use super::dial::*;
 use super::testkit::*;
 use super::wire::*;
 use crate::ssh::SshClient;
-use crate::store::{PeerLinkRow, SessionMessage, Store};
+use crate::store::{Adopted, PeerLinkRow, SessionMessage, Store};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -808,9 +808,10 @@ async fn a_re_pair_rebinds_onto_the_older_row_and_its_pending_rows_go_out() {
 }
 
 /// C1: a newly paired hub C whose handshake claims fleet-b — which A
-/// already has a connected link to — cannot take that link over. The claim
-/// ends refused on C's own row, naming the live link; the live link keeps
-/// its url, token and state, and A's next message still goes to B.
+/// already has a connected link to — cannot take that link over. C's own
+/// row is refused the fleet: it waits, naming the live link, and never
+/// merges while that link works; the live link keeps its url, token and
+/// state, and A's messages still go to B.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_peer_claiming_a_connected_links_fleet_is_refused() {
     let p = pair();
@@ -825,45 +826,168 @@ async fn a_new_peer_claiming_a_connected_links_fleet_is_refused() {
             .unwrap()
             .insert_dialer_link("https://c.example", "t-c")
             .unwrap();
-    let exit = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::spawn(run_link(
-            p.a.clone(),
-            p.a_ssh.clone(),
-            claimant,
-            "t-c".into(),
-            loopback(&c, &c_ssh, c_client),
-            p.cancel.clone(),
-        )),
+    let c_call = loopback(&c, &c_ssh, c_client);
+    let claim_loop = tokio::spawn(run_link(
+        p.a.clone(),
+        p.a_ssh.clone(),
+        claimant,
+        "t-c".into(),
+        c_call.clone(),
+        p.cancel.clone(),
+    ));
+    let claim_row = || p.a.lock().unwrap().peer_link(claimant).unwrap();
+    p.until("the claim waits", || {
+        claim_row().is_some_and(|r| r.last_error.is_some())
+    })
+    .await;
+    // C has a message for A's session: it must not land while C waits.
+    let c1 = session(&c, "c1");
+    crate::service::messages::send_message(
+        args(c1, "fleet-a/session/local/a1", "from c"),
+        &c,
+        &c_ssh,
     )
     .await
-    .expect("the claimant's loop stops")
     .unwrap();
-    assert_eq!(exit, LinkExit::Refused);
-    let (live, claim) = {
-        let s = p.a.lock().unwrap();
-        (
-            s.peer_link(p.link).unwrap().unwrap(),
-            s.peer_link(claimant)
-                .unwrap()
-                .expect("the claimant row stays"),
-        )
-    };
+    // More handshakes: the claim is re-checked, and refused again.
+    p.until("the claim was checked again", || {
+        c_call.calls.load(Ordering::SeqCst) >= 3
+    })
+    .await;
+    p.send_a_to_b("still to b").await;
+    p.until("B has it", || p.b_inbox().len() == 1).await;
+    let live = p.row();
+    let claim = claim_row().expect("the claimant row stays");
     assert_eq!(live.url.as_deref(), Some("https://b.example"));
     assert_eq!(live.token.as_deref(), Some("t"));
     assert_eq!(live.state, "connected");
-    assert_eq!(claim.state, "refused");
+    assert_eq!(claim.state, "retrying");
     assert!(claim.fleet_id.is_none());
+    assert_eq!(claim.token.as_deref(), Some("t-c"));
     let why = claim.last_error.unwrap_or_default();
     assert!(
         why.contains(&format!(
-            "fleet fleet-b is already linked (link {})",
+            "fleet fleet-b is still linked (link {}); waiting for it to stop",
             p.link
-        )) && why.contains("fleet-hub peer remove"),
+        )) && !why.contains("peer remove"),
         "{why}"
     );
-    p.send_a_to_b("still to b").await;
-    p.until("B has it", || p.b_inbox().len() == 1).await;
+    assert!(!claim_loop.is_finished());
+    assert!(p.a_inbox().is_empty(), "C's message landed while it waits");
+    p.cancel.cancel();
+    assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+    assert_eq!(claim_loop.await.unwrap(), LinkExit::Cancelled);
+}
+
+/// The documented re-pair, as it races: B revokes A's old peer client and
+/// A adds the new code while A's old loop still has a call in flight on the
+/// old token, so the old row still reads `connected`. The new row's
+/// handshake reaches B (which rebinds to the new token) but must not strand
+/// the link: it waits `retrying`, delivering and accepting nothing, until
+/// the old loop is refused, then merges — and the link ends `connected` on
+/// the new token with every waiting message, both ways, delivered once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_pair_racing_the_old_loop_waits_for_it_and_then_merges() {
+    let p = pair();
+    let old_loop = p.start();
+    p.handshake().await;
+    p.parked().await;
+    // B: the old peer client is revoked and a new one paired.
+    p.b.lock().unwrap().revoke_client_token("hub-a").unwrap();
+    let c2 = peer_client(&p.b, "hub-a-2");
+    let new_call = loopback(&p.b, &p.b_ssh, c2);
+    // A's old loop: its next call is in flight across the re-pair, and B's
+    // auth layer answers it 401 once released (the old token is revoked).
+    p.call.arm(Fault::HoldThenRefuse("E_UNAUTHORIZED"));
+    p.send_a_to_b("waiting on the old link").await;
+    p.until("the old call is in flight", || {
+        p.call.held.load(Ordering::SeqCst)
+    })
+    .await;
+    assert_eq!(p.row().state, "connected");
+    // A: `peer add` with the new code.
+    let tmp =
+        p.a.lock()
+            .unwrap()
+            .insert_dialer_link("https://b.example", "t2-new-token")
+            .unwrap();
+    let new_loop = tokio::spawn(run_link(
+        p.a.clone(),
+        p.a_ssh.clone(),
+        tmp,
+        "t2-new-token".into(),
+        new_call.clone(),
+        p.cancel.clone(),
+    ));
+    let tmp_row = || p.a.lock().unwrap().peer_link(tmp).unwrap();
+    let waiting = format!(
+        "fleet fleet-b is still linked (link {}); waiting for it to stop",
+        p.link
+    );
+    p.until("the new row waits", || {
+        tmp_row().is_some_and(|r| {
+            r.state == "retrying" && r.last_error.as_deref().unwrap_or("").contains(&waiting)
+        })
+    })
+    .await;
+    // While it waits, B has a message for A: the new row must not take it.
+    p.send_b_to_a("waiting on B").await;
+    p.until("the new row asked again", || {
+        new_call.calls.load(Ordering::SeqCst) >= 2
+    })
+    .await;
+    assert!(p.a_inbox().is_empty(), "accepted before the merge");
+    assert!(p.b_inbox().is_empty(), "delivered before the merge");
+    let r = tmp_row().expect("the new row stays until the merge");
+    assert!(r.fleet_id.is_none());
+    assert!(
+        !r.last_error.unwrap_or_default().contains("peer remove"),
+        "never tell the operator to fail the waiting messages"
+    );
+    assert!(!new_loop.is_finished());
+    let old = p.row();
+    assert_eq!(
+        (old.state.as_str(), old.token.as_deref()),
+        ("connected", Some("t"))
+    );
+    // The old call comes back refused.
+    p.call.release.notify_one();
+    let exit = tokio::time::timeout(Duration::from_secs(5), old_loop)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit, LinkExit::Refused);
+    let exit = tokio::time::timeout(Duration::from_secs(10), new_loop)
+        .await
+        .expect("the new row merges once the old one stopped")
+        .unwrap();
+    assert_eq!(exit, LinkExit::Rebound(p.link));
+    assert!(tmp_row().is_none(), "the temporary row is dropped");
+    let kept = p.row();
+    assert_eq!(kept.token.as_deref(), Some("t2-new-token"));
+    assert_eq!(kept.state, "retrying");
+    // The supervisor starts the kept row on its new credentials.
+    let h = tokio::spawn(run_link(
+        p.a.clone(),
+        p.a_ssh.clone(),
+        p.link,
+        "t2-new-token".into(),
+        new_call.clone(),
+        p.cancel.clone(),
+    ));
+    p.until("connected on the new token, both ways", || {
+        p.row().state == "connected"
+            && p.a_pending() == 0
+            && p.b_inbox().len() == 1
+            && p.a_inbox().len() == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(p.b_inbox().len(), 1);
+    assert_eq!(p.a_inbox().len(), 1);
+    assert!(p.b_inbox()[0].body.ends_with("waiting on the old link"));
+    assert!(p.a_inbox()[0].body.ends_with("waiting on B"));
+    assert_eq!(p.row().token.as_deref(), Some("t2-new-token"));
     p.cancel.cancel();
     assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
 }
@@ -895,7 +1019,10 @@ async fn a_stale_loops_refusal_cannot_clobber_a_re_paired_row() {
         let tmp = s
             .insert_dialer_link("https://b2.example", "t2-new-token")
             .unwrap();
-        assert_eq!(s.adopt_dialer_fleet(tmp, "fleet-b").unwrap(), p.link);
+        assert_eq!(
+            s.adopt_dialer_fleet(tmp, "fleet-b").unwrap(),
+            Adopted::Link(p.link)
+        );
     }
     p.call.release.notify_one();
     let exit = tokio::time::timeout(Duration::from_secs(5), stale)
@@ -1415,7 +1542,10 @@ async fn the_supervisor_restarts_a_running_link_on_new_credentials() {
         s.set_peer_link_state(link, "refused", Some("E_UNAUTHORIZED: gone"), 0)
             .unwrap();
         let tmp = s.insert_dialer_link("https://b.example", NEW).unwrap();
-        assert_eq!(s.adopt_dialer_fleet(tmp, "fleet-b").unwrap(), link);
+        assert_eq!(
+            s.adopt_dialer_fleet(tmp, "fleet-b").unwrap(),
+            Adopted::Link(link)
+        );
     }
     tokio::task::block_in_place(|| {
         wait("a loop on the new token", &|| {

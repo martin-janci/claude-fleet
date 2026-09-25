@@ -615,6 +615,23 @@ until_ok 350 'tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":f
 n=$(tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -o "while E was down" | wc -l | tr -d ' ')
 check "a message sent while hub E was down arrives once after its restart" '[ "$n" = 1 ]' "count=$n"
 
+# The documented re-pair, while D's old loop is still parked on the old
+# token: revoke on E, pair again, `peer add` on D, old link left alone. The
+# new row may handshake before the old loop hears its 401; it must wait and
+# then take the old row over, not strand the link (both rows refused).
+rev=$("$BIN" client revoke hub-d --data-dir "$ROOT/e" --port "$PE" 2>&1)
+check "hub E revokes hub D's old peer client" 'echo "$rev" | grep -q "revoked hub-d"' "$(redact "$rev")"
+CODE3=$("$BIN" pair --data-dir "$ROOT/e" --name hub-d-2 --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
+out=$("$BIN" peer add --data-dir "$ROOT/d" --insecure "http://127.0.0.1:$PE" "$CODE3" 2>&1); rc=$?
+check "peer add re-pairs hub D to hub E" '[ $rc -eq 0 ]' "$(redact "$out")"
+tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"across the re-pair\"}" >/dev/null
+until_ok 750 'tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -q "across the re-pair"'
+n=$(tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -o "across the re-pair" | wc -l | tr -d ' ')
+check "a message sent across a re-pair arrives once" '[ "$n" = 1 ]' "count=$n / $(redact "$("$BIN" peer list --data-dir "$ROOT/d")")"
+until_ok 150 '[ "$("$BIN" peer list --data-dir "$ROOT/d" | grep -c dialer)" = 1 ] && "$BIN" peer list --data-dir "$ROOT/d" | grep dialer | grep -q connected'
+pl=$("$BIN" peer list --data-dir "$ROOT/d")
+check "the re-paired link is one connected row" '[ "$(echo "$pl" | grep -c dialer)" = 1 ] && echo "$pl" | grep dialer | grep -q connected' "$(redact "$pl")"
+
 # A peer token reaches peer_exchange only.
 CODE2=$("$BIN" pair --data-dir "$ROOT/e" --name probe --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
 PTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PE/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$CODE2\"}" | grep -oE '"token": ?"[0-9a-f]+' | grep -oE '[0-9a-f]{64}')

@@ -20,7 +20,7 @@ use crate::mcp::guard;
 use crate::service::messages::timeline_detail;
 use crate::ssh::SshClient;
 use crate::store::{
-    PeerLinkRow, Store, LINK_CONNECTED, LINK_INCOMPATIBLE, LINK_REFUSED, LINK_RETRYING,
+    Adopted, PeerLinkRow, Store, LINK_CONNECTED, LINK_INCOMPATIBLE, LINK_REFUSED, LINK_RETRYING,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -205,6 +205,9 @@ enum Settled {
     /// Applied, but the peer answered no result for this many of the
     /// messages sent: back off rather than resend at full speed.
     Short(usize),
+    /// Not applied: the handshake's fleet still has a running link. Stay
+    /// `retrying` with this reason and handshake again after a backoff.
+    Wait(String),
     Exit(LinkExit),
 }
 
@@ -314,6 +317,18 @@ pub async fn run_link(
                         let why =
                             format!("the peer did not answer for {unanswered} sent message(s)");
                         if !fence.state(LINK_CONNECTED, &why) {
+                            return LinkExit::Superseded;
+                        }
+                        if sleep_or_cancel(&cancel, backoff.next()).await {
+                            return LinkExit::Cancelled;
+                        }
+                    }
+                    Ok(Settled::Wait(why)) => {
+                        tracing::info!(
+                            link_id,
+                            "[peer] the peer's fleet is still linked; waiting for that link to stop"
+                        );
+                        if !fence.state(LINK_RETRYING, &why) {
                             return LinkExit::Superseded;
                         }
                         if sleep_or_cancel(&cancel, backoff.next()).await {
@@ -456,11 +471,23 @@ async fn settle(
         None => {
             let adopted = lock(store)?.adopt_dialer_fleet(link.id, &resp.fleet_id);
             let kept = match adopted {
-                Ok(kept) => kept,
-                // That fleet already has a link — a working dialer row
-                // (this handshake may not take it over) or a listener row
-                // (it dials us). One link per fleet, and retrying cannot
-                // change that: terminal on THIS row; the other is untouched.
+                Ok(Adopted::Link(kept)) => kept,
+                // That fleet's dialer link is still running. Most often it
+                // is the old loop of a re-pair, not yet refused on its
+                // revoked token (parked, or backing off); it may also be a
+                // working link this handshake must never take over. Either
+                // way nothing the peer answered applies — no results, no
+                // messages, `after` unmoved — and this row asks again after
+                // a backoff: it merges once the other row has stopped.
+                Ok(Adopted::Waiting(live)) => {
+                    return Ok(Settled::Wait(format!(
+                        "fleet {} is still linked (link {live}); waiting for it to stop",
+                        resp.fleet_id
+                    )));
+                }
+                // That fleet already has a listener row (it dials us). One
+                // link per fleet, and retrying cannot change that: terminal
+                // on THIS row; the other is untouched.
                 Err(e) if e.code == codes::E_EXISTS => {
                     return Ok(Settled::Exit(fence.terminal(
                         LINK_REFUSED,

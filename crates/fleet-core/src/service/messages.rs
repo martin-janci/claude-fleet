@@ -971,7 +971,8 @@ mod tests {
         let link = {
             let s = store.lock().unwrap();
             let id = s.insert_dialer_link("https://b.example", "t").unwrap();
-            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+            id
         };
         let mut m = args(a, 0, "hi");
         m.to_session_id = 0;
@@ -1039,7 +1040,8 @@ mod tests {
         let link = {
             let s = store.lock().unwrap();
             let id = s.insert_dialer_link("https://b.example", "t").unwrap();
-            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+            id
         };
         for bad in ["Task", "a b", "kind\nx", &"k".repeat(33)] {
             let mut m = args(a, 0, "hi");
@@ -1083,7 +1085,8 @@ mod tests {
         let link = {
             let s = store.lock().unwrap();
             let id = s.insert_dialer_link("https://b.example", "t").unwrap();
-            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+            id
         };
         let mut long = args(a, 0, "hi");
         long.to_addr = Some(format!(
@@ -1176,7 +1179,8 @@ mod tests {
         let link = {
             let s = store.lock().unwrap();
             let id = s.insert_dialer_link("https://b.example", "t").unwrap();
-            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+            id
         };
         let mut reply = args(a, 0, "re");
         reply.to_addr = Some("fleet-b/session/h/b1".into());
@@ -1283,7 +1287,8 @@ mod tests {
         let link = {
             let s = store.lock().unwrap();
             let id = s.insert_dialer_link("https://b.example", "t").unwrap();
-            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+            id
         };
         let mut first = args(a, 0, "hi b");
         first.to_addr = Some("fleet-b/session/h/b1".into());
@@ -1319,7 +1324,8 @@ mod tests {
         let link = {
             let s = store.lock().unwrap();
             let id = s.insert_dialer_link("https://b.example", "t").unwrap();
-            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+            id
         };
         // `a` exchanges with the remote recipient — this is the parent `b`
         // will try to forge a reply onto.
@@ -1374,7 +1380,8 @@ mod tests {
         let link = {
             let s = store.lock().unwrap();
             let id = s.insert_dialer_link("https://b.example", "t").unwrap();
-            s.adopt_dialer_fleet(id, "fleet-b").unwrap()
+            s.adopt_dialer_fleet(id, "fleet-b").unwrap();
+            id
         };
         let mut m = args(long_sender, 0, "hi");
         m.to_addr = Some("fleet-b/session/h/b1".into());

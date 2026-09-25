@@ -105,7 +105,7 @@ been handed over.
 
 ### Revocation
 
-- `fleet-hub peer remove <fleet_id>` on either side stamps `revoked_at`. On the
+- `fleet-hub peer remove <fleet_id|id>` on either side stamps `revoked_at`. On the
   listener it also revokes the `client_tokens` row.
 - `fleet-hub client revoke` on the listener's peer token has the same effect:
   the next exchange is refused and the dialer goes `refused`.
@@ -359,10 +359,17 @@ Pending rows, `peer_state`, the pinned `fleet_id` and `after` all live in
   and the temporary row is dropped. The pending rows therefore stay attached
   to the same link, and the unique `fleet_id` is never violated. A handshake
   claiming a fleet whose live dialer row is in any other state (`connected`,
-  `retrying`) is refused: the NEW row goes terminal `refused` with
-  `fleet <id> is already linked (link <N>); remove it first with fleet-hub
-  peer remove`, and the live row is untouched — otherwise any newly paired
-  hub could take over a working link to a third fleet. The dialer checks the
+  `retrying`) does not take it over — otherwise any newly paired hub could
+  take over a working link to a third fleet — and the live row is
+  untouched. The NEW row is not terminal either: it stays `retrying`,
+  unpinned, with `fleet <id> is still linked (link <N>); waiting for it to
+  stop`, applies nothing the peer answered (no results, no messages, `after`
+  unmoved), backs off, and re-runs the handshake; it merges once that row
+  reads `refused` or `incompatible`. That is the documented re-pair racing
+  the old loop: B rebinds to the new token at the new row's first exchange,
+  while A's old loop is still parked or backing off and only then gets its
+  401. A terminal claim there stranded the link (both rows refused, B bound
+  to a token only a dead row held, the code spent). The dialer checks the
   answered `fleet_id` before anything else: malformed is `incompatible`, this
   hub's own id is `refused`.
 
@@ -441,7 +448,9 @@ Controller rulings during the build changed the design above as follows
   a second live token claiming the fleet is refused `E_FORBIDDEN`, naming
   `fleet-hub client revoke`.
 - **Dialer merge only into a stopped row.** The dialer-side mirror: a re-pair
-  merges into a `refused` / `incompatible` row only (§3 Retry).
+  merges into a `refused` / `incompatible` row only (§3 Retry). A claim on a
+  running row waits (`retrying`, exchanging nothing) and merges once that
+  row stops, rather than going terminal.
 - **Link-scoped results.** A peer's `accepted` / `rejected` results settle
   only rows on its own link; the listener ignores `accepted` entries and
   hands rows over by `after` alone.

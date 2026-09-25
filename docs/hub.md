@@ -641,21 +641,40 @@ connection, with about one round-trip of latency.
 
 Pair only a hub you trust: the **first** peer token to claim a given (never
 linked) fleet id gets that link, and no other token can claim the same fleet
-afterward. Re-pairing a fleet you have already linked needs the old peer
-token revoked first — `fleet-hub client revoke <name>` on whichever side
-minted it — otherwise the new code's first exchange is refused (`fleet <id>
-is already linked to another peer token; revoke that client first`); the
-link's waiting messages stay attached across a legitimate re-pair.
+afterward.
 
-On the dialing hub, a new `peer add` takes over an existing link to the same
-fleet only once that link has stopped (`peer list` shows it `refused` or
-`incompatible`); its waiting messages then go out over the new credentials.
-While the old link is still `connected` or `retrying`, the new one is refused
-on its first exchange (`fleet <id> is already linked (link <N>); remove it
-first with fleet-hub peer remove`) and the working link is left alone — so a
-newly paired hub can never claim a fleet you already talk to. A peer that
-answers with a malformed fleet id is `incompatible`; one that answers with
-this hub's own fleet id is `refused`.
+To **re-pair** a link you already have (a lost or leaked token, a rebuilt
+hub), keep the old link — its waiting messages are what a re-pair keeps:
+
+1. On the listening hub: `fleet-hub client revoke <old peer client>`, then
+   `fleet-hub pair --mode peer --name <label>` for a new code. (Without the
+   revoke, the new code's first exchange is refused: `fleet <id> is already
+   linked to another peer token; revoke that client first`.)
+2. On the dialing hub: `fleet-hub peer add https://<other-hub> <new code>`.
+   Do **not** `peer remove` the old link: that fails its waiting messages
+   back to their senders.
+
+The new link's first exchange reaches the other hub, but the old link may not
+have noticed its revoked token yet (it can be parked in a long-poll for up to
+25 s, or backing off). Until it does, `peer list` shows the new link
+`retrying` with `fleet <id> is still linked (link <N>); waiting for it to
+stop`, and it carries no messages either way. Once the old link's next
+exchange is refused, the new credentials move onto the old link — same link
+id, the new row disappears — and the waiting messages go out and come in over
+them, once each. This normally takes seconds; both links back off up to a
+minute between tries, so it can take two.
+
+The same wait is what keeps a newly paired hub from claiming a fleet you
+already talk to: a new link whose handshake names the fleet of a link that is
+still `connected` or `retrying` never takes it over, delivers nothing and
+accepts nothing; it waits, and `fleet_health` counts it as a link down. If you
+did not mean a re-pair, remove the waiting row by its ID (see below) — it holds
+no messages. Only if the old link can no longer reach the other hub at all
+(the hub moved to a new URL) will it never hear the refusal; then `peer
+remove` the old link to let the new one take the fleet, knowing its waiting
+messages fail back to their senders. A peer that answers with a malformed
+fleet id is `incompatible`; one that answers with this hub's own fleet id is
+`refused`.
 
 What a linked hub can do: deliver messages into your sessions' inboxes,
 marked as untrusted input, and receive your sessions' messages to it. What it
@@ -663,12 +682,17 @@ cannot do: call any other tool, read `/events`, type into a pane (a message
 from another fleet wakes an idle session with a fixed one-line nudge only,
 never its text), or forward your messages to a third fleet.
 
-Remove a link on either side with `fleet-hub peer remove <fleet-id>`; messages
-still waiting on it fail back to their senders as `message_undeliverable`, as
-does any message a peer has not taken within 7 days. A link that is refused
-(a revoked token, a fleet-id mismatch) or incompatible (a hub without
+Remove a link on either side with `fleet-hub peer remove <fleet-id>` or
+`fleet-hub peer remove <id>` (the `ID` column of `peer list`); messages still
+waiting on it fail back to their senders as `message_undeliverable`, as does
+any message a peer has not taken within 7 days. A link that is refused (a
+revoked token, a fleet-id mismatch) or incompatible (a hub without
 `peer_exchange`) stops retrying; pair again to restore it — waiting messages
-are kept for the week.
+are kept for the week. A link that stopped **before** its first handshake
+completed (its fleet reads `(handshake pending)` — a self-link, a fleet
+already linked the other way, a token the other hub refused) has no fleet id
+to remove it by and holds no messages: remove it by its ID, which also clears
+the `fleet_health` line it keeps raised.
 
 A message's `kind` crossing a link is a short lowercase token — 1 to 32
 bytes of `[a-z0-9_-]` (the default, `message`, always passes) — and never

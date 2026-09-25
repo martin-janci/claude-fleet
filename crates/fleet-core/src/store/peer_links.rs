@@ -94,6 +94,17 @@ pub struct OutboxRow {
     pub wake: bool,
 }
 
+/// The outcome of [`Store::adopt_dialer_fleet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adopted {
+    /// The link to use: this row, now pinned to the fleet, or the older
+    /// stopped row it was merged into (this one is gone).
+    Link(i64),
+    /// The fleet's live dialer link (this id) is still running, so nothing
+    /// changed: this row stays unpinned and asks again later.
+    Waiting(i64),
+}
+
 /// The outcome of [`Store::insert_inbound_remote`]: either a fresh row, or
 /// the id of the row this exact `(remote_fleet_id, remote_message_id)`
 /// already produced.
@@ -210,9 +221,11 @@ impl Store {
     /// this one is dropped, so its pending rows stay attached. A live row in
     /// any other state is a working link: this handshake cannot take it over
     /// (any newly paired hub could otherwise claim a third fleet's id and
-    /// receive its messages), so it is `E_EXISTS` and nothing changes. A
-    /// fleet this hub already listens for is `E_EXISTS` too.
-    pub fn adopt_dialer_fleet(&self, id: i64, fleet_id: &str) -> Result<i64, IpcError> {
+    /// receive its messages), so nothing changes and the answer is
+    /// [`Adopted::Waiting`] — the caller asks again later, and merges once
+    /// that row has stopped (a re-pair racing the old loop's refusal). A
+    /// fleet this hub already listens for is `E_EXISTS`.
+    pub fn adopt_dialer_fleet(&self, id: i64, fleet_id: &str) -> Result<Adopted, IpcError> {
         self.atomically(|s| {
             let other: Option<(i64, String)> = s
                 .conn
@@ -242,16 +255,10 @@ impl Store {
                             ),
                             other => other,
                         })?;
-                    Ok(id)
+                    Ok(Adopted::Link(id))
                 }
                 Some((live, state)) if state != LINK_REFUSED && state != LINK_INCOMPATIBLE => {
-                    Err(IpcError::new(
-                        codes::E_EXISTS,
-                        format!(
-                            "fleet {fleet_id} is already linked (link {live}); remove it \
-                             first with `fleet-hub peer remove {live}`"
-                        ),
-                    ))
+                    Ok(Adopted::Waiting(live))
                 }
                 Some((keep, _)) => {
                     s.conn.execute(
@@ -266,7 +273,7 @@ impl Store {
                     )?;
                     s.conn
                         .execute("DELETE FROM peer_links WHERE id = ?1", [id])?;
-                    Ok(keep)
+                    Ok(Adopted::Link(keep))
                 }
             }
         })
@@ -977,7 +984,7 @@ mod tests {
         s.set_peer_link_state(link, LINK_REFUSED, Some("E_UNAUTHORIZED: gone"), 1)
             .unwrap();
         let tmp = s.insert_dialer_link("https://b2.example", "new").unwrap();
-        assert_eq!(s.adopt_dialer_fleet(tmp, B).unwrap(), link);
+        assert_eq!(s.adopt_dialer_fleet(tmp, B).unwrap(), Adopted::Link(link));
         assert!(!s
             .set_dialer_link_state(link, "old", LINK_REFUSED, Some("E_UNAUTHORIZED: x"), 5)
             .unwrap());
@@ -1124,12 +1131,16 @@ mod tests {
     fn a_repaired_fleet_moves_onto_its_old_dialer_row() {
         let s = Store::open_in_memory().unwrap();
         let old = s.insert_dialer_link("https://b.example", "t1").unwrap();
-        assert_eq!(s.adopt_dialer_fleet(old, B).unwrap(), old);
+        assert_eq!(s.adopt_dialer_fleet(old, B).unwrap(), Adopted::Link(old));
         s.set_peer_link_state(old, LINK_REFUSED, Some("401"), 1)
             .unwrap();
         let new = s.insert_dialer_link("https://b2.example", "t2").unwrap();
         let kept = s.adopt_dialer_fleet(new, B).unwrap();
-        assert_eq!(kept, old, "pending rows stay on the old link");
+        assert_eq!(
+            kept,
+            Adopted::Link(old),
+            "pending rows stay on the old link"
+        );
         let row = s.peer_link(old).unwrap().unwrap();
         assert_eq!(row.url.as_deref(), Some("https://b2.example"));
         assert_eq!(row.token.as_deref(), Some("t2"));
@@ -1139,26 +1150,22 @@ mod tests {
 
     /// C1: a newly paired hub whose handshake claims a fleet that already has
     /// a working (or merely retrying) dialer link cannot take that link over:
-    /// the claim is refused naming the link, the live row keeps its url,
-    /// token and state, and the new row is left as it was. Only a `refused`
-    /// or `incompatible` row takes new credentials (a re-pair).
+    /// the claim waits on the live link, which keeps its url, token and
+    /// state, and the new row is left as it was. Only a `refused` or
+    /// `incompatible` row takes new credentials (a re-pair).
     #[test]
     fn a_new_row_cannot_take_over_a_live_link_for_its_fleet() {
         let s = Store::open_in_memory().unwrap();
         let live = s.insert_dialer_link("https://b.example", "t-b").unwrap();
-        assert_eq!(s.adopt_dialer_fleet(live, B).unwrap(), live);
+        assert_eq!(s.adopt_dialer_fleet(live, B).unwrap(), Adopted::Link(live));
         assert!(s.set_dialer_link_progress(live, "t-b", 3, None, 1).unwrap());
         for state in [LINK_CONNECTED, LINK_RETRYING] {
             s.set_peer_link_state(live, state, None, 2).unwrap();
             let claimant = s.insert_dialer_link("https://evil.example", "t-c").unwrap();
-            let e = s.adopt_dialer_fleet(claimant, B).unwrap_err();
-            assert_eq!(e.code, crate::ipc_error::codes::E_EXISTS, "{state}");
-            assert!(
-                e.message
-                    .contains(&format!("fleet {B} is already linked (link {live})"))
-                    && e.message.contains("fleet-hub peer remove"),
-                "{}",
-                e.message
+            assert_eq!(
+                s.adopt_dialer_fleet(claimant, B).unwrap(),
+                Adopted::Waiting(live),
+                "{state}"
             );
             let row = s.peer_link(live).unwrap().unwrap();
             assert_eq!(row.url.as_deref(), Some("https://b.example"));
@@ -1177,7 +1184,11 @@ mod tests {
             let again = s
                 .insert_dialer_link("https://b2.example", &format!("t-{state}"))
                 .unwrap();
-            assert_eq!(s.adopt_dialer_fleet(again, B).unwrap(), live, "{state}");
+            assert_eq!(
+                s.adopt_dialer_fleet(again, B).unwrap(),
+                Adopted::Link(live),
+                "{state}"
+            );
             let row = s.peer_link(live).unwrap().unwrap();
             assert_eq!(row.token.as_deref(), Some(format!("t-{state}").as_str()));
             assert_eq!(row.state, LINK_RETRYING);
@@ -1193,7 +1204,10 @@ mod tests {
     fn ensure_listener_link_refuses_a_fleet_already_linked_the_other_way() {
         let s = Store::open_in_memory().unwrap();
         let dialer = s.insert_dialer_link("https://b.example", "t").unwrap();
-        assert_eq!(s.adopt_dialer_fleet(dialer, B).unwrap(), dialer);
+        assert_eq!(
+            s.adopt_dialer_fleet(dialer, B).unwrap(),
+            Adopted::Link(dialer)
+        );
 
         let c = client(&s, "hub-b");
         let err = s.ensure_listener_link(c, B).unwrap_err();
