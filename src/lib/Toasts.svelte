@@ -96,6 +96,7 @@
   }
   .toast.error { border-left-color: #e64a4a; }
   .toast.success { border-left-color: #50c86e; }
+  .toast.warning { border-left-color: #e0a030; }
   .toast.info { border-left-color: var(--accent); }
   .code {
     flex: 0 0 auto;
