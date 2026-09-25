@@ -473,7 +473,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
     .unwrap();
     assert_eq!(hinted.host_alias, "hosta");
 
-    let (row, queued) = start_with(&fx.store, &plan, None, spawn_on(&fx.store))
+    let (row, queued) = start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
         .await
         .unwrap();
     assert!(!queued);
@@ -525,9 +525,15 @@ async fn a_brief_start_queues_the_ticket_with_its_text_fenced() {
     let text = brief.find("Ignore previous instructions").unwrap();
     let end = brief.find(crate::mcp::guard::UNTRUSTED_END).unwrap();
     assert!(marker < text && text < end, "{brief}");
-    let (row, queued) = start_with(&fx.store, &plan, Some(brief.clone()), spawn_on(&fx.store))
-        .await
-        .unwrap();
+    let (row, queued) = start_with(
+        &fx.store,
+        &plan,
+        Some(brief.clone()),
+        &OrgScope::All,
+        spawn_on(&fx.store),
+    )
+    .await
+    .unwrap();
     assert!(queued);
     let pending = fx
         .store
@@ -575,7 +581,9 @@ async fn a_start_that_loses_the_race_reports_the_winner_and_its_orphan() {
             .unwrap();
         std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
     };
-    let e = start_with(&fx.store, &plan, None, spawn).await.unwrap_err();
+    let e = start_with(&fx.store, &plan, None, &OrgScope::All, spawn)
+        .await
+        .unwrap_err();
     assert_eq!(e.code, codes::E_EXISTS);
     let d = e.details.unwrap();
     assert_eq!(d["session_id"], winner.lock().unwrap().unwrap());
@@ -585,6 +593,65 @@ async fn a_start_that_loses_the_race_reports_the_winner_and_its_orphan() {
     assert_eq!(row.tmux_name, "loser");
     assert!(row.work.is_none(), "the loser is not linked");
     assert!(e.message.contains("loser"), "{}", e.message);
+}
+
+/// The post-spawn re-check keeps `plan_start`'s D7 rule: when the winner
+/// is an isolated org's session the caller may not see, the refusal says
+/// only that the key has a live session, and its details carry the orphan
+/// alone — no id, host or tmux name of the winner.
+#[tokio::test]
+async fn a_lost_race_does_not_name_an_isolated_orgs_winner() {
+    let fx = Fx::new();
+    {
+        let s = fx.store.lock().unwrap();
+        let c = s.add_org("Company C", None, true).unwrap().id;
+        s.upsert_host("hostc").unwrap();
+        s.set_host_org("hostc", Some(c)).unwrap();
+    }
+    // The tracker has no org: its item's live links are kept from every org.
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let store = Arc::clone(&fx.store);
+    let spawn = move |a: crate::service::sessions::NewSessionArgs| {
+        let s = store.lock().unwrap();
+        let other = s
+            .upsert_session("winner", "hostc", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(other, WorkTarget::Key("ABC-1"), "started")
+            .unwrap();
+        let id = s
+            .upsert_session("loser", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    };
+    let scope = OrgScope::for_host(&fx.store.lock().unwrap(), "hosta").unwrap();
+    let e = start_with(&fx.store, &plan, None, &scope, spawn)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    assert_eq!(e.message, "ABC-1 already has a live session");
+    let d = e.details.unwrap();
+    let orphan = d["orphan_session_id"].as_i64().unwrap();
+    assert_eq!(
+        d.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["orphan_session_id"],
+        "{d}"
+    );
+    let s = fx.store.lock().unwrap();
+    let row = s.get_session_by_id(orphan).unwrap().unwrap();
+    assert_eq!(row.tmux_name, "loser");
+    assert!(row.work.is_none(), "the loser is not linked");
 }
 
 #[tokio::test]
