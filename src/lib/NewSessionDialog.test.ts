@@ -1606,6 +1606,35 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     projects.set([]);
   });
 
+  it('forgets ticked repos when the ticket changes, and never starts in one not shown (M9.6)', async () => {
+    const { projects } = await import('./projects');
+    projects.set([
+      project as never,
+      { project: { ...project.project, id: 2, repo: 'web', base_path: '/r/web' }, worktrees: [] } as never,
+    ]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'session_work_links')
+        return JSON.stringify(a).includes('ABC-7')
+          ? [{ id: 1, state: 'confirmed', source: 'manual', created_at: 1, ended_at: 5, snap_project_id: 2 }]
+          : [];
+      if (cmd === 'start_work') return started;
+      if (cmd === 'start_work_multi') return { key: 'XYZ-9', started: [started] };
+      return null;
+    });
+    const { rerender } = render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate: () => {}, onCancel: () => {} },
+    });
+    await fireEvent.click(await screen.findByTestId('ticket-also-in-2'));
+    // Another ticket: repo 2 is no longer offered, and its tick is gone.
+    await rerender({ ticket: { ...ticket, id: 43, key: 'XYZ-9', title: 'Other' } });
+    await vi.waitFor(() => expect(screen.queryByTestId('ticket-also-in')).toBeNull());
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    await vi.waitFor(() => expect(calls.some((c) => c[0] === 'start_work')).toBe(true));
+    expect(calls.some((c) => c[0] === 'start_work_multi')).toBe(false);
+    projects.set([]);
+  });
+
   it('sends an edited brief, or none when unticked', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
       cmd === 'start_work' ? started : null,

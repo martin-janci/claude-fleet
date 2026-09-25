@@ -72,6 +72,8 @@ import { onboardingDismissed } from './onboarding';
 import { toasts, clearToasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { workFilters, mineItemIds, DEFAULT_WORK_FILTERS } from './work_filters';
+import { trackers } from './trackers';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
@@ -2065,5 +2067,123 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(screen.queryByTestId('work-groups')).toBeNull();
     expect(await screen.findAllByTestId('proj-row')).toHaveLength(2);
     expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+  });
+});
+
+describe('Sidebar work filters (work graph M10.4)', () => {
+  const w = (key: string, item: number, status: string, archived: number | null = null) => ({
+    link_id: item, item_id: item, key, title: key, source: 'manual',
+    status_category: status, archived_at: archived,
+  });
+  const jira = (id: number, prefix: string) => ({
+    id, provider: 'jira_cloud', name: `Jira ${prefix}`, site_url: `https://${prefix}.example`,
+    state: 'ok', created_at: 0, config: { key_prefixes: [prefix] },
+  });
+  const names = () => screen.queryAllByTestId('sess-row').map((r) => r.textContent ?? '');
+
+  beforeEach(() => {
+    sidebarGroupBy.set('project');
+    workFilters.set({ ...DEFAULT_WORK_FILTERS });
+    trackers.set([]);
+    mineItemIds.set(new Set());
+  });
+
+  it('no chrome without work to filter', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick();
+    expect(screen.queryByTestId('work-filters-toggle')).toBeNull();
+  });
+
+  it('status chips filter the tree, count on the pill, and persist', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
+    const b = { ...sessionFor(1, 'dev-b'), work: w('PAY-2', 2, 'todo') };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick();
+    expect(screen.queryByTestId('work-filters')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    // Has-session is work mode only; one tracker needs no tracker chips.
+    expect(screen.queryByTestId('wf-session-no')).toBeNull();
+    expect(screen.queryByTestId('wf-tracker-all')).toBeNull();
+    await fireEvent.click(screen.getByTestId('wf-status-todo'));
+    await tick();
+    expect(names().some((n) => n.includes('dev-b'))).toBe(true);
+    expect(names().some((n) => n.includes('dev-a'))).toBe(false);
+    expect(screen.getByTestId('work-filters-toggle')).toHaveTextContent('⚑ work (1)');
+    const isAny = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+    expect(readPref('sidebar.work-filters', {}, isAny)).toMatchObject({ status: 'todo' });
+    await fireEvent.click(screen.getByTestId('wf-clear'));
+    await tick();
+    expect(names()).toHaveLength(2);
+    expect(get(workFilters)).toEqual(DEFAULT_WORK_FILTERS);
+  });
+
+  it('mine reads the hub’s mine view and composes with needs-you', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
+    const b = { ...sessionFor(1, 'dev-b'), work: w('PAY-2', 2, 'in_progress') };
+    mockBackend(fakeProjects, [a, b]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: unknown) =>
+      cmd === 'work_tickets' ? [{ id: 2 }] : base(cmd, x),
+    );
+    render(Sidebar);
+    await tick();
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await fireEvent.click(screen.getByTestId('wf-mine'));
+    await waitFor(() => expect(names()).toHaveLength(1));
+    expect(names()[0]).toContain('dev-b');
+    expect(mockedInvoke).toHaveBeenCalledWith('work_tickets', { args: { view: 'mine', limit: 200 } });
+    // Needs-you on top: nothing of mine needs me.
+    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await tick();
+    expect(names()).toHaveLength(0);
+  });
+
+  it('tracker chips show with two trackers and filter by the key’s tracker', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'todo') };
+    const b = { ...sessionFor(1, 'dev-b'), work: w('OPS-2', 2, 'todo') };
+    mockBackend(fakeProjects, [a, b]);
+    trackers.set([jira(1, 'PAY'), jira(2, 'OPS')] as never);
+    render(Sidebar);
+    await tick();
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await fireEvent.click(screen.getByTestId('wf-tracker-2'));
+    await tick();
+    expect(names()).toHaveLength(1);
+    expect(names()[0]).toContain('dev-b');
+  });
+
+  it('work mode: past only and hide archived act on past work', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
+    mockBackend(fakeProjects, [a]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { key?: string } }) => {
+      if (cmd === 'session_work_links') {
+        return x?.args?.key === undefined
+          ? [{ id: 2, ref_key: 'ABC-9', state: 'confirmed', source: 'manual', created_at: 1, ended_at: nowSec - 60, snap_host: 'local', snap_name: 'old' }]
+          : [];
+      }
+      return base(cmd, x);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await screen.findByTestId('past-work-group');
+    expect(names()).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await fireEvent.click(screen.getByTestId('wf-session-no'));
+    await tick();
+    expect(names()).toHaveLength(0);
+    expect(screen.getByTestId('past-work-group')).toHaveTextContent('ABC-9');
+    await fireEvent.click(screen.getByTestId('wf-session-yes'));
+    await tick();
+    expect(names()).toHaveLength(1);
+    expect(screen.queryByTestId('past-work-group')).toBeNull();
+    await fireEvent.click(screen.getByTestId('wf-session-any'));
+    await fireEvent.click(screen.getByTestId('wf-hide-archived'));
+    await tick();
+    expect(names()).toHaveLength(1);
+    expect(screen.queryByTestId('past-work-group')).toBeNull();
   });
 });

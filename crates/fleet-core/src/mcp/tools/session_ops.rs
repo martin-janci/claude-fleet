@@ -325,10 +325,7 @@ impl FleetTools {
         self.confirm_gate(
             "new_session",
             p.confirm_nonce.as_deref(),
-            &format!(
-                "host={} name={} project_id={:?}",
-                p.host_alias, p.name, p.project_id
-            ),
+            &new_session_summary(&p),
             &caller,
         )?;
         let args = sessions::NewSessionArgs {
@@ -374,10 +371,7 @@ impl FleetTools {
         self.confirm_gate(
             "new_shell_session",
             p.confirm_nonce.as_deref(),
-            &format!(
-                "host={} name={} project_id={:?}",
-                p.host_alias, p.name, p.project_id
-            ),
+            &new_shell_session_summary(&p),
             &caller,
         )?;
         let args = sessions::NewSessionArgs {
@@ -484,7 +478,10 @@ impl FleetTools {
     pub(super) async fn recreate_session(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<sessions::RecreateSessionArgs>,
+        Parameters(RecreateSessionParams {
+            args,
+            confirm_nonce,
+        }): Parameters<RecreateSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "recreate_session",
@@ -492,12 +489,25 @@ impl FleetTools {
         );
         // Gate on the stored row's host: a per-host token must not kill and
         // rebuild a session on another host by naming its fleet id.
-        self.resolve_target(
+        let (host, name) = self.resolve_target(
             &caller,
             Some(args.session_id),
             None,
             None,
             "the session to recreate",
+        )?;
+        // The operator's recreates (a kill and a start) need a person (D12).
+        self.confirm_gate(
+            "recreate_session",
+            confirm_nonce.as_deref(),
+            &format!(
+                "session_id={} host={} name={} force={}",
+                args.session_id,
+                bound_text(Some(&host)),
+                bound_text(Some(&name)),
+                args.force
+            ),
+            &caller,
         )?;
         let row = sessions::recreate_session(args, &self.store, &self.ssh)
             .await
@@ -517,13 +527,30 @@ impl FleetTools {
     pub(super) async fn restore_host_sessions(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<sessions::RestoreHostSessionsArgs>,
+        Parameters(RestoreHostSessionsParams {
+            args,
+            confirm_nonce,
+        }): Parameters<RestoreHostSessionsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "restore_host_sessions",
             &format!("host={} dry_run={}", args.host_alias, args.dry_run),
         );
         require_host(&caller, &args.host_alias, "the lost sessions")?;
+        // A real restore starts sessions: the operator's needs a person
+        // (D12). A dry run only reads the plan.
+        if !args.dry_run {
+            self.confirm_gate(
+                "restore_host_sessions",
+                confirm_nonce.as_deref(),
+                &format!(
+                    "host={} session_ids={:?}",
+                    bound_text(Some(&args.host_alias)),
+                    args.session_ids
+                ),
+                &caller,
+            )?;
+        }
         let report = sessions::restore_host_sessions(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -590,13 +617,22 @@ impl FleetTools {
     pub(super) async fn new_bg_session(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<crate::service::bg_sessions::NewBgSessionArgs>,
+        Parameters(NewBgSessionParams {
+            args,
+            confirm_nonce,
+        }): Parameters<NewBgSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "new_bg_session",
             &format!("host={} name={}", args.host_alias, args.name),
         );
         require_host(&caller, &args.host_alias, "the new background session")?;
+        self.confirm_gate(
+            "new_bg_session",
+            confirm_nonce.as_deref(),
+            &new_bg_session_summary(&args),
+            &caller,
+        )?;
         // The requester (when given) must exist and, for a per-host caller,
         // live on that host — otherwise any agent could parent a background
         // session onto somebody else's conversation. Same gate as

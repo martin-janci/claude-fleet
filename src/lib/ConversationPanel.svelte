@@ -105,6 +105,7 @@
   import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
+  import SpiralLoader from './SpiralLoader.svelte';
   import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
 
@@ -1722,7 +1723,9 @@
       {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
     </div>
   {:else if loading}
-    <p class="muted">Loading…</p>
+    <p class="muted conv-loading" data-testid="conv-loading" role="status">
+      <SpiralLoader size={16} />Loading conversation…
+    </p>
   {:else}
     <!-- A scrollable region has to be in the tab order, or the transcript
          can only be scrolled with a pointer; being focusable is also what
@@ -1751,7 +1754,7 @@
             Older turns not shown{#if (turnsWanted ?? CONV_TURNS_STEP) < CONV_MAX_TURNS}
               ·
               <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
-                >{loadingOlder ? 'Loading…' : 'Load older'}</button
+                >{#if loadingOlder}<SpiralLoader size={12} class="inline-spiral" />Loading…{:else}Load older{/if}</button
               >{/if}
           </p>
         {/if}
@@ -1966,7 +1969,7 @@
             role={indicator ? 'status' : undefined}
             aria-hidden={indicator ? undefined : 'true'}
           >
-            <span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>
+            <SpiralLoader size={16} paused={!indicator} class="indicator-spiral" />
             <span class="indicator-label"
               >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicatorLabel}</span
             >
@@ -2491,9 +2494,6 @@
     opacity: 0;
     pointer-events: none;
   }
-  .indicator.is-idle .pulse i {
-    animation-play-state: paused;
-  }
   .indicator[data-kind='sent'] {
     font-style: italic;
   }
@@ -2506,40 +2506,20 @@
   .probe-off code {
     font-size: inherit;
   }
-  .pulse {
-    display: inline-flex;
-    gap: 3px;
+  .indicator :global(.indicator-spiral) {
+    color: var(--accent);
   }
-  .pulse i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-    animation: conv-pulse 1.2s ease-in-out infinite;
+  .conv-loading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--fg-muted);
   }
-  .pulse i:nth-child(2) {
-    animation-delay: 0.2s;
-  }
-  .pulse i:nth-child(3) {
-    animation-delay: 0.4s;
-  }
-  @keyframes conv-pulse {
-    0%,
-    80%,
-    100% {
-      opacity: 0.25;
-      transform: scale(0.8);
-    }
-    40% {
-      opacity: 1;
-      transform: scale(1);
-    }
+  .linkish :global(.inline-spiral) {
+    margin-right: 0.3em;
+    vertical-align: -1px;
   }
   @media (prefers-reduced-motion: reduce) {
-    .pulse i {
-      animation: none;
-      opacity: 0.7;
-    }
     .tools summary::before {
       transition: none;
     }

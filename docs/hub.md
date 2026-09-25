@@ -619,6 +619,18 @@ What a client may do:
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
   this option keeps marking everything, which is the safe direction.
 
+**Work on a phone** (the work graph, M8). A client token is served `work`
+and — `full` only — `work_link`, and never `work_admin`, so tracker
+administration stays on the desktop. With it the phone shows each session's
+ticket and groups by it, confirms or rejects a suggestion, starts and resumes
+work from a ticket, and (M8.6) reads *Today* (`work today`), a ticket's
+acceptance criteria (`work card`) and past work (`resume_plan`), asks a
+session for a handover note (`work_link handover`, `full`), and labels and
+filters by organisation (`work orgs`). A client token is never org-scoped
+(the org fence of M5 is for per-host tokens, the ones agents hold), so the
+org chips on a phone are a way of reading the fleet, not a fence. Every one of these is gated on the hub's own
+`tools/list`, action by action, so an older hub simply shows less.
+
 `revoke` takes effect on the client's very next request — the auth layer only
 resolves live rows — and an open event stream ends within one heartbeat
 (15 s). The row is kept, revoked, for the audit trail, and the name becomes
@@ -1943,8 +1955,11 @@ deliberately.
   from a desktop can carry it switched on; `fleet-hub serve` logs a warning
   at startup when it is.
 - **The operator's starts and kills.** The UX agent's operator session
-  must have its session starts (`new_session`, `new_shell_session`,
-  `work_link` `start` / `resume`) and kills approved by a person, whatever
+  must have its session starts and restarts (`new_session`,
+  `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task` with
+  `new_worker`, `restore_host_sessions` other than a `dry_run`,
+  `recreate_session`, `restart_session`, `work_link` `start` / `resume`)
+  and kills approved by a person, whatever
   `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
   no approver, so an operator homed on a hub-served fleet is refused those
   calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from

@@ -77,6 +77,15 @@ export function siblingCandidates(
     });
 }
 
+/**
+ * The ticked sibling projects still on offer, in ticking order: a tick left
+ * over from another key (or a candidate that has since gone) is dropped, so
+ * a start never reaches a repository the dialog does not show.
+ */
+export function shownSiblings(ticked: readonly number[], offered: readonly SiblingCandidate[]): number[] {
+  return ticked.filter((id) => offered.some((c) => c.id === id));
+}
+
 /** One line on what a multi-repo start left out, or null when nothing. */
 export function multiStartNote(r: MultiStart, labelOf: (projectId: number) => string): string | null {
   const parts: string[] = [];

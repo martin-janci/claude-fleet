@@ -81,6 +81,10 @@ use serde_json::Value;
 ///   `work` so a phone can never group a session by a guess. Absent for
 ///   most rows, so a row replaced whole without it has no suggestion.
 ///   Added for fleet-mobile's work milestone (M8).
+/// * `org_id` — the session's organisation (M5): the phone's org label and
+///   org filter for a session with no work, which carries no `org_id` of its
+///   own. An id only; the names come from `work { action: orgs }`. Absent
+///   for a session no org claims. Added for fleet-mobile's M8.6.
 ///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
@@ -104,6 +108,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "last_stop_at",
     "last_turn_at",
     "needs_attention",
+    "org_id",
     "pending_input",
     "project_id",
     "safe_kill_state",

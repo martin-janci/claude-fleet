@@ -28,7 +28,7 @@
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
-  import { startWorkMulti, siblingCandidates, multiStartNote } from './multi_start';
+  import { startWorkMulti, siblingCandidates, multiStartNote, shownSiblings } from './multi_start';
 
   let {
     project,
@@ -674,30 +674,37 @@
   // ── Multi-repo start (work graph M9.6) ──
   // One ticket, one sibling session per repository, all on the same branch
   // name (D11). Offered: the projects this key ran in before.
+  const ticketKey = $derived(ticket?.key ?? null);
   let ticketPast = $state<WorkLink[]>([]);
+  let alsoIn = $state<number[]>([]);
+  // A different key (or project) is a different offer: forget the old one's
+  // past links and ticked repos, so a stale tick can never start a session
+  // in a repository the dialog no longer shows.
   $effect(() => {
-    const key = ticket?.key;
+    const key = ticketKey;
+    void projectId;
+    ticketPast = [];
+    alsoIn = [];
     if (!key) return;
     void endedWorkLinks(key).then((r) => {
-      if (ticket?.key === key && r.ok && Array.isArray(r.value)) ticketPast = r.value;
+      if (ticketKey === key && r.ok && Array.isArray(r.value)) ticketPast = r.value;
     });
   });
   const siblings = $derived(
-    ticket?.key ? siblingCandidates(ticket.key, projectId, ticketPast, $sessions, $projects) : [],
+    ticketKey ? siblingCandidates(ticketKey, projectId, ticketPast, $sessions, $projects) : [],
   );
-  let alsoIn = $state<number[]>([]);
   function toggleAlso(id: number, on: boolean) {
     alsoIn = on ? [...alsoIn.filter((x) => x !== id), id] : alsoIn.filter((x) => x !== id);
   }
   const multiBlocked = $derived(hubActionBlocked('start_work_multi', $hubStatus, $hubConnection));
 
-  async function submitMulti(t: TicketRow, host: string) {
+  async function submitMulti(t: TicketRow, host: string, extra: number[]) {
     if (multiBlocked) return;
     busy = true;
     error = null;
     const r = await startWorkMulti({
       ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
-      project_ids: [projectId, ...alsoIn],
+      project_ids: [projectId, ...extra],
       host_alias: host,
       name: friendlyName.trim() || undefined,
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
@@ -738,8 +745,10 @@
     }
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
-    if (alsoIn.length > 0) {
-      await submitMulti(t, submittedHost);
+    // Only repositories still offered: never one the dialog does not show.
+    const extra = shownSiblings(alsoIn, siblings);
+    if (extra.length > 0) {
+      await submitMulti(t, submittedHost, extra);
       if (!error) remember(submittedHost, submittedWorktreeId);
       return;
     }

@@ -348,8 +348,10 @@ acceptance on a real fleet is still to do.
   three link-less turns with 1–5 candidates in the host's scope; Claude's
   answer (`source: agent_inferred`) is a pre-selected suggestion only (R11).
   See the M4 plan's Revisions.
-- **Not done:** the remote-host SessionStart measurement. (Suggestions on
-  the phone landed with M8.)
+- **Remote-host SessionStart measurement:** the procedure is written
+  (`scripts/measure-session-start.sh`, M10.4) and the M4 plan has a
+  placeholder table; **to be measured by the user**. D5 stays open.
+  (Suggestions on the phone landed with M8.)
 
 **Value:** most sessions are linked correctly without touching anything, and
 every link says why. **Tests:** the resolver table (conflicts, a sticky reject,
@@ -398,11 +400,11 @@ to do.
   scopes, Settings → Work → Organisations (read-only when paired), colour
   bars, the cross-org "Link anyway"; one `rowMatches` for the sidebar's
   two modes, past work and ⌘K.
-- **Not done:** a Today view to scope (M9 does not exist yet); tracker /
-  status / assignee / has-session / archived filters have no chrome of
-  their own yet (the predicate composes them; only scope, host, bg and
-  needs-you are wired to controls); the phone does not show orgs (M8); the
-  manual acceptance.
+- **Filter chrome** (M10.4): tracker / status / mine / has-session /
+  archived are chips under the sidebar's "⚑ work" pill, persisted, through
+  the same `rowMatches`.
+- **Not done:** a Today view to scope (M9 does not exist yet); the phone
+  does not show orgs (M8); the manual acceptance.
 
 ### M6: more providers
 
@@ -532,6 +534,13 @@ fleet-mobile's `claude/cloud-fleet-work-graph-m8` is superseded by it. Note
 the plan's Revisions item 4 (an absent `work` on a row means none), which
 #32 follows.
 
+**M8.6** (the phone catches up with M4.6, M5 and M9.1–M9.3): `org_id` joins
+`PHONE_SESSION_FIELDS` (hub side, no contract bump); on fleet-mobile the
+*Today* sheet with *Copy standup*, a ticket's acceptance criteria and past
+work, *Ask for a handover* followed on the timeline, org labels and an org
+filter, and the `agent_inferred` wording — on fleet-mobile's
+`claude/cloud-fleet-work-graph-m8-6`, per the M8 plan's §M8.6.
+
 ### M9: beyond
 
 The ideas the review ranked, for when M1–M8 have settled.
@@ -592,6 +601,32 @@ acceptance is still to do.
   operator's instructions say how to tidy through `work { tidy }` /
   `work_link { tidy_apply }` without ever turning a safe kill into a kill.
 
+### M10: settle, prove, and reach the phone
+
+Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
+
+- **Review leftovers:** the M9.3 / M9.6 should-fix items, per-caller
+  isolation rows.
+- **End to end:** `hub-e2e.sh` covers the work graph against a loopback fake
+  tracker.
+- **Acceptance:** one written manual acceptance run, for the user to execute.
+- **Recorded gaps closed or decided:** Today → Tidy-up, filter chrome, the
+  remote SessionStart numbers (D5), M4.6 (D14).
+- **Phone:** Today and the ticket card, read-only (D15).
+- **Replay ring:** pressure measured before anything is changed.
+
+**Value:** the work graph is proven end to end and has no silent "not done".
+
+**Status (2026-09-25):**
+- **M10.4** (branch `claude/cloud-fleet-work-graph-m10`): Today's Stale
+  opens the Tidy-up sheet narrowed to those sessions (Show all widens it);
+  the work filters have chips; the remote SessionStart measurement has a
+  script and a placeholder table for the user (D5 open). M4.6 was built
+  on its own branch and merged (#273, OFF), which settles D14. Frontend and docs only: no new tool, action, command,
+  migration or contract bump.
+- M10.0 (the plan) is committed; M10.1–M10.3, M10.5 and M10.6 are not
+  started.
+
 ## Critical path and parallelism
 
 ```
@@ -614,13 +649,16 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 | D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org |
 | D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-25: none.** M9.5 stays planned, not built |
 | D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub |
-| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide |
+| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95 |
 | D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only |
 | D9 | May fleet spend a turn of a session's model to write its handover (M9.3)? | on demand · also at safe kill · never | **Decided 2026-09-25: on demand only** (a button; never at safe kill) |
 | D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-25: off.** M9.4 stays planned, not built |
 | D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before** |
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always** |
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
+| D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
+| D15 | Handover and multi-start on the phone (M10.5)? | read-only M9 only · also the actions | Read-only only (Today + card) |
+| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | Local opt-in, as today |
 
 ## Risks to watch
 
@@ -712,4 +750,15 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: the two M9 follow-ups on M7 (Today → Tidy up, the operator's
   "Tidy up done tickets"); frontend and the operator's CLAUDE.md only — no
   new action, no budget change.
-
+- 2026-09-25: M10 planned (`plans/2026-09-25-work-graph-m10-settle.md`):
+  review leftovers, a work-graph e2e, the written acceptance, the recorded
+  gaps, the phone's M9 moments, replay-ring measurement. New decisions
+  D14–D16; D5 re-asked with remote numbers.
+- 2026-09-25: M10.4 on `claude/cloud-fleet-work-graph-m10`: Today → Tidy-up
+  narrowed to the stale sessions, the work-filter chips, the remote
+  SessionStart measurement procedure (`scripts/measure-session-start.sh`;
+  numbers to be taken by the user, D5 open). D14–D16 added to the decisions table with their defaults. No new tool,
+  action, command, migration or contract bump; the tool budget is untouched.
+- 2026-09-25: `main` merged into M10.4. M4.6 had landed on `main` (#273,
+  OFF behind `work.classify_nudge`), so M10.4's "decided against" is
+  withdrawn: D14 reads *built, off by default*.
