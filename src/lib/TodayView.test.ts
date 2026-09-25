@@ -14,6 +14,7 @@ import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import type { Today } from './today';
+import { tidyRequest, EMPTY_REPORT } from './tidy';
 
 const digest: Today = {
   since: 0,
@@ -86,5 +87,30 @@ describe('TodayView', () => {
     render(TodayView);
     await flush();
     expect(screen.getByTestId('today-error').textContent).toContain('hub unreachable');
+  });
+
+  it('Stale sessions fleet suggests tidying open Tidy up with just those picked (M9)', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_today') return digest;
+      if (cmd === 'work_tidy')
+        return {
+          ...EMPTY_REPORT,
+          candidates: [
+            { session_id: 42, host_alias: 'mefistos', tmux_name: 'old', reason: 'done_idle', action: 'safe_kill', since: 0 },
+            { session_id: 99, host_alias: 'mefistos', tmux_name: 'x', reason: 'done_idle', action: 'safe_kill', since: 0 },
+          ],
+        };
+      return null;
+    });
+    tidyRequest.set(null);
+    const onclose = vi.fn();
+    render(TodayView, { onclose });
+    await flush();
+    const btn = await screen.findByTestId('today-tidy');
+    expect(btn.textContent).toBe('Tidy up · 1');
+    await fireEvent.click(btn);
+    expect(get(tidyRequest)?.sessionIds).toEqual([42]);
+    expect(onclose).toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).not.toContain('tidy_apply');
   });
 });

@@ -3,6 +3,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyItems,
+  candidatesFor,
+  requestedTicks,
+  tidyRequestLive,
+  TIDY_REQUEST_TTL_MS,
   autoTidyPreview,
   choicesFor,
   defaultChoice,
@@ -148,3 +152,25 @@ describe('the sidebar scope (work graph M5)', () => {
     expect(inScope(cands, rows, 'org:1', scopeOf).map((c) => c.session_id)).toEqual([1, 3]);
   });
 });
+
+describe('tidy requests (work graph M9)', () => {
+  const c = (id: number, action = 'safe_kill', reason = 'done_idle') =>
+    ({ session_id: id, host_alias: 'h', tmux_name: `s${id}`, reason, action, since: 0 }) as TidyCandidate;
+
+  it('tick the requested rows it can act on, else the preselection', () => {
+    const cands = [c(1), c(2, 'resume_or_expire', 'ghost_expiring'), c(3)];
+    expect([...requestedTicks(cands, { sessionIds: [3, 9], at: 0 })]).toEqual([3]);
+    expect([...requestedTicks(cands, { sessionIds: [], at: 0 })].sort()).toEqual(
+      cands.filter(preselected).map((x) => x.session_id).sort(),
+    );
+    expect(candidatesFor(cands, [1, 3]).map((x) => x.session_id)).toEqual([1, 3]);
+  });
+
+  it('a request lives for a short while only', () => {
+    const now = 1_000_000;
+    expect(tidyRequestLive({ sessionIds: [], at: now - TIDY_REQUEST_TTL_MS }, now)).toBe(true);
+    expect(tidyRequestLive({ sessionIds: [], at: now - TIDY_REQUEST_TTL_MS - 1 }, now)).toBe(false);
+    expect(tidyRequestLive(null, now)).toBe(false);
+  });
+});
+
