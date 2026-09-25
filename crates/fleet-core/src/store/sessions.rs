@@ -1376,7 +1376,11 @@ impl Store {
     }
 
     /// [`Self::set_transcript_path_by_claude_id`] for one row, and only while
-    /// `claude_session_id` is still its current conversation.
+    /// `claude_session_id` is still its current conversation. A repeat of
+    /// the same path is a no-op write (Task 3: every hook of a conversation
+    /// resends the same `transcript_path`, and an unconditional write here
+    /// bumped `row_version` — see migration 042's trigger — on every one of
+    /// them).
     pub fn set_transcript_path_for_row(
         &self,
         row_id: i64,
@@ -1384,7 +1388,8 @@ impl Store {
         path: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
         self.conn.execute(
-            "UPDATE sessions SET transcript_path = ?1 WHERE id = ?2 AND claude_session_id = ?3",
+            "UPDATE sessions SET transcript_path = ?1 WHERE id = ?2 AND claude_session_id = ?3 \
+             AND transcript_path IS NOT ?1",
             rusqlite::params![path, row_id, claude_session_id],
         )?;
         Ok(())

@@ -130,8 +130,10 @@ impl Store {
     /// One transaction; emits `session:updated` and `session:conversations`
     /// after commit.
     ///
-    /// Opens its own transaction, so it cannot run inside
-    /// `Store::atomically` (SQLite has no nested `BEGIN`).
+    /// Runs under a SAVEPOINT (Task 3), so it works standalone (autocommit —
+    /// a SAVEPOINT opens an implicit transaction of its own) and nested
+    /// inside `Store::atomically` (`service::hooks::resolve_and_rebind` calls
+    /// it from a hook's own transaction).
     pub fn rebind_conversation(
         &self,
         session_id: i64,
@@ -166,93 +168,118 @@ impl Store {
         turn_started: bool,
     ) -> Result<Option<SessionRow>, IpcError> {
         let now = now_unix();
-        let tx = self.conn.unchecked_transaction()?;
-        let prior_id: Option<String> = tx
-            .query_row(
-                "SELECT claude_session_id FROM sessions WHERE id=?1",
-                [session_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let same = prior_id.as_deref() == Some(claude_session_id);
-        tx.execute(
-            "UPDATE conversations SET ended_at = COALESCE(ended_at, ?3), \
-                 end_reason = COALESCE(end_reason, 'replaced') \
-             WHERE session_id = ?1 AND claude_session_id != ?2 AND ended_at IS NULL",
-            rusqlite::params![session_id, claude_session_id, now],
-        )?;
-        tx.execute(
-            "INSERT INTO conversations (session_id, claude_session_id, transcript_path, \
-                 started_at, start_source, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-             ON CONFLICT(session_id, claude_session_id) DO UPDATE SET \
-                 ended_at = NULL, end_reason = NULL, \
-                 transcript_path = COALESCE(excluded.transcript_path, transcript_path), \
-                 model = COALESCE(excluded.model, model)",
-            rusqlite::params![
-                session_id,
-                claude_session_id,
-                transcript_path,
-                now,
-                source.as_str(),
-                model
-            ],
-        )?;
-        if same && !matches!(source, StartSource::Unknown | StartSource::Compact) {
-            tx.execute(
-                "UPDATE conversations SET start_source = ?3 \
-                 WHERE session_id = ?1 AND claude_session_id = ?2 AND start_source = 'unknown'",
-                rusqlite::params![session_id, claude_session_id, source.as_str()],
+        // SAVEPOINT, not a second `BEGIN`: `Store::atomically` cannot nest,
+        // and Task 3 calls this from inside one
+        // (`service::hooks::resolve_and_rebind` runs under a hook's
+        // transaction). A SAVEPOINT works both standalone (autocommit — it
+        // starts an implicit transaction) and already inside an open
+        // transaction, so this stays one commit either way instead of a
+        // separate autocommit under the store mutex.
+        self.conn.execute_batch("SAVEPOINT rebind_conversation")?;
+        let outcome: Result<(), IpcError> = (|| {
+            let prior_id: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT claude_session_id FROM sessions WHERE id=?1",
+                    [session_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            let same = prior_id.as_deref() == Some(claude_session_id);
+            self.conn.execute(
+                "UPDATE conversations SET ended_at = COALESCE(ended_at, ?3), \
+                     end_reason = COALESCE(end_reason, 'replaced') \
+                 WHERE session_id = ?1 AND claude_session_id != ?2 AND ended_at IS NULL",
+                rusqlite::params![session_id, claude_session_id, now],
             )?;
-        }
-        let path_sql = if same {
-            "transcript_path = COALESCE(?3, transcript_path)"
-        } else {
-            "transcript_path = ?3"
-        };
-        let resets = source.resets_context() && !(same && turn_started);
-        let reset_sql = if resets && turn_started {
-            ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
-               context_at = ?5, context_stale = 0"
-        } else if resets {
-            ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
-               context_at = ?5, context_stale = 0, current_activity = NULL, last_prompt = NULL, \
-               pending_input = NULL"
-        } else if matches!(
-            source,
-            StartSource::Resume | StartSource::Unknown | StartSource::Fork
-        ) && !same
-        {
-            ", context_stale = 1"
-        } else {
-            ""
-        };
-        let sql = format!(
-            "UPDATE sessions SET claude_session_id = ?2, {path_sql}, \
-                 model = COALESCE(?4, model), awaiting_rebind_at = NULL{reset_sql} \
-             WHERE id = ?1"
-        );
-        // rusqlite rejects a bound parameter the statement does not use, and
-        // only the resetting branch references `?5`.
-        let params: [&dyn rusqlite::ToSql; 5] = [
-            &session_id,
-            &claude_session_id,
-            &transcript_path,
-            &model,
-            &now,
-        ];
-        let n_params = if resets { 5 } else { 4 };
-        tx.execute(&sql, &params[..n_params])?;
-        // Work graph M2.2: a conversation that an ENDED work link snapshotted
-        // is being resumed (from fleet's Resume, `claude --resume`, or a
-        // `/resume`) — the work follows it. Best-effort: work links never
-        // fail a rebind.
-        if !same {
-            if let Err(e) = self.carry_resumed_work(session_id, claude_session_id) {
-                tracing::warn!(session_id, error = %e.message, "[work] resume carry failed");
+            self.conn.execute(
+                "INSERT INTO conversations (session_id, claude_session_id, transcript_path, \
+                     started_at, start_source, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(session_id, claude_session_id) DO UPDATE SET \
+                     ended_at = NULL, end_reason = NULL, \
+                     transcript_path = COALESCE(excluded.transcript_path, transcript_path), \
+                     model = COALESCE(excluded.model, model)",
+                rusqlite::params![
+                    session_id,
+                    claude_session_id,
+                    transcript_path,
+                    now,
+                    source.as_str(),
+                    model
+                ],
+            )?;
+            if same && !matches!(source, StartSource::Unknown | StartSource::Compact) {
+                self.conn.execute(
+                    "UPDATE conversations SET start_source = ?3 \
+                     WHERE session_id = ?1 AND claude_session_id = ?2 AND start_source = 'unknown'",
+                    rusqlite::params![session_id, claude_session_id, source.as_str()],
+                )?;
+            }
+            let path_sql = if same {
+                "transcript_path = COALESCE(?3, transcript_path)"
+            } else {
+                "transcript_path = ?3"
+            };
+            let resets = source.resets_context() && !(same && turn_started);
+            let reset_sql = if resets && turn_started {
+                ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
+                   context_at = ?5, context_stale = 0"
+            } else if resets {
+                ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
+                   context_at = ?5, context_stale = 0, current_activity = NULL, last_prompt = NULL, \
+                   pending_input = NULL"
+            } else if matches!(
+                source,
+                StartSource::Resume | StartSource::Unknown | StartSource::Fork
+            ) && !same
+            {
+                ", context_stale = 1"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "UPDATE sessions SET claude_session_id = ?2, {path_sql}, \
+                     model = COALESCE(?4, model), awaiting_rebind_at = NULL{reset_sql} \
+                 WHERE id = ?1"
+            );
+            // rusqlite rejects a bound parameter the statement does not use,
+            // and only the resetting branch references `?5`.
+            let params: [&dyn rusqlite::ToSql; 5] = [
+                &session_id,
+                &claude_session_id,
+                &transcript_path,
+                &model,
+                &now,
+            ];
+            let n_params = if resets { 5 } else { 4 };
+            self.conn.execute(&sql, &params[..n_params])?;
+            // Work graph M2.2: a conversation that an ENDED work link
+            // snapshotted is being resumed (from fleet's Resume, `claude
+            // --resume`, or a `/resume`) — the work follows it. Best-effort:
+            // work links never fail a rebind, and this still runs inside the
+            // SAVEPOINT so a genuine rebind failure cannot leave a carry
+            // half-applied.
+            if !same {
+                if let Err(e) = self.carry_resumed_work(session_id, claude_session_id) {
+                    tracing::warn!(session_id, error = %e.message, "[work] resume carry failed");
+                }
+            }
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE rebind_conversation")?;
+            }
+            Err(e) => {
+                // Best-effort: undo just this SAVEPOINT's work and surface
+                // the original error.
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO rebind_conversation; RELEASE rebind_conversation");
+                return Err(e);
             }
         }
-        tx.commit()?;
         self.bus.conversations_changed(session_id);
         Ok(self.emit_session(session_id)?)
     }
@@ -279,7 +306,8 @@ impl Store {
     /// Store a hook-validated transcript path on the session's conversation
     /// row for `claude_session_id`, so an earlier conversation can be read
     /// after the session has moved on. No event: `list_conversations` reads
-    /// it on demand.
+    /// it on demand. A repeat of the same path is a no-op write (Task 3: a
+    /// hook resending the same `transcript_path` must not cost a write).
     pub fn set_conversation_transcript_path(
         &self,
         session_id: i64,
@@ -288,7 +316,7 @@ impl Store {
     ) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE conversations SET transcript_path = ?3 \
-             WHERE session_id = ?1 AND claude_session_id = ?2",
+             WHERE session_id = ?1 AND claude_session_id = ?2 AND transcript_path IS NOT ?3",
             rusqlite::params![session_id, claude_session_id, path],
         )?;
         Ok(())
@@ -438,7 +466,12 @@ impl Store {
     }
 
     /// Write a context size for `claude_session_id` — ignored when that is no
-    /// longer the session's current conversation. Derives `context_pct`.
+    /// longer the session's current conversation. Derives `context_pct`. A
+    /// repeat of the same tokens/window/source/model on an already-fresh
+    /// context (`context_stale = 0`) is a no-op write (Task 3: `refresh_context`
+    /// calls this on every Stop hook's follow-up, most of which report the
+    /// same size as last time) — still written when it would clear
+    /// `context_stale`, since that is a real state change.
     pub fn set_context(
         &self,
         session_id: i64,
@@ -454,7 +487,9 @@ impl Store {
             "UPDATE sessions SET context_tokens = ?3, context_window = ?4, context_pct = ?5, \
                  context_source = ?6, context_at = ?7, context_stale = 0, \
                  model = COALESCE(?8, model) \
-             WHERE id = ?1 AND claude_session_id = ?2",
+             WHERE id = ?1 AND claude_session_id = ?2 \
+               AND (context_stale = 1 OR context_tokens IS NOT ?3 OR context_window IS NOT ?4 \
+                    OR context_source IS NOT ?6 OR model IS NOT COALESCE(?8, model))",
             rusqlite::params![
                 session_id,
                 claude_session_id,
