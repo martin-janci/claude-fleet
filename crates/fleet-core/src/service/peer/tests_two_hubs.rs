@@ -476,6 +476,9 @@ async fn a_dialer_that_crashed_before_its_watermark_stores_the_batch_once() {
         )
         .unwrap();
     let calls = p.call.calls.load(Ordering::SeqCst);
+    // Checked before the loop starts: on a loaded box a worker can run the
+    // whole resend before this thread reads B's outbox.
+    assert_eq!(p.b_pending(b_link), 1);
     let restart = CancellationToken::new();
     let h = tokio::spawn(run_link(
         p.a.clone(),
@@ -485,7 +488,6 @@ async fn a_dialer_that_crashed_before_its_watermark_stores_the_batch_once() {
         p.call.clone(),
         restart.clone(),
     ));
-    assert_eq!(p.b_pending(b_link), 1);
     p.until("B handed it over again", || p.b_pending(b_link) == 0)
         .await;
     assert!(p.call.calls.load(Ordering::SeqCst) > calls);
