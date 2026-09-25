@@ -168,7 +168,9 @@ impl Store {
     /// `usage_daily` bucket for the UTC day of `now`. Returns whether the
     /// totals or model changed; only then is `usage_updated_at` stamped and
     /// `session_updated` emitted (a pass that only moves the offset is
-    /// silent). An unknown session id is a no-op.
+    /// silent). An unknown session id is a no-op. Opens its own transaction;
+    /// a caller that already holds one (usage collection's per-host batch)
+    /// uses [`Store::apply_usage_in_tx`] instead.
     pub fn apply_usage(
         &self,
         session_id: i64,
@@ -176,10 +178,52 @@ impl Store {
         d: &UsageDelta,
     ) -> Result<bool, rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
-        let old: Option<(UsageTotals, Option<String>)> = tx
+        let changed = self.apply_usage_body(session_id, host_alias, d)?;
+        tx.commit()?;
+        if changed {
+            self.emit_session(session_id)?;
+        }
+        Ok(changed)
+    }
+
+    /// Same as [`Store::apply_usage`] but assumes the caller already holds a
+    /// transaction — usage collection's per-host batch, run inside
+    /// [`Store::atomically`], where a second `BEGIN` on the same connection
+    /// would error. Still emits `session_updated` when the row changed:
+    /// `atomically` holds bus events until its own commit, so this never
+    /// announces a write that later rolls back.
+    pub fn apply_usage_in_tx(
+        &self,
+        session_id: i64,
+        host_alias: &str,
+        d: &UsageDelta,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.apply_usage_body(session_id, host_alias, d)?;
+        if changed {
+            self.emit_session(session_id)?;
+        }
+        Ok(changed)
+    }
+
+    /// Shared body of [`Store::apply_usage`] / [`Store::apply_usage_in_tx`]:
+    /// writes without opening or committing a transaction. A pass whose
+    /// token totals and model are unchanged AND whose offset does not move
+    /// writes nothing — there is no new byte read to account for and no
+    /// cursor progress to persist, so neither the row nor `usage_daily` is
+    /// touched (and `usage_last_msg_id` / `usage_source` are not clobbered
+    /// with the empty values a no-growth read reports).
+    fn apply_usage_body(
+        &self,
+        session_id: i64,
+        host_alias: &str,
+        d: &UsageDelta,
+    ) -> Result<bool, rusqlite::Error> {
+        let old: Option<(UsageTotals, Option<String>, i64)> = self
+            .conn
             .query_row(
                 "SELECT usage_input_tokens, usage_output_tokens, usage_cache_write_tokens, \
-                 usage_cache_read_tokens, usage_cost_micros, usage_model FROM sessions WHERE id = ?1",
+                 usage_cache_read_tokens, usage_cost_micros, usage_model, usage_offset_bytes \
+                 FROM sessions WHERE id = ?1",
                 rusqlite::params![session_id],
                 |r| {
                     Ok((
@@ -191,11 +235,12 @@ impl Store {
                             cost_micros: r.get(4)?,
                         },
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((before, old_model)) = old else {
+        let Some((before, old_model, old_offset)) = old else {
             return Ok(false);
         };
         let after = if d.reset {
@@ -212,7 +257,11 @@ impl Store {
         };
         let model = d.model.clone().or_else(|| old_model.clone());
         let changed = after != before || model != old_model;
-        tx.execute(
+        let new_offset = d.offset.max(0);
+        if !changed && new_offset == old_offset {
+            return Ok(false);
+        }
+        self.conn.execute(
             "UPDATE sessions SET usage_input_tokens = ?1, usage_output_tokens = ?2, \
              usage_cache_write_tokens = ?3, usage_cache_read_tokens = ?4, usage_cost_micros = ?5, \
              usage_model = ?6, usage_offset_bytes = ?7, usage_source = ?8, usage_last_msg_id = ?9, \
@@ -225,7 +274,7 @@ impl Store {
                 after.cache_read_tokens,
                 after.cost_micros,
                 model,
-                d.offset.max(0),
+                new_offset,
                 d.source,
                 d.last_msg_id,
                 changed,
@@ -235,7 +284,7 @@ impl Store {
             ],
         )?;
         if !daily.is_zero() {
-            tx.execute(
+            self.conn.execute(
                 "INSERT INTO usage_daily (day, host_alias, input_tokens, output_tokens, \
                  cache_write_tokens, cache_read_tokens, cost_micros) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  ON CONFLICT(day, host_alias) DO UPDATE SET \
@@ -254,10 +303,6 @@ impl Store {
                     daily.cost_micros
                 ],
             )?;
-        }
-        tx.commit()?;
-        if changed {
-            self.emit_session(session_id)?;
         }
         Ok(changed)
     }

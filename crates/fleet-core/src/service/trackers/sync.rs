@@ -368,6 +368,11 @@ impl TrackerSync {
         self.store_items(tracker_id, found, store, seen, pass)
     }
 
+    /// One batch's items, one transaction: every upsert (and its status
+    /// journal row) commits together instead of autocommitting per item,
+    /// and an unchanged item's `fetched_at` touch is deferred to a single
+    /// batched `UPDATE … WHERE id IN (…)` after the loop instead of one
+    /// `UPDATE` each.
     fn store_items(
         &self,
         tracker_id: i64,
@@ -377,23 +382,27 @@ impl TrackerSync {
         pass: &mut TrackerPass,
     ) -> Result<(), TrackerError> {
         let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
-        for item in items {
-            if !seen.insert((item.external_id.clone(), item.updated)) {
-                continue;
+        s.atomically(|s| {
+            let mut unchanged_ids = Vec::new();
+            for item in items {
+                if !seen.insert((item.external_id.clone(), item.updated)) {
+                    continue;
+                }
+                pass.seen += 1;
+                let key = item.key.clone();
+                let out = s.upsert_tracker_item_batched(tracker_id, &to_write(item))?;
+                if out.changed {
+                    pass.changed += 1;
+                } else {
+                    unchanged_ids.push(out.id);
+                }
+                if let Some((from, to)) = out.status_change {
+                    let _ = s.journal_status_change(out.id, key.as_deref(), &from, &to);
+                }
             }
-            pass.seen += 1;
-            let key = item.key.clone();
-            let out = s
-                .upsert_tracker_item(tracker_id, &to_write(item))
-                .map_err(|e| TrackerError::Invalid(e.message))?;
-            if out.changed {
-                pass.changed += 1;
-            }
-            if let Some((from, to)) = out.status_change {
-                let _ = s.journal_status_change(out.id, key.as_deref(), &from, &to);
-            }
-        }
-        Ok(())
+            s.touch_tracker_items_fetched_at(&unchanged_ids)
+        })
+        .map_err(|e| TrackerError::Invalid(e.message))
     }
 }
 

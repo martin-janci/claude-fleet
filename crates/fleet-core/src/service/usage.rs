@@ -633,16 +633,22 @@ pub async fn collect_host(
     }
     let results = parse_batch_output(&stdout);
     let s = lock(store)?;
-    let mut changed = 0;
-    for c in &cursors {
-        if let Some(FileOutcome::Read(read)) = results.get(&c.session_id) {
-            let delta = plan_delta(read, overrides, MAX_CHUNK_BYTES, now);
-            if s.apply_usage(c.session_id, host, &delta)? {
-                changed += 1;
+    // One transaction for the whole host: every session's pass commits
+    // together instead of one autocommit per session, and a no-op pass
+    // (`apply_usage_in_tx` skipping a session whose offset did not move)
+    // writes nothing at all.
+    s.atomically(|s| {
+        let mut changed = 0;
+        for c in &cursors {
+            if let Some(FileOutcome::Read(read)) = results.get(&c.session_id) {
+                let delta = plan_delta(read, overrides, MAX_CHUNK_BYTES, now);
+                if s.apply_usage_in_tx(c.session_id, host, &delta)? {
+                    changed += 1;
+                }
             }
         }
-    }
-    Ok(changed)
+        Ok(changed)
+    })
 }
 
 /// The hosts a collection pass visits, from `(alias, reachable)` rows:
@@ -1745,6 +1751,130 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.code.starts_with("E_"), "{}", err.code);
+    }
+
+    // ── Task 5: one transaction per host, no-op passes write nothing ──
+
+    #[tokio::test]
+    async fn a_pass_with_no_new_bytes_writes_no_row() {
+        let (store, id, _path) = store_with_session("vps");
+        let fake = FakeSsh::new();
+        let src = format!("{SID}.jsonl");
+        // First pass: establishes a cursor and some totals.
+        fake.on(
+            Match::script_contains("tail -c +"),
+            Reply::ok(&format!(
+                "F\t{id}\tnew\t0\t500\t{src}\nU\t{id}\tclaude-opus-5\t10\t1\t0\t0\t0\nE\t{id}\t480\tmsg_a\tclaude-opus-5\t10,1,0,0,0\n"
+            )),
+        );
+        assert_eq!(
+            collect_host(&store, &fake, "vps", &BTreeMap::new(), 1_000)
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Second pass: nothing past the offset — chunk 0, nothing consumed,
+        // no message reported (mirrors a real awk run that found no new
+        // complete line).
+        fake.on(
+            Match::script_contains("tail -c +"),
+            Reply::ok(&format!("F\t{id}\tcont\t480\t0\t{src}\nE\t{id}\t0\t\t\t\n")),
+        );
+        let before = {
+            let s = store.lock().unwrap();
+            (
+                s.conn_for_test().total_changes(),
+                s.get_session_by_id(id).unwrap().unwrap(),
+            )
+        };
+        let n = collect_host(&store, &fake, "vps", &BTreeMap::new(), 2_000)
+            .await
+            .unwrap();
+        let after = {
+            let s = store.lock().unwrap();
+            (
+                s.conn_for_test().total_changes(),
+                s.get_session_by_id(id).unwrap().unwrap(),
+            )
+        };
+        assert_eq!(n, 0, "no session's totals grew");
+        assert_eq!(
+            before.0, after.0,
+            "a no-growth pass writes nothing at all (no UPDATE, no usage_daily row)"
+        );
+        assert!(
+            before.1.eq_ignoring_row_version(&after.1),
+            "the row itself is untouched: {:?} -> {:?}",
+            before.1,
+            after.1
+        );
+    }
+
+    #[tokio::test]
+    async fn growth_for_2_of_3_sessions_updates_exactly_those_2_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        let sid = |i: i64| format!("550e8400-e29b-41d4-a716-44665544000{i}");
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let id = s
+                .upsert_session(
+                    &format!("dev-{i}"),
+                    "vps",
+                    None,
+                    None,
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            s.set_claude_session_id(id, &sid(i)).unwrap();
+            ids.push(id);
+        }
+        let store = Mutex::new(s);
+        let fake = FakeSsh::new();
+        // Sessions 0 and 1 grow; session 2 reports no new bytes.
+        let script = format!(
+            "F\t{a}\tnew\t0\t100\t{sa}.jsonl\nU\t{a}\tclaude-opus-5\t5\t1\t0\t0\t0\nE\t{a}\t80\tmsg_0\tclaude-opus-5\t5,1,0,0,0\n\
+             F\t{b}\tnew\t0\t100\t{sb}.jsonl\nU\t{b}\tclaude-opus-5\t7\t2\t0\t0\t0\nE\t{b}\t90\tmsg_1\tclaude-opus-5\t7,2,0,0,0\n\
+             F\t{c}\tnew\t0\t0\t{sc}.jsonl\nE\t{c}\t0\t\t\t\n",
+            a = ids[0],
+            b = ids[1],
+            c = ids[2],
+            sa = sid(0),
+            sb = sid(1),
+            sc = sid(2),
+        );
+        fake.on(Match::script_contains("tail -c +"), Reply::ok(&script));
+        let row_version_before = {
+            let s = store.lock().unwrap();
+            s.get_session_by_id(ids[2]).unwrap().unwrap().row_version
+        };
+        let changed = collect_host(&store, &fake, "vps", &BTreeMap::new(), 5_000)
+            .await
+            .unwrap();
+        assert_eq!(changed, 2, "exactly 2 of 3 sessions' totals grew");
+        let s = store.lock().unwrap();
+        let row0 = s.get_session_by_id(ids[0]).unwrap().unwrap();
+        let row1 = s.get_session_by_id(ids[1]).unwrap().unwrap();
+        let row2 = s.get_session_by_id(ids[2]).unwrap().unwrap();
+        assert_eq!(row0.usage.usage_input_tokens, 5);
+        assert_eq!(row1.usage.usage_input_tokens, 7);
+        assert_eq!(row0.usage.usage_updated_at, Some(5_000));
+        assert_eq!(row1.usage.usage_updated_at, Some(5_000));
+        assert_eq!(row2.usage.usage_input_tokens, 0);
+        assert_eq!(row2.usage.usage_updated_at, None, "session 2 never wrote");
+        assert_eq!(s.list_usage_cursors("vps").unwrap().len(), 3);
+        // Exactly 2 rows updated means the third is never written at all —
+        // not even a no-op UPDATE that sets the same values back (the
+        // `sessions_row_version_bump` trigger fires on ANY UPDATE, so an
+        // untouched row's row_version proves no UPDATE ran for it).
+        assert_eq!(
+            row2.row_version, row_version_before,
+            "session 2's row must not be written at all, not even a no-op UPDATE"
+        );
     }
 
     /// One real pass over `local`: the store hands out the cursors and the
