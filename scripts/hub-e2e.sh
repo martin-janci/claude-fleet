@@ -77,6 +77,8 @@ cleanup() {
   for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}" "${NAME4:-}" "${NAME5:-}"; do
     [ -n "$n" ] && tmux has-session -t "$n" 2>/dev/null && tmux kill-session -t "$n" 2>/dev/null
   done
+  # The work-graph leg's sessions (scripts/e2e/work.sh), on the same server.
+  declare -F work_cleanup >/dev/null && work_cleanup
   return 0
 }
 trap cleanup EXIT
@@ -647,6 +649,15 @@ hist=$(tool "$PD" "$PUB" "$TOKD" session_history "{\"session_id\":$SD}")
 check "the sender's timeline says message_undeliverable" 'echo "$hist" | grep -q message_undeliverable' "${hist:0:400}"
 stop_hub d
 
+# The work graph end to end (work graph M10.2): a fake tracker and a fake
+# Claude, driven through hub W. Needs a fleet-hub built with `--features e2e`;
+# any other build is skipped here, loudly (see scripts/e2e/work.sh).
+E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e"
+WORK_SKIPPED=0
+# shellcheck source=e2e/work.sh
+. "$E2E_DIR/work.sh"
+work_leg
+
 echo "== ssh-key in an isolated HOME"
 FH="$ROOT/home"; mkdir -p "$FH"
 HOME="$FH" "$BIN" ssh-key >"$ROOT/k1" 2>&1
@@ -660,5 +671,6 @@ check "public key without its private half is printed with a warning" 'grep -q "
 mv "$ROOT/parked" "$FH/.ssh/id_ed25519"
 
 echo
+[ "$WORK_SKIPPED" = 1 ] && echo "NOTE: the work graph leg was skipped: build fleet-hub with --features e2e to run it"
 echo "passed $PASS, failed $FAIL   (logs in $ROOT)"
 [ "$FAIL" -eq 0 ]

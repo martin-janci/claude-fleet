@@ -151,6 +151,9 @@ run_hub_e2e() {
     echo "ci-local: fleet-hub/fleet-agent not built at $target_dir/debug; run without --frontend-only, or build them first: cargo build -p fleet-hub -p fleet-agent --locked" >&2
     exit 1
   fi
+  # The work-graph leg needs the debug-only fake tracker override (work
+  # graph M10.2); the default build was already checked by run_rust.
+  step cargo build -p fleet-hub --locked --features e2e
   BIN="$bin" ABIN="$abin" step bash scripts/hub-e2e.sh
 }
 
