@@ -27,7 +27,8 @@ no setup; an explicit link (from the UI, or the in-session agent) wins over
 recognition, and "Not this" is sticky. When a session ends its link ends
 with a snapshot, and the work journal keeps what its conversations did, so
 the work can be resumed later — continued, or started fresh with a handover
-brief. A **tracker** (Jira Cloud today, configured on the hub) only enriches
+brief. A **tracker** (Jira Cloud, GitHub Issues through `gh`, Asana, Linear
+or Jira Data Center, configured on the hub) only enriches
 this: titles and status on the chips, tickets in ⌘K, and starting a session
 from a ticket in one step. Trackers are polled, read-only, and never gate
 anything. See [control-api.md](control-api.md) (`work`, `work_link`,

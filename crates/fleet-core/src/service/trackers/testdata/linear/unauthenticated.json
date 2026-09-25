@@ -1,0 +1,12 @@
+{
+  "errors": [
+    {
+      "message": "Authentication required, not authenticated",
+      "extensions": {
+        "code": "AUTHENTICATION_ERROR",
+        "type": "authentication error",
+        "statusCode": 401
+      }
+    }
+  ]
+}

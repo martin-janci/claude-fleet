@@ -1,0 +1,66 @@
+{
+  "data": {
+    "i0": {
+      "id": "iss-0001",
+      "identifier": "ENG-101",
+      "title": "Ship SSO",
+      "url": "https://linear.app/acme/issue/ENG-101/ship-sso",
+      "updatedAt": "2026-09-21T10:15:30.000Z",
+      "description": "Roll out SSO to every client.",
+      "previousIdentifiers": [],
+      "state": {
+        "name": "In Progress",
+        "type": "started"
+      },
+      "team": {
+        "key": "ENG"
+      },
+      "assignee": {
+        "id": "user-0001",
+        "name": "Dana Dev"
+      },
+      "parent": null,
+      "cycle": {
+        "number": 12,
+        "name": null,
+        "isActive": true
+      }
+    },
+    "i1": {
+      "id": "iss-0002",
+      "identifier": "ENG-102",
+      "title": "Audit log export",
+      "url": "https://linear.app/acme/issue/ENG-102/audit-log-export",
+      "updatedAt": "2026-09-21T08:00:00.000Z",
+      "description": null,
+      "previousIdentifiers": [],
+      "state": {
+        "name": "Todo",
+        "type": "unstarted"
+      },
+      "team": {
+        "key": "ENG"
+      },
+      "assignee": {
+        "id": "user-0001",
+        "name": "Dana Dev"
+      },
+      "parent": null,
+      "cycle": null
+    },
+    "i2": null
+  },
+  "errors": [
+    {
+      "message": "Entity not found: Issue",
+      "path": [
+        "i2"
+      ],
+      "extensions": {
+        "type": "invalid input",
+        "code": "INVALID_INPUT",
+        "userPresentableMessage": "Could not find referenced Issue."
+      }
+    }
+  ]
+}

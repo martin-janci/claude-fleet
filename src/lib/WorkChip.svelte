@@ -16,6 +16,9 @@
     trackerStale,
     syncedAgo,
     statusDotClass,
+    displayKey,
+    providerInfo,
+    showProviderBadges,
   } from './trackers';
   import { fleetSettings, settingInt, SETTING_KEYS } from './fleet_settings';
 
@@ -43,11 +46,16 @@
   );
   const ticketShaped = $derived(/^[A-Z][A-Z0-9_]{1,9}-\d{1,7}$/.test(workKey.key));
   const unbound = $derived(!suggested && !workKey.status && ticketShaped && !tracker);
+  // Work graph M6: which tracker, once there is more than one kind.
+  const prov = $derived(
+    tracker && showProviderBadges($trackers) ? providerInfo(tracker.provider) : null,
+  );
   const title = $derived.by(() => {
     let t = describeWorkKey(workKey);
     if (workKey.status) t += ` · ${syncedAgo(tracker, now())}`;
     if (stale) t += ' (stale: the tracker has not synced lately)';
-    if (unbound) t += ` · connect Jira in Settings → Work to see ${workKey.key}'s status`;
+    if (prov) t = `${prov.label} · ${t}`;
+    if (unbound) t += ` · connect its tracker in Settings → Work to see ${workKey.key}'s status`;
     if (suggested) t += ' · suggestion: Confirm (y) or Not this (n)';
     return t;
   });
@@ -72,7 +80,8 @@
       aria-label={workKey.status.name ?? workKey.status.category}
     ></span>
   {/if}
-  {workKey.key}{#if suggested}<span class="q" aria-label="suggested">?</span>{/if}
+  {#if prov}<span class="prov" data-testid="{testid}-provider" aria-label={prov.label}>{prov.icon}</span>{/if}
+  {displayKey(workKey.key)}{#if suggested}<span class="q" aria-label="suggested">?</span>{/if}
   {#if workKey.auto && !suggested}<span class="auto" data-testid="{testid}-auto" aria-label="linked automatically"></span>{/if}
   {#if stale}<span class="stale" data-testid="{testid}-stale" aria-label="stale">◷</span>{/if}
 </span>
@@ -135,5 +144,11 @@
   .stale {
     font-size: 0.6rem;
     opacity: 0.8;
+  }
+  .prov {
+    font-size: 0.58rem;
+    font-weight: 600;
+    opacity: 0.7;
+    margin-right: 0.15rem;
   }
 </style>

@@ -49,14 +49,16 @@ pub use rows::*;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
-pub use tracker_items::{ItemMeta, TrackerItemWrite, UpsertOutcome};
+pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use trackers::{
-    is_allowed_tracker_host, normalize_site_url, validate_credential_ref, Secret, TrackerConfig,
-    TrackerCredential, TrackerRow, TrackerViewRow, TRACKER_AUTH_KINDS, TRACKER_PROVIDERS,
-    TRACKER_STATES,
+    is_allowed_tracker_host, normalize_dc_site, normalize_provider_site, normalize_site_url,
+    validate_credential_ref, validate_tracker_settings, validate_tracker_transport, Secret,
+    TrackerConfig, TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow,
+    TRACKER_AUTH_KINDS, TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
-    normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, WORK_LINK_SOURCES,
+    canonical_key, github_ref, normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary,
+    WorkTarget, WORK_LINK_SOURCES,
 };
 pub use work_detect::DetectionState;
 pub use work_journal::{

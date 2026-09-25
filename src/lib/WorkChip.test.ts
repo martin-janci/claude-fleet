@@ -58,7 +58,7 @@ describe('WorkChip', () => {
     });
     const chip = screen.getByTestId('work-chip');
     expect(chip.className).toContain('unbound');
-    expect(chip.title).toContain('connect Jira in Settings → Work to see ZED-9');
+    expect(chip.title).toContain('connect its tracker in Settings → Work to see ZED-9');
   });
 
   it('a plain key without a tracker item is just a key', () => {
@@ -68,5 +68,33 @@ describe('WorkChip', () => {
     const chip = screen.getByTestId('work-chip');
     expect(chip.className).not.toContain('unbound');
     expect(screen.queryByTestId('work-chip-dot')).toBeNull();
+  });
+});
+
+describe('WorkChip, more than one tracker kind (work graph M6)', () => {
+  it('shows the provider badge and an Asana key short', () => {
+    trackers.update((l) => [
+      ...l,
+      {
+        id: 2,
+        provider: 'asana',
+        name: 'Company B',
+        site_url: 'https://app.asana.com',
+        state: 'ok',
+        created_at: 1,
+        last_sync_at: T - 60,
+        config: {},
+      },
+    ]);
+    render(WorkChip, {
+      props: {
+        workKey: { ...linked(), key: 'asana:1207000000000001' },
+        now: () => T,
+      },
+    });
+    const chip = screen.getByTestId('work-chip');
+    expect(screen.getByTestId('work-chip-provider').textContent).toBe('A');
+    expect(chip.textContent).toContain('Asana …000001');
+    expect(chip.title.startsWith('Asana · ')).toBe(true);
   });
 });

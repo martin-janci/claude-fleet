@@ -2,8 +2,9 @@
 //! `testdata/jira/` (see its README). No test here reaches a real site.
 
 use super::*;
-use crate::net::https::{FakeTransport, Method, Response};
+use crate::net::https::{FakeTransport, Method, Response, TransportError};
 use crate::service::trackers::list_all;
+use crate::service::trackers::DESCRIPTION_MAX_CHARS;
 
 const SITE: &str = "https://acme.atlassian.net";
 const ME: &str = "557058:00000000-aaaa-bbbb-cccc-000000000001";
@@ -469,6 +470,7 @@ fn keys_are_recognised_only_with_known_prefixes_and_boundaries() {
     let f = FakeTransport::new();
     let refs = jira(&f).recognize(
         "see https://acme.atlassian.net/browse/ABC-101 and https://other.atlassian.net/browse/ZED-1 and team-8",
+        RefCtx::default(),
     );
     assert_eq!(
         refs,
@@ -509,4 +511,183 @@ fn adf_excerpts_are_capped() {
     );
     assert_eq!(adf_excerpt(&Value::Null), None);
     assert_eq!(adf_excerpt(&json!({"type":"doc","content":[]})), None);
+}
+
+// --- the provider conformance suite (M6.0) -----------------------------------
+
+struct JiraHarness;
+
+#[async_trait::async_trait]
+impl crate::service::trackers::conformance::Harness for JiraHarness {
+    fn name(&self) -> &'static str {
+        "jira"
+    }
+
+    fn expect(&self) -> crate::service::trackers::conformance::Expect {
+        crate::service::trackers::conformance::Expect {
+            instance_id: Some("11111111-2222-3333-4444-555555555555"),
+            me: ME,
+            prefixes: vec!["ABC", "TEAM"],
+            view: view("mine", VIEW_MINE),
+            list_ids: vec![
+                "10100", "10101", "10102", "10103", "10104", "20007", "20008",
+            ],
+            fetch: [
+                ItemRef::Id("10101".into()),
+                ItemRef::Key("ABC-102".into()),
+                ItemRef::Id("10999".into()),
+            ],
+            statuses: vec![
+                ("10101", "in_progress", None),
+                ("10102", "done", Some("completed")),
+                ("10103", "done", Some("not_planned")),
+                ("10104", "done", Some("duplicate")),
+                ("20008", "todo", None),
+            ],
+            hierarchy: Some(("20008", "20007", Some(-1))),
+            moved: Some((ItemRef::Key("OLD-5".into()), "30005", "OLD-5")),
+            recognize: vec![
+                (
+                    "see https://acme.atlassian.net/browse/ABC-101 and team-8",
+                    None,
+                    vec![
+                        ItemRef::Key("ABC-101".into()),
+                        ItemRef::Key("TEAM-8".into()),
+                    ],
+                ),
+                (
+                    "ZZZ-1 and https://other.atlassian.net/browse/ZED-1",
+                    None,
+                    vec![],
+                ),
+            ],
+            bare_repo: "",
+            secret: Some("ATATT3xFfGF0-test-token-not-real-0000"),
+        }
+    }
+
+    fn provider(&self, fake: &FakeTransport) -> Box<dyn TrackerProvider> {
+        Box::new(jira(fake))
+    }
+
+    fn script_probe(&self, f: &FakeTransport) {
+        f.once(Method::Get, "/rest/api/3/myself", ok("myself.json"))
+            .once(Method::Get, "/_edge/tenant_info", ok("tenant_info.json"))
+            .once(Method::Get, "startAt=0", ok("project_search_p1.json"))
+            .once(Method::Get, "startAt=1", ok("project_search_p2.json"))
+            .once(Method::Get, "/rest/api/3/field", ok("fields.json"))
+            .once(Method::Post, "/search/jql", ok("sprint_projects.json"))
+            .once(
+                Method::Get,
+                "/filter/favourite",
+                Ok(Response::json(200, &json!([]))),
+            );
+    }
+
+    fn script_list(&self, f: &FakeTransport) {
+        f.once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+            .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    }
+
+    async fn incremental(
+        &self,
+        p: &dyn TrackerProvider,
+        f: &FakeTransport,
+    ) -> Result<Vec<WorkItemSnapshot>, TrackerError> {
+        f.once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+        let since = crate::service::catalog::now_secs() - 10 * 60 - 5;
+        let page = p.list(&view("mine", VIEW_MINE), Some(since), None).await?;
+        let jql = f.requests()[0].json_body().unwrap()["jql"].clone();
+        assert!(jql.as_str().unwrap().contains("updated >= -11m"), "{jql}");
+        Ok(page.items)
+    }
+
+    fn script_fetch(&self, f: &FakeTransport) {
+        f.once(Method::Post, "/issue/bulkfetch", ok("bulkfetch_two.json"));
+    }
+
+    fn script_moved(&self, f: &FakeTransport) {
+        f.once(Method::Post, "/issue/bulkfetch", ok("bulkfetch_moved.json"));
+    }
+
+    fn script_error(
+        &self,
+        f: &FakeTransport,
+        case: crate::service::trackers::conformance::ErrorCase,
+    ) {
+        use crate::service::trackers::conformance::ErrorCase as E;
+        match case {
+            E::Unauthorized => {
+                f.once(Method::Get, "/myself", Ok(Response::new(401, "")));
+            }
+            E::ForbiddenView => {
+                f.once(Method::Post, "/search/jql", Ok(Response::new(403, "")));
+            }
+            E::RateLimited => {
+                f.once(
+                    Method::Post,
+                    "/search/jql",
+                    Ok(Response::new(429, "").with_header("Retry-After", "30")),
+                );
+            }
+            E::Offline => {}
+            E::Garbage => {
+                f.once(
+                    Method::Post,
+                    "/search/jql",
+                    Ok(Response::new(200, "<html>maintenance</html>")),
+                );
+            }
+        }
+    }
+}
+
+crate::conformance_suite!(JiraHarness);
+
+/// M6.3 acceptance 4 in miniature: a tracker only reachable from host X is
+/// read through X with `curl`; the credential is on stdin, in no argv.
+#[tokio::test]
+async fn a_via_host_tracker_is_read_through_curl_on_its_host() {
+    use crate::service::trackers::{provider_for, TrackerNet};
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let body = fixture("bulkfetch.json").to_string();
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
+    let ssh = FakeSsh::new();
+    ssh.on_host(
+        "vpnbox",
+        Match::contains("/rest/api/3/issue/bulkfetch"),
+        Reply::ok(&format!(
+            "__fleet_status__=200\n__fleet_head__={}\n{head}{body}",
+            head.len()
+        )),
+    );
+    let mut row = crate::store::Store::open_in_memory()
+        .unwrap()
+        .add_tracker("jira", "Acme", SITE)
+        .unwrap();
+    row.transport = "via_host:vpnbox".into();
+    let p = provider_for(
+        &row,
+        Some(cred()),
+        &TrackerNet::with_ssh(Arc::new(ssh.clone())),
+    )
+    .unwrap();
+    let got = p.fetch(&[ItemRef::Id("10101".into())]).await.unwrap();
+    assert!(matches!(&got[0], Fetched::Found(s) if s.key.as_deref() == Some("ABC-101")));
+    let call = &ssh.calls_for("vpnbox")[0];
+    let secret = cred().secret.expose().to_string();
+    let basic = cred().literals()[1].clone();
+    assert!(!call.command().contains(&secret) && !call.command().contains(&basic));
+    let stdin = call.stdin_str().unwrap();
+    assert!(stdin.contains(&format!("Authorization: Basic {basic}")));
+    // The host fence is the provider's: a via_host Jira still only talks
+    // to *.atlassian.net.
+    let evil = crate::net::https::Request::get("https://evil.example.com/x");
+    let t = TrackerNet::with_ssh(Arc::new(ssh.clone()))
+        .transport_for(&row)
+        .unwrap();
+    assert!(matches!(
+        t.send(evil).await,
+        Err(TransportError::Refused(_))
+    ));
 }

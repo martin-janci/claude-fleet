@@ -23,13 +23,30 @@ use std::process::ExitCode;
 pub enum TrackerCmd {
     /// Print the trackers and their state, one per line.
     List,
-    /// Add a Jira Cloud site: paste any ticket URL on it, or the site URL.
+    /// Add a tracker: paste any ticket or issue URL on it, or the site URL.
+    /// The provider is inferred from the URL (atlassian.net → Jira,
+    /// github.com → GitHub) unless --provider says otherwise.
     Add {
-        /// https://<name>.atlassian.net, or a ticket URL on it.
+        /// https://<name>.atlassian.net, https://github.com/<owner>, or a
+        /// ticket / issue URL on it.
         url: String,
-        /// Display name. [default: the site's name]
+        /// Display name. [default: from the site]
         #[arg(long)]
         name: Option<String>,
+        /// jira | github. [default: from the URL]
+        #[arg(long)]
+        provider: Option<String>,
+        /// Run a trusted CLI on this host with ITS login (GitHub: `gh`);
+        /// fleet then stores no credential.
+        #[arg(long, conflicts_with = "via_host")]
+        via_cli: Option<String>,
+        /// Send the requests with `curl` from this host (a tracker only it
+        /// can reach); the token is piped there on stdin, never in argv.
+        #[arg(long)]
+        via_host: Option<String>,
+        /// GitHub: only these repositories (owner/repo; repeatable).
+        #[arg(long = "repo")]
+        repos: Vec<String>,
     },
     /// Set a tracker's credential. The API token is read from stdin (one
     /// line) unless --from-env or --ref says otherwise; it is never an
@@ -37,9 +54,11 @@ pub enum TrackerCmd {
     SetCredential {
         /// The tracker's id, from `tracker list`.
         id: i64,
-        /// The Atlassian account email the token belongs to.
+        /// The Atlassian account email the token belongs to (Jira Cloud's
+        /// basic auth). Without it the token is sent as the whole
+        /// credential (a bearer / API key).
         #[arg(long)]
-        email: String,
+        email: Option<String>,
         /// Read the token from this environment variable of THIS command
         /// (e.g. `read -rs JIRA_TOKEN; export JIRA_TOKEN`), and store it.
         #[arg(long, conflicts_with = "reference")]
@@ -77,11 +96,38 @@ fn source(from_env: Option<String>, reference: Option<String>) -> Source {
     }
 }
 
+/// The `work_admin` arguments for `add`.
+fn add_args(
+    url: String,
+    name: Option<String>,
+    provider: Option<String>,
+    via_cli: Option<String>,
+    via_host: Option<String>,
+    repos: Vec<String>,
+) -> Value {
+    let mut args = json!({ "action": "add", "site_url": url });
+    if let Some(n) = name {
+        args["name"] = Value::String(n);
+    }
+    if let Some(p) = provider {
+        args["provider"] = Value::String(p);
+    }
+    if let Some(h) = via_cli {
+        args["transport"] = Value::String(format!("via_cli:{h}"));
+    } else if let Some(h) = via_host {
+        args["transport"] = Value::String(format!("via_host:{h}"));
+    }
+    if !repos.is_empty() {
+        args["settings"] = json!({ "repos": repos });
+    }
+    args
+}
+
 /// The `work_admin` arguments for `set-credential`, the secret read from its
 /// source. `read_stdin` is injected so the test never touches a terminal.
 fn credential_args(
     id: i64,
-    email: &str,
+    email: Option<&str>,
     src: &Source,
     env: &HashMap<String, String>,
     read_stdin: impl FnOnce() -> Result<String, String>,
@@ -89,9 +135,11 @@ fn credential_args(
     let mut args = json!({
         "action": "set_credential",
         "tracker_id": id,
-        "auth_kind": "basic",
-        "username": email,
+        "auth_kind": if email.is_some() { "basic" } else { "bearer" },
     });
+    if let Some(e) = email {
+        args["username"] = Value::String(e.to_string());
+    }
     match src {
         Source::Reference(r) => args["credential_ref"] = Value::String(r.clone()),
         Source::Env(var) => {
@@ -165,17 +213,27 @@ pub async fn run(
                 out::line(&tracker_line(&t));
             }
         }
-        TrackerCmd::Add { url, name } => {
-            let mut args = json!({ "action": "add", "site_url": url });
-            if let Some(n) = name {
-                args["name"] = Value::String(n);
-            }
+        TrackerCmd::Add {
+            url,
+            name,
+            provider,
+            via_cli,
+            via_host,
+            repos,
+        } => {
+            let args = add_args(url, name, provider, via_cli, via_host, repos);
             let t = call_tool(&conn, "work_admin", args).await?;
             out::line(&tracker_line(&t));
-            out::line(&format!(
-                "next: fleet-hub tracker set-credential {} --email <you@example.com> < token.txt",
-                t["id"].as_i64().unwrap_or_default()
-            ));
+            let id = t["id"].as_i64().unwrap_or_default();
+            out::line(&match (t["provider"].as_str(), t["transport"].as_str()) {
+                (_, Some(tr)) if tr.starts_with("via_cli:") => {
+                    format!("next: fleet-hub tracker test {id} (no credential: the host's own login)")
+                }
+                (Some("jira"), _) => format!(
+                    "next: fleet-hub tracker set-credential {id} --email <you@example.com> < token.txt"
+                ),
+                _ => format!("next: fleet-hub tracker set-credential {id} < token.txt"),
+            });
         }
         TrackerCmd::SetCredential {
             id,
@@ -183,8 +241,13 @@ pub async fn run(
             from_env,
             reference,
         } => {
-            let args =
-                credential_args(id, &email, &source(from_env, reference), env, read_one_line)?;
+            let args = credential_args(
+                id,
+                email.as_deref(),
+                &source(from_env, reference),
+                env,
+                read_one_line,
+            )?;
             let t = call_tool(&conn, "work_admin", args).await?;
             out::line(&tracker_line(&t));
             out::line(&format!(
@@ -235,7 +298,7 @@ mod tests {
     #[test]
     fn the_secret_comes_from_stdin_env_or_a_reference_never_argv() {
         let env = HashMap::from([("JIRA_TOKEN".to_string(), format!(" {TOKEN}\n"))]);
-        let a = credential_args(1, "me@x.com", &Source::Stdin, &env, || {
+        let a = credential_args(1, Some("me@x.com"), &Source::Stdin, &env, || {
             Ok(format!("{TOKEN}\n"))
         })
         .unwrap();
@@ -243,7 +306,7 @@ mod tests {
         assert_eq!(a["username"], "me@x.com");
         let a = credential_args(
             1,
-            "me@x.com",
+            Some("me@x.com"),
             &Source::Env("JIRA_TOKEN".into()),
             &env,
             || panic!("stdin must not be read"),
@@ -252,7 +315,7 @@ mod tests {
         assert_eq!(a["secret"], TOKEN);
         let a = credential_args(
             1,
-            "me@x.com",
+            Some("me@x.com"),
             &Source::Reference("file:/run/secrets/jira".into()),
             &env,
             || panic!("stdin must not be read"),
@@ -261,14 +324,34 @@ mod tests {
         assert_eq!(a["credential_ref"], "file:/run/secrets/jira");
         assert!(a.get("secret").is_none());
         assert!(
-            credential_args(1, "x", &Source::Env("NOPE".into()), &env, || Ok(
+            credential_args(1, Some("x"), &Source::Env("NOPE".into()), &env, || Ok(
                 String::new()
             ))
             .is_err()
         );
-        assert!(credential_args(1, "x", &Source::Stdin, &env, || Ok("\n".into())).is_err());
+        assert!(credential_args(1, Some("x"), &Source::Stdin, &env, || Ok("\n".into())).is_err());
+        // No email: the token is the whole credential (Asana, Linear, DC).
+        let a =
+            credential_args(2, None, &Source::Stdin, &env, || Ok("lin_api_x\n".into())).unwrap();
+        assert_eq!(a["auth_kind"], "bearer");
+        assert!(a.get("username").is_none());
         assert_eq!(source(Some("A".into()), None), Source::Env("A".into()));
         assert_eq!(source(None, None), Source::Stdin);
+    }
+
+    #[test]
+    fn add_carries_the_transport_and_repos() {
+        let a = add_args(
+            "https://github.com/acme".into(),
+            None,
+            None,
+            Some("devbox".into()),
+            None,
+            vec!["acme/api".into()],
+        );
+        assert_eq!(a["transport"], "via_cli:devbox");
+        assert_eq!(a["settings"]["repos"], json!(["acme/api"]));
+        assert!(a.get("provider").is_none(), "inferred by the hub");
     }
 
     /// No flag or positional takes the token: an extra argument is refused
@@ -310,7 +393,7 @@ mod tests {
         );
         let T { cmd } =
             T::try_parse_from(["t", "add", "https://acme.atlassian.net/browse/ABC-1"]).unwrap();
-        assert!(matches!(cmd, TrackerCmd::Add { url, name: None } if url.ends_with("ABC-1")));
+        assert!(matches!(cmd, TrackerCmd::Add { url, name: None, .. } if url.ends_with("ABC-1")));
     }
 
     #[test]

@@ -2972,19 +2972,29 @@ fn the_served_definition_budget_stays_bounded() {
     // 2026-09-24 (+627); plus 100.
     // Work graph M5.3: `work_link` gains `force_cross_org` (the cross-org
     // integrity override). Measured at 69,099 on 2026-09-24 (+87); plus 100.
+    // Work graph M6.1: `work_admin` gains `transport` (direct | via_host |
+    // via_cli, so GitHub is read through `gh` on a host) and `settings`
+    // (the provider's admin settings object); `provider` lists the five
+    // providers. No new tool. Measured at 68,553 on the M4 base (+168);
+    // merged over M5, 69,288 on 2026-09-24 (+189 over M5's 69,099); plus
+    // 100.
     // Work graph M8.0: `work` / `work_link` `action` became a schema `enum`
     // generated from the tables the parser and the dispatch read
     // (`WORK_ACTIONS`, `WORK_LINK_ACTIONS`), so the phone draws a button only
     // for an action the hub serves; the two doc lines that listed them by
     // hand were cut to "Default links." / "The decision.". Measured at 69,171
     // on 2026-09-24 (+72); plus 100.
+    // M6.1 and M8.0 merged: measured at 69,360 on 2026-09-24 (M5's 69,099
+    // + 189 for M6.1 + 72 for M8.0); plus 100.
     // Work graph M9.1: `work` gains `today` (the Today view's digest) and
     // one parameter, `since`. No new tool. Measured at 69,265 on 2026-09-25
     // (+94); plus 100.
     // Work graph M9.2: `work` gains `card` (the ticket context card; no
     // parameter). Measured at 69,284 on 2026-09-25 (+19): inside the
     // headroom, so the constant was not raised.
-    const BUDGET_BYTES: usize = 69_365;
+    // M9.1 + M9.2 merged over M6: measured at 69,473 on 2026-09-25 (M6's
+    // 69,360 + 113); plus 100.
+    const BUDGET_BYTES: usize = 69_573;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

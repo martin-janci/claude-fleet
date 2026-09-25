@@ -27,8 +27,9 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Providers a tracker may be. GitHub, Asana and Linear arrive with M6.
-pub const TRACKER_PROVIDERS: &[&str] = &["jira"];
+/// Providers a tracker may be (M6 adds GitHub, Asana, Linear and Jira Data
+/// Center, one at a time).
+pub const TRACKER_PROVIDERS: &[&str] = &["jira", "github", "asana", "linear", "jira_dc"];
 
 /// `trackers.state`.
 pub const TRACKER_STATES: &[&str] = &[
@@ -72,6 +73,57 @@ pub struct TrackerConfig {
     /// The sprint custom field's id (`customfield_10020`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprint_field: Option<String>,
+    /// Jira Data Center: the Epic Link custom field's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic_field: Option<String>,
+    // --- M6: what the providers after Jira learn; all default.
+    /// The workspace / organisation the tracker reads (Asana workspace gid,
+    /// Linear organisation id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Containers with their own view (Asana projects the user's tasks sit
+    /// in), as `(id, name)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<(String, String)>,
+    /// The tracker's search is available (Asana: a Premium workspace).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub search: bool,
+    /// Asana: the section → status map the probe INFERRED from section
+    /// names (lower-case name → todo | in_progress | done). What a person
+    /// confirms goes to `TrackerSettings::section_map`, which wins.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub section_map: std::collections::BTreeMap<String, String>,
+}
+
+/// What the ADMIN set for a tracker (migration 050, work graph M6), kept
+/// apart from [`TrackerConfig`], which every probe replaces. Never a secret.
+/// Unknown fields are ignored and every field defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerSettings {
+    /// GitHub: the repositories (`owner/repo`, lower case) whose issues the
+    /// views cover. Empty: `assignee:@me` across the site's owner scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    /// Asana: section name (lower case) → `todo` | `in_progress` | `done`.
+    /// Inferred on the first sync, correctable in Settings.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub section_map: std::collections::BTreeMap<String, String>,
+    /// A person confirmed (or edited) `section_map`; inference stops.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub section_map_confirmed: bool,
+    /// Jira Data Center: an extra CA (PEM) the site's certificate chains to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_ca: Option<String>,
+    /// Jira Data Center: the admin allows a site that resolves to a
+    /// loopback, private or link-local address (refused by default: SSRF).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_private_network: bool,
+}
+
+impl TrackerSettings {
+    pub fn is_default(&self) -> bool {
+        *self == TrackerSettings::default()
+    }
 }
 
 /// A tracker as every read path sees it. No secret: see the module docs.
@@ -112,6 +164,9 @@ pub struct TrackerRow {
     /// The org its items belong to (work graph M5); `None` = unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// What the admin set (M6); absent from an older hub.
+    #[serde(default, skip_serializing_if = "TrackerSettings::is_default")]
+    pub settings: TrackerSettings,
 }
 
 /// One query a sync runs.
@@ -127,6 +182,10 @@ pub struct TrackerViewRow {
     pub watermark: Option<i64>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// An opaque sync token (M6: Asana's events API), for a provider whose
+    /// incremental reads are not a time watermark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_mark: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -252,6 +311,282 @@ pub fn normalize_site_url(raw: &str) -> Result<String, IpcError> {
     Ok(format!("https://{host}"))
 }
 
+/// An `https://host[/path]` URL split into its lower-case host and its path
+/// segments. Refused: another scheme, userinfo, a port, a query, a fragment.
+fn split_https(raw: &str) -> Result<(String, Vec<String>), &'static str> {
+    let t = raw.trim();
+    let rest = t
+        .get(..8)
+        .filter(|p| p.eq_ignore_ascii_case("https://"))
+        .map(|_| &t[8..])
+        .ok_or("not an https:// URL")?;
+    if rest.contains(['?', '#']) {
+        return Err("a query or fragment");
+    }
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    if authority.contains('@') {
+        return Err("userinfo");
+    }
+    if authority.contains(':') {
+        return Err("a port");
+    }
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err("no host");
+    }
+    let segs = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok((authority.to_ascii_lowercase(), segs))
+}
+
+/// A GitHub account or repository name (never a flag or a qualifier).
+fn github_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && !s.starts_with(['.', '-'])
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// `https://github.com` (every repository the `gh` login sees) or
+/// `https://github.com/<owner>` — a pasted repository or issue URL narrows
+/// to its owner. Lower case.
+fn normalize_github_site(raw: &str) -> Result<String, IpcError> {
+    let invalid = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("{why}: a GitHub tracker is https://github.com or https://github.com/<owner>"),
+        )
+    };
+    let (host, segs) = split_https(raw).map_err(invalid)?;
+    if host != "github.com" && host != "www.github.com" {
+        return Err(invalid("not github.com"));
+    }
+    match segs.first() {
+        None => Ok("https://github.com".into()),
+        Some(o) if github_name(o) => Ok(format!("https://github.com/{}", o.to_ascii_lowercase())),
+        Some(_) => Err(invalid("not an owner name")),
+    }
+}
+
+/// `https://app.asana.com`, or `https://app.asana.com/<workspace gid>` —
+/// a pasted `/1/<workspace>/…` task URL names its workspace; a `/0/…` one
+/// does not.
+fn normalize_asana_site(raw: &str) -> Result<String, IpcError> {
+    let invalid = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{why}: an Asana tracker is https://app.asana.com or \
+                 https://app.asana.com/<workspace gid>"
+            ),
+        )
+    };
+    let (host, segs) = split_https(raw).map_err(invalid)?;
+    if host != "app.asana.com" {
+        return Err(invalid("not app.asana.com"));
+    }
+    let digits =
+        |s: &String| !s.is_empty() && s.len() <= 24 && s.bytes().all(|b| b.is_ascii_digit());
+    let ws = match segs.as_slice() {
+        [] => None,
+        [one, ws, ..] if one == "1" && digits(ws) => Some(ws.clone()),
+        [zero, ..] if zero == "0" => None,
+        [ws] if digits(ws) => Some(ws.clone()),
+        _ => return Err(invalid("not an Asana workspace or task URL")),
+    };
+    Ok(match ws {
+        Some(w) => format!("https://app.asana.com/{w}"),
+        None => "https://app.asana.com".into(),
+    })
+}
+
+/// `https://linear.app/<workspace urlKey>`; a pasted issue URL names its
+/// workspace. Lower case.
+fn normalize_linear_site(raw: &str) -> Result<String, IpcError> {
+    let invalid = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("{why}: a Linear tracker is https://linear.app/<workspace>"),
+        )
+    };
+    let (host, segs) = split_https(raw).map_err(invalid)?;
+    if host != "linear.app" {
+        return Err(invalid("not linear.app"));
+    }
+    match segs.first() {
+        Some(ws)
+            if !ws.is_empty()
+                && ws.len() <= 64
+                && ws
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
+        {
+            Ok(format!("https://linear.app/{}", ws.to_ascii_lowercase()))
+        }
+        _ => Err(invalid("no workspace in the URL")),
+    }
+}
+
+/// A Jira Data Center site as an admin enters it (or any ticket URL on it):
+/// `https://<host>[/<context path>]`, lower-case host, https only, no
+/// userinfo, no port (a port would let the site aim at another service on
+/// the same machine), no query or fragment; a `/browse/…` tail is dropped.
+/// An Atlassian Cloud host is refused (that is the `jira` provider).
+pub fn normalize_dc_site(raw: &str) -> Result<String, IpcError> {
+    let invalid = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{why}: a Jira Data Center site is https://<host>[/<context path>], \
+                 without a port or credentials"
+            ),
+        )
+    };
+    let (host, segs) = split_https(raw).map_err(invalid)?;
+    let host_ok = host.len() <= 253
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && host.contains('.')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
+    if !host_ok {
+        return Err(invalid("not a host name"));
+    }
+    if host.ends_with(".atlassian.net") {
+        return Err(invalid("an Atlassian Cloud site (use the jira provider)"));
+    }
+    let ctx: Vec<&String> = segs
+        .iter()
+        .take_while(|s| !matches!(s.as_str(), "browse" | "rest" | "secure" | "projects"))
+        .collect();
+    if ctx.len() > 3
+        || ctx.iter().any(|s| {
+            s.is_empty()
+                || s.starts_with('.')
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+    {
+        return Err(invalid("not a context path"));
+    }
+    let mut out = format!("https://{host}");
+    for s in ctx {
+        out.push('/');
+        out.push_str(s);
+    }
+    Ok(out)
+}
+
+/// Normalise and fence a site URL for `provider` (see each provider's
+/// fence). `E_INVALID` for an unknown provider.
+pub fn normalize_provider_site(provider: &str, raw: &str) -> Result<String, IpcError> {
+    match provider {
+        "jira" => normalize_site_url(raw),
+        "github" => normalize_github_site(raw),
+        "asana" => normalize_asana_site(raw),
+        "linear" => normalize_linear_site(raw),
+        "jira_dc" => normalize_dc_site(raw),
+        other => Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "unknown tracker provider {other:?}; one of {}",
+                TRACKER_PROVIDERS.join(", ")
+            ),
+        )),
+    }
+}
+
+/// Largest `extra_ca` PEM accepted.
+pub const EXTRA_CA_MAX_BYTES: usize = 16 * 1024;
+
+/// Validate and normalise what an admin sets for a `provider` tracker.
+pub fn validate_tracker_settings(
+    provider: &str,
+    mut s: TrackerSettings,
+) -> Result<TrackerSettings, IpcError> {
+    let bad = |m: String| IpcError::new(codes::E_INVALID, m);
+    if !s.repos.is_empty() && provider != "github" {
+        return Err(bad("repos is a GitHub setting".into()));
+    }
+    let mut repos = Vec::new();
+    for r in &s.repos {
+        let ok = r
+            .trim()
+            .split_once('/')
+            .filter(|(o, n)| github_name(o) && github_name(n))
+            .map(|(o, n)| format!("{o}/{n}").to_ascii_lowercase())
+            .ok_or_else(|| bad(format!("{r:?} is not owner/repo")))?;
+        if !repos.contains(&ok) {
+            repos.push(ok);
+        }
+    }
+    s.repos = repos;
+    if !s.section_map.is_empty() && provider != "asana" {
+        return Err(bad("section_map is an Asana setting".into()));
+    }
+    let mut map = std::collections::BTreeMap::new();
+    for (k, v) in &s.section_map {
+        if !matches!(v.as_str(), "todo" | "in_progress" | "done") {
+            return Err(bad(format!(
+                "section {k:?} maps to {v:?}; use todo, in_progress or done"
+            )));
+        }
+        let k = k.trim().to_lowercase();
+        if k.is_empty() || k.chars().count() > 120 || k.chars().any(char::is_control) {
+            return Err(bad(
+                "a section name must be 1-120 printable characters".into()
+            ));
+        }
+        map.insert(k, v.clone());
+    }
+    s.section_map = map;
+    if (s.extra_ca.is_some() || s.allow_private_network) && provider != "jira_dc" {
+        return Err(bad(
+            "extra_ca and allow_private_network are Jira Data Center settings".into(),
+        ));
+    }
+    if let Some(pem) = &s.extra_ca {
+        if pem.len() > EXTRA_CA_MAX_BYTES || !pem.contains("-----BEGIN CERTIFICATE-----") {
+            return Err(bad(format!(
+                "extra_ca must be PEM certificates, at most {} KiB",
+                EXTRA_CA_MAX_BYTES / 1024
+            )));
+        }
+    }
+    Ok(s)
+}
+
+/// `trackers.transport`: `direct`, `via_host:<alias>` (curl on that host)
+/// or `via_cli:<alias>` (a trusted CLI there — `gh`). Normalised.
+pub fn validate_tracker_transport(raw: &str) -> Result<String, IpcError> {
+    let t = raw.trim();
+    if t.is_empty() || t == "direct" {
+        return Ok("direct".into());
+    }
+    for kind in ["via_host:", "via_cli:"] {
+        if let Some(alias) = t.strip_prefix(kind) {
+            crate::validate::host_alias_syntax(alias)?;
+            return Ok(format!("{kind}{alias}"));
+        }
+    }
+    Err(IpcError::new(
+        codes::E_INVALID,
+        format!("unknown tracker transport {t:?}; one of direct, via_host:<host>, via_cli:<host>"),
+    ))
+}
+
 /// The host part of [`normalize_site_url`]'s fence, for the transport's
 /// connect-time policy: `<name>.atlassian.net`, one label.
 pub fn is_allowed_tracker_host(host: &str) -> bool {
@@ -324,7 +659,7 @@ fn secret_hint(value: &str) -> Option<String> {
 
 const TRACKER_COLUMNS: &str = "t.id, t.provider, t.name, t.instance_id, t.site_url, t.transport, \
      t.config, t.state, t.last_sync_at, t.last_error, t.created_at, \
-     s.auth_kind, s.username, s.value, s.credential_ref, t.org_id";
+     s.auth_kind, s.username, s.value, s.credential_ref, t.org_id, t.settings";
 
 fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
     let config: Option<String> = r.get(6)?;
@@ -354,6 +689,10 @@ fn map_tracker(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerRow> {
         auth_kind: r.get(11)?,
         username: r.get(12)?,
         org_id: r.get(15)?,
+        settings: r
+            .get::<_, Option<String>>(16)?
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default(),
     })
     // `value` is dropped here: it was read only to compute the hint.
 }
@@ -366,6 +705,7 @@ fn map_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerViewRow> {
         query: r.get(3)?,
         watermark: r.get(4)?,
         enabled: r.get::<_, i64>(5)? != 0,
+        sync_mark: r.get(6)?,
     })
 }
 
@@ -398,7 +738,7 @@ impl Store {
                 ),
             ));
         }
-        let site = normalize_site_url(site_url)?;
+        let site = normalize_provider_site(provider, site_url)?;
         let name = validate_name(name)?;
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM trackers WHERE provider = ?1 AND site_url = ?2)",
@@ -446,6 +786,32 @@ impl Store {
         ))?;
         let rows = stmt.query_map([], map_tracker)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Set where a tracker's requests leave from. Resets the state to
+    /// `unconfigured` until the next test, like a new credential. A tracker
+    /// read through a CLI (`via_cli`) never holds a credential in fleet: any
+    /// stored one is dropped.
+    pub fn set_tracker_transport(&self, id: i64, transport: &str) -> Result<TrackerRow, IpcError> {
+        let transport = validate_tracker_transport(transport)?;
+        let row = self.require_tracker(id)?;
+        if row.transport == transport {
+            return Ok(row);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE trackers SET transport = ?1, state = 'unconfigured', last_error = NULL \
+             WHERE id = ?2",
+            rusqlite::params![transport, id],
+        )?;
+        if transport.starts_with("via_cli:") {
+            tx.execute(
+                "DELETE FROM tracker_secrets WHERE tracker_id = ?1",
+                rusqlite::params![id],
+            )?;
+        }
+        tx.commit()?;
+        self.require_tracker(id)
     }
 
     /// Rename a tracker.
@@ -503,7 +869,18 @@ impl Store {
         value: Option<&str>,
         credential_ref: Option<&str>,
     ) -> Result<TrackerRow, IpcError> {
-        self.require_tracker(id)?;
+        let row = self.require_tracker(id)?;
+        if row.transport.starts_with("via_cli:") {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{} is read through a CLI on {} with that host's own login; \
+                     fleet stores no credential for it",
+                    row.name,
+                    row.transport.trim_start_matches("via_cli:")
+                ),
+            ));
+        }
         if !TRACKER_AUTH_KINDS.contains(&auth_kind) {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -699,7 +1076,8 @@ impl Store {
 
     pub fn list_tracker_views(&self, tracker_id: i64) -> Result<Vec<TrackerViewRow>, IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT tracker_id, view_id, label, query, watermark, enabled FROM tracker_views \
+            "SELECT tracker_id, view_id, label, query, watermark, enabled, sync_mark \
+             FROM tracker_views \
              WHERE tracker_id = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map(rusqlite::params![tracker_id], map_view)?;
@@ -722,6 +1100,7 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT(tracker_id, view_id) DO UPDATE SET label = excluded.label, \
                    watermark = CASE WHEN query IS excluded.query THEN watermark END, \
+                   sync_mark = CASE WHEN query IS excluded.query THEN sync_mark END, \
                    query = excluded.query",
                 rusqlite::params![tracker_id, id, label, query],
             )?;
@@ -756,6 +1135,38 @@ impl Store {
             rusqlite::params![tracker_id, view_id, watermark],
         )?;
         Ok(())
+    }
+
+    /// Store (or clear) a view's sync token.
+    pub fn set_tracker_view_mark(
+        &self,
+        tracker_id: i64,
+        view_id: &str,
+        mark: Option<&str>,
+    ) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE tracker_views SET sync_mark = ?3 WHERE tracker_id = ?1 AND view_id = ?2",
+            rusqlite::params![tracker_id, view_id, mark],
+        )?;
+        Ok(())
+    }
+
+    /// Replace what the admin set. `true` when it changed.
+    pub fn set_tracker_settings(
+        &self,
+        id: i64,
+        settings: &TrackerSettings,
+    ) -> Result<bool, IpcError> {
+        self.require_tracker(id)?;
+        let json = (!settings.is_default())
+            .then(|| serde_json::to_string(settings))
+            .transpose()
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
+        let n = self.conn.execute(
+            "UPDATE trackers SET settings = ?1 WHERE id = ?2 AND settings IS NOT ?1",
+            rusqlite::params![json, id],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn set_tracker_view_enabled(
@@ -894,9 +1305,10 @@ mod tests {
         }
         assert_eq!(
             src.matches("FROM tracker_secrets").count(),
-            3,
+            4,
             "tracker_secrets is read by resolve_tracker_credential, \
-             tracker_secret_literals and deleted by remove_tracker only"
+             tracker_secret_literals and deleted by remove_tracker and \
+             set_tracker_transport (a via_cli tracker holds none) only"
         );
     }
 

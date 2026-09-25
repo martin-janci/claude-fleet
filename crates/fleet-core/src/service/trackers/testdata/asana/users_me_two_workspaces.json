@@ -1,0 +1,16 @@
+{
+  "data": {
+    "gid": "1200000000000100",
+    "name": "Dana Dev",
+    "workspaces": [
+      {
+        "gid": "1200000000000001",
+        "name": "Company B"
+      },
+      {
+        "gid": "1200000000000002",
+        "name": "Personal"
+      }
+    ]
+  }
+}

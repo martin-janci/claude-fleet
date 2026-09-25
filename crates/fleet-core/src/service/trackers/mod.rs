@@ -9,31 +9,64 @@
 //! falls through the cache. Nothing in M1/M2 waits on a tracker.
 
 pub mod admin;
+pub mod asana;
+#[cfg(test)]
+pub mod conformance;
+pub mod github;
 pub mod jira;
+pub mod jira_common;
+pub mod jira_dc;
+pub mod linear;
 pub mod sync;
+#[cfg(test)]
+#[path = "tests_isolation_providers.rs"]
+mod tests_isolation_providers;
 pub mod tickets;
 
-use crate::net::https::{DirectTransport, HttpTransport};
+use crate::net::https::{DirectTransport, HostPolicy, HttpTransport};
 use crate::store::{TrackerConfig, TrackerCredential, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// What a provider can do; the UI degrades on what is missing.
+/// How a provider reads only what changed (M6.0).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Incremental {
+    /// A time watermark per view (`updated >= since`), minus an overlap.
+    #[default]
+    Watermark,
+    /// An opaque per-view sync token ([`TrackerProvider::changes`]); an
+    /// expired token means one whole listing (Asana's events API).
+    SyncToken,
+    /// Every pass lists every view whole.
+    None,
+}
+
+/// What a provider can do; the UI degrades on what is missing (M6.0).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Caps {
-    /// `jql` for Jira.
+    /// `jql` (Jira), `gql` (Linear, GitHub), `search`, or none.
     #[serde(default)]
     pub query_lang: Option<String>,
+    /// Items have parents (epics, sub-issues, subtasks).
     #[serde(default)]
     pub hierarchy: bool,
+    /// Sprints / cycles.
     #[serde(default)]
     pub iterations: bool,
-    /// Items have human keys (`ABC-123`), not only ids.
+    /// Items have human keys (`ABC-123`) with prefixes the probe learns;
+    /// without them, detection is by URL (and repo-relative `#n`) only.
     #[serde(default)]
     pub human_keys: bool,
+    /// A bare `#123` names an item of the session's own `owner/repo`.
     #[serde(default)]
-    pub incremental: bool,
-    /// Always false in M3: read-only.
+    pub repo_relative: bool,
+    /// One item can sit in several containers (Asana projects).
+    #[serde(default)]
+    pub multi_container: bool,
+    #[serde(default)]
+    pub incremental: Incremental,
+    /// Always false in M3–M6: read-only.
     #[serde(default)]
     pub write: bool,
 }
@@ -117,19 +150,68 @@ pub enum Fetched {
 /// `Unavailable.reason` for a 404 or an id missing from a bulk answer.
 pub const NOT_FOUND_OR_NO_PERMISSION: &str = "not_found_or_no_permission";
 
-/// A reference to an item recognised in text.
+/// A reference to an item recognised in text (or stored on a link).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ItemRef {
+    /// The tracker's own id (`external_id`).
     Id(String),
+    /// A human key (`ABC-123`), or the canonical reference of a provider
+    /// without human keys (`owner/repo#42`, `asana:<gid>`).
     Key(String),
+    /// An issue number in a repository (`owner/repo`, lower case).
+    RepoNumber { repo: String, n: u64 },
+    /// An item's web URL, as pasted.
+    Url(String),
 }
 
 impl ItemRef {
-    pub fn as_str(&self) -> &str {
+    /// The canonical text of the reference: what `Fetched::Unavailable`
+    /// carries back and what a link's `ref_key` holds.
+    pub fn reference(&self) -> String {
         match self {
-            ItemRef::Id(s) | ItemRef::Key(s) => s,
+            ItemRef::Id(s) | ItemRef::Key(s) | ItemRef::Url(s) => s.clone(),
+            ItemRef::RepoNumber { repo, n } => format!("{repo}#{n}"),
         }
     }
+
+    /// A stored reference (`ref_key`, a lookup's text) as an [`ItemRef`]:
+    /// `owner/repo#n` is a repo number, a URL is a URL, anything else a key.
+    pub fn parse(r: &str) -> ItemRef {
+        let r = r.trim();
+        if r.starts_with("https://") || r.starts_with("http://") {
+            return ItemRef::Url(r.to_string());
+        }
+        if let Some((repo, n)) = r.rsplit_once('#') {
+            if repo.contains('/') {
+                if let Ok(n) = n.parse::<u64>() {
+                    return ItemRef::RepoNumber {
+                        repo: repo.to_ascii_lowercase(),
+                        n,
+                    };
+                }
+            }
+        }
+        ItemRef::Key(r.to_string())
+    }
+}
+
+/// What recognition knows besides the text (M6.0).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefCtx<'a> {
+    /// The session's GitHub `owner/repo`, for a bare `#123`.
+    pub repo: Option<&'a str>,
+}
+
+/// What [`TrackerProvider::changes`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// Items that changed since the mark (already normalised).
+    pub items: Vec<WorkItemSnapshot>,
+    /// The mark to pass next time (opaque, per provider).
+    pub mark: Option<String>,
+    /// The mark was missing or had expired: the caller lists the view
+    /// whole once, then continues from `mark`.
+    pub expired: bool,
 }
 
 /// One page of a view.
@@ -241,32 +323,326 @@ pub trait TrackerProvider: Send + Sync {
     ) -> Result<Page, TrackerError>;
     /// Items by id or key; every reference gets an answer.
     async fn fetch(&self, refs: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError>;
-    /// Item references in free text: this site's URLs, and keys with a
-    /// known prefix.
-    fn recognize(&self, text: &str) -> Vec<ItemRef>;
+    /// Item references in free text: this site's URLs, keys with a known
+    /// prefix, and (where `caps.repo_relative`) a bare `#n` of `ctx.repo`.
+    fn recognize(&self, text: &str, ctx: RefCtx<'_>) -> Vec<ItemRef>;
+    /// What changed in `view` since `mark`, for a provider whose
+    /// `caps.incremental` is [`Incremental::SyncToken`]. The default says
+    /// the view has no token, so the caller lists it whole.
+    async fn changes(&self, _view: &ViewDef, _mark: Option<&str>) -> Result<Changes, TrackerError> {
+        Ok(Changes {
+            expired: true,
+            ..Default::default()
+        })
+    }
 }
 
-/// The provider for `row`, over `transport`. `cred` is `None` when no
-/// credential is set; every call then fails [`TrackerError::Unconfigured`].
+/// The provider for `row`, over the transport `net` picks for it. `cred` is
+/// `None` when no credential is set; a provider that needs one then fails
+/// every call [`TrackerError::Unconfigured`] (GitHub through `gh` needs
+/// none: the host's own `gh` login is used).
 pub fn provider_for(
     row: &TrackerRow,
     cred: Option<TrackerCredential>,
-    transport: Arc<dyn HttpTransport>,
-) -> Box<dyn TrackerProvider> {
-    // `provider` is validated on insert; jira is the only one in M3.
-    Box::new(jira::JiraCloud::new(
-        &row.site_url,
-        row.config.clone(),
-        cred,
-        transport,
-    ))
+    net: &TrackerNet,
+) -> Result<Box<dyn TrackerProvider>, TrackerError> {
+    let transport = net.transport_for(row)?;
+    Ok(match row.provider.as_str() {
+        "jira" => Box::new(jira::JiraCloud::new(
+            &row.site_url,
+            row.config.clone(),
+            cred,
+            transport,
+        )),
+        "asana" => Box::new(asana::Asana::new(
+            &row.site_url,
+            row.config.clone(),
+            row.settings.clone(),
+            cred,
+            transport,
+        )),
+        "jira_dc" => Box::new(jira_dc::JiraDc::new(
+            &row.site_url,
+            row.config.clone(),
+            cred,
+            transport,
+        )),
+        "linear" => Box::new(linear::Linear::new(
+            &row.site_url,
+            row.config.clone(),
+            cred,
+            transport,
+        )),
+        // Through `gh` the host's own login is used: never a token.
+        "github" => Box::new(github::GitHub::new(
+            &row.site_url,
+            row.config.clone(),
+            row.settings.clone(),
+            transport,
+        )),
+        other => {
+            return Err(TrackerError::Refused(format!(
+                "this build has no {other:?} tracker provider"
+            )))
+        }
+    })
 }
 
-/// The real transport: HTTPS from this process, fenced to tracker hosts.
-pub fn direct_transport() -> Arc<dyn HttpTransport> {
-    Arc::new(DirectTransport::new(Arc::new(
-        crate::store::is_allowed_tracker_host,
-    )))
+/// Whether a provider needs a credential stored in fleet. GitHub through
+/// `gh` uses the host's own login, so fleet never holds its token.
+pub fn needs_credential(row: &TrackerRow) -> bool {
+    !matches!(
+        TransportKind::parse(&row.transport),
+        Ok(TransportKind::ViaCli(_))
+    )
+}
+
+/// Where a tracker's requests leave from (`trackers.transport`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportKind {
+    /// HTTPS from this process (the hub or a standalone desktop).
+    Direct,
+    /// `curl` on that host, the token piped on stdin (M6.3).
+    ViaHost(String),
+    /// A trusted CLI on that host (`gh`), with its own login (M6.1).
+    ViaCli(String),
+}
+
+impl TransportKind {
+    pub fn parse(s: &str) -> Result<TransportKind, TrackerError> {
+        let s = s.trim();
+        if s.is_empty() || s == "direct" {
+            return Ok(TransportKind::Direct);
+        }
+        let alias = |a: &str| -> Result<String, TrackerError> {
+            crate::validate::host_alias(a)
+                .map(|_| a.to_string())
+                .map_err(|e| TrackerError::Refused(e.message))
+        };
+        if let Some(a) = s.strip_prefix("via_host:") {
+            return Ok(TransportKind::ViaHost(alias(a)?));
+        }
+        if let Some(a) = s.strip_prefix("via_cli:") {
+            return Ok(TransportKind::ViaCli(alias(a)?));
+        }
+        Err(TrackerError::Refused(format!(
+            "unknown tracker transport {s:?}"
+        )))
+    }
+}
+
+/// What a tracker's transport is built from: the process's own HTTPS, and
+/// SSH for `via_host` / `via_cli`. Tests put a fake in front of all of it.
+#[derive(Clone, Default)]
+pub struct TrackerNet {
+    /// Every request goes here instead (tests).
+    fake: Option<Arc<dyn HttpTransport>>,
+    ssh: Option<Arc<dyn crate::ssh::SshExec>>,
+}
+
+impl TrackerNet {
+    /// The real thing: direct HTTPS fenced per provider, and `ssh` (when
+    /// this process has hosts) for `via_host` / `via_cli`.
+    pub fn real(ssh: Option<Arc<dyn crate::ssh::SshExec>>) -> Self {
+        TrackerNet { fake: None, ssh }
+    }
+
+    /// Every tracker, whatever its transport, talks to `t` (tests).
+    pub fn fake(t: Arc<dyn HttpTransport>) -> Self {
+        TrackerNet {
+            fake: Some(t),
+            ssh: None,
+        }
+    }
+
+    /// Real transport selection over a scripted SSH (tests of `via_host` /
+    /// `via_cli`).
+    pub fn with_ssh(ssh: Arc<dyn crate::ssh::SshExec>) -> Self {
+        TrackerNet {
+            fake: None,
+            ssh: Some(ssh),
+        }
+    }
+
+    /// The transport `row` says, with the provider's host fence.
+    pub fn transport_for(&self, row: &TrackerRow) -> Result<Arc<dyn HttpTransport>, TrackerError> {
+        if let Some(f) = &self.fake {
+            return Ok(Arc::clone(f));
+        }
+        let policy = host_policy(row);
+        let ssh = |h: &str| {
+            self.ssh.clone().ok_or_else(|| {
+                TrackerError::Unreachable(format!("this process has no SSH to reach {h} with"))
+            })
+        };
+        match TransportKind::parse(&row.transport)? {
+            // An admin-configured site (Data Center): resolve first, refuse
+            // loopback / link-local / unspecified unless opted in, connect
+            // to the checked address, and trust the admin's extra CA.
+            TransportKind::Direct if row.provider == "jira_dc" => Ok(Arc::new(
+                DirectTransport::new(policy)
+                    .with_address_guard(row.settings.allow_private_network)
+                    .with_extra_ca(row.settings.extra_ca.clone()),
+            )),
+            TransportKind::Direct => Ok(Arc::new(DirectTransport::new(policy))),
+            TransportKind::ViaCli(h) => match row.provider.as_str() {
+                "github" => Ok(Arc::new(crate::net::via_host::GhCliTransport::new(
+                    ssh(&h)?,
+                    h,
+                ))),
+                p => Err(TrackerError::Refused(format!(
+                    "no trusted CLI is known for {p} trackers"
+                ))),
+            },
+            TransportKind::ViaHost(h) => Ok(Arc::new(crate::net::via_host::CurlTransport::new(
+                ssh(&h)?,
+                h,
+                policy,
+            ))),
+        }
+    }
+}
+
+static DEFAULT_NET: std::sync::OnceLock<TrackerNet> = std::sync::OnceLock::new();
+
+/// Install the process's tracker network once at startup (the hub and a
+/// standalone desktop, with their SSH client, so `via_host` / `via_cli`
+/// trackers work). A second call is ignored.
+pub fn install_default_net(net: TrackerNet) {
+    let _ = DEFAULT_NET.set(net);
+}
+
+/// The process's tracker network: what [`install_default_net`] set, else
+/// direct HTTPS only.
+pub fn default_net() -> TrackerNet {
+    DEFAULT_NET.get().cloned().unwrap_or_default()
+}
+
+/// The hosts a tracker's requests may go to: its provider's API only (the
+/// SSRF fence, enforced by every transport before anything is sent).
+pub fn host_policy(row: &TrackerRow) -> HostPolicy {
+    match row.provider.as_str() {
+        "github" => Arc::new(|h: &str| h == crate::net::via_host::GITHUB_API_HOST),
+        "asana" => Arc::new(|h: &str| h == asana::API_HOST),
+        "linear" => Arc::new(|h: &str| h == linear::API_HOST),
+        // Exactly the configured site's host: nothing else, not a subdomain.
+        "jira_dc" => {
+            let site_host = row
+                .site_url
+                .trim_start_matches("https://")
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            Arc::new(move |h: &str| h.eq_ignore_ascii_case(&site_host))
+        }
+        _ => Arc::new(crate::store::is_allowed_tracker_host),
+    }
+}
+
+/// Which call a response answers; decides what a 403 means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallKind {
+    /// Who am I: a 403 here is an auth failure.
+    Identity,
+    /// A view's query: a 403 disables that view only.
+    View,
+    Other,
+}
+
+/// A transport failure → the tracker error it means.
+pub(crate) fn map_transport(e: crate::net::https::TransportError) -> TrackerError {
+    use crate::net::https::TransportError as T;
+    match e {
+        T::Refused(m) => TrackerError::Refused(m),
+        T::Connect(m) => TrackerError::Unreachable(m),
+        T::Timeout => TrackerError::Unreachable("timed out".into()),
+        T::TooLarge(m) | T::Protocol(m) => TrackerError::Invalid(m),
+    }
+}
+
+/// `Retry-After` in seconds, else the seconds until `X-RateLimit-Reset`
+/// (a unix time: GitHub, Linear) when the quota is spent.
+pub(crate) fn retry_after(resp: &crate::net::https::Response) -> Option<u64> {
+    if let Some(s) = resp
+        .header("Retry-After")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        return Some(s);
+    }
+    let spent = resp
+        .header("X-RateLimit-Remaining")
+        .or_else(|| resp.header("X-RateLimit-Requests-Remaining"))
+        .is_some_and(|v| v.trim() == "0");
+    if !spent {
+        return None;
+    }
+    let reset = resp
+        .header("X-RateLimit-Reset")
+        .or_else(|| resp.header("X-RateLimit-Requests-Reset"))
+        .and_then(|v| v.trim().parse::<i64>().ok())?;
+    // Linear sends milliseconds.
+    let reset = if reset > 10_000_000_000 {
+        reset / 1000
+    } else {
+        reset
+    };
+    Some((reset - crate::service::catalog::now_secs()).clamp(1, 3600) as u64)
+}
+
+/// Map a non-2xx answer for the providers after Jira (GitHub, Asana,
+/// Linear, Jira DC): the same table as Jira's, plus a 403 that is really a
+/// spent rate limit.
+pub(crate) fn check_http(
+    resp: &crate::net::https::Response,
+    call: CallKind,
+) -> Result<(), TrackerError> {
+    if resp.is_success() {
+        return Ok(());
+    }
+    let wait = retry_after(resp);
+    Err(match resp.status {
+        401 => TrackerError::Auth("401 Unauthorized".into()),
+        403 | 429 if wait.is_some() => TrackerError::RateLimited {
+            retry_after_secs: wait,
+        },
+        429 => TrackerError::RateLimited {
+            retry_after_secs: None,
+        },
+        403 if call == CallKind::Identity => TrackerError::Auth("403 on the identity call".into()),
+        403 if call == CallKind::View => TrackerError::Forbidden("403 on this view's query".into()),
+        403 => TrackerError::Forbidden("403".into()),
+        404 => TrackerError::NotFound,
+        503 if wait.is_some() => TrackerError::RateLimited {
+            retry_after_secs: wait,
+        },
+        300..=399 => TrackerError::Invalid(format!("{} redirect (not followed)", resp.status)),
+        s => TrackerError::Invalid(format!("HTTP {s}")),
+    })
+}
+
+/// Unix seconds → `YYYY-MM-DDTHH:MM:SSZ` (the inverse of
+/// [`parse_timestamp`] for UTC).
+pub fn format_timestamp(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// Most pages one view listing reads in one pass.
@@ -367,6 +743,14 @@ mod tests {
         ] {
             assert_eq!(parse_timestamp(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn timestamps_format_back() {
+        for t in [0, 1_789_892_130, 1_709_208_000, 951_782_400] {
+            assert_eq!(parse_timestamp(&format_timestamp(t)), Some(t));
+        }
+        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
     }
 
     #[test]

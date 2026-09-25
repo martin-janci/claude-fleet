@@ -614,7 +614,7 @@ impl FleetTools {
                     &self.store,
                     reference,
                     &scope,
-                    crate::service::trackers::direct_transport(),
+                    &crate::service::trackers::default_net(),
                 )
                 .await
                 .map_err(to_mcp_err)?;
@@ -717,7 +717,7 @@ impl FleetTools {
                 &self.reg,
                 &crate::service::work::start_args(&args),
                 &scope,
-                crate::service::trackers::direct_transport(),
+                &crate::service::trackers::default_net(),
             )
             .await
             .map_err(to_mcp_err)?;
@@ -736,7 +736,7 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Trackers (Jira) and orgs; see action. Never \
+    #[tool(description = "Trackers and orgs; see action. Never \
         returns a secret.")]
     pub(super) async fn work_admin(
         &self,
@@ -754,13 +754,10 @@ impl FleetTools {
                 let id = args
                     .tracker_id
                     .ok_or_else(|| mcp_err("E_INVALID", "test needs tracker_id", None))?;
-                let report = a::test_tracker(
-                    id,
-                    &self.store,
-                    crate::service::trackers::direct_transport(),
-                )
-                .await
-                .map_err(to_mcp_err)?;
+                let report =
+                    a::test_tracker(id, &self.store, &crate::service::trackers::default_net())
+                        .await
+                        .map_err(to_mcp_err)?;
                 ok_json(&report)
             }
             action if action.is_removal() => {

@@ -1,0 +1,37 @@
+[
+  {
+    "id": "summary",
+    "name": "Summary",
+    "custom": false
+  },
+  {
+    "id": "customfield_10005",
+    "name": "Sprint",
+    "custom": true,
+    "schema": {
+      "type": "string",
+      "custom": "com.example:not-a-sprint"
+    }
+  },
+  {
+    "id": "customfield_10100",
+    "name": "Sprint",
+    "custom": true,
+    "schema": {
+      "type": "array",
+      "items": "string",
+      "custom": "com.pyxis.greenhopper.jira:gh-sprint",
+      "customId": 10100
+    }
+  },
+  {
+    "id": "customfield_10101",
+    "name": "Epic Link",
+    "custom": true,
+    "schema": {
+      "type": "any",
+      "custom": "com.pyxis.greenhopper.jira:gh-epic-link",
+      "customId": 10101
+    }
+  }
+]

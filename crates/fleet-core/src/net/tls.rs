@@ -18,6 +18,22 @@
 /// every caller goes through [`tls_connector`], which runs it on the blocking
 /// pool.
 fn build_tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
+    let (roots, errors) = platform_roots();
+    if roots.is_empty() {
+        // Failing closed. An empty root store would reject every server
+        // with an opaque certificate error; saying so once, here, is
+        // the difference between a diagnosable problem and a mystery.
+        return Err(format!(
+            "no usable certificates in this machine's trust store \
+             ({errors} error(s) while reading it); an https:// server cannot be verified"
+        ));
+    }
+    Ok(connector_from(roots))
+}
+
+/// The platform trust store as a root store, and how many errors reading it
+/// produced. Blocking: called only from the two blocking-pool builders.
+fn platform_roots() -> (tokio_rustls::rustls::RootCertStore, usize) {
     // Only the `ring` provider is compiled in, so rustls would pick it
     // anyway; installing it explicitly means a future second provider
     // cannot silently change which one is used. Same reasoning, and
@@ -31,22 +47,65 @@ fn build_tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
         // the app trusting the rest.
         let _ = roots.add(cert);
     }
-    if roots.is_empty() {
-        // Failing closed. An empty root store would reject every server
-        // with an opaque certificate error; saying so once, here, is
-        // the difference between a diagnosable problem and a mystery.
-        return Err(format!(
-            "no usable certificates in this machine's trust store \
-             ({} error(s) while reading it); an https:// server cannot be verified",
-            found.errors.len()
-        ));
-    }
+    (roots, found.errors.len())
+}
+
+fn connector_from(roots: tokio_rustls::rustls::RootCertStore) -> tokio_rustls::TlsConnector {
     let config = tokio_rustls::rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
-        config,
-    )))
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+}
+
+/// Parse PEM certificates (an admin's `extra_ca`). `Err` when there is none
+/// or one does not parse.
+pub fn parse_pem_certs(
+    pem: &str,
+) -> Result<Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>, String> {
+    use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer};
+    let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("extra_ca is not PEM certificates: {e:?}"))?;
+    if certs.is_empty() {
+        return Err("extra_ca holds no certificate".into());
+    }
+    Ok(certs)
+}
+
+/// A connector that trusts the platform store PLUS `pem` (work graph M6.5:
+/// Jira Data Center behind an internal CA). Built on the blocking pool
+/// (the platform store is blocking I/O) and cached per PEM text; a failure
+/// is not cached, for the same reason as [`tls_connector`].
+pub async fn tls_connector_with_extra_roots(
+    pem: &str,
+) -> Result<tokio_rustls::TlsConnector, String> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, tokio_rustls::TlsConnector>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(c) = cache.lock().ok().and_then(|m| m.get(pem).cloned()) {
+        return Ok(c);
+    }
+    let extra = parse_pem_certs(pem)?;
+    let built = tokio::task::spawn_blocking(move || {
+        let (mut roots, _) = platform_roots();
+        for c in extra {
+            roots
+                .add(c)
+                .map_err(|e| format!("extra_ca cannot be a trust anchor: {e}"))?;
+        }
+        Ok::<_, String>(connector_from(roots))
+    })
+    .await
+    .map_err(|e| format!("building the TLS config failed: {e}"))??;
+    if let Ok(mut m) = cache.lock() {
+        if m.len() >= 16 {
+            m.clear();
+        }
+        m.insert(pem.to_string(), built.clone());
+    }
+    Ok(built)
 }
 
 /// The TLS client config, built once and cached.
@@ -117,6 +176,17 @@ mod tests {
             src.matches("load_native_certs()").count(),
             1,
             "the platform trust store is read in one place only"
+        );
+        // Its one reader runs only on the blocking pool: from the cached
+        // builder, and from the extra-roots builder's spawn_blocking.
+        let readers: Vec<&str> = src
+            .lines()
+            .filter(|l| l.contains("platform_roots()") && !l.trim_start().starts_with("//"))
+            .collect();
+        assert_eq!(
+            readers.len(),
+            3,
+            "the definition, build_tls_connector and the extra-roots spawn_blocking: {readers:#?}"
         );
     }
 

@@ -1,0 +1,185 @@
+[
+  {
+    "aliases": [],
+    "assignee_id": "557058:00000000-aaaa-bbbb-cccc-000000000001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "ABC"
+    ],
+    "description": null,
+    "external_id": "10100",
+    "hierarchy_level": 1,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "ABC-100",
+    "kind": "Epic",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "in_progress",
+      "name": "In Progress",
+      "resolution": null
+    },
+    "title": "Billing migration",
+    "updated": 1789887600,
+    "url": "https://acme.atlassian.net/browse/ABC-100"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "557058:00000000-aaaa-bbbb-cccc-000000000001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "ABC"
+    ],
+    "description": "Context\nInvoices still live in legacy_ledger. Ask @Pat Ops\nSee https://acme.atlassian.net/browse/ABC-90\n- copy rows\n- switch reads",
+    "external_id": "10101",
+    "hierarchy_level": 0,
+    "iteration": "ABC Sprint 7",
+    "iteration_active": true,
+    "key": "ABC-101",
+    "kind": "Story",
+    "parent_external_id": "10100",
+    "parent_key": "ABC-100",
+    "status": {
+      "category": "in_progress",
+      "name": "In Review",
+      "resolution": null
+    },
+    "title": "Move invoices to the new ledger",
+    "updated": 1789892130,
+    "url": "https://acme.atlassian.net/browse/ABC-101"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "557058:00000000-aaaa-bbbb-cccc-000000000001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "ABC"
+    ],
+    "description": null,
+    "external_id": "10102",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "ABC-102",
+    "kind": "Bug",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Done",
+      "resolution": "completed"
+    },
+    "title": "Fix rounding in totals",
+    "updated": 1789826400,
+    "url": "https://acme.atlassian.net/browse/ABC-102"
+  },
+  {
+    "aliases": [],
+    "assignee_id": null,
+    "assignees": [],
+    "containers": [
+      "ABC"
+    ],
+    "description": null,
+    "external_id": "10103",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "ABC-103",
+    "kind": "Story",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Closed",
+      "resolution": "not_planned"
+    },
+    "title": "Export to CSV v1",
+    "updated": 1789718400,
+    "url": "https://acme.atlassian.net/browse/ABC-103"
+  },
+  {
+    "aliases": [],
+    "assignee_id": null,
+    "assignees": [],
+    "containers": [
+      "ABC"
+    ],
+    "description": null,
+    "external_id": "10104",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "ABC-104",
+    "kind": "Bug",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Closed",
+      "resolution": "duplicate"
+    },
+    "title": "Rounding again",
+    "updated": 1789722000,
+    "url": "https://acme.atlassian.net/browse/ABC-104"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "557058:00000000-aaaa-bbbb-cccc-000000000001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "TEAM"
+    ],
+    "description": "plain text from a v2-shaped body",
+    "external_id": "20007",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "TEAM-7",
+    "kind": "Task",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "in_progress",
+      "name": "Doing",
+      "resolution": null
+    },
+    "title": "Onboarding checklist",
+    "updated": 1789889400,
+    "url": "https://acme.atlassian.net/browse/TEAM-7"
+  },
+  {
+    "aliases": [],
+    "assignee_id": null,
+    "assignees": [],
+    "containers": [
+      "TEAM"
+    ],
+    "description": null,
+    "external_id": "20008",
+    "hierarchy_level": -1,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "TEAM-8",
+    "kind": "Subtask",
+    "parent_external_id": "20007",
+    "parent_key": "TEAM-7",
+    "status": {
+      "category": "todo",
+      "name": "Triage",
+      "resolution": null
+    },
+    "title": "Status with no category yet",
+    "updated": 1789890300,
+    "url": "https://acme.atlassian.net/browse/TEAM-8"
+  }
+]

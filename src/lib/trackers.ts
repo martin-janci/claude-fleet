@@ -25,6 +25,30 @@ export interface TrackerConfig {
   key_prefixes?: string[];
   sprint_projects?: string[];
   sprint_field?: string | null;
+  // --- work graph M6
+  epic_field?: string | null;
+  /** Asana workspace gid / Linear organisation id. */
+  workspace?: string | null;
+  /** Containers with their own view, `[id, name]` (Asana projects). */
+  projects?: [string, string][];
+  /** Search is available (Asana Premium). */
+  search?: boolean;
+  /** Asana: the section → status map the probe inferred. */
+  section_map?: Record<string, string>;
+}
+
+/** What an admin set for a tracker (work graph M6). Never a secret. */
+export interface TrackerSettings {
+  /** GitHub: only these repositories (`owner/repo`). */
+  repos?: string[];
+  /** Asana: section name (lower case) → todo | in_progress | done. */
+  section_map?: Record<string, string>;
+  /** A person confirmed the section map. */
+  section_map_confirmed?: boolean;
+  /** Jira Data Center: an extra CA (PEM). */
+  extra_ca?: string | null;
+  /** Jira Data Center: the site may resolve to a private address. */
+  allow_private_network?: boolean;
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */
@@ -46,6 +70,8 @@ export interface TrackerRow {
   username?: string | null;
   /** The org its tickets belong to (work graph M5); absent = unassigned. */
   org_id?: number | null;
+  /** What the admin set (work graph M6). */
+  settings?: TrackerSettings;
 }
 
 /** A work item, local or from a tracker. */
@@ -150,18 +176,47 @@ export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>
   return r;
 }
 
-export function addTracker(url: string, name?: string): Promise<Result<TrackerRow>> {
-  return invokeCmd<TrackerRow>('add_tracker', { args: { url, name } });
+export interface AddTrackerOptions {
+  name?: string;
+  /** jira | github | asana | linear | jira_dc; the hub infers it from the URL
+   *  when absent. */
+  provider?: string;
+  /** direct | via_host:<host> | via_cli:<host>. */
+  transport?: string;
+  settings?: TrackerSettings;
 }
 
+export function addTracker(
+  url: string,
+  opts: AddTrackerOptions | string = {},
+): Promise<Result<TrackerRow>> {
+  const o: AddTrackerOptions = typeof opts === 'string' ? { name: opts } : opts;
+  return invokeCmd<TrackerRow>('add_tracker', { args: { url, ...o } });
+}
+
+/** A credential: `username` for Jira Cloud's email + API token; `null` for a
+ *  token that is the whole credential (Asana, Linear, Data Center). */
 export function setTrackerCredential(
   trackerId: number,
-  username: string,
+  username: string | null,
   secret: string,
 ): Promise<Result<TrackerRow>> {
   return invokeCmd<TrackerRow>('set_tracker_credential', {
-    args: { tracker_id: trackerId, username, secret },
+    args: { tracker_id: trackerId, username: username ?? undefined, secret },
   });
+}
+
+export interface UpdateTrackerOptions {
+  name?: string;
+  transport?: string;
+  settings?: TrackerSettings;
+}
+
+export function updateTracker(
+  trackerId: number,
+  opts: UpdateTrackerOptions,
+): Promise<Result<TrackerRow>> {
+  return invokeCmd<TrackerRow>('update_tracker', { args: { tracker_id: trackerId, ...opts } });
 }
 
 export function testTracker(trackerId: number): Promise<Result<TrackerTestReport>> {
@@ -252,13 +307,174 @@ export function parseJiraTicketUrl(text: string): { site: string; key: string } 
   return key ? { site: `https://${host}`, key: key.toUpperCase() } : null;
 }
 
-/** The tracker whose probed key prefixes own `key` — only when exactly one
- *  does (a prefix two trackers claim is never guessed). */
-export function trackerForKey(key: string, list: readonly TrackerRow[]): TrackerRow | null {
+// ---------------------------------------------------------------------------
+// Providers (work graph M6)
+
+export type ProviderId = 'jira' | 'jira_dc' | 'github' | 'asana' | 'linear';
+
+export interface ProviderInfo {
+  label: string;
+  /** A short glyph for the badge on chips and ⌘K rows. */
+  icon: string;
+  /** What Connect asks for. */
+  needs: 'email_token' | 'token' | 'host_with_gh';
+  /** The credential's name in the form. */
+  secretLabel?: string;
+  secretHelp?: string;
+}
+
+export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
+  jira: {
+    label: 'Jira Cloud',
+    icon: 'J',
+    needs: 'email_token',
+    secretLabel: 'API token',
+    secretHelp: 'Create one at id.atlassian.com → Security → API tokens.',
+  },
+  jira_dc: {
+    label: 'Jira Data Center',
+    icon: 'JD',
+    needs: 'token',
+    secretLabel: 'Personal access token',
+    secretHelp: 'Profile → Personal Access Tokens on your Jira server.',
+  },
+  github: { label: 'GitHub', icon: 'GH', needs: 'host_with_gh' },
+  asana: {
+    label: 'Asana',
+    icon: 'A',
+    needs: 'token',
+    secretLabel: 'Personal access token',
+    secretHelp: 'Asana → Settings → Apps → Developer apps → Personal access tokens.',
+  },
+  linear: {
+    label: 'Linear',
+    icon: 'L',
+    needs: 'token',
+    secretLabel: 'API key',
+    secretHelp: 'Linear → Settings → Security & access → Personal API keys.',
+  },
+};
+
+export function providerInfo(provider: string | null | undefined): ProviderInfo | null {
+  return provider && provider in PROVIDERS ? PROVIDERS[provider as ProviderId] : null;
+}
+
+/** What a pasted URL names: the provider, the site to add, and the key it
+ *  points at (if any). Data Center cannot be told from a URL: pick it. The
+ *  backend fences every site the same way (`normalize_provider_site`). */
+export function inferProvider(
+  text: string,
+): { provider: ProviderId; site: string; key: string } | null {
+  const jira = parseJiraTicketUrl(text);
+  if (jira) return { provider: 'jira', ...jira };
+  let u: URL;
+  try {
+    u = new URL(text.trim());
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port) return null;
+  const host = u.hostname.toLowerCase();
+  const segs = u.pathname.split('/').filter(Boolean);
+  if (/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.atlassian\.net$/.test(host) && segs.length === 0) {
+    return { provider: 'jira', site: `https://${host}`, key: '' };
+  }
+  const name = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+  if (host === 'github.com' || host === 'www.github.com') {
+    const [o, r, kind, n] = segs;
+    if (!o) return { provider: 'github', site: 'https://github.com', key: '' };
+    if (!name.test(o)) return null;
+    const key =
+      r && name.test(r) && kind === 'issues' && /^\d{1,9}$/.test(n ?? '')
+        ? `${o}/${r}#${n}`.toLowerCase()
+        : '';
+    return { provider: 'github', site: `https://github.com/${o.toLowerCase()}`, key };
+  }
+  if (host === 'app.asana.com') {
+    const digits = /^\d{1,24}$/;
+    let ws = '';
+    let task = '';
+    if (segs[0] === '0' && segs.length >= 3) task = segs[2];
+    else if (segs[0] === '1' && digits.test(segs[1] ?? '')) {
+      ws = segs[1];
+      const t = segs.indexOf('task');
+      if (t >= 0) task = segs[t + 1] ?? '';
+    } else if (segs.length === 1 && digits.test(segs[0])) ws = segs[0];
+    else if (segs.length > 0) return null;
+    return {
+      provider: 'asana',
+      site: ws ? `https://app.asana.com/${ws}` : 'https://app.asana.com',
+      key: digits.test(task) ? `asana:${task}` : '',
+    };
+  }
+  if (host === 'linear.app') {
+    const [ws, kind, k] = segs;
+    if (!ws || !/^[A-Za-z0-9_-]{1,64}$/.test(ws)) return null;
+    const key = kind === 'issue' && /^[A-Za-z][A-Za-z0-9_]{1,9}-\d{1,7}$/.test(k ?? '') ? k.toUpperCase() : '';
+    return { provider: 'linear', site: `https://linear.app/${ws.toLowerCase()}`, key };
+  }
+  return null;
+}
+
+/** A key as the UI shows it: an Asana task's opaque `asana:<gid>` becomes a
+ *  short `Asana …123456` (never used for matching); every other key as is. */
+export function displayKey(key: string): string {
+  const gid = key.startsWith('asana:') ? key.slice('asana:'.length) : null;
+  return gid ? `Asana …${gid.slice(-6)}` : key;
+}
+
+/** `owner/repo#n` → the lower-case `owner/repo`, else null. */
+function githubRepo(key: string): string | null {
+  const m = key.match(/^([A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*)#\d{1,9}$/);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/** The trackers that may answer `key` — the backend's `tracker_claims`: a
+ *  GitHub `owner/repo#n` the GitHub trackers whose scope covers the repo,
+ *  an `asana:<gid>` every Asana tracker, a ticket key the trackers whose
+ *  probed prefixes have it. */
+export function trackerClaims(key: string, list: readonly TrackerRow[]): TrackerRow[] {
+  const repo = githubRepo(key);
+  if (repo) {
+    return list.filter((t) => {
+      if (t.provider !== 'github') return false;
+      const repos = t.settings?.repos ?? [];
+      if (repos.length > 0) return repos.some((r) => r.toLowerCase() === repo);
+      const owner = t.site_url.replace(/\/+$/, '').match(/^https:\/\/github\.com\/(.+)$/)?.[1];
+      return !owner || repo.split('/')[0] === owner.toLowerCase();
+    });
+  }
+  if (key.startsWith('asana:')) return list.filter((t) => t.provider === 'asana');
   const prefix = key.split('-')[0]?.toUpperCase();
-  if (!prefix) return null;
-  const owners = list.filter((t) => (t.config?.key_prefixes ?? []).includes(prefix));
+  if (!prefix) return [];
+  return list.filter((t) => (t.config?.key_prefixes ?? []).includes(prefix));
+}
+
+/** The tracker that owns `key` — only when exactly one does (a prefix two
+ *  trackers claim is never guessed). */
+export function trackerForKey(key: string, list: readonly TrackerRow[]): TrackerRow | null {
+  const owners = trackerClaims(key, list);
   return owners.length === 1 ? owners[0] : null;
+}
+
+/** Show provider badges only once trackers of two or more providers exist:
+ *  a Jira-only fleet looks exactly as before. */
+export function showProviderBadges(list: readonly TrackerRow[]): boolean {
+  return new Set(list.map((t) => t.provider)).size > 1;
+}
+
+/** Asana's section map as Settings shows it: every section the probe or a
+ *  person mapped, the person's choice winning. */
+export function sectionMapRows(t: TrackerRow): { section: string; category: string; confirmed: boolean }[] {
+  const inferred = t.config?.section_map ?? {};
+  const set = t.settings?.section_map ?? {};
+  const confirmed = !!t.settings?.section_map_confirmed;
+  const names = [...new Set([...Object.keys(inferred), ...Object.keys(set)])].sort();
+  return names.map((section) => ({
+    section,
+    category: set[section] ?? (confirmed ? 'todo' : (inferred[section] ?? 'todo')),
+    confirmed: section in set,
+  }));
 }
 
 /** The tracker's data is stale: its last sync is older than twice the

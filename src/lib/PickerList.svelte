@@ -7,6 +7,8 @@
     description?: string;
     /** Trailing hint (status, "⌘↵"). */
     meta?: string;
+    /** A small leading badge (a ticket's tracker), its name in the tooltip. */
+    badge?: { icon: string; title: string };
     /** Non-selectable group heading rendered before this row. */
     group?: string;
     testid?: string;
@@ -105,7 +107,11 @@
       }}
     >
       <div class="main">
-        <span class="label">{item.label}</span>
+        <span class="label"
+          >{#if item.badge}<span class="badge" title={item.badge.title} data-testid="picker-badge"
+              >{item.badge.icon}</span
+            >{/if}{item.label}</span
+        >
         {#if item.description}
           <span class="desc">{item.description}</span>
         {/if}
@@ -174,5 +180,14 @@
     font-size: 0.7rem;
     color: var(--fg-muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .badge {
+    font-size: 0.62rem;
+    font-weight: 600;
+    padding: 0 0.25rem;
+    margin-right: 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    opacity: 0.8;
   }
 </style>

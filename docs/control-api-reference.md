@@ -479,9 +479,9 @@ Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `
 
 ### `work_admin`
 
-Trackers (Jira) and orgs; see action. Never returns a secret.
+Trackers and orgs; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `color`, `confirm_nonce`, `credential_ref`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `site_url`, `tracker_id`, `username`
+Parameters: `action`, `auth_kind`, `color`, `confirm_nonce`, `credential_ref`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 

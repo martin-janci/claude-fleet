@@ -16,7 +16,7 @@ import type { ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
-import type { TicketRow } from './trackers';
+import { displayKey, type TicketRow } from './trackers';
 import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
 
 /** A cached tracker ticket and the section it is listed under. */
@@ -49,12 +49,18 @@ export interface SwitcherEntry {
   section?: string;
   /** Lookup: what to resolve. */
   lookup?: string;
+  /** Tickets: the tracker's provider badge (work graph M6). */
+  badge?: { icon: string; title: string };
 }
 
 const TICKET_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{1,9}-\d{1,7}$/;
 
 /** Ticket rows, one per key (the first section a key appears in wins). */
-export function ticketEntries(tickets: readonly SwitcherTicket[]): SwitcherEntry[] {
+export function ticketEntries(
+  tickets: readonly SwitcherTicket[],
+  /** tracker id → its provider badge, when badges are shown (M6). */
+  badges: ReadonlyMap<number, { icon: string; title: string }> = new Map(),
+): SwitcherEntry[] {
   const seen = new Set<string>();
   const out: SwitcherEntry[] = [];
   for (const { ticket: t, section } of tickets) {
@@ -63,10 +69,11 @@ export function ticketEntries(tickets: readonly SwitcherTicket[]): SwitcherEntry
     seen.add(key);
     const live = (t.live_session_ids ?? []).length;
     const assignee = (t.assignees ?? []).join(', ');
+    const shown = displayKey(key);
     out.push({
       kind: 'ticket',
       key: `ticket:${key}`,
-      label: t.title ? `${key} ${t.title}` : key,
+      label: t.title ? `${shown} ${t.title}` : shown,
       description: [t.status_name, assignee, live > 0 ? `${live} live` : null]
         .filter((x): x is string => !!x)
         .join(' · '),
@@ -74,6 +81,7 @@ export function ticketEntries(tickets: readonly SwitcherTicket[]): SwitcherEntry
       fields: [key, t.title, t.status_name ?? '', assignee, ...(t.aliases ?? [])].filter(Boolean),
       ticket: t,
       section,
+      badge: t.tracker_id != null ? badges.get(t.tracker_id) : undefined,
     });
   }
   return out;
@@ -85,13 +93,14 @@ export function lookupEntry(query: string, knownKeys: ReadonlySet<string>): Swit
   const q = query.trim();
   if (!q) return null;
   const isUrl = /^https:\/\/\S+$/i.test(q);
-  const isKey = TICKET_KEY_RE.test(q);
+  // A ticket key, or a GitHub `owner/repo#n` (work graph M6).
+  const isKey = TICKET_KEY_RE.test(q) || /^[\w.-]+\/[\w.-]+#\d{1,9}$/.test(q);
   if (!isUrl && !isKey) return null;
   if (isKey && knownKeys.has(q.toUpperCase())) return null;
   return {
     kind: 'lookup',
     key: `lookup:${q}`,
-    label: isUrl ? `Look up ${q}` : `Look up ${q.toUpperCase()}`,
+    label: isUrl ? `Look up ${q}` : `Look up ${TICKET_KEY_RE.test(q) ? q.toUpperCase() : q}`,
     description: 'fetch the ticket from its tracker',
     meta: '↵',
     fields: [q],

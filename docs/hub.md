@@ -628,33 +628,37 @@ free to pair again:
 revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
 ```
 
-## Trackers (Jira Cloud)
+## Trackers
 
-A hub can read tickets from Jira Cloud, read-only: sessions then show their
-ticket's title and status, ⌘K lists *My work* (and *Current sprint* where a
-project has sprints), and work can be started from a ticket. Nothing needs a
+A hub can read tickets from **Jira Cloud, GitHub Issues, Asana, Linear and
+Jira Data Center**, read-only: sessions then show their ticket's title and
+status, ⌘K lists *My work* (and a current sprint / cycle where one exists),
+and work can be started from a ticket. Every provider behaves the same in
+⌘K, on the chips, in start and resume and in detection; with trackers of two
+or more kinds, a small provider badge tells them apart. Nothing needs a
 tracker — keys in branch names group sessions without one — and nothing
-waits on it: with Jira down or the token expired, everything answers from
-the cache.
+waits on it: with a tracker down or its token expired, everything answers
+from the cache.
 
 Trackers are fleet administration, so they are configured **on the hub**
 (`work_admin` is master-only; a paired desktop shows them read-only and says
-so). From the hub machine:
+so). From the hub machine — paste any ticket or issue URL; the provider and
+site are inferred from it:
 
 ```sh
-fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123   # any ticket URL, or the site
+fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123   # Jira Cloud
 fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
 fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
 fleet-hub tracker list
 fleet-hub tracker remove 1        # its items stay, marked unavailable
 ```
 
-The API token (id.atlassian.com → Security → API tokens) is read from
-**stdin**, from an environment variable of that command (`--from-env
-JIRA_TOKEN`), or not read at all: `--ref env:NAME` or `--ref
+A token is read from **stdin**, from an environment variable of that command
+(`--from-env JIRA_TOKEN`), or not read at all: `--ref env:NAME` or `--ref
 file:/run/secrets/jira` stores a *reference* the hub resolves each time it
 syncs. It is never an argument, so it never lands in `ps` or shell history.
-With Docker, put the token in a secret and point the tracker at it:
+Without `--email` the token is the whole credential (Asana, Linear, Data
+Center). With Docker, put the token in a secret and point the tracker at it:
 
 ```yaml
 services:
@@ -670,29 +674,87 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   --email you@acme.com --ref file:/run/secrets/jira
 ```
 
-What to know:
+### Per provider
 
-- **Only `https://<name>.atlassian.net` is accepted** (no other host, port,
-  path or userinfo), and redirects are never followed: a tracker's URL is
-  where the hub sends a credential from its own network position. Data
-  Center is not supported yet.
-- **Atlassian API tokens expire** (at most a year). An expired one sets the
-  tracker to `auth_failed` and polling stops until you set a new one and
-  `test` it; a CAPTCHA (`captcha`) needs one browser login to the site.
-  `rate_limited` and `unreachable` retry on their own.
+| Provider | Add | Credential | What fleet reads |
+|---|---|---|---|
+| **Jira Cloud** | `https://<name>.atlassian.net` or any ticket URL | email + API token (id.atlassian.com → Security → API tokens; they expire within a year) | `search/jql` views *My work*, *Current sprint* (projects with sprints), *Recent*, favourite filters; status category + resolution; epics by `hierarchyLevel` |
+| **GitHub Issues** | `https://github.com/<owner>` or any issue URL, **`--via-cli <host>`** (`--repo owner/repo` to narrow) | **none in fleet**: `gh` on that host, with its own `gh auth login` | GraphQL through `gh api`: `assignee:@me` issues in the owner's repositories; `OPEN` → to do (in progress when GitHub links a branch or a closing PR), `CLOSED` → done / not planned / duplicate by `stateReason`; sub-issues' parent; a transferred issue keeps its links |
+| **Asana** | `https://app.asana.com[/<workspace gid>]` or any task URL | personal access token | *My tasks*, one view per project your tasks sit in (the **events API**, a sync token per project; an expired token lists the project whole once), *Recent* where search exists (Premium); `completed` → done, otherwise the task's section through the section map |
+| **Linear** | `https://linear.app/<workspace>` or any issue URL | personal API key | issues assigned to you: *My issues*, *Current cycle* (teams with cycles), *Recent*; team keys are the key prefixes; `state.type` → status (canceled → not planned); a team move keeps the link |
+| **Jira Data Center** | `--provider jira_dc https://jira.corp.example[/jira]` | personal access token | API v2 (`/search` by `startAt`), the Epic Link field, the same views and filters as Cloud |
+
+- **GitHub reads through `gh`**, run over SSH on the host you name
+  (`transport = via_cli:<host>`). Fleet never reads, stores or sends a GitHub
+  token: the host's `gh` login is used, and `set-credential` refuses a
+  GitHub tracker. A host without `gh`, or with `gh` logged out, makes the
+  tracker `unreachable` with the fix in its error.
+- **Asana has no human keys.** A task's reference is its URL (both forms,
+  `/0/<project>/<task>` and `/1/<workspace>/project/<p>/task/<t>`); the UI
+  shows a short `Asana …123456`. A task in two projects is listed under both.
+  Which **sections** mean *in progress* is inferred on the first test from
+  their names (progress / doing / review → in progress, done / shipped →
+  done) and shown in Settings → Work with a Confirm button; once confirmed,
+  your map wins (`work_admin update` with `settings.section_map`).
+- **Linear vs Jira keys:** `ENG-123` belongs to the tracker whose probed
+  prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
+  trackers claim is never bound automatically.
+
+### Reaching a tracker from a host: `via_host`
+
+A tracker only one machine can reach (a VPN, an internal network), or one
+whose requests should leave from a particular host, is read with `curl` on
+that host: `fleet-hub tracker add <url> --via-host <host>`. The token goes to
+the host **on stdin** into a private temp file (`umask 077`, removed on
+exit) that `curl -q` reads with `-H @file`: it is in no argv on the host
+(`ps` shows only file names), no environment variable and no log. Requests
+are https only, never follow a redirect, and still go only to that
+tracker's own host. `curl` 7.55 or newer is needed on the host.
+
+### Jira Data Center
+
+The site is whatever an admin enters, so it is fenced harder than the others:
+https only, one exact host (no subdomain, no port, no userinfo, an optional
+context path), and **before connecting the hub resolves the name and refuses
+a loopback, link-local (169.254.0.0/16, cloud metadata) or unspecified
+address**, then connects to the address it checked. A site that really is on
+such an address needs `settings.allow_private_network: true`. An internal CA
+goes into `settings.extra_ca` (PEM), trusted besides the system store. A site
+only a VPN host can reach uses `--via-host` instead (that host's trust store).
+
+```sh
+fleet-hub tracker add --provider jira_dc https://jira.corp.example/jira
+fleet-hub tracker set-credential 3 < pat.txt
+fleet-hub tracker test 3
+```
+
+### What to know
+
+- **Sites are fenced** per provider — `*.atlassian.net`, `api.github.com`
+  (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
+  — and redirects are never followed: a tracker's URL is where the hub sends
+  a credential from its own network position.
+- **States.** An expired or refused credential sets `auth_failed` and polling
+  stops until you set a new one and `test` it; a CAPTCHA (`captcha`) needs
+  one browser login to the site. `rate_limited` (429, `Retry-After`, Linear's
+  complexity limit, GitHub's spent quota) and `unreachable` retry on their
+  own.
 - **Sync** runs every `work.sync_interval_secs` (default 300; `0` turns it
-  off, read at start): each view from its watermark with a 2-minute overlap,
-  every linked ticket by id, and keys typed before the tracker was connected
-  (which then bind to their tickets on their own). A ticket that vanishes is
-  marked *unavailable* — deleted or no longer visible, Jira cannot say which
-  — never deleted, and its links stay.
+  off, read at start): each view from its watermark with a 2-minute overlap
+  (Asana projects: from their sync token), every linked ticket by id, and
+  references typed before the tracker was connected (which then bind to their
+  tickets on their own). A ticket that vanishes is marked *unavailable* —
+  deleted or no longer visible, a tracker cannot say which — never deleted,
+  and its links stay.
 - **Secrets** never leave `tracker_secrets`: no answer, event, log line,
-  diagnostics bundle or error report carries the token (a row shows only
-  `…abcd`), and `last_error` is redacted before it is stored.
+  diagnostics bundle or error report carries a token (a row shows only
+  `…abcd`), and `last_error` is redacted before it is stored — Atlassian,
+  GitHub (`ghp_`, `gho_`, `github_pat_` …), Linear (`lin_api_`) and Asana
+  token shapes included.
 - **Isolation:** a per-host token (an in-session Claude) sees only tickets
   linked to sessions on its own host, inside its host's organisation (see
-  *Organisations and isolation* below), and never receives `work:*` frames
-  on `/events`. Master and paired clients see all.
+  *Organisations and isolation* below), whatever the provider, and never
+  receives `work:*` frames on `/events`. Master and paired clients see all.
 - **Migrating from the desktop:** a copied `state.db` carries the desktop's
   trackers and a stored token. Re-enter the token on the hub (or rotate it
   and use a `--ref`) rather than keep one that lived on another machine.
