@@ -234,7 +234,7 @@ const P_URL: &str = "@@URL@@";
 /// The script `via_host` runs. Read the notes on [`CurlTransport`] before
 /// changing a line.
 const CURL_SCRIPT: &str = r#"builtin unalias -a 2>/dev/null
-builtin unset -f unset unalias builtin command set trap umask exit exec printf test [ curl rm mktemp find cat head dd wc grep sed 2>/dev/null
+builtin unset -f unset unalias builtin command set trap umask exit exec printf test [ curl rm mktemp find cat head dd wc grep sed tr break continue 2>/dev/null
 set +x
 umask 077
 trap '' PIPE
