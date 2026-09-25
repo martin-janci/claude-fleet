@@ -183,8 +183,9 @@ impl FleetTools {
         access log ever sees it; the device posts it to the hub's /pair once \
         and gets a token of its own back. name must be 1-64 characters with no \
         control characters and must not be one a live client already holds. \
-        mode is full (drive sessions fleet-wide) or readonly (observe only); \
-        fleet-admin tools are out of a client's reach either way. Codes live \
+        mode is full (drive sessions fleet-wide), readonly (observe only), or \
+        peer (another hub's link — see peer_exchange); fleet-admin tools are \
+        out of a client's reach either way. Codes live \
         in memory only, so a hub restart invalidates every outstanding one. \
         Master token only. Returns JSON { url, code, expires_in_s, name, mode, \
         trusted }.")]
@@ -201,6 +202,13 @@ impl FleetTools {
         let name = crate::store::validate_client_name(&p.name).map_err(to_mcp_err)?;
         let mode = p.mode.unwrap_or_else(|| "full".to_string());
         crate::store::validate_client_mode(&mode).map_err(to_mcp_err)?;
+        if mode == "peer" && p.trusted {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                "a peer hub link is never trusted; drop trusted",
+                None,
+            ));
+        }
         audit(
             "pair_client",
             &format!(

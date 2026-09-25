@@ -628,6 +628,113 @@ free to pair again:
 revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
 ```
 
+## Link two hubs
+
+Two fleets can message each other's sessions by address:
+`<fleet>/session/<host>/<name>`. One hub **dials** (it needs a route to the
+other), the other **listens**; messages flow both ways over the dialer's
+connection, with about one round-trip of latency.
+
+1. On the hub that will listen: `fleet-hub pair --mode peer --name <label>`.
+2. On the hub that will dial: `fleet-hub peer add https://<other-hub> <code>`.
+   `fleet-hub peer list` shows the link `connected` within a few seconds.
+
+Pair only a hub you trust: the **first** peer token to claim a given (never
+linked) fleet id gets that link, and no other token can claim the same fleet
+afterward.
+
+To **re-pair** a link you already have (a lost or leaked token, a rebuilt
+hub), keep the old link — its waiting messages are what a re-pair keeps:
+
+1. On the listening hub: `fleet-hub client revoke <old peer client>`, then
+   `fleet-hub pair --mode peer --name <label>` for a new code. (Without the
+   revoke, the new code's first exchange is refused: `fleet <id> is already
+   linked to another peer token; revoke that client first`.)
+2. On the dialing hub: `fleet-hub peer add https://<other-hub> <new code>`.
+   Do **not** `peer remove` the old link: that fails its waiting messages
+   back to their senders.
+
+The new link's first exchange reaches the other hub, but the old link may not
+have noticed its revoked token yet (it can be parked in a long-poll for up to
+25 s, or backing off). Until it does, `peer list` shows the new link
+`retrying` with `fleet <id> is still linked (link <N>); waiting for it to
+stop`, and it carries no messages either way. Once the old link's next
+exchange is refused, the new credentials move onto the old link — same link
+id, the new row disappears — and the waiting messages go out and come in over
+them, once each. This normally takes seconds; both links back off up to a
+minute between tries, so it can take two.
+
+The same wait is what keeps a newly paired hub from claiming a fleet you
+already talk to: a new link whose handshake names the fleet of a link that is
+still `connected` or `retrying` never takes it over, delivers nothing and
+accepts nothing; it waits, and `fleet_health` counts it as a link down. If you
+did not mean a re-pair, remove the waiting row by its ID (see below) — it holds
+no messages. Only if the old link can no longer reach the other hub at all
+(the hub moved to a new URL) will it never hear the refusal; then `peer
+remove` the old link to let the new one take the fleet, knowing its waiting
+messages fail back to their senders. A peer that answers with a malformed
+fleet id is `incompatible`; one that answers with this hub's own fleet id is
+`refused`.
+
+What a linked hub can do: deliver messages into your sessions' inboxes,
+marked as untrusted input, and receive your sessions' messages to it. What it
+cannot do: call any other tool, read `/events`, type into a pane (a message
+from another fleet wakes an idle session with a fixed one-line nudge only,
+never its text), or forward your messages to a third fleet.
+
+Remove a link on either side with `fleet-hub peer remove <fleet-id>` or
+`fleet-hub peer remove <id>` (the `ID` column of `peer list`); messages still
+waiting on it fail back to their senders as `message_undeliverable`, as does
+any message a peer has not taken within 7 days. A link that is refused (a
+revoked token, a fleet-id mismatch) or incompatible (a hub without
+`peer_exchange`) stops retrying; pair again to restore it — waiting messages
+are kept for the week. A link that stopped **before** its first handshake
+completed (its fleet reads `(handshake pending)` — a self-link, a fleet
+already linked the other way, a token the other hub refused) has no fleet id
+to remove it by and holds no messages: remove it by its ID, which also clears
+the `fleet_health` line it keeps raised.
+
+A message's `kind` crossing a link is a short lowercase token — 1 to 32
+bytes of `[a-z0-9_-]` (the default, `message`, always passes) — and never
+`question`: a message from another fleet cannot hold a session's `Stop`
+hook. Sender and recipient addresses are at most 256 bytes. The sender
+checks all of this before queuing, so a message the other hub would refuse
+comes back as an immediate error, never as a `message_undeliverable` a week
+later.
+
+If you put a reverse proxy in front of a **listening** hub, it must allow a
+request of at least 35 s: the dialer's idle exchange long-polls up to 25 s,
+and a proxy timeout shorter than that (plus margin) drops the connection
+mid-poll and the link sits `retrying`. It must also allow request bodies of
+at least 1 MiB (nginx's default `client_max_body_size` is exactly 1 MiB): one
+exchange carries up to 512 KiB of messages each way, encoded.
+
+Limits: plain `http://` peers are allowed only on loopback (`--insecure`);
+at most 50 messages and 512 KiB of them per exchange in each direction (a
+single larger message still goes, alone), and 32 KiB per message; an unread message
+from another fleet whose recipient session is later deleted is not reported
+back to the sending fleet.
+
+**What ends a link versus what just interrupts it.** The dialer treats HTTP
+401, or a structured tool refusal (`E_FORBIDDEN`/`E_UNAUTHORIZED` with a
+code), a `fleet_id` mismatch, a rejected `proto`, or a peer that does not
+know `peer_exchange` as terminal — the link goes `refused` or `incompatible`
+and stops on its own. A bare HTTP 403 with none of that — the shape a proxy
+in front of the peer sends, not the peer hub's own answer — is treated like
+a dropped connection instead and retried with backoff.
+
+`fleet-hub client revoke <name>` on the listener's peer token is not the same
+as `fleet-hub peer remove`: it acts at once (a call the listener already had
+parked returns immediately, and a further send to that fleet is refused)
+but leaves the link's pending rows exactly where `peer remove` would have
+failed them — attached, waiting for a re-pair inside the retention window.
+
+A reply only threads onto a message the two ends actually exchanged: onto
+one your own hub sent across this same link, or one the peer sent that
+named you. An id that only looks right — a purely local thread, another
+fleet's traffic, or a message this link never carried — is refused
+(`E_INVALID`) rather than silently accepted.
+
 ## Trackers
 
 A hub can read tickets from **Jira Cloud, GitHub Issues, Asana, Linear and
@@ -1755,6 +1862,27 @@ deliberately.
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a
   phone* and *Clients* above.
+- **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
+  reaches the `peer_exchange` tool only — every other tool answers
+  `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there
+  is no `--trusted` for a peer link, and a host token can never hold the
+  `peer` mode. A message that arrives over a link is stored marked as
+  untrusted input and is never typed into a pane: the only thing it can do
+  to a pane is wake an idle session with a fixed one-line nudge, never the
+  remote text itself. See *Link two hubs* above.
+- **A peer's own words cannot forge the marker that quotes them.** If a
+  message body from another fleet happens to contain a line matching
+  fleet's own untrusted-content marker, that line is neutralised (prefixed
+  `> `) before it is ever stored — a peer cannot close the marked block
+  early and have the rest of its text read back as fleet's own.
+- **Trust in a link is decided once, at pairing, by identity — not by a
+  fleet-id allowlist.** The pairing code itself is the credential: only
+  someone who can already run commands on the other hub can mint one, and
+  the first exchange pins whichever `fleet_id` that hub answers with for
+  the life of the link. There is nothing to pre-register, because a fleet
+  id is not secret and requiring one in advance would mean the listener's
+  operator already had to know the dialer's id before pairing — the code
+  is what lets them skip that.
 - **A reverse proxy in front of the hub must APPEND to `X-Forwarded-For`.**
   That per-address budget keys on the request's TCP peer, except when the peer
   is a loopback or private address — the compose topology, where the peer is

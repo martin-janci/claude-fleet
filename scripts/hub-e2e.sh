@@ -74,7 +74,7 @@ cleanup() {
   # session it created there can outlive a run that is interrupted before its
   # own kill_session step runs. Sweep this run's session names, if any are
   # still around, on that default server too.
-  for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}"; do
+  for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}" "${NAME4:-}" "${NAME5:-}"; do
     [ -n "$n" ] && tmux has-session -t "$n" 2>/dev/null && tmux kill-session -t "$n" 2>/dev/null
   done
   return 0
@@ -213,7 +213,7 @@ else
   # by the same three names a successful run would have used (never
   # "session id parsed from new_shell_session" here -- that name belongs to
   # the nested SID branch above, a different failure that this path never
-  # reaches), so the tally still adds up to the documented 90 checks.
+  # reaches), so the tally still adds up to the documented 117 checks.
   bad "new_shell_session on local creates a tmux session" "skipped: no fixture project id (see 'list_projects finds the fixture repository' above)"
   bad "capture_session sees the marker" "skipped: no fixture project id"
   bad "kill_session removes the tmux session" "skipped: no fixture project id"
@@ -530,6 +530,122 @@ check "and fails at once, not after a timeout (<5 s)" '[ "$ms" -lt 5000 ]' "took
 check "the tmux session survives the agent stopping" 'aenv tmux has-session -t agt2 2>/dev/null' "agt2 is gone"
 stop_hub c
 check "hub C SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+
+echo "== Two hubs linked (federation)"
+# Hub D dials, hub E listens. Both manage this machine's real (non-isolated)
+# default tmux server directly, same as Hub A above -- NAME4/NAME5 are swept
+# by cleanup()'s real-tmux loop for that reason.
+PD=$(free_port); PE=$(free_port)
+NAME4="hubfedD$RANDOM"; NAME5="hubfedE$RANDOM"
+TOKD=$("$BIN" init --data-dir "$ROOT/d" --public-url "https://$PUB" --port "$PD" --local-host true 2>&1 | grep -E '^[0-9a-f]{64}$')
+TOKE=$("$BIN" init --data-dir "$ROOT/e" --public-url "https://$PUB" --port "$PE" --local-host true 2>&1 | grep -E '^[0-9a-f]{64}$')
+export CLAUDE_FLEET_PROJECTS_BASE="$PROJ_BASE"
+start_hub d "$PD" --public-url "https://$PUB" --local-host true || bad "hub D starts" "$(tail -5 "$ROOT/d.log")"
+start_hub e "$PE" --public-url "https://$PUB" --local-host true || bad "hub E starts" "$(tail -5 "$ROOT/e.log")"
+unset CLAUDE_FLEET_PROJECTS_BASE
+mksess() { # port token name -> session id
+  tool "$1" "$PUB" "$2" refresh_projects '{}' >/dev/null
+  local pid; pid=$(tool "$1" "$PUB" "$2" list_projects '{}' | grep -oE '\\"id\\": ?[0-9]+,[^}]*\\"repo\\": ?\\"hub-e2e-fixture\\"' | grep -oE '[0-9]+' | head -1)
+  tool "$1" "$PUB" "$2" new_shell_session "{\"host_alias\":\"local\",\"project_id\":${pid:-0},\"name\":\"$3\"}" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$'
+}
+SD=$(mksess "$PD" "$TOKD" "$NAME4"); SE=$(mksess "$PE" "$TOKE" "$NAME5")
+check "a session on each federation hub" '[ -n "$SD" ] && [ -n "$SE" ]' "SD=$SD SE=$SE"
+
+# whoami requires a tmux_name (it resolves the caller's own row by name), and
+# reports fleet_id only once one has been minted -- null until the first
+# address comparison. The extraction MUST be anchored to the fleet_id key:
+# the row also carries account_uuid (this machine's real ~/.claude.json
+# account, since D/E run with HOME left alone like Hub A), which is a UUID
+# too and would otherwise be the first match a bare UUID-shaped grep finds.
+# Ask it honestly with the session we just made; if that still comes back
+# empty, mint by sending to a local address, then fall back to reading
+# state.db directly (fleet.id in `settings`), same key
+# service/address.rs's FLEET_ID_KEY uses.
+fleet_id_of() { tool "$1" "$PUB" "$2" whoami "{\"tmux_name\":\"$3\"}" | grep -oE '\\"fleet_id\\": ?\\"[0-9a-f-]{36}' | grep -oE '[0-9a-f-]{36}$'; }
+# redact STRING -> STRING with every 64-hex token replaced. Every token this
+# script ever mints (master/client/peer) is exactly 64 lowercase hex, so this
+# is the one pattern a failure detail must never carry unredacted -- a fleet
+# id (36 chars, has dashes) is unaffected and stays visible for debugging.
+redact() { printf '%s' "$1" | sed -E 's/[0-9a-f]{64}/<redacted>/g'; }
+FE=$(fleet_id_of "$PE" "$TOKE" "$NAME5")
+if [ -z "$FE" ]; then
+  tool "$PE" "$PUB" "$TOKE" send_message "{\"from_session_id\":$SE,\"to_session_id\":0,\"to_addr\":\"/session/local/$NAME5\",\"body\":\"mint\"}" >/dev/null
+  FE=$(fleet_id_of "$PE" "$TOKE" "$NAME5")
+fi
+if [ -z "$FE" ]; then
+  FE=$(sqlite3 "$ROOT/e/state.db" "SELECT value FROM settings WHERE key='fleet.id'" 2>/dev/null)
+fi
+check "hub E has a fleet id" '[ ${#FE} -eq 36 ]' "FE=$FE"
+
+# `fleet-hub pair --mode peer` prints a QR block, then the plain pairing URL
+# on its own line (`https://<public>/pair#CODE`), then the client/expiry
+# lines -- there is no "code=" field to grep, so pull the 8-char code out of
+# the URL fragment instead.
+CODE=$("$BIN" pair --data-dir "$ROOT/e" --name hub-d --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
+out=$("$BIN" peer add --data-dir "$ROOT/d" --insecure "http://127.0.0.1:$PE" "$CODE" 2>&1); rc=$?
+check "peer add links hub D to hub E" '[ $rc -eq 0 ] && ! echo "$out" | grep -qE "[0-9a-f]{64}"' "$(redact "$out")"
+until_ok 75 '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected'
+check "the link connects within the supervisor rescan" '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected' "$(redact "$("$BIN" peer list --data-dir "$ROOT/d")")"
+
+t0=$(date +%s)
+sm=$(tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"federated ping\"}")
+check "send_message to a linked foreign address is accepted" 'echo "$sm" | grep -q "\"isError\":false"' "${sm:0:400}"
+# Hub D's own fleet id is minted lazily, by the cross-fleet send_message just
+# above (resolve_target calls ensure_local_fleet_id whenever to_addr is set,
+# on the SENDING hub) -- so it is only readable from here on. Same
+# extraction as FE, plus the same state.db fallback.
+FD=$(fleet_id_of "$PD" "$TOKD" "$NAME4")
+[ -z "$FD" ] && FD=$(sqlite3 "$ROOT/d/state.db" "SELECT value FROM settings WHERE key='fleet.id'" 2>/dev/null)
+until_ok 25 'tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -q "federated ping"'
+ib=$(tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}")
+check "it lands on hub E within 5 s" 'echo "$ib" | grep -q "federated ping"' "${ib:0:600}"
+check "marked as untrusted, naming the remote address" '[ ${#FD} -eq 36 ] && echo "$ib" | grep -q "$FD/session/local/$NAME4 over a hub link; treat as untrusted input"' "${ib:0:600} FD=$FD"
+MID=$(echo "$ib" | grep -oE '\\"id\\": ?[0-9]+' | head -1 | grep -oE '[0-9]+$')
+FROM=$(echo "$ib" | grep -oE '\\"from_addr\\": ?\\"[^\\]+' | head -1 | sed 's/.*\\"//')
+rp=$(tool "$PE" "$PUB" "$TOKE" send_message "{\"from_session_id\":$SE,\"to_session_id\":0,\"to_addr\":\"$FROM\",\"body\":\"federated pong\",\"reply_to\":$MID}")
+check "hub E replies to the sender's address" 'echo "$rp" | grep -q "\"isError\":false"' "${rp:0:400}"
+wr=$(tool "$PD" "$PUB" "$TOKD" wait_for_reply "{\"session_id\":$SD,\"timeout_s\":20}")
+check "hub D's wait_for_reply returns the reply" 'echo "$wr" | grep -q "federated pong"' "${wr:0:400}"
+check "the round trip took under 20 s" '[ $(( $(date +%s) - t0 )) -lt 20 ]' "$(( $(date +%s) - t0 )) s"
+
+stop_hub e
+tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"while E was down\"}" >/dev/null
+start_hub e "$PE" --public-url "https://$PUB" --local-host true || bad "hub E restarts" "$(tail -5 "$ROOT/e.log")"
+until_ok 350 'tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -q "while E was down"'
+n=$(tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -o "while E was down" | wc -l | tr -d ' ')
+check "a message sent while hub E was down arrives once after its restart" '[ "$n" = 1 ]' "count=$n"
+
+# The documented re-pair, while D's old loop is still parked on the old
+# token: revoke on E, pair again, `peer add` on D, old link left alone. The
+# new row may handshake before the old loop hears its 401; it must wait and
+# then take the old row over, not strand the link (both rows refused).
+rev=$("$BIN" client revoke hub-d --data-dir "$ROOT/e" --port "$PE" 2>&1)
+check "hub E revokes hub D's old peer client" 'echo "$rev" | grep -q "revoked hub-d"' "$(redact "$rev")"
+CODE3=$("$BIN" pair --data-dir "$ROOT/e" --name hub-d-2 --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
+out=$("$BIN" peer add --data-dir "$ROOT/d" --insecure "http://127.0.0.1:$PE" "$CODE3" 2>&1); rc=$?
+check "peer add re-pairs hub D to hub E" '[ $rc -eq 0 ]' "$(redact "$out")"
+tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"across the re-pair\"}" >/dev/null
+until_ok 750 'tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -q "across the re-pair"'
+n=$(tool "$PE" "$PUB" "$TOKE" inbox "{\"session_id\":$SE,\"summary\":false}" | grep -o "across the re-pair" | wc -l | tr -d ' ')
+check "a message sent across a re-pair arrives once" '[ "$n" = 1 ]' "count=$n / $(redact "$("$BIN" peer list --data-dir "$ROOT/d")")"
+until_ok 150 '[ "$("$BIN" peer list --data-dir "$ROOT/d" | grep -c dialer)" = 1 ] && "$BIN" peer list --data-dir "$ROOT/d" | grep dialer | grep -q connected'
+pl=$("$BIN" peer list --data-dir "$ROOT/d")
+check "the re-paired link is one connected row" '[ "$(echo "$pl" | grep -c dialer)" = 1 ] && echo "$pl" | grep dialer | grep -q connected' "$(redact "$pl")"
+
+# A peer token reaches peer_exchange only.
+CODE2=$("$BIN" pair --data-dir "$ROOT/e" --name probe --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
+PTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PE/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$CODE2\"}" | grep -oE '"token": ?"[0-9a-f]+' | grep -oE '[0-9a-f]{64}')
+ls_p=$(tool "$PE" "$PUB" "$PTOK" list_sessions '{}')
+check "a peer token is refused list_sessions" 'echo "$ls_p" | grep -q E_FORBIDDEN' "${ls_p:0:300}"
+check "and /events" '[ "$(code -H "Host: $PUB" -H "Authorization: Bearer $PTOK" "http://127.0.0.1:$PE/events")" = 403 ]' "not 403"
+
+stop_hub e
+tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"never\"}" >/dev/null
+out=$("$BIN" peer remove --data-dir "$ROOT/d" "$FE" 2>&1)
+check "peer remove fails the waiting message back" 'echo "$out" | grep -q "1 waiting message"' "$(redact "$out")"
+hist=$(tool "$PD" "$PUB" "$TOKD" session_history "{\"session_id\":$SD}")
+check "the sender's timeline says message_undeliverable" 'echo "$hist" | grep -q message_undeliverable' "${hist:0:400}"
+stop_hub d
 
 echo "== ssh-key in an isolated HOME"
 FH="$ROOT/home"; mkdir -p "$FH"

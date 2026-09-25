@@ -826,6 +826,15 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Arc::clone(&bus) as Arc<dyn EventBus>,
         ticks_cancel.clone(),
     );
+    // Hub↔hub federation: one exchange loop per dialer link in state.db,
+    // rescanned every 5 s so a CLI `peer add` / `peer remove` lands without
+    // a restart. Stopped with the ticks.
+    let peer_handle = fleet_core::service::peer::supervisor::spawn_peer_supervisor(
+        Arc::clone(&store),
+        Arc::clone(&ssh),
+        Arc::new(fleet_core::http_client::TcpTransport),
+        ticks_cancel.clone(),
+    );
     // Trackers (work graph M3.3): the hub owns its fleet, so it syncs them
     // (`work.sync_interval_secs`, `0` = off). A paired desktop never does.
     // `via_host` / `via_cli` trackers (M6) run `curl` / `gh` on a host over
@@ -872,6 +881,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tick_handles.push(h);
     }
     tick_handles.push(usage_handle);
+    tick_handles.push(peer_handle);
     if let Some(h) = tracker_handle {
         tick_handles.push(h);
     }

@@ -5,6 +5,7 @@ mod demo;
 mod org;
 mod out;
 mod pair;
+mod peer;
 mod reports;
 mod serve;
 mod tls;
@@ -77,7 +78,7 @@ enum Cmd {
         /// Name for the client, as it will appear in `client list` (1-64 characters).
         #[arg(long)]
         name: String,
-        /// What the client may do: full (drive sessions) or readonly (observe). [default: full]
+        /// What the client may do: full (drive sessions), readonly (observe), or peer (another hub; see fleet-hub peer add). [default: full]
         #[arg(long)]
         mode: Option<String>,
         /// Seconds the pairing code stays valid (30-3600). [default: 600]
@@ -94,6 +95,13 @@ enum Cmd {
     Client {
         #[command(subcommand)]
         cmd: ClientCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Link this hub to another fleet's hub, list links, or remove one.
+    Peer {
+        #[command(subcommand)]
+        cmd: PeerCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -194,6 +202,25 @@ enum ClientCmd {
     Untrust { name: String },
 }
 
+#[derive(Subcommand)]
+enum PeerCmd {
+    /// Dial another hub with a pairing code its operator made with
+    /// `fleet-hub pair --mode peer`. This hub then keeps the link open.
+    Add {
+        /// The other hub's URL (https://…).
+        url: String,
+        /// The single-use pairing code.
+        code: String,
+        /// Allow a plain http:// URL; loopback only (for a local test).
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// Print this hub's links, one per line (never a token).
+    List,
+    /// Remove a link by fleet id or link id; waiting messages fail back to their senders.
+    Remove { target: String },
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     // Mandatory and first: fleet-core keeps no default app version, so
@@ -227,6 +254,15 @@ async fn main() -> ExitCode {
             ClientCmd::Revoke { name } => pair::client_revoke(&opts, &env, &name).await,
             ClientCmd::Trust { name } => pair::client_trust(&opts, &env, &name, true).await,
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
+        },
+        Cmd::Peer { cmd, opts } => match cmd {
+            PeerCmd::Add {
+                url,
+                code,
+                insecure,
+            } => peer::add(&opts, &env, &url, &code, insecure).await,
+            PeerCmd::List => peer::list(&opts, &env),
+            PeerCmd::Remove { target } => peer::remove(&opts, &env, &target),
         },
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
@@ -491,6 +527,39 @@ mod tests {
             panic!("client trust did not parse");
         };
         assert!(matches!(cmd, ClientCmd::Trust { name } if name == "desk"));
+        // `peer add|list|remove`, HubOptions in either position like `client`.
+        Cli::try_parse_from(["fleet-hub", "peer", "add", "https://b.example", "CODE"]).unwrap();
+        Cli::try_parse_from(["fleet-hub", "peer", "list"]).unwrap();
+        Cli::try_parse_from(["fleet-hub", "peer", "remove", "fleet-b"]).unwrap();
+        for argv in [
+            ["fleet-hub", "peer", "list", "--data-dir", "/tmp/x"],
+            ["fleet-hub", "peer", "--data-dir", "/tmp/x", "list"],
+        ] {
+            let Cmd::Peer { cmd, opts } = Cli::try_parse_from(argv).unwrap().cmd else {
+                panic!("{argv:?} did not parse as peer");
+            };
+            assert!(matches!(cmd, PeerCmd::List), "{argv:?}");
+            assert_eq!(opts.data_dir, Some("/tmp/x".into()), "{argv:?}");
+        }
+        let Cmd::Peer { cmd, .. } = Cli::try_parse_from([
+            "fleet-hub",
+            "peer",
+            "add",
+            "http://127.0.0.1:7788",
+            "CODE",
+            "--insecure",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("peer add did not parse");
+        };
+        assert!(matches!(
+            cmd,
+            PeerCmd::Add {
+                url, code, insecure
+            } if url == "http://127.0.0.1:7788" && code == "CODE" && insecure
+        ));
         let Cmd::Client { cmd, .. } =
             Cli::try_parse_from(["fleet-hub", "client", "untrust", "desk"])
                 .unwrap()

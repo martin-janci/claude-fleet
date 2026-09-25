@@ -170,6 +170,7 @@
       "ghosts",
       "hosts_reachable",
       "hosts_total",
+      "peer_links_down",
       "schema_version",
       "sessions_total",
       "stuck",

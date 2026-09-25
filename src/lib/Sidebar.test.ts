@@ -65,6 +65,7 @@ import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
 import { sessions, loadSessions, showBgAgents, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
+import { sessionFocus, focusSession } from './session_focus';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, loadAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
@@ -120,6 +121,7 @@ beforeEach(() => {
   showBgAgents.set(true);
   showRowDetails.set(true);
   selectSession(null);
+  sessionFocus.set(null);
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
   // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
@@ -1379,6 +1381,34 @@ describe('Sidebar triage (W2 Track D)', () => {
     await fireEvent.click(pill);
     await tick();
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('a focused session (a clicked suggestion) is the only row, past the other filters', async () => {
+    const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const };
+    const fine = sessionFor(2, 'dev-fine');
+    mockBackend(fakeProjects, [stuck, fine]);
+    render(Sidebar);
+    await tick(); await tick();
+    // Needs you would hide the healthy row; the focus shows it anyway.
+    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    hostFilter.set('elsewhere');
+    focusSession(fine.id, 'dev-fine');
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('dev-fine');
+    expect(get(selectedSession)?.id).toBe(fine.id);
+    expect(screen.getByTestId('session-focus-bar')).toHaveTextContent('Showing only dev-fine');
+    // The chip lifts it: back to the filters the user had.
+    await fireEvent.click(screen.getByTestId('session-focus-clear'));
+    await tick();
+    expect(get(sessionFocus)).toBeNull();
+    expect(screen.queryByTestId('session-focus-bar')).toBeNull();
+    hostFilter.set('all');
+    await tick();
+    const after = screen.getAllByTestId('sess-row');
+    expect(after).toHaveLength(1);
+    expect(after[0]).toHaveTextContent('dev-stuck');
   });
 
   // UX-08: at zero there is nothing to warn about, so the glyph and the

@@ -15,6 +15,7 @@ mod hosts_accounts;
 mod layers;
 mod orgs;
 mod participants;
+mod peer_links;
 mod projects;
 mod read_cursors;
 mod reconcile;
@@ -43,7 +44,12 @@ pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
     SessionOrgFacts, ORG_NAME_MAX_CHARS,
 };
-pub use participants::{ParticipantRow, RETIRED_RETENTION_SECS};
+pub use participants::{ParticipantRow, PARTICIPANT_REMOTE, RETIRED_RETENTION_SECS};
+pub use peer_links::{
+    Adopted, Inbound, OutboxRow, PeerLinkRow, PeerLinkSummary, LINK_CONNECTED, LINK_INCOMPATIBLE,
+    LINK_REFUSED, LINK_RETRYING, LINK_ROLE_DIALER, LINK_ROLE_LISTENER, LISTENER_STALE_SECS,
+    PEER_PENDING_MAX_SECS,
+};
 pub use read_cursors::CursorRow;
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
@@ -83,6 +89,11 @@ pub struct Store {
     /// embedding and needs no new `RowChange` variant, so no contract golden
     /// or `events.ts` allowlist entry moves.
     message_notify: Arc<tokio::sync::Notify>,
+    /// Per hub link, the generation of its latest `peer_exchange` — so a
+    /// parked listener handler a newer exchange superseded can return at
+    /// once. Process-local on purpose, like `kills`: it only has to outlive
+    /// a long-poll, and a restart has no parked handlers to release.
+    peer_generations: std::sync::Mutex<std::collections::HashMap<i64, u64>>,
 }
 
 /// The store's handle on its [`EventBus`]. Normally a pass-through; inside
@@ -140,6 +151,7 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         };
         store.migrate()?;
         Ok(store)
@@ -176,6 +188,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         })
     }
 
@@ -187,6 +200,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         };
         store.migrate()?;
         Ok(store)
@@ -200,6 +214,7 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         };
         store.migrate()?;
         Ok(store)

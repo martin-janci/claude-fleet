@@ -234,3 +234,9 @@ Conversation event tracking is landed end to end (migration 037
 `/clear`, `/resume` and compaction tracked as conversation switches;
 `session_conversations` API; the Conversations UI panel), per
 `docs/superpowers/specs/2026-09-18-conversation-events-design.md`.
+
+Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
+`fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor
+and a `peer_exchange` listener carry messages both ways by fleet address,
+and `fleet_health.peer_links_down` reports a link in trouble, per
+`docs/superpowers/specs/2026-09-24-hub-federation-design.md`.

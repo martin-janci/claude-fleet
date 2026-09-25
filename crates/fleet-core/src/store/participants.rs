@@ -22,9 +22,22 @@ pub struct ParticipantRow {
     /// is gone, so a sender learns instead of timing out.
     #[serde(default)]
     pub retired_at: Option<i64>,
+    /// The full `<fleet>/session/<host>/<name>` address of a `remote`
+    /// participant (migration 054). `None` for every other kind.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// The `peer_links` row this `remote` participant belongs to (migration
+    /// 054). `None` for every other kind.
+    #[serde(default)]
+    pub peer_link_id: Option<i64>,
 }
 
-const COLUMNS: &str = "id, kind, session_id, client_id, created_at, retired_at";
+/// A participant standing for a session on another, linked hub (migration
+/// 054) — see `store::peer_links`.
+pub const PARTICIPANT_REMOTE: &str = "remote";
+
+const COLUMNS: &str =
+    "id, kind, session_id, client_id, created_at, retired_at, address, peer_link_id";
 
 /// How long a tombstoned participant's undelivered mail is kept. Long enough
 /// that a sender waiting on a reply, or a human reading a timeline the next
@@ -39,6 +52,8 @@ fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<ParticipantRow> {
         client_id: row.get(3)?,
         created_at: row.get(4)?,
         retired_at: row.get(5)?,
+        address: row.get(6)?,
+        peer_link_id: row.get(7)?,
     })
 }
 
@@ -276,7 +291,7 @@ impl Store {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (mid, sender, unread) in &orphans {
-            if *unread {
+            if *unread && *sender != 0 {
                 let _ = self.insert_session_event(
                     *sender,
                     "message_undeliverable",
@@ -311,11 +326,13 @@ impl Store {
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             for (mid, sender) in unread {
-                let _ = self.insert_session_event(
-                    sender,
-                    "message_undeliverable",
-                    Some(&format!("message {mid} was never read; recipient is gone")),
-                );
+                if sender != 0 {
+                    let _ = self.insert_session_event(
+                        sender,
+                        "message_undeliverable",
+                        Some(&format!("message {mid} was never read; recipient is gone")),
+                    );
+                }
             }
             self.conn.execute(
                 "DELETE FROM session_messages WHERE to_participant_id = ?1",

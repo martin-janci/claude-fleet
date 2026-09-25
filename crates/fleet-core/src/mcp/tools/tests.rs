@@ -721,6 +721,131 @@ fn set_secret_value_never_reaches_the_persisted_audit_trail() {
     assert_eq!(detail, "set_secret by master: host_alias=mefistos name=FOO");
 }
 
+/// SEC: a linked hub's message bodies ride `peer_exchange`'s `send` array,
+/// and `redact_args` only redacts top-level string keys — an array is
+/// rendered as raw JSON, so up to the summary cap of a peer's body would
+/// land on the controller's timeline, once per long-poll. `peer_exchange`
+/// therefore writes no audit row at all; its own `audit` log line carries
+/// counts only.
+#[test]
+fn peer_exchange_bodies_never_reach_the_persisted_audit_trail() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({
+        "proto": 1,
+        "fleet_id": "fleet-a",
+        "send": [{
+            "id": 1, "from_addr": "fleet-a/session/h/a1",
+            "to_addr": "fleet-b/session/local/ctl", "body": "the secret peer body",
+            "kind": "message", "sent_at": 0
+        }],
+        "results": [{ "id": 2, "status": "rejected", "code": "E_X", "message": "peer words" }]
+    });
+    persist_audit(
+        &store,
+        crate::mcp::auth::PEER_TOOL,
+        args.as_object(),
+        &client_caller("hub-a", TokenMode::Peer),
+    );
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    assert!(
+        !events.iter().any(|e| e.kind == "mcp_call"),
+        "peer_exchange must not persist an audit row: {events:?}"
+    );
+}
+
+/// G1 (review): `persist_audit` runs BEFORE `enforce_mode` in `call_tool`
+/// ("audit first so refused calls are on the timeline too"), so a peer
+/// token's call to any tool OTHER than `peer_exchange` — refused a moment
+/// later — used to still write the peer-chosen tool name and its (redacted)
+/// args onto the controller's session, `find_audit_session` falling back to
+/// the controller. `tool` there is entirely peer-chosen and never
+/// truncated. A `Peer` caller must never persist an audit row, whatever tool
+/// it names.
+#[test]
+fn a_refused_peer_call_writes_no_audit_row() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({ "host_alias": "local" });
+    persist_audit(
+        &store,
+        "list_sessions",
+        args.as_object(),
+        &client_caller("hub-a", TokenMode::Peer),
+    );
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    assert!(
+        !events.iter().any(|e| e.kind == "mcp_call"),
+        "a peer caller's refused tool call must not persist an audit row: {events:?}"
+    );
+}
+
+/// G19 (review): a remote message's stored `body` is already wrapped in the
+/// untrusted-content marker (`apply.rs`'s `mark_untrusted`) — for a marker
+/// naming a realistic sender address, that line alone runs past
+/// `INBOX_PREVIEW_CHARS` (80), so the unstripped preview used to be all
+/// marker and no message, even though the row is already flagged foreign
+/// via `from_addr` regardless.
+#[test]
+fn a_remote_messages_inbox_preview_strips_the_untrusted_marker() {
+    let body = guard::mark_untrusted("short reply", "fleet-b/session/h/b1 over a hub link");
+    assert!(
+        body.lines().next().unwrap().len() > INBOX_PREVIEW_CHARS,
+        "fixture marker must itself exceed the preview cap for this test to mean anything"
+    );
+    let m = crate::store::SessionMessage {
+        id: 1,
+        from_session_id: 0,
+        to_session_id: 5,
+        body,
+        kind: "message".into(),
+        sent_at: 0,
+        read_at: None,
+        reply_to: None,
+        from_addr: Some("fleet-b/session/h/b1".into()),
+        to_addr: Some("/session/local/alpha".into()),
+    };
+    let summary = InboxSummary::from(m);
+    assert_eq!(summary.body_preview, "short reply");
+}
+
+/// A local message's `body` carries no marker, so the preview is untouched.
+#[test]
+fn a_local_messages_inbox_preview_is_the_raw_body() {
+    let m = crate::store::SessionMessage {
+        id: 1,
+        from_session_id: 3,
+        to_session_id: 5,
+        body: "hi there".into(),
+        kind: "message".into(),
+        sent_at: 0,
+        read_at: None,
+        reply_to: None,
+        from_addr: None,
+        to_addr: None,
+    };
+    let summary = InboxSummary::from(m);
+    assert_eq!(summary.body_preview, "hi there");
+}
+
 #[test]
 fn ok_json_never_emits_an_empty_text_block() {
     // Even degenerate values must serialize to a non-empty text block, so a
@@ -1626,8 +1751,9 @@ fn capture_default_cap_matches_docs() {
 /// count is 73 with `list_host_worktrees`, 74 with `resolve_move`, and 80
 /// with restore_host_sessions/discover_lost_sessions. The fleet-mesh
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
-/// the merged count is 81, and 83 with the work graph's `work` /
-/// `work_link`.)
+/// the merged count is 81, 83 with the work graph's `work` / `work_link`,
+/// 84 with `work_admin`; hub federation adds `peer_exchange` and
+/// `list_peer_links`: 86.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1638,6 +1764,7 @@ fn router_sum_serves_every_tool() {
         include_str!("orchestration.rs"),
         include_str!("repo.rs"),
         include_str!("assets.rs"),
+        include_str!("peer.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -1647,7 +1774,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 84);
+    assert_eq!(served, 86);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1781,12 +1908,15 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
     // guard.rs's own doc comment on READONLY_TOOLS: `list_clients` is the
     // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
     // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
-    // may reach must also be something a full client may reach.
+    // may reach must also be something a full client may reach. `list_peer_links`
+    // is the same shape for the same reason (it names other fleets).
     for name in guard::READONLY_TOOLS {
         assert!(
-            guard::CLIENT_TOOLS.contains(name) || *name == "list_clients",
+            guard::CLIENT_TOOLS.contains(name)
+                || *name == "list_clients"
+                || *name == "list_peer_links",
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients special case"
+             documented list_clients/list_peer_links special case"
         );
     }
 }
@@ -2016,6 +2146,25 @@ fn list_clients_is_master_only() {
     assert!(enforce_admin(&Caller::master(), "list_clients").is_ok());
 }
 
+/// `list_peer_links` names every fleet this hub is linked to — the same
+/// "who else can see this" reasoning as `list_clients` above, so it gets the
+/// same master-only gate even though the read mutates nothing.
+#[test]
+fn list_peer_links_is_master_only() {
+    assert!(enforce_admin(&Caller::master(), "list_peer_links").is_ok());
+    for (label, c) in every_caller_kind() {
+        if c.is_master() {
+            continue;
+        }
+        assert!(
+            enforce_mode(&c, "list_peer_links")
+                .and_then(|()| enforce_admin(&c, "list_peer_links"))
+                .is_err(),
+            "{label}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn pair_client_mints_into_the_registry_the_pair_route_redeems_from() {
     let (tools, guards, _store) = client_tools();
@@ -2129,6 +2278,37 @@ async fn pair_client_refuses_a_name_a_live_client_already_holds() {
             .is_ok(),
         "a revoked name can be paired again"
     );
+}
+
+/// A peer token is a linked hub, never an operator's own device — pairing
+/// one `trusted` makes no sense (`set_client_trust` refuses it too, at the
+/// store layer) and is caught here, before a code is ever minted.
+#[tokio::test]
+async fn pair_client_refuses_a_trusted_peer_but_allows_an_untrusted_one() {
+    let (tools, guards, _store) = client_tools();
+    let err = tools
+        .pair_client(Parameters(PairClientParams {
+            name: "hub-b".into(),
+            mode: Some("peer".into()),
+            ttl_s: None,
+            trusted: true,
+        }))
+        .await
+        .expect_err("trusted peer must be refused");
+    assert!(err.message.starts_with("E_VALIDATE"), "{}", err.message);
+    assert!(guards.pairings.is_empty(), "no code was minted");
+
+    let r = tools
+        .pair_client(Parameters(PairClientParams {
+            name: "hub-b".into(),
+            mode: Some("peer".into()),
+            ttl_s: None,
+            trusted: false,
+        }))
+        .await
+        .expect("untrusted peer is fine");
+    let v = result_json(&r);
+    assert_eq!(v["mode"], "peer");
 }
 
 #[tokio::test]
@@ -2367,7 +2547,7 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
 
 // ---- what the router SERVES (scope, slimming, hints) ----
 
-/// The five caller shapes the server actually sees.
+/// The six caller shapes the server actually sees.
 fn every_caller_kind() -> Vec<(&'static str, Caller)> {
     vec![
         ("master", Caller::master()),
@@ -2378,6 +2558,7 @@ fn every_caller_kind() -> Vec<(&'static str, Caller)> {
             "client readonly",
             client_caller("phone", TokenMode::Readonly),
         ),
+        ("client peer", client_caller("hub-b", TokenMode::Peer)),
     ]
 }
 
@@ -2401,6 +2582,37 @@ fn the_served_tool_list_matches_the_call_gates() {
     }
 }
 
+/// A peer token (a linked hub) reaches exactly one tool — `peer_exchange` —
+/// and nothing else reaches that tool. The loop covers every other
+/// registered tool.
+#[test]
+fn a_peer_token_reaches_only_peer_exchange_and_nothing_else_reaches_it() {
+    let peer = client_caller("hub-b", TokenMode::Peer);
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let name = t.name.to_string();
+        if name == crate::mcp::auth::PEER_TOOL {
+            continue;
+        }
+        assert!(
+            enforce_mode(&peer, &name).is_err(),
+            "a peer token must be refused {name}"
+        );
+        assert!(
+            !present::visible_to(&peer, &name),
+            "{name} served to a peer"
+        );
+    }
+    assert!(enforce_mode(&peer, crate::mcp::auth::PEER_TOOL).is_ok());
+    assert!(present::visible_to(&peer, crate::mcp::auth::PEER_TOOL));
+    for (label, c) in every_caller_kind() {
+        if c.mode == TokenMode::Peer {
+            continue;
+        }
+        let e = enforce_mode(&c, crate::mcp::auth::PEER_TOOL);
+        assert!(e.is_err(), "{label} must be refused peer_exchange");
+    }
+}
+
 #[test]
 fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
     let all = FleetTools::tool_router_for_doc().list_all();
@@ -2411,7 +2623,12 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
             .collect()
     };
     let master = served(&Caller::master());
-    assert_eq!(master.len(), all.len(), "the master token sees everything");
+    assert_eq!(
+        master.len(),
+        all.len() - 1,
+        "the master token sees everything but peer_exchange"
+    );
+    assert!(!master.iter().any(|n| n == crate::mcp::auth::PEER_TOOL));
 
     let readonly = served(&host_caller("hosta", TokenMode::Readonly));
     assert!(
@@ -2942,6 +3159,11 @@ fn the_served_definition_budget_stays_bounded() {
     // what's new since your last read." on all five, re-measured at 64,732.
     // Raised to that plus the customary 100.
     //
+    // Raised for hub federation, task 9: `list_peer_links` joined the master
+    // surface (`peer_exchange` alone does not count — it is peer-only, see
+    // the `peer` entry logged below). Measured at 64,929; raised to that plus
+    // the customary 100.
+    //
     // Raised for the work graph (roadmap M1b.2, review C21): two tools,
     // `work` (read) and `work_link` (link / reject / unlink), with one-line
     // descriptions and one-clause parameter docs. The surface had 100 bytes
@@ -3022,7 +3244,10 @@ fn the_served_definition_budget_stays_bounded() {
     // M7 (main, #267) merged into M9: measured at 70,765 on 2026-09-25
     // (M7-on-M6's 70,209 + 556 for M9.1-M9.7; M7 had already added
     // `confirm_nonce` to `work_link`); plus 100.
-    const BUDGET_BYTES: usize = 70_865;
+    // Hub federation merged onto M9 (main): `list_peer_links` and the
+    // federation clauses on the messaging tools. Measured at 71,066 on
+    // 2026-09-25 (+301 over M9's 70,765); plus 100.
+    const BUDGET_BYTES: usize = 71_166;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3052,6 +3277,12 @@ fn the_served_definition_budget_stays_bounded() {
         (
             "client full",
             definition_bytes(&client_caller("phone", TokenMode::Full)),
+        ),
+        // `peer_exchange` alone: served to a peer token and nothing else, so
+        // it never counts against the master budget above.
+        (
+            "peer",
+            definition_bytes(&client_caller("hub-b", TokenMode::Peer)),
         ),
     ] {
         println!("{label}: {n} tools / {b} bytes (~{} tokens)", b * 10 / 37);

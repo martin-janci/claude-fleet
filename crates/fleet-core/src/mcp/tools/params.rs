@@ -875,8 +875,9 @@ pub struct PairClientParams {
     /// control characters, and not a name a live client already holds.
     pub name: String,
     /// What the client's token may do: `full` (drive sessions across the
-    /// fleet) or `readonly` (observe only). Default `full`. Fleet-admin tools
-    /// stay out of reach either way.
+    /// fleet), `readonly` (observe only), or `peer` (another hub's link —
+    /// see `peer_exchange`). Default `full`. Fleet-admin tools stay out of
+    /// reach either way.
     #[serde(default)]
     pub mode: Option<String>,
     /// Seconds the pairing code stays valid. Default 600, at most 3600. The

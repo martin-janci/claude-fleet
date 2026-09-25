@@ -59,6 +59,7 @@ tracing-appender = "0.2"
 # `tokio-rustls` (ring only) + platform-trust-store pair the desktop already
 # used to reach a hub, lifted here, so no second TLS stack and no new crate
 # enters `Cargo.lock`. See the M3 plan's Revisions for why not `reqwest`.
+# The hub also dials another hub with it (federation, `http_client/`).
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-native-certs = "0.8"
 

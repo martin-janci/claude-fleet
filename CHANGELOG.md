@@ -8,6 +8,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.39] - 2026-09-25
+
+### Added
+- **sidebar:** clicking a suggestion shows only its session
+## [0.2.38] - 2026-09-25
+
+### Added
+- **work-graph:** M9.6 multi-repo start
+- **work-graph:** M9.3 agent-written handover, on demand
+- **work-graph:** M9.7 the operator's starts and kills always need approval
+- **work-graph:** M9.2 ticket context card in Details
+- **work-graph:** M9.1 Today view and Copy standup
+- **ui:** connect any tracker, provider badges, the Asana section map; docs (M6.6)
+- **trackers:** Jira Data Center, with an admin-fenced site (M6.5)
+- **trackers:** Linear (M6.4)
+- **trackers:** via_host transport — curl on a host, the credential on stdin (M6.3)
+- **ui:** org scope selector, needs-you across scopes, Organisations settings; one rowMatches (M5.4, M5.5)
+- **trackers:** GitHub Issues through gh and Asana (M6.1, M6.2)
+- **work:** the org boundary for per-host tokens (M5.3)
+- **work:** Tidy up and Reopened in the UI, archived work in Done (M7.3)
+- **work:** tidy-up storage and API, archive, snooze, reopen, auto-tidy (M7.2)
+- **work:** phone view carries work_suggested; work/work_link action enums (M8.0)
+- **trackers:** provider conformance suite and trait refinements (M6.0)
+- **work:** organisations — schema, resolution, scopes and admin (M5.1, M5.2)
+- **work:** the pure tidy-up planner, plan_tidy (M7.1)
+- **work:** SessionStart work context behind work.session_start_context, off (M4.5)
+- **work:** explanations and one-key correction for detected links (M4.4)
+- **work:** detection signals and the pure link resolver (M4.2, M4.3)
+- **work:** one ticket recogniser in Rust and TypeScript over a shared fixture (M4.1)
+- **ui:** tickets in ⌘K, start work from a ticket, status on chips, Settings → Work (M3.5)
+- **work:** tickets, lookup and start work on a ticket (M3.4)
+- **trackers:** the sync tick, retro-binding and events on real change only (M3.3)
+- **work_admin:** trackers admin over MCP, the hub CLI and LocalOnly desktop commands (M3.1)
+- **trackers:** the provider trait and a read-only Jira Cloud adapter (M3.2)
+- **store:** trackers, their secrets and views; tracker columns on work items (M3.1)
+- **sidebar:** past work under Done, past-only work groups, Resume with a brief preview (M2.5)
+- **work:** a work read with neither session nor key lists recently ended links (M2.5)
+- **work:** resume past work over MCP and Tauri — plan, continue, fresh with brief (M2.4)
+- **hub:** peer add/list/remove, list_peer_links, health and outbox sweep
+- **work:** deterministic handover brief, delivered through additionalContext ahead of the inbox (M2.3)
+- **work:** links carry across resume, fork, review and task workers; purge marks lost conversations (M2.2)
+- **hosts:** E_PROBE carries the classified ssh failure
+- **work:** work journal — conversations, progress and compaction summaries outlive their sessions (M2.1)
+- **peer:** the dialer loop, its supervisor, and the two-hub proof
+- **peer:** the listener side and the peer_exchange tool
+- **sidebar:** a row's work comes from its link first; set work, "Not this", clear (M1b.2)
+- **work:** desktop work-link commands routed to the hub; rows name their rejected keys (M1b.2)
+- **messages:** a linked foreign address queues to the hub outbox
+- **work:** a session row carries its primary work; `work` and `work_link` MCP tools (M1b.2)
+- **peer:** wire types, inbound checks and dialer backoff
+- **messages:** a remote end reads back as its address
+- **store:** work items and session↔work links that survive moves and kills (M1b.1)
+- **store:** peer links, remote participants and the hub outbox
+- **auth:** a peer token mode that reaches peer_exchange only
+- **new-session:** name the work, warn on a duplicate, accept a pasted ticket URL (M1a)
+- **sidebar:** group sessions by work key, with no tracker and no setup (M1a)
+- **store:** every session row gets its participant on insert (migration 045)
+- **ssh_diag:** one classifier for ssh client failures
+
+### Changed
+- **net:** lift the hub client's TLS/HTTP/1.1 stack into fleet-core (M3.0)
+- **store:** migration 045 on a populated v44 database (M9)
+- **e2e:** two hubs linked end to end; docs for hub links
+- **ssh_diag:** rename SshFailure.host_alias to ssh_alias
+- **account_usage:** cover the OpenSSH 9.x auth-denied prefix as a connect failure
+- **ssh:** mux and usage-fallback checks read the shared classifier
+- **http:** move the hub HTTP client into fleet-core
+
+### Fixed
+- **peer:** a re-pair racing the old loop waits instead of stranding the link
+- **hub:** CLI + docs/spec review fixes (G6, G15, G21, G22, G25b, G26b/e)
+- **peer:** dialer review fixes (G3, G7, G14b, G20, G26c, G26d)
+- **messages:** G2b -- a reply across a link must involve the recipient itself
+- **work:** a closing ref no tracker resolves is never auto-linked (R3u)
+- **peer:** inbound review fixes for the listener and apply path (G9, G11, G12, G13, G8a, G25a, G6 peer items)
+- **mcp:** G2 correction -- restore the sender-participation check in send_remote
+- **mcp:** federation review fixes for the tool layer and send_remote (G1, G2, G4, G19, G8b, G25c, G26a, G6 parse_client)
+- **gc:** warn when the peer outbox sweep fails (G24)
+- **health:** peer_links_down uses the new store roll-up (G14c)
+- **store:** peer_links store-layer review fixes (G5, G10, G14a/c, G16, G18, G23, G24)
+- **store:** index participants.peer_link_id (G17)
+- **trackers:** ticket text cannot escape the untrusted fence (M3 review)
+- **peer:** bound what a peer's words and addresses can do to a recipient
+- **peer:** a new link cannot take over a live one; check the peer's fleet id; cap pages by size
+- **e2e:** redact tokens in failure output; strengthen the untrusted-marker check
+- **conversation:** keep working indicator and composer note mounted to stop layout jumps
+- **ssh_diag:** SshFailureKind::Unknown is forward-compatible on deserialize
+- **peer:** a stale dialer loop cannot write over a re-paired row; a store fault is retried, not rejected
+- **peer:** a peer's kind is a short [a-z0-9_-] token
+- **peer:** a newer exchange releases a parked one on the same link
+- **peer:** one fresh wake per recipient; a peer's refusal is one attributed line
+- **peer:** a link is bound to one live token and settles only its own rows
+- **store:** cover the peer_links live-fleet unique-constraint mapping
+- **move:** a moved session keeps its tags
+- **sessions:** a rename keeps the session's row, participant and history
+- **mcp:** phone view keeps tags so a phone tag edit no longer wipes the rest
+
+### Documentation
+- **work-graph:** M9.3, M9.6, M9.7 landed — roadmap, plan revisions, CLAUDE.md
+- **work-graph:** record decisions D3 and D9-D13 for M9
+- **work-graph:** M9.1/M9.2 landed — roadmap status, plan revisions, control API
+- **work-graph:** M9 plan — Today view, ticket card, and the decision-gated rest
+- **work-graph:** M6 landed — roadmap status, plan revisions, CLAUDE.md
+- **work-graph:** M8.1–M8.5 merged in fleet-mobile (#32); correct the M8 status
+- **work-graph:** M8.2 landed in fleet-mobile — plan revisions and roadmap status
+- **work-graph:** M8.1 landed in fleet-mobile — plan revisions and roadmap status
+- **work-graph:** record the M5 ticket-fence decision (own host and own org)
+- **work-graph:** M5 landed — organisations and isolation in hub.md, concepts and control API; roadmap, plan revisions (M5.6)
+- **work-graph:** M7 landed — lifecycle concepts, tidy-up settings, control API, roadmap and plan revisions (M7.4)
+- **work-graph:** M8 plan — the phone (tool-gated work chips, grouping, start and resume)
+- **work-graph:** M4 landed — rule table and chip vocabulary, control API, roadmap and plan revisions (M4.7)
+- **work-graph:** M3 landed — trackers in hub.md and concepts, roadmap and plan revisions (M3.6)
+- **peer:** re-pair merges only into a stopped link; byte-capped pages, address cap, no question; as-built rulings
+- **work-graph:** M7 plan — self-cleaning lifecycle
+- **work-graph:** M2 landed — journal, carry, handover, resume; control API, skill and plan revisions (M2.6)
+- **work-graph:** M6 plan — more providers
+- **work-graph:** M5 plan — organisations and isolation
+- **work-graph:** M4 plan — smarter detection and explanations
+- **work-graph:** M1b.2 landed; M1b.1 verified
+- **work-graph:** M3 plan — tracker foundation and Jira Cloud (read-only)
+- **work-graph:** M2 brief delivery via a handover journal row (from_session_id is NOT NULL)
+- **work-graph:** M2 plan — resume and work memory
+- **work-graph:** M1a done, M1b.1 written, M1b.2 scoped
+- **work-graph:** record M0 status; the work graph schema moves to migration 046
+- **skill:** a readonly token's E_FORBIDDEN from whoami also skips the label
+- **skill:** friendly-name skill finds its row with whoami, not list_sessions
+- **work-graph:** specialist review, design rev 2, roadmap, takeover prompt v2
+- **spec:** work graph discovery and design proposal
+- **plan:** hub-to-hub federation implementation plan
+- **spec:** hub-to-hub federation design
+- **plan:** SSH self-diagnosis PR 1 (classifier); spec adds Handshake kind
+- **spec:** SSH self-diagnosis design
 ## [0.2.37] - 2026-09-24
 
 ### Added
@@ -1358,6 +1490,8 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.39]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.39
+[0.2.38]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.38
 [0.2.37]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.37
 [0.2.36]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.36
 [0.2.35]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.35

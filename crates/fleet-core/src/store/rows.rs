@@ -818,11 +818,27 @@ pub struct SessionMessage {
     /// Id of the message this one answers (migration 020); `None` when the
     /// message is not a reply.
     pub reply_to: Option<i64>,
+    /// The sender's true end when `from_session_id` is `0` (migration 054):
+    /// another fleet's session, addressed like `fleet-a/session/h/a1`. Never
+    /// present for a local message — `skip_serializing_if` keeps a local
+    /// row's wire shape byte-identical to before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_addr: Option<String>,
+    /// The same, for the recipient end (migration 054).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_addr: Option<String>,
 }
 
 /// Columns every `SessionMessage` query selects, in [`map_message_row`] order.
+/// The last two are correlated subqueries onto `participants` resolving
+/// `from_participant_id`/`to_participant_id` — a remote end's row (migration
+/// 054) carries its address there, `NULL` for every local end. Every query
+/// using this constant MUST select `FROM session_messages` unaliased so
+/// these subqueries' unqualified `session_messages.*` references resolve.
 pub(super) const MESSAGE_COLUMNS: &str =
-    "id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to";
+    "id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to, \
+     (SELECT address FROM participants p WHERE p.id = session_messages.from_participant_id), \
+     (SELECT address FROM participants p WHERE p.id = session_messages.to_participant_id)";
 
 /// One dispatched unit of work (migration 020). `state` is one of
 /// [`TASK_STATES`]; `result` is the paragraph the worker printed after its
@@ -1041,7 +1057,11 @@ pub(super) fn params_then<'a, T: rusqlite::ToSql>(
         .collect()
 }
 
-pub(super) fn now_unix() -> i64 {
+/// Unix seconds, now. `pub` (not `pub(super)`) so a caller outside the store
+/// — `fleet-hub peer remove`, in particular — has one definition to import
+/// rather than a local duplicate; `service/gc.rs`, `service/health.rs` and a
+/// few others still carry their own private copies predating this export.
+pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1089,6 +1109,8 @@ pub(super) fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         sent_at: row.get(5)?,
         read_at: row.get(6)?,
         reply_to: row.get(7)?,
+        from_addr: row.get(8)?,
+        to_addr: row.get(9)?,
     })
 }
 

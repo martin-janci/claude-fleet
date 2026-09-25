@@ -135,6 +135,10 @@ List all registered hosts with their reachability, claude/tmux versions, and lin
 
 List the catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
+### `list_peer_links`
+
+List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only, master token only.
+
 ### `list_projects`
 
 List discovered projects (repos fleet can spawn sessions in). Slim rows by default (id, owner, repo, worktree_count, last_session_at); summary=false returns the full nested worktree tree, which is large — pair it with limit.
@@ -189,9 +193,15 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide) or readonly (observe only); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode, trusted }.
+Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide), readonly (observe only), or peer (another hub's link — see peer_exchange); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode, trusted }.
 
 Parameters: `mode`, `name`, `trusted`, `ttl_s`
+
+### `peer_exchange`
+
+Hub-to-hub link exchange (peer tokens only): deliver messages and acks, receive this hub's messages for the caller. Long-polls up to wait_ms. See docs/hub.md, Link two hubs.
+
+Parameters: `after`, `fleet_id`, `proto`, `results`, `send`, `wait_ms`
 
 ### `peer_status`
 

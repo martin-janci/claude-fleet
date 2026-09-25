@@ -118,6 +118,17 @@ fn messages_have_participant_columns(conn: &Connection) -> rusqlite::Result<bool
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 054: `participants.address` exists,
+/// so its `ALTER TABLE ... ADD COLUMN` lines would fail again.
+fn participants_have_address(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('participants') WHERE name = 'address'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 047: `work_links` already has its
 /// `role` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
 /// [`Migration`].
@@ -522,6 +533,16 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/053_org_auto_tidy.sql"),
         already_applied: Some(orgs_has_auto_tidy),
     },
+    // Hub↔hub federation (cycle 3): `peer_links`, remote participants, and the
+    // remote / outbox columns on `session_messages`. Guarded: ADD COLUMN.
+    Migration {
+        version: 54,
+        sql: include_str!("../../migrations/054_peer_links.sql"),
+        already_applied: Some(participants_have_address),
+    },
+    // `participants(peer_link_id)` index (federation review G17):
+    // `CREATE INDEX IF NOT EXISTS`, safe to re-run.
+    Migration::plain(55, include_str!("../../migrations/055_peer_link_index.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -743,6 +764,7 @@ mod tests {
         "error_reports",
         "participants",
         "read_cursors",
+        "peer_links",
     ];
 
     #[test]
@@ -797,6 +819,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         };
         assert!(store.has_table("handoffs").unwrap());
         assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
@@ -864,6 +887,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         };
         store.migrate().unwrap();
         let (n, src, started): (i64, String, i64) = store
@@ -1091,6 +1115,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         }
     }
 
@@ -2000,6 +2025,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_generations: Default::default(),
         };
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());
@@ -2391,5 +2417,224 @@ mod tests {
             .unwrap();
         old.migrate().expect("re-running 053 is safe");
         assert_eq!(old.list_orgs().unwrap()[0].auto_tidy, None);
+    }
+
+    // ── migration 054: peer_links, remote participants, outbox columns ──
+
+    /// A guarded second pass over 054: roll the recorded version back and
+    /// migrate again. `participants_have_address` sees the ADD COLUMNs
+    /// already applied, so 054's whole body is skipped and only its version
+    /// is re-recorded — must not error, and `participants.address` must
+    /// still exist exactly once.
+    #[test]
+    fn migration_054_guarded_second_pass_does_not_error() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 54;")
+            .unwrap();
+        s.migrate().expect("guarded second pass over 054");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('participants') WHERE name = 'address'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "participants.address must exist exactly once");
+    }
+
+    /// Migration 054 on a POPULATED v53 database: sessions, participants and
+    /// messages survive with their ids, every new column reads NULL or its
+    /// default, and the partial unique indexes exist.
+    #[test]
+    fn migration_054_upgrades_a_populated_v53_db_and_keeps_its_rows() {
+        const SEED_AT: i64 = 53;
+        let s = store_at_version(SEED_AT);
+        // Since 045 a session's participant is minted by trigger on insert;
+        // renumber the two it mints so the messages below can name them.
+        s.conn
+            .execute_batch(
+                "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+             INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+               VALUES (11, 'a1', 'local', 1, 1, 'running'),
+                      (12, 'b1', 'local', 1, 1, 'running');
+             UPDATE participants SET id = 21 WHERE session_id = 11;
+             UPDATE participants SET id = 22 WHERE session_id = 12;
+             INSERT INTO session_messages
+               (id, from_session_id, to_session_id, from_participant_id, to_participant_id,
+                body, kind, sent_at, reply_to, delivered_at)
+               VALUES (31, 11, 12, 21, 22, 'hello', 'message', 5, NULL, 6),
+                      (32, 12, 11, 22, 21, 'back', 'task_result', 7, 31, NULL);",
+            )
+            .unwrap();
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
+        assert!(!s.has_table("peer_links").unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(s.has_table("peer_links").unwrap());
+
+        let sessions: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE id IN (11, 12)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sessions, 2, "sessions survive");
+        type Part = (i64, Option<i64>, Option<String>, Option<i64>);
+        let parts: Vec<Part> = s
+            .conn
+            .prepare("SELECT id, session_id, address, peer_link_id FROM participants ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            parts,
+            vec![(21, Some(11), None, None), (22, Some(12), None, None)],
+            "participants survive; address and peer_link_id are NULL"
+        );
+        type Row = (
+            i64,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            i64,
+            Option<String>,
+        );
+        let msgs: Vec<Row> = s
+            .conn
+            .prepare(
+                "SELECT id, body, reply_to, delivered_at, remote_fleet_id, remote_message_id, \
+                        peer_state, peer_wake, peer_from_addr \
+                 FROM session_messages ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            msgs,
+            vec![
+                (31, "hello".into(), None, Some(6), None, None, None, 0, None),
+                (32, "back".into(), Some(31), None, None, None, None, 0, None),
+            ],
+            "messages survive; the remote and outbox columns are NULL / 0"
+        );
+        // Local rows read as before: the inbox is unchanged.
+        let inbox = s.list_inbox(12, false, 10).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].body, "hello");
+        assert!(inbox[0].from_addr.is_none());
+
+        let partial_unique = |name: &str| -> (i64, Option<String>) {
+            s.conn
+                .query_row(
+                    "SELECT il.\"unique\", m.sql FROM sqlite_master m \
+                       JOIN pragma_index_list(m.tbl_name) il ON il.name = m.name \
+                      WHERE m.type = 'index' AND m.name = ?1",
+                    [name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or_else(|e| panic!("index {name}: {e}"))
+        };
+        for name in [
+            "idx_peer_links_live_fleet",
+            "idx_peer_links_client",
+            "idx_participants_address",
+            "idx_session_messages_remote",
+        ] {
+            let (unique, sql) = partial_unique(name);
+            assert_eq!(unique, 1, "{name} is unique");
+            assert!(
+                sql.as_deref().unwrap_or("").contains(" WHERE "),
+                "{name} is partial: {sql:?}"
+            );
+        }
+        let (unique, _) = partial_unique("idx_session_messages_peer_pending");
+        assert_eq!(unique, 0, "the pending index is a plain partial index");
+    }
+
+    /// G17: `pending_outbox`, `has_pending_outbox`, `mark_peer_accepted`,
+    /// `handover_upto` and `peer_links_down`'s listener branch all join
+    /// `participants ON participants.peer_link_id = peer_links.id` — every
+    /// poll of every dialer loop and every listener exchange. Migration 055
+    /// gives that join an index; this pins that it exists, is partial (only
+    /// the `remote` rows that ever set the column), and is a plain (not
+    /// unique) index — more than one participant can belong to the same
+    /// link.
+    #[test]
+    fn migration_055_adds_a_partial_index_on_participants_peer_link_id() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let (unique, sql): (i64, Option<String>) = s
+            .conn
+            .query_row(
+                "SELECT il.\"unique\", m.sql FROM sqlite_master m \
+                   JOIN pragma_index_list(m.tbl_name) il ON il.name = m.name \
+                  WHERE m.type = 'index' AND m.name = 'idx_participants_peer_link'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unique, 0, "more than one participant can share a link");
+        let sql = sql.unwrap_or_default();
+        assert!(sql.contains("peer_link_id"), "{sql}");
+        assert!(sql.contains(" WHERE "), "partial: {sql}");
+    }
+
+    /// Migration 055 on a database that already has migration 054 and rows
+    /// in `participants`: it must not disturb them, and running it twice
+    /// (`CREATE INDEX IF NOT EXISTS`) is a no-op.
+    #[test]
+    fn migration_055_on_a_populated_v54_database_is_a_safe_reindex() {
+        const SEED_AT: i64 = 54;
+        let s = store_at_version(SEED_AT);
+        // The session's own participant is minted by the 045 trigger.
+        s.conn
+            .execute_batch(
+                "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+                 INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+                   VALUES (1, 'a1', 'local', 1, 1, 'running');
+                 INSERT INTO participants (id, kind, address, peer_link_id, created_at)
+                   VALUES (2, 'remote', 'fleet-b/session/h/b1', NULL, 1);",
+            )
+            .unwrap();
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        // Re-running the migration script directly (as `migrate()` would on
+        // a database that already recorded 55) must not fail.
+        s.conn
+            .execute_batch(include_str!("../../migrations/055_peer_link_index.sql"))
+            .unwrap();
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "the re-run touched no rows");
     }
 }
