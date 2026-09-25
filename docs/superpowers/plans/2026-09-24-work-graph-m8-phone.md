@@ -175,6 +175,68 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
   - The design doc appendix.
 - **claude-fleet.** `docs/hub.md` → *Pair a phone*: what the phone can do with work. Update the roadmap's M8 status and Revisions.
 
+### M8.6: the phone catches up (M4.6, M5, M9.1–M9.3)
+
+Added 2026-09-25, after M8.1–M8.5 landed and the hub moved on. Four parts,
+each gated on the hub's `tools/list` like the rest of M8. No contract bump.
+
+- **M8.6.0, hub side (claude-fleet).** `org_id` joins `PHONE_SESSION_FIELDS`.
+  - It is needed for a session with no work, whose org nothing else carries.
+    Each `WorkSummary` already carries its own `org_id`.
+  - Update the view pin and put an org on the real-key fixture. `/events`
+    frames are whole rows, so they already carry it.
+- **M8.6.1, M4.6 on the phone.**
+  - `workWhy` learns `agent_inferred`, with the desktop's words:
+    "suggested by Claude when asked" (or "named …" once confirmed), plus the
+    rule, and no strength suffix.
+  - The chip, the ring and Confirm / Not this need nothing new: an
+    `agent_inferred` link is only ever a pre-selected suggestion (R11).
+  - Unknown strengths (`inferred` today) are shown as text, never refused.
+- **M8.6.2, Today (M9.1).**
+  - A **Today** sheet opens from the Sessions app bar when the hub lists
+    `work today`. It calls `work { action: today, since: <local midnight> }`.
+  - Sections in the desktop's order: *Waiting on me*, *In progress*,
+    *Shipped*, *Stale*.
+  - Tapping a session opens it. It re-reads on open, on pull, and (debounced)
+    when a `session:*` or `work:item` frame arrives while it is open.
+  - **Copy standup** copies the desktop's `standupText`, ported with its
+    test cases by name: `bucketOf`, `sessionPhrase`, `groupLabel`, and the
+    scoping rule.
+  - Readonly and full tokens alike.
+- **M8.6.3, past work and handover (M2, M9.2, M9.3).**
+  - Tapping a ticket in the Tickets sheet also reads `work card` (cache
+    only): the acceptance criteria, or the excerpt when there are none.
+  - It lists the resume plan's `candidates` as **past work**: name, host,
+    when it ended, branch, PR, and the number of conversations.
+  - The session screen's work sheet gains **Ask for a handover**
+    (`work_link handover`). It is shown only when all of these hold:
+    - a full token;
+    - the hub lists the action;
+    - the session has a primary key;
+    - the session is running.
+  - The answer is asynchronous. The sheet follows the session's
+    `handover_requested` / `handover_written` / `handover_missing` /
+    `handover_send_failed` timeline frames and says which one arrived.
+    `E_NOT_ALIVE`, `E_EXISTS` and `E_INVALID` are said in words.
+- **M8.6.4, orgs (M5).**
+  - When the hub lists `work orgs`, it is read once per connection (like
+    *My work*) into id → name and colour.
+  - A row's org is its own `org_id`, else its work's `org_id`. A ticket's org
+    is its tracker's `org_id`.
+  - With two or more orgs in view:
+    - work group headings and ticket rows carry an org label;
+    - the Sessions tab gains an org filter chip, which also scopes Today.
+  - A client token sees every org (`OrgScope::All`), so this is a view
+    filter, not a fence.
+- **Tests.**
+  - `standupText` / `bucketOf` / scoping cases, by name.
+  - `workWhy` for `agent_inferred`.
+  - Today refresh and gating.
+  - Card and past work parsing, from hub-shaped fixtures.
+  - The handover button's gates and its timeline states.
+  - Org resolution (row, then work) and the filter.
+  - `ToolsTheAppMayCallTest` is unchanged: `work` and `work_link` only.
+
 ## Acceptance (manual: a hub with Jira connected and a paired phone)
 
 1. **Chips.** A session on `pay-7-refund` shows a **PAY-7** chip on the phone. By work groups it under PAY-7 with the title.
@@ -183,6 +245,15 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
 4. **Resume.** Kill the PAY-9 session on the desktop. The phone's PAY-9 now shows **Resume**, which recreates it on the chosen host.
 5. **Old hub.** Against a hub without `work`, the phone shows no chips, sheet or chip filters, and nothing errors.
 6. **Isolation (with M5).** A phone paired with an org-scoped token sees only that org's tickets and work groups.
+
+7. **Today (M8.6).** The Today sheet lists the same groups as the desktop's
+   Today view at the same moment. **Copy standup** pastes the same text.
+8. **Handover (M8.6).** With a full token, **Ask for a handover** on a linked,
+   idle session ends in "Handover written" once the turn stops. The note
+   then shows in the desktop's context. With a readonly token the button is
+   absent.
+9. **Orgs (M8.6).** With two orgs configured, the org chip narrows Sessions
+   and Today to one org. A session with no work still lands in its org.
 
 ## Risks
 
@@ -318,3 +389,36 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
   `SessionWorkViewModel`; Start here leaves the project to the hub unless one
   is picked (`E_AMBIGUOUS` narrows to the candidates); the resume plan is read
   when a ticket is tapped; *My work* is read once per connection.
+- **2026-09-25, M8.6 planned and M8.6.0 landed** on
+  `claude/cloud-fleet-work-graph-m8`. The phone catches up with M4.6
+  (`agent_inferred`), M5 (orgs) and M9.1–M9.3 (Today, the ticket card, past
+  work, handover on demand). The hub side is one field: `org_id` in
+  `PHONE_SESSION_FIELDS`, with no contract bump and no budget change (the
+  view is not part of the tool schema). A survey of the client-token surface
+  found:
+  1. Client tokens are never org-scoped.
+  2. `today`, `card`, `orgs`, `scopes`, `resume_plan` and `links` are all
+     `work` reads, open to readonly tokens.
+  3. `handover` is `work_link`, so it is full-token only and not
+     confirm-gated.
+  4. There is no journal action. Past work is the resume plan's candidates,
+     and the journal reaches a phone only inside `context`.
+  5. No `work:link` / `work:journal` event exists. Link changes arrive as
+     `session:updated`, and handover progress as `session:event`.
+- **2026-09-25, M8.6 built** in fleet-mobile on
+  `claude/cloud-fleet-work-graph-m8-6` (on `main` after #33 and #34). As
+  planned, with these specifics:
+  1. *Today* sends local midnight through a `utcOffsetSeconds`
+     expect/actual; the app has no date library.
+  2. The Kotlin `standupText` keeps the desktop's test cases by name. One
+     departure: a session the phone has no row for yet keeps the digest's
+     own `org_id` instead of dropping out of every org.
+  3. The org directory is re-read with *My work* on a pull, not only on
+     `ready`.
+  4. A card the hub has not cached (`cached: false`) shows nothing, and the
+     description stays.
+  5. Past work is listed even while a session is live on the ticket.
+  6. The handover button needs a running fleet session: not background, a
+     shell, or external. The hub decides idle.
+  7. The work sheet now shows its own errors, since a banner behind a modal
+     sheet could not be read.
