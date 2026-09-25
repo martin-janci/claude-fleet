@@ -211,8 +211,9 @@
   const workFilterCtx = $derived({ trackers: $trackers, mine: $mineItemIds });
   const workPredicate = $derived(workFilterPredicate(workFilterView, workFilterCtx));
   // "Mine" reads the hub's `mine` view; re-read while the chip is on.
+  const mineOn = $derived($workFilters.assignee === 'mine');
   $effect(() => {
-    if ($workFilters.assignee !== 'mine') return;
+    if (!mineOn) return;
     void $trackers.length;
     untrack(() => void loadMine());
     const t = setInterval(() => void loadMine(), 120_000);
