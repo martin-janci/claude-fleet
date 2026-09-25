@@ -1143,6 +1143,19 @@ impl Store {
         &self,
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        self.record_prompt_submit_hook_for_row_with(row_id, true)
+    }
+
+    /// [`Self::record_prompt_submit_hook_for_row`] with the touch decided by
+    /// the caller: `touch = false` for a prompt fleet itself typed (a peer's
+    /// wake nudge, the safe-kill instructions, an inbox delivery), which
+    /// marks the session working like any other but is nobody's touch and
+    /// must not keep a done session out of tidy-up or un-archive it.
+    pub fn record_prompt_submit_hook_for_row_with(
+        &self,
+        row_id: i64,
+        touch: bool,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
@@ -1154,9 +1167,11 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        // A prompt is a person's touch (work graph M7): it protects the
+        // A person's prompt is a touch (work graph M7): it protects the
         // session from tidy-up for an hour and un-archives it.
-        self.touch_for_prompt(row_id)?;
+        if touch {
+            self.touch_for_prompt(row_id)?;
+        }
         Ok(self.emit_session(row_id)?)
     }
 
