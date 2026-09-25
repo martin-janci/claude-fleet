@@ -494,3 +494,51 @@ fn a_cross_org_branch_candidate_leaves_the_existing_primary_alone() {
         "another org's item is never linked or suggested here"
     );
 }
+
+/// A prompt suggestion the branch promotes becomes the branch's link: when
+/// the branch moves on, R7 ends it like any other auto link, instead of
+/// leaving a confirmed 'prompt' link the resolver never retires.
+#[test]
+fn a_promoted_suggestion_takes_the_promoting_signals_source_so_r7_ends_it() {
+    let f = fx();
+    trust(&f);
+    let sid = session(&f, "dev", "c1");
+    on_prompt(&f.s, sid, "see ABC-1", true).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        vec![(
+            "ABC-1".into(),
+            "suggested".into(),
+            "prompt".into(),
+            Some("R5".into())
+        )]
+    );
+    assert!(f.s.set_current_branch(sid, "abc-1-fix").unwrap());
+    resolve_session(&f.s, sid).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        vec![(
+            "ABC-1".into(),
+            "confirmed".into(),
+            "branch".into(),
+            Some("R3".into())
+        )],
+        "promoted by the branch: a branch link"
+    );
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-1"));
+
+    assert!(f.s.set_current_branch(sid, "abc-2-other").unwrap());
+    resolve_session(&f.s, sid).unwrap();
+    let live: Vec<String> = links(&f.s, sid).into_iter().map(|l| l.0).collect();
+    assert_eq!(
+        live,
+        vec!["ABC-2".to_string()],
+        "ABC-1 ended with the branch"
+    );
+    let ended = f.s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].end_reason.as_deref(), Some("branch_changed"));
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-2"));
+}

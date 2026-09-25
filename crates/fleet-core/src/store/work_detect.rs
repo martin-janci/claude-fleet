@@ -222,6 +222,7 @@ impl Store {
                 LinkChange::Promote {
                     link_id,
                     rule,
+                    source,
                     strength,
                     evidence,
                 } => {
@@ -238,10 +239,12 @@ impl Store {
                         continue;
                     }
                     let old = self.link_evidence(*link_id)?;
+                    // The link is now the promoting signal's (R7 ends a
+                    // `branch` / `pr` link when that signal moves on).
                     self.conn.execute(
                         "UPDATE work_links SET state = 'confirmed', rule = ?2, strength = ?3, \
                            evidence = ?4, decided_at = ?5, claude_session_id = ?6, \
-                           preselected = 0 \
+                           source = ?7, preselected = 0 \
                          WHERE id = ?1 AND state = 'suggested' AND ended_at IS NULL",
                         rusqlite::params![
                             link_id,
@@ -249,7 +252,8 @@ impl Store {
                             strength.as_str(),
                             encode_evidence(&old, evidence),
                             now,
-                            conversation
+                            conversation,
+                            source
                         ],
                     )?;
                 }
