@@ -483,6 +483,125 @@ async fn a_429_without_retry_after_waits_the_default() {
     a_429_is_waited_out(None, DEFAULT_RETRY_SECS).await;
 }
 
+/// A tracker's strings are bounded before they are stored: a 10k-character
+/// summary becomes a `TITLE_MAX_CHARS` title, a long status name a
+/// `FIELD_MAX_CHARS` one, and a list keeps at most `LIST_MAX` entries.
+#[tokio::test]
+async fn oversized_tracker_fields_are_capped_before_they_are_stored() {
+    let fx = Fx::new();
+    fx.fake.once(
+        Method::Post,
+        "/search/jql",
+        Ok(Response::json(
+            200,
+            &json!({"issues": [{"id": "9", "key": "ABC-9", "fields": {
+                "summary": "t".repeat(10_000),
+                "status": {"name": "s".repeat(500), "statusCategory": {"key": "new"}},
+                "issuetype": {"name": "Task", "hierarchyLevel": 0},
+                "project": {"key": "ABC"},
+                "assignee": {"accountId": "a1", "displayName": "n".repeat(400)}}}],
+                "isLast": true}),
+        )),
+    );
+    let p = fx.sync(|| T0).run_pass(&fx.store).await.unwrap().remove(0);
+    assert_eq!((p.seen, p.error.as_deref()), (1, None), "{p:?}");
+    let item = fx.item("ABC-9");
+    assert_eq!(item.title.chars().count(), TITLE_MAX_CHARS);
+    assert_eq!(
+        item.status_name.as_deref().map(str::len),
+        Some(FIELD_MAX_CHARS)
+    );
+    assert!(item
+        .assignees
+        .iter()
+        .all(|a| a.chars().count() <= FIELD_MAX_CHARS));
+    // The lists, at the write shape.
+    let many = (0..40)
+        .map(|i| format!("{i}-{}", "x".repeat(300)))
+        .collect();
+    let w = to_write(WorkItemSnapshot {
+        external_id: "1".into(),
+        assignees: many,
+        ..Default::default()
+    });
+    assert_eq!(w.assignees.len(), LIST_MAX);
+    assert!(w
+        .assignees
+        .iter()
+        .all(|a| a.chars().count() == FIELD_MAX_CHARS));
+}
+
+/// The 429 deadline is on the row too: a sync with no memory of it (a
+/// restart) still waits it out, and a pass after it clears the row.
+#[tokio::test]
+async fn a_429_deadline_is_kept_on_the_row_and_cleared_by_a_good_pass() {
+    let fx = Fx::new();
+    fx.fake
+        .once(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::new(429, "").with_header("Retry-After", "30")),
+        )
+        .always(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
+        );
+    fx.sync(|| T0).run_pass(&fx.store).await.unwrap();
+    let nb = fx
+        .store
+        .lock()
+        .unwrap()
+        .tracker_not_before(fx.tracker)
+        .unwrap()
+        .expect("the deadline is on the row");
+    assert!((T0 + 30..=T0 + 40).contains(&nb), "{nb}");
+    // A fresh sync (nothing in memory), still inside the window: skipped.
+    assert!(fx.sync(|| T0 + 10).run_pass(&fx.store).await.unwrap()[0].skipped);
+    assert_eq!(
+        fx.fake.count("/search/jql"),
+        1,
+        "no request inside the window"
+    );
+    // Past it: runs, and the row's deadline is gone.
+    let p = fx
+        .sync(|| T0 + 3600)
+        .run_pass(&fx.store)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(!p.skipped && p.error.is_none(), "{p:?}");
+    assert_eq!(
+        fx.store
+            .lock()
+            .unwrap()
+            .tracker_not_before(fx.tracker)
+            .unwrap(),
+        None
+    );
+}
+
+/// An absurd `Retry-After` neither overflows nor parks the tracker past
+/// `MAX_RETRY_SECS` (plus jitter).
+#[tokio::test]
+async fn a_huge_retry_after_is_clamped() {
+    let fx = Fx::new();
+    fx.fake.once(
+        Method::Post,
+        "/search/jql",
+        Ok(Response::new(429, "").with_header("Retry-After", "4000000000000000000")),
+    );
+    let sync = fx.sync(|| T0);
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.row().state, "rate_limited");
+    let nb = sync.not_before.lock().unwrap()[&fx.tracker];
+    assert!(nb > T0, "{nb}");
+    assert!(
+        nb <= T0 + (MAX_RETRY_SECS + MAX_RETRY_SECS / 4) as i64,
+        "{nb}"
+    );
+}
+
 #[tokio::test]
 async fn offline_marks_the_tracker_unreachable_and_the_cache_still_answers() {
     let fx = Fx::new();
@@ -548,8 +667,10 @@ fn the_interval_setting_defaults_turns_off_and_has_a_floor() {
 }
 
 /// A provider whose views are read by sync token (M6.0's opaque mark).
+/// `bad`: its changes carry an item the store refuses (no id).
 struct TokenProvider {
     expired: bool,
+    bad: bool,
 }
 
 #[async_trait::async_trait]
@@ -591,7 +712,7 @@ impl TrackerProvider for TokenProvider {
     ) -> Result<crate::service::trackers::Changes, TrackerError> {
         Ok(crate::service::trackers::Changes {
             items: if mark.is_some() && !self.expired {
-                vec![snap("changed")]
+                vec![snap(if self.bad { "" } else { "changed" })]
             } else {
                 vec![]
             },
@@ -617,7 +738,10 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         query: "1".into(),
     };
     let ids = |v: &[WorkItemSnapshot]| v.iter().map(|i| i.external_id.clone()).collect::<Vec<_>>();
-    let p = TokenProvider { expired: false };
+    let p = TokenProvider {
+        expired: false,
+        bad: false,
+    };
     // No token yet: a whole listing, then a first token.
     let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, None)
         .await
@@ -636,7 +760,10 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         (vec!["changed".into()], false, Some("tok-2"))
     );
     // An expired token: one whole listing, and the fresh token.
-    let p = TokenProvider { expired: true };
+    let p = TokenProvider {
+        expired: true,
+        bad: false,
+    };
     let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, Some("old"))
         .await
         .unwrap();
@@ -644,4 +771,61 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         (ids(&items), full, mark.as_deref()),
         (vec!["whole".into()], true, Some("tok-2"))
     );
+}
+
+/// The token moves only once the items it stands for are stored: a store
+/// write that fails leaves the token where it was, so the next pass reads
+/// the same changes again instead of skipping them.
+#[tokio::test]
+async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
+    let fx = Fx::new();
+    let views = {
+        let s = fx.store.lock().unwrap();
+        s.sync_tracker_views(fx.tracker, &[("project:1".into(), "P".into(), "1".into())])
+            .unwrap();
+        s.set_tracker_view_mark(fx.tracker, "project:1", Some("tok-1"))
+            .unwrap();
+        s.set_tracker_view_watermark(fx.tracker, "project:1", T0)
+            .unwrap();
+        s.list_tracker_views(fx.tracker).unwrap()
+    };
+    let mark = |fx: &Fx| -> Option<String> {
+        fx.store
+            .lock()
+            .unwrap()
+            .list_tracker_views(fx.tracker)
+            .unwrap()
+            .remove(0)
+            .sync_mark
+    };
+    let sync = fx.sync(|| T0);
+    // Inside FULL_EVERY_SECS of a whole listing, so the view reads changes.
+    sync.last_full
+        .lock()
+        .unwrap()
+        .insert((fx.tracker, "project:1".into()), T0);
+    let row = fx.row();
+    let mut pass = TrackerPass::default();
+    let bad = TokenProvider {
+        expired: false,
+        bad: true,
+    };
+    let r = sync
+        .run_provider(&row, &bad, views.clone(), &fx.store, T0, &mut pass)
+        .await;
+    assert!(r.is_err(), "the store refused the item");
+    assert_eq!(
+        mark(&fx).as_deref(),
+        Some("tok-1"),
+        "the token did not move"
+    );
+    let good = TokenProvider {
+        expired: false,
+        bad: false,
+    };
+    sync.run_provider(&row, &good, views, &fx.store, T0, &mut pass)
+        .await
+        .unwrap();
+    assert_eq!(mark(&fx).as_deref(), Some("tok-2"));
+    assert_eq!(pass.changed, 1);
 }

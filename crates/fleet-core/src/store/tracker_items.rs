@@ -614,10 +614,13 @@ impl Store {
 
     /// The one tracker item `key` names (its key or an alias) when exactly
     /// one tracker has it; `None` when none does or two do (never guess).
+    /// A removed tracker's rows (kept for the links that point at them) do
+    /// not count: they would shadow the same site re-added.
     pub fn tracker_item_for_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
         let key = super::normalize_work_ref(key)?;
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {ITEM_COLUMNS} FROM work_items WHERE tracker_id IS NOT NULL AND \
+            "SELECT {ITEM_COLUMNS} FROM work_items \
+             WHERE tracker_id IN (SELECT id FROM trackers) AND \
                (key = ?1 OR EXISTS (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) \
                                     WHERE value = ?1)) \
              ORDER BY (key = ?1) DESC, id"
@@ -631,6 +634,29 @@ impl Store {
         } else {
             None
         })
+    }
+
+    /// The item `key` names (its key or an alias) in ONE tracker's cache:
+    /// what a lookup by URL asks, since the URL says which tracker.
+    pub fn tracker_item_for_key_in(
+        &self,
+        tracker_id: i64,
+        key: &str,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let key = super::normalize_work_ref(key)?;
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ITEM_COLUMNS} FROM work_items WHERE tracker_id = ?1 AND \
+                       (key = ?2 OR EXISTS (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) \
+                                            WHERE value = ?2)) \
+                     ORDER BY (key = ?2) DESC, id LIMIT 1"
+                ),
+                rusqlite::params![tracker_id, key],
+                map_item,
+            )
+            .optional()?)
     }
 
     /// Record which items a favourite-filter view returned. A full listing
@@ -680,15 +706,16 @@ impl Store {
         Ok(())
     }
 
-    /// Every tracker item (of `tracker_id`, or of every tracker), with its
-    /// meta, newest `updated` first.
+    /// Every item of `tracker_id`, or of every tracker that still exists
+    /// (a removed tracker's rows stay only for the links that point at
+    /// them), with its meta, newest `updated` first.
     pub fn tracker_items(
         &self,
         tracker_id: Option<i64>,
     ) -> Result<Vec<(WorkItemRow, ItemMeta)>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS}, meta FROM work_items \
-             WHERE tracker_id IS NOT NULL AND (?1 IS NULL OR tracker_id = ?1) \
+             WHERE tracker_id IN (SELECT id FROM trackers) AND (?1 IS NULL OR tracker_id = ?1) \
              ORDER BY COALESCE(updated_ext, 0) DESC, id DESC"
         ))?;
         let rows = stmt.query_map(rusqlite::params![tracker_id], |r| {
@@ -1030,6 +1057,55 @@ mod tests {
         s.upsert_tracker_item(t2, &write("99", "ABC-1", ("To Do", "todo")))
             .unwrap();
         assert!(s.tracker_item_for_key("ABC-1").unwrap().is_none());
+    }
+
+    /// A removed tracker's rows stay for the links that point at them, but
+    /// neither shadow the same site re-added (its fresh id) in a key lookup
+    /// nor show up beside the new rows in the listing.
+    #[test]
+    fn a_removed_trackers_rows_do_not_shadow_the_re_added_tracker() {
+        let (s, t, _) = with_tracker(&["ABC"]);
+        let old = s
+            .upsert_tracker_item(t, &write("1", "ABC-1", ("To Do", "todo")))
+            .unwrap()
+            .id;
+        let sid = session(&s, "dev");
+        s.link_session_work(sid, WorkTarget::Item(old), "manual")
+            .unwrap();
+        assert!(s.remove_tracker(t).unwrap());
+        assert!(
+            s.tracker_item_for_key("ABC-1").unwrap().is_none(),
+            "an orphan is not the cache"
+        );
+        assert!(s.tracker_items(None).unwrap().is_empty());
+        // The link still reads its item.
+        assert_eq!(
+            s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work
+                .unwrap()
+                .item_id,
+            Some(old)
+        );
+        let t2 = s
+            .add_tracker("jira", "Acme again", "https://acme.atlassian.net")
+            .unwrap()
+            .id;
+        assert_ne!(t2, t);
+        let fresh = s
+            .upsert_tracker_item(t2, &write("1", "ABC-1", ("Doing", "in_progress")))
+            .unwrap()
+            .id;
+        assert_ne!(fresh, old);
+        assert_eq!(s.tracker_item_for_key("ABC-1").unwrap().unwrap().id, fresh);
+        let listed: Vec<i64> = s
+            .tracker_items(None)
+            .unwrap()
+            .into_iter()
+            .map(|(i, _)| i.id)
+            .collect();
+        assert_eq!(listed, vec![fresh]);
     }
 
     #[test]

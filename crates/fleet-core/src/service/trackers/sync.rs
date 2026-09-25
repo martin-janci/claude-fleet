@@ -52,6 +52,9 @@ pub const UNBOUND_MAX: usize = 100;
 pub const NEGATIVE_TTL_SECS: i64 = 3600;
 /// Wait after a 429 with no `Retry-After`.
 pub const DEFAULT_RETRY_SECS: u64 = 60;
+/// Longest a 429's `Retry-After` parks a tracker: a tracker (or anyone
+/// answering for one) must not be able to park the sync until a restart.
+pub const MAX_RETRY_SECS: u64 = 3600;
 
 /// States a pass runs for.
 pub fn runnable(state: &str) -> bool {
@@ -147,12 +150,18 @@ impl TrackerSync {
             ..Default::default()
         };
         let now = (self.clock)();
-        let waiting = self
+        // The deadline is kept here and on the row (`set_tracker_not_before`):
+        // the row's copy is what a `lookup` honours and what survives a
+        // restart.
+        let in_memory = self
             .not_before
             .lock()
             .ok()
-            .and_then(|m| m.get(&t.id).copied())
-            .is_some_and(|nb| nb > now);
+            .and_then(|m| m.get(&t.id).copied());
+        let on_row = lock(store)
+            .ok()
+            .and_then(|s| s.tracker_not_before(t.id).ok().flatten());
+        let waiting = in_memory.is_some_and(|nb| nb > now) || on_row.is_some_and(|nb| nb > now);
         if !runnable(&t.state) || waiting {
             pass.skipped = true;
             return pass;
@@ -163,6 +172,7 @@ impl TrackerSync {
                     m.remove(&t.id);
                 }
                 if let Ok(s) = lock(store) {
+                    let _ = s.set_tracker_not_before(t.id, None);
                     let changed = s.set_tracker_state(t.id, "ok", None).unwrap_or(false);
                     let first = s.set_tracker_synced(t.id, now).unwrap_or(false);
                     if changed || first {
@@ -172,14 +182,25 @@ impl TrackerSync {
             }
             Err(e) => {
                 pass.error = Some(e.explain());
-                if let TrackerError::RateLimited { retry_after_secs } = &e {
-                    let wait = retry_after_secs.unwrap_or(DEFAULT_RETRY_SECS);
+                let deadline = match &e {
+                    TrackerError::RateLimited { retry_after_secs } => {
+                        let wait = retry_after_secs
+                            .unwrap_or(DEFAULT_RETRY_SECS)
+                            .min(MAX_RETRY_SECS);
+                        Some(now.saturating_add(wait.saturating_add(jitter(wait)) as i64))
+                    }
+                    _ => None,
+                };
+                if let Some(d) = deadline {
                     if let Ok(mut m) = self.not_before.lock() {
-                        m.insert(t.id, now + (wait + jitter(wait)) as i64);
+                        m.insert(t.id, d);
                     }
                 }
                 tracing::warn!(tracker_id = t.id, result = ?e.state(), "tracker sync failed");
                 if let Ok(s) = lock(store) {
+                    if let Some(d) = deadline {
+                        let _ = s.set_tracker_not_before(t.id, Some(d));
+                    }
                     let _ = super::admin::record_failure(&s, t.id, &e);
                 }
             }
@@ -207,6 +228,21 @@ impl TrackerSync {
             return Err(TrackerError::Unconfigured);
         }
         let provider = provider_for(t, cred, &self.net)?;
+        self.run_provider(t, provider.as_ref(), views, store, now, pass)
+            .await
+    }
+
+    /// The pass proper, over the provider `run_tracker` built (tests hand
+    /// in their own).
+    async fn run_provider(
+        &self,
+        t: &TrackerRow,
+        provider: &dyn TrackerProvider,
+        views: Vec<crate::store::TrackerViewRow>,
+        store: &Mutex<Store>,
+        now: i64,
+        pass: &mut TrackerPass,
+    ) -> Result<(), TrackerError> {
         let incremental = provider.caps().incremental;
         // (id, updated) seen this pass: the overlap's repeats are dropped.
         let mut seen: HashSet<(String, Option<i64>)> = HashSet::new();
@@ -226,7 +262,7 @@ impl TrackerSync {
                 query: v.query.clone(),
             };
             let listed = read_view(
-                provider.as_ref(),
+                provider,
                 &def,
                 incremental,
                 full,
@@ -254,15 +290,16 @@ impl TrackerSync {
                     continue;
                 }
             };
-            if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
-                if let Ok(s) = lock(store) {
-                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
-                }
-            }
             let newest = items.iter().filter_map(|i| i.updated).max();
             let ids: Vec<String> = items.iter().map(|i| i.external_id.clone()).collect();
             self.store_items(t.id, items, store, &mut seen, pass)?;
+            // The token and the watermark move only once the items they
+            // stand for are stored: a write that fails leaves them to be
+            // read again, not skipped.
             if let Ok(s) = lock(store) {
+                if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
+                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
+                }
                 if let Some(w) = newest {
                     let _ = s.set_tracker_view_watermark(t.id, &v.view_id, w);
                 }
@@ -444,24 +481,54 @@ async fn read_view(
     }
 }
 
-/// A provider snapshot → the store's write shape.
+/// Longest title a tracker item keeps (a person's own titles are held to
+/// `WORK_TITLE_MAX_CHARS`; a tracker's get a little more).
+pub const TITLE_MAX_CHARS: usize = 300;
+/// Longest status name, kind, resolution, iteration, assignee, container
+/// or alias.
+pub const FIELD_MAX_CHARS: usize = 100;
+/// Longest key.
+pub const KEY_MAX_CHARS: usize = 64;
+/// Longest external id (and parent id) and URL.
+pub const ID_MAX_CHARS: usize = 200;
+pub const URL_MAX_CHARS: usize = 2048;
+/// Most aliases, containers or assignees kept.
+pub const LIST_MAX: usize = 16;
+
+fn cap(s: String, max: usize) -> String {
+    if s.chars().count() <= max {
+        s
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
+fn cap_list(v: Vec<String>, max: usize) -> Vec<String> {
+    v.into_iter().take(LIST_MAX).map(|s| cap(s, max)).collect()
+}
+
+/// A provider snapshot → the store's write shape. The one place every
+/// snapshot passes (the sync's and `fetch_one`'s) before it is stored, so
+/// every field is bounded here: the tracker — or a host forging its
+/// answer — controls these strings, and each one rides in every linked
+/// session's row, row event and `GET /events` frame.
 pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
     TrackerItemWrite {
-        external_id: s.external_id,
-        key: s.key,
-        aliases: s.aliases,
-        title: s.title,
-        url: s.url,
-        kind: s.kind,
+        external_id: cap(s.external_id, ID_MAX_CHARS),
+        key: s.key.map(|k| cap(k, KEY_MAX_CHARS)),
+        aliases: cap_list(s.aliases, KEY_MAX_CHARS),
+        title: cap(s.title, TITLE_MAX_CHARS),
+        url: s.url.map(|u| cap(u, URL_MAX_CHARS)),
+        kind: s.kind.map(|k| cap(k, FIELD_MAX_CHARS)),
         hierarchy_level: s.hierarchy_level,
-        status_name: s.status.name,
+        status_name: cap(s.status.name, FIELD_MAX_CHARS),
         status_category: s.status.category,
-        resolution: s.status.resolution,
-        parent_external_id: s.parent_external_id,
-        containers: s.containers,
-        assignees: s.assignees,
-        assignee_id: s.assignee_id,
-        iteration: s.iteration,
+        resolution: s.status.resolution.map(|r| cap(r, FIELD_MAX_CHARS)),
+        parent_external_id: s.parent_external_id.map(|p| cap(p, ID_MAX_CHARS)),
+        containers: cap_list(s.containers, FIELD_MAX_CHARS),
+        assignees: cap_list(s.assignees, FIELD_MAX_CHARS),
+        assignee_id: s.assignee_id.map(|a| cap(a, ID_MAX_CHARS)),
+        iteration: s.iteration.map(|i| cap(i, FIELD_MAX_CHARS)),
         iteration_active: s.iteration_active,
         updated_ext: s.updated,
         description: s.description,

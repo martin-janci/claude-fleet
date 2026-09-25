@@ -28,7 +28,7 @@ use super::ItemRef;
 use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
-use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkTarget};
+use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -79,13 +79,38 @@ pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>
     Ok(Some(out))
 }
 
-/// The live sessions working on `key` that the scope may see (D7: an
+/// The live sessions working on `key` as far as the item of `item_org` is
+/// concerned. A link whose session is in one org while the item is in
+/// another — a bare `ref_key` that `work_link` deliberately kept bare
+/// because the key was outside the caller's orgs (work graph M5) — is not
+/// live work on that item: a host of org A must not be able to block org
+/// B's `start` or be named as working on B's ticket by typing its key. The
+/// rule is [`Store::bind_tracker_refs`]'s: an unassigned side never
+/// conflicts, and a forced item link keeps its item's org.
+fn live_work_on(
+    s: &Store,
+    key: &str,
+    item_org: Option<i64>,
+) -> Result<Vec<(WorkLinkRow, SessionRow)>, IpcError> {
+    let mut out = Vec::new();
+    for (l, row) in s.live_work_sessions_for_key(key)? {
+        if let (Some(io), Some(lo)) = (item_org, s.link_org(&l)?) {
+            if io != lo {
+                continue;
+            }
+        }
+        out.push((l, row));
+    }
+    Ok(out)
+}
+
+/// The live sessions working on `item` that the scope may see (D7: an
 /// isolated org's session is not named to a host outside it).
-fn live_ids(s: &Store, scope: &OrgScope, key: Option<&str>) -> Result<Vec<i64>, IpcError> {
-    let Some(k) = key else {
+fn live_ids(s: &Store, scope: &OrgScope, item: &WorkItemRow) -> Result<Vec<i64>, IpcError> {
+    let Some(k) = item.key.as_deref() else {
         return Ok(Vec::new());
     };
-    Ok(s.live_work_sessions_for_key(k)?
+    Ok(live_work_on(s, k, s.item_org(item.id)?)?
         .into_iter()
         .filter(|(_, r)| scope.sees_row(r))
         .map(|(_, r)| r.id)
@@ -174,7 +199,7 @@ pub(crate) fn tickets_in(
                 continue;
             }
         }
-        let live = live_ids(s, scope, item.key.as_deref())?;
+        let live = live_ids(s, scope, &item)?;
         out.push(Ticket {
             item,
             live_session_ids: live,
@@ -207,8 +232,9 @@ pub fn trackers(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<TrackerRow
 
 /// What a `lookup` reference names: a tracker and a key, when a URL (or a
 /// reference only one tracker can answer) says which tracker; a bare key
-/// otherwise.
-fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String), IpcError> {
+/// otherwise. The flag says the reference was a URL, whose tracker is
+/// then the only cache to answer from.
+fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String, bool), IpcError> {
     let r = reference.trim();
     let trackers = s.list_trackers()?;
     if r.starts_with("https://") || r.starts_with("http://") {
@@ -221,7 +247,7 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
                 )
                 .with_details(serde_json::json!({ "site_url": site, "key": key })));
             }
-            return Ok((t, key));
+            return Ok((t, key, true));
         }
         // Any other tracker URL the recogniser knows (GitHub, Asana,
         // Linear): its reference, answered by the trackers that claim it.
@@ -250,7 +276,7 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
         let t = (owners.len() == 1)
             .then(|| trackers.iter().find(|t| t.id == owners[0]).cloned())
             .flatten();
-        return Ok((t, key));
+        return Ok((t, key, true));
     }
     let key = crate::store::normalize_work_ref(r)?;
     // The tracker that may answer it, when exactly one does.
@@ -258,7 +284,7 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
     let t = (owners.len() == 1)
         .then(|| trackers.iter().find(|t| t.id == owners[0]).cloned())
         .flatten();
-    Ok((t, key))
+    Ok((t, key, false))
 }
 
 /// `work { action: lookup, key | url }`: the cache, else one live fetch.
@@ -268,7 +294,7 @@ pub async fn lookup(
     scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<Ticket, IpcError> {
-    let (tracker, key) = {
+    let (tracker, key, by_url) = {
         let s = lock(store)?;
         match recognise(&s, reference) {
             Ok(r) => r,
@@ -281,7 +307,12 @@ pub async fn lookup(
             Err(e) => return Err(e),
         }
     };
-    let cached = lock(store)?.tracker_item_for_key(&key)?;
+    // A URL names its tracker: only that tracker's cache answers for it
+    // (two sites can share a project key). A bare key asks every cache.
+    let cached = match (&tracker, by_url) {
+        (Some(t), true) => lock(store)?.tracker_item_for_key_in(t.id, &key)?,
+        _ => lock(store)?.tracker_item_for_key(&key)?,
+    };
     let item_id = match cached {
         Some(item) => item.id,
         None => {
@@ -305,6 +336,25 @@ pub async fn lookup(
                     ),
                 )
                 .with_details(serde_json::json!({ "state": t.state })));
+            }
+            // Inside a 429's Retry-After the sync recorded: no request, the
+            // same refusal, and how long is left — a lookup must not extend
+            // the outage the sync is waiting out.
+            let now = crate::service::catalog::now_secs();
+            if let Some(nb) = lock(store)?
+                .tracker_not_before(t.id)?
+                .filter(|nb| *nb > now)
+            {
+                let left = nb - now;
+                return Err(IpcError::new(
+                    codes::E_TRACKER,
+                    format!(
+                        "{key} is not cached and {} cannot be asked now (rate-limited for \
+                         another {left}s)",
+                        t.name
+                    ),
+                )
+                .with_details(serde_json::json!({ "state": t.state, "retry_after_secs": left })));
             }
             fetch_one(&t, ItemRef::parse(&key), store, net)
                 .await
@@ -340,7 +390,7 @@ pub async fn lookup(
         t.as_ref(),
         crate::service::catalog::now_secs(),
     );
-    let live = live_ids(&s, scope, item.key.as_deref())?;
+    let live = live_ids(&s, scope, &item)?;
     // An agent reads it: fenced on both sides, markers defused (M3 review).
     let description = meta.description.map(|d| match scope {
         OrgScope::Host { .. } => {
@@ -400,6 +450,10 @@ pub struct StartPlan {
     pub worktree_id: Option<i64>,
     /// `KEY title`, the session's friendly name.
     pub name: String,
+    /// A multi-repo start's sibling: the duplicate guard counts only live
+    /// sessions on the key in this plan's project.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_project: bool,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -502,7 +556,8 @@ pub async fn plan_start(
         }
     };
     let s = lock(store)?;
-    let live = s.live_work_sessions_for_key(&key)?;
+    let item_org = item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+    let live = live_work_on(&s, &key, item_org)?;
     if let Some((_, row)) = live
         .iter()
         .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
@@ -660,12 +715,17 @@ pub async fn plan_start(
         host_alias,
         branch,
         worktree_id,
+        per_project: args.per_project,
     })
 }
 
-/// One line of tracker text (a title, a status name) for fleet's own
-/// lines: control characters and newlines flattened, markers defused, capped
-/// — a newline in a Jira title must not be able to write a line of its own.
+/// Most characters of a key fleet's own lines carry.
+const KEY_LINE_MAX: usize = 64;
+
+/// One line of tracker text (a title, a status name, a key) for fleet's
+/// own lines: control characters and newlines flattened, markers defused,
+/// capped — a newline in a Jira title must not be able to write a line of
+/// its own.
 fn tracker_line(s: &str, max: usize) -> String {
     let flat: String = s
         .chars()
@@ -700,7 +760,12 @@ pub fn ticket_brief_with(
         .transpose()?
         .flatten();
     let meta = plan.item_id.map(|id| s.work_item_meta(id)).transpose()?;
-    let mut out = format!("You are starting work on {}", plan.key);
+    // The key is the tracker's text too (only the by-key fetch validates
+    // its shape): flattened and defused like the title.
+    let mut out = format!(
+        "You are starting work on {}",
+        tracker_line(&plan.key, KEY_LINE_MAX)
+    );
     if !plan.title.is_empty() {
         out.push_str(&format!(": {}", tracker_line(&plan.title, 200)));
     }
@@ -748,7 +813,11 @@ pub fn brief_visible_on(store: &Mutex<Store>, plan: &StartPlan) -> Result<bool, 
 /// The short prompt typed once the REPL is ready (the brief rides the
 /// hook's `additionalContext`).
 pub fn start_prompt(key: &str) -> String {
-    format!("Start on {key}: the ticket's context is in your fleet brief. Read it, then plan before you edit.")
+    format!(
+        "Start on {}: the ticket's context is in your fleet brief. Read it, then plan before \
+         you edit.",
+        tracker_line(key, KEY_LINE_MAX)
+    )
 }
 
 /// Do the start. `spawn` makes the session (production: `new_session`).
@@ -780,11 +849,49 @@ where
     };
     let row = spawn(args).await?;
     let s = lock(store)?;
+    // The guard `plan_start` checked under is long gone (the spawn is an
+    // SSH round trip): another start of the same key may have won since.
+    // Re-check under the guard that writes the link, and name the session
+    // this start made but did not link, so nobody has to find it.
+    let orphaned = |e: IpcError| -> IpcError {
+        let mut d = e.details.clone().unwrap_or_else(|| serde_json::json!({}));
+        if let Some(o) = d.as_object_mut() {
+            o.insert("orphan_session_id".into(), row.id.into());
+        }
+        e.with_details(d)
+    };
+    let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+    if let Some((_, other)) = live_work_on(&s, &plan.key, item_org)?
+        .into_iter()
+        .find(|(_, r)| {
+            r.id != row.id && (!plan.per_project || r.project_id == Some(plan.project_id))
+        })
+    {
+        return Err(orphaned(
+            IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "{} already has a live session ({} on {}); the session this start made \
+                     ({}) is not linked to it",
+                    plan.key,
+                    other.friendly_name.as_deref().unwrap_or(&other.tmux_name),
+                    other.host_alias,
+                    row.tmux_name
+                ),
+            )
+            .with_details(serde_json::json!({
+                "session_id": other.id,
+                "host_alias": other.host_alias,
+                "tmux_name": other.tmux_name,
+            })),
+        ));
+    }
     let target = match plan.item_id {
         Some(id) => WorkTarget::Item(id),
         None => WorkTarget::Key(&plan.key),
     };
-    s.link_session_work(row.id, target, "started")?;
+    s.link_session_work(row.id, target, "started")
+        .map_err(orphaned)?;
     let queued = match brief {
         Some(body) if !body.trim().is_empty() => {
             let body: String = body
@@ -872,6 +979,7 @@ pub struct MultiStart {
 
 /// PURE: the line each sibling's brief carries about the others.
 pub fn siblings_line(key: &str, here: &str, others: &[String], branch: &str) -> String {
+    let key = tracker_line(key, KEY_LINE_MAX);
     let mut line = format!(
         "This is one of {} sessions starting {key} together, one per repository: this one \
          works in {here}",
