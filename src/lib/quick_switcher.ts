@@ -16,7 +16,7 @@ import type { ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
-import { displayKey, type TicketRow } from './trackers';
+import { displayKey, keyFamily, type TicketRow } from './trackers';
 import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
 
 /** A cached tracker ticket and the section it is listed under. */
@@ -371,9 +371,10 @@ export function chordLabel(isMac: boolean): string {
 
 /**
  * Where a ticket's new session most likely belongs: the project and host of
- * the most recently active session working on a key with the same prefix
- * (`ABC-*`), else null — the dialog then falls back to `contextProject`. The
- * hub's `start` makes the same choice from its links.
+ * the most recently active session working on a key of the same family
+ * (`ABC-*`; a GitHub issue the same `owner/repo`, see `keyFamily`), else null
+ * — the dialog then falls back to `contextProject`. The hub's `start` makes
+ * the same choice from its links.
  */
 export function placeForTicket(
   key: string,
@@ -381,12 +382,12 @@ export function placeForTicket(
   projects: readonly ProjectTreeRow[],
   keyOf: (s: SessionRow) => string | null,
 ): { project: ProjectTreeRow; host: string } | null {
-  const prefix = key.split('-')[0]?.toUpperCase();
-  if (!prefix) return null;
+  const family = keyFamily(key);
+  if (!family) return null;
   const byId = new Map(projects.filter((p) => !p.project.system).map((p) => [p.project.id, p]));
   const hits = sessions
     .filter((s) => s.project_id != null && byId.has(s.project_id))
-    .filter((s) => keyOf(s)?.split('-')[0]?.toUpperCase() === prefix)
+    .filter((s) => keyFamily(keyOf(s)) === family)
     .sort((a, b) => (b.last_activity_at ?? 0) - (a.last_activity_at ?? 0));
   const s = hits[0];
   if (!s || s.project_id == null) return null;

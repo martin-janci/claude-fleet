@@ -561,6 +561,27 @@
   "expect": []
  },
  {
+  "name": "a percent-encoded url path decodes",
+  "text": "https://acme.atlassian.net/browse/%41BC-2",
+  "ctx": {},
+  "expect": [
+   {
+    "kind": "url",
+    "key": "ABC-2",
+    "tracker_id": null,
+    "provider": "jira",
+    "text": "https://acme.atlassian.net/browse/%41BC-2",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "one malformed percent sequence leaves the whole path undecoded",
+  "text": "https://acme.atlassian.net/browse/%41BC-1/%zz",
+  "ctx": {},
+  "expect": []
+ },
+ {
   "name": "ghes: an issue URL of a configured GitHub Enterprise host",
   "text": "see https://ghe.corp.example/Acme/API/issues/12 now",
   "ctx": {

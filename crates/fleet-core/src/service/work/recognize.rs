@@ -286,23 +286,32 @@ fn url_spans(text: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Percent-decode all or nothing, like the twin's `decodeURIComponent`: one
+/// malformed `%XX`, or bytes that are not UTF-8, and the input comes back
+/// unchanged — so both recognisers read the same key (or none) from one URL.
 fn percent_decode(s: &str) -> String {
     let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
+        if b[i] == b'%' {
+            match (
+                b.get(i + 1).and_then(|&c| hex(c)),
+                b.get(i + 2).and_then(|&c| hex(c)),
+            ) {
+                (Some(h), Some(l)) => {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
+                }
+                _ => return s.to_string(),
             }
         }
         out.push(b[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// A GitHub owner or repository name as a reference carries it:

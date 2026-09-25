@@ -240,7 +240,7 @@ pub fn rank_candidates(boot: Option<i64>, probes: Vec<TranscriptProbe>) -> Vec<L
 pub struct DiscoverLostSessionsArgs {
     /// Host to scan.
     pub host_alias: String,
-    /// Max transcripts to read, newest first. Default 50, max 500.
+    /// Newest first; default 50, max 500.
     #[serde(default)]
     pub limit: Option<i64>,
 }

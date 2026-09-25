@@ -825,6 +825,18 @@ fn a_remote_messages_inbox_preview_strips_the_untrusted_marker() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "short reply");
+    // D8: every rendering of peer text says it is untrusted — the slim row
+    // lost the marker to the preview cap, so it carries the flag instead.
+    assert!(summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert_eq!(v["untrusted"], true, "{v}");
+    assert!(
+        !v["body_preview"]
+            .as_str()
+            .unwrap()
+            .contains("[claude-fleet"),
+        "{v}"
+    );
 }
 
 /// A local message's `body` carries no marker, so the preview is untouched.
@@ -844,6 +856,12 @@ fn a_local_messages_inbox_preview_is_the_raw_body() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "hi there");
+    assert!(!summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert!(
+        v.get("untrusted").is_none(),
+        "a local row carries no flag: {v}"
+    );
 }
 
 #[test]
@@ -900,10 +918,6 @@ fn list_sessions_docs_quote_status_vocabulary() {
         list_sessions_param_doc("claude_status").contains(&ClaudeStatus::vocabulary_doc()),
         "ListSessionsParams.claude_status doc must quote the vocabulary verbatim"
     );
-    assert!(
-        list_sessions_param_doc("summary").contains(&StuckKind::vocabulary_doc()),
-        "ListSessionsParams.summary doc must quote the stuck_kind vocabulary verbatim"
-    );
     let tools = FleetTools::tool_router_for_doc().list_all();
     let desc = tools
         .iter()
@@ -912,6 +926,34 @@ fn list_sessions_docs_quote_status_vocabulary() {
         .expect("list_sessions description");
     assert!(desc.contains(&ClaudeStatus::vocabulary_doc()));
     assert!(desc.contains(&StuckKind::vocabulary_doc()));
+}
+
+/// Wherever a served description or parameter doc lists a status vocabulary,
+/// it lists all of it, as the enum renders it (M11.5 moved the lists to the
+/// places a caller reads them; this keeps any that remain from drifting).
+#[test]
+fn every_served_status_list_quotes_the_enum() {
+    let claude = ClaudeStatus::vocabulary_doc();
+    let stuck = StuckKind::vocabulary_doc();
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let t = present::present(t);
+        let mut texts = vec![t.description.as_deref().unwrap_or_default().to_string()];
+        if let Some(props) = t.input_schema.get("properties").and_then(|p| p.as_object()) {
+            texts.extend(
+                props
+                    .values()
+                    .filter_map(|p| p["description"].as_str().map(str::to_string)),
+            );
+        }
+        for text in texts {
+            if text.contains("working | blocked") {
+                assert!(text.contains(&claude), "{}: {text}", t.name);
+            }
+            if text.contains("auth_menu |") {
+                assert!(text.contains(&stuck), "{}: {text}", t.name);
+            }
+        }
+    }
 }
 
 #[test]
@@ -3270,7 +3312,19 @@ fn the_served_definition_budget_stays_bounded() {
     // restore_host_sessions, recreate_session and restart_session (no new
     // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
     // plus 100.
-    const BUDGET_BYTES: usize = 71_658;
+    // M11.5: paid back 16,944 B (M0.6). Descriptions and parameter docs
+    // reworded, no tool, action or parameter renamed and no schema shape
+    // changed: prose that restated a schema default, a parameter's own doc,
+    // or a vocabulary listed twice was cut; every confirm gate, untrusted
+    // marker, host fence and "never" clause kept. Measured at 71,590 before
+    // and 54,646 after on 2026-09-25; plus 100. Re-measure when the M11.1 /
+    // M11.3 / M11.4 branches land: whichever lands second merges and
+    // re-measures.
+    // Merged over main (#285: `inbox` gains the hub-link from_addr
+    // untrusted clause): measured at 54,700 (+54), inside the headroom.
+    // M11.4 merged (`work_admin` gains `status`): measured at 54,707 (+7),
+    // inside the headroom; M11.1 / M11.3 still to land.
+    const BUDGET_BYTES: usize = 54_746;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -5661,6 +5715,106 @@ async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cu
         .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
+}
+
+/// `fresh_for` names the reader whose cursor the call advances, so it is
+/// fenced like a target: a per-host token naming a session on ANOTHER host
+/// is refused with `E_FORBIDDEN` before any read, and no cursor row is
+/// written — otherwise host A could advance host B's watermark and blind
+/// that session to its deltas. The same fence, through one helper, on all
+/// five tools: here session_history, inbox and list_sessions (the two
+/// SSH-backed ones, session_transcript and repo_diff, share it).
+#[tokio::test]
+async fn fresh_for_naming_another_hosts_session_is_forbidden_and_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let target = s
+        .upsert_session("target", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let foreign_reader = s
+        .upsert_session("reader-b", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    let own_reader = s
+        .upsert_session("reader-a", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.insert_session_event(target, "prompt_sent", None).unwrap();
+    s.insert_message(own_reader, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+    let host_a = host_caller("hosta", TokenMode::Full);
+    let cursor_rows = || -> i64 {
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    let err = t
+        .session_history(
+            Extension(host_a.clone()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(foreign_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let err = t
+        .inbox(
+            Extension(host_a.clone()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(foreign_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+    p.fresh_for = Some(foreign_reader);
+    let err = t
+        .list_sessions(Extension(host_a.clone()), Parameters(p))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert_eq!(cursor_rows(), 0, "a foreign reader never gets a cursor row");
+
+    // The same token naming its own host's session reads and writes as
+    // before; the master is unbound.
+    let out = t
+        .session_history(
+            Extension(host_a),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(own_reader),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&out)["data"].as_array().unwrap().len(), 1);
+    t.session_history(
+        Extension(Caller::master()),
+        Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(50),
+            fresh_for: Some(foreign_reader),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cursor_rows(), 2);
 }
 
 /// Ruling 17: an unknown reader (e.g. an agent still using its

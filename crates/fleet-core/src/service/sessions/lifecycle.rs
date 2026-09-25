@@ -764,7 +764,9 @@ pub(super) async fn new_session_inner(
             )
         })?;
 
-    let derived_friendly = derive_friendly_name(&s, &args, row.worktree_id)?;
+    let worktree_id =
+        link_new_session_worktree(&s, row.id, &args, &path.to_string_lossy(), fixed.is_some())?;
+    let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
     finalize_new_session(
         &s,
         row.id,
@@ -774,6 +776,34 @@ pub(super) async fn new_session_inner(
         claude_id.as_deref(),
         is_shell,
     )
+}
+
+/// Point a new session's row at the worktree it was started in: the one
+/// named by `worktree_id`, or the one `new_worktree` just created (its row
+/// upserted for the session's host, keyed by name, the branch the worktree
+/// script made). Reconcile only ever sets `worktree_key`, never this FK, and
+/// tidy-up, safe kill and the idle killer inspect a work session's tree only
+/// through it: without it a started session could only ever be archived.
+/// A system project (`fixed`) has no worktree. Returns the linked id.
+pub(super) fn link_new_session_worktree(
+    s: &Store,
+    row_id: i64,
+    args: &NewSessionArgs,
+    cwd: &str,
+    fixed: bool,
+) -> Result<Option<i64>, IpcError> {
+    if fixed {
+        return Ok(None);
+    }
+    let wid = match (args.worktree_id, args.new_worktree.as_deref()) {
+        (Some(w), _) => w,
+        (None, Some(name)) => {
+            s.upsert_worktree_on(&args.host_alias, args.project_id, name, cwd, Some(name))?
+        }
+        (None, None) => return Ok(None),
+    };
+    s.link_session_worktree(row_id, wid)?;
+    Ok(Some(wid))
 }
 
 /// The writes `new_session` makes after the session exists, then ONE re-read
@@ -1105,6 +1135,10 @@ pub async fn rename_session(
             &args.old_name,
             "rename_session",
         )?;
+        // tmux would accept the new name (a lost session is not in tmux),
+        // and the row carry-over below would then dismiss the lost row —
+        // its timeline, participant and restore entry. Refuse first.
+        reject_lost_session_name(&s, &args.host_alias, &args.new_name)?;
     }
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
@@ -1304,9 +1338,9 @@ pub(crate) fn recreate_pane_command(
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RecreateSessionParams")]
 pub struct RecreateSessionArgs {
-    /// Fleet session id (from list_sessions).
+    /// Fleet session id.
     pub session_id: i64,
-    /// Recreate even if this is the registered fleet controller. Default false.
+    /// Recreate even the fleet controller.
     #[serde(default)]
     pub force: bool,
 }
@@ -1415,7 +1449,7 @@ pub async fn recreate_session(
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct DismissGhostSessionArgs {
-    /// Fleet session id (from list_sessions).
+    /// Fleet session id.
     pub session_id: i64,
 }
 

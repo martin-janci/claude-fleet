@@ -9,63 +9,63 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ### `add_host`
 
-Register a new host. transport is "ssh" (the default: probed first, persisted only if reachable) or "agent" (a host the hub cannot reach, which runs fleet-agent and dials in: persisted unprobed and unreachable until its agent connects; get its token on the hub with `fleet-hub agent-token <alias>`). Returns the host row as JSON.
+Register a host. transport "ssh" (default) is probed first and persisted only if reachable; "agent" (a host the hub cannot reach; it runs fleet-agent and dials in) is persisted unprobed, unreachable until its agent connects (token: `fleet-hub agent-token <alias>` on the hub). Returns the host row.
 
 Parameters: `alias`, `ssh_alias`, `transport`
 
 ### `agent_status`
 
-Which agent hosts (transport "agent") have a fleet-agent connected, since when (unix seconds), which agent version, host name and OS. Offline agent hosts are listed with connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false on a server that accepts no agents (the desktop). Returns JSON.
+Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
 
 ### `apply_sync`
 
-Apply a plan from plan_sync on hosts: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. Returns per-host results; restart_required marks hosts whose Claude must be restarted.
+Apply a plan_sync plan: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. restart_required marks hosts whose Claude must be restarted.
 
 Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 
 ### `broadcast_prompt`
 
-Send the same prompt to every matching work session (excludes the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Send one prompt to every matching work session (not the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `host`, `project_id`, `prompt`, `raw`, `status`, `submit`
 
 ### `cancel_task`
 
-Cancel a queued or running task: marks it cancelled (E_TASK_TERMINAL if it already finished). The worker session keeps running — kill or re-prompt it separately if needed. May return E_CONFIRM_REQUIRED when desktop confirmation is on. A per-host token may only cancel tasks it can see (E_FORBIDDEN).
+Cancel a queued or running task (E_TASK_TERMINAL if it already finished). The worker session keeps running: kill or re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop confirmation is on. A per-host token may only cancel tasks it can see (E_FORBIDDEN).
 
 Parameters: `confirm_nonce`, `task_id`
 
 ### `capture_session`
 
-Capture a session's terminal output — the visible tmux pane, or include scrollback history (scrollback_lines). Use after send_prompt to read the session's reply. Returns the pane as plain text (not JSON), capped to the last max_lines lines (default 200).
+Capture a session's terminal: the visible tmux pane, plus scrollback_lines of history. Use after send_prompt to read the reply. Returns plain text, not JSON.
 
 Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
 ### `delete_worktree`
 
-Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it (override with force=true). Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
+Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
 
 Parameters: `confirm_nonce`, `force`, `worktree_id`
 
 ### `discover_hosts`
 
-Discover SSH hosts from the user's ~/.ssh/config. These are candidates for add_host. Returns JSON.
+SSH hosts in the user's ~/.ssh/config: candidates for add_host.
 
 ### `discover_lost_sessions`
 
-Read-only: scan ~/.claude/projects on a host for Claude conversations fleet has no live pane for, ranked against the host's boot (rank_hint: before_boot | after_boot | stale | unknown) and enriched with project_id, worktree_id and existing_session_id — the last set when a fleet row (live or lost) already holds that conversation, which restore_host_sessions handles, not this. resumable is true only when the pane would start in exactly the transcript's cwd; anywhere else claude --resume silently starts an empty conversation instead, so do not resume it. Resume one with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name (a hint), resume_claude_session_id }. limit: newest first, default 50, max 500.
+Read-only: scan ~/.claude/projects on a host for conversations fleet has no live pane for, ranked against the host's boot (rank_hint: before_boot | after_boot | stale | unknown), with project_id, worktree_id and existing_session_id (set when a fleet row, live or lost, holds it: restore_host_sessions handles that one). resumable is true only when the pane would start in exactly the transcript's cwd; anywhere else claude --resume silently starts an empty conversation, so do not resume it. Resume with new_session { host_alias, project_id, worktree_id, name: derived_tmux_name (a hint), resume_claude_session_id }.
 
 Parameters: `host_alias`, `limit`
 
 ### `dismiss_ghost_session`
 
-Dismiss a ghost session (lost from tmux): permanently delete its row. Use when a ghost is not worth reviving — the row is the only thing left to clean up. Errors if the session is not a ghost.
+Permanently delete a ghost session's row (lost from tmux, not worth reviving). Errors if it is not a ghost.
 
 Parameters: `session_id`
 
 ### `dispatch_task`
 
-Dispatch a unit of work to a worker session and track it as a task. Pass worker_session_id (an existing session) OR new_worker { host_alias, project_id, name? } (spawns one via new_session). The prompt is delivered with an appended instruction to print FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph result; fleet detects the marker on the worker's next Stop and flips the task to done with that paragraph as `result` (also delivered to requester_session_id's inbox as kind=task_result). Returns the task row (id, state=running, worker_session_id, …); follow with wait_for_task. A per-host token must name a requester on its own host. Marked as untrusted unless raw=true (master only).
+Dispatch work to a worker session and track it as a task. The prompt gets an appended instruction to print FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph result; on the worker's next Stop fleet flips the task to done with that paragraph as `result` (also sent to the requester's inbox as kind=task_result). Returns the task row; follow with wait_for_task. A per-host token must name a requester on its own host. Marked untrusted unless raw=true (master only).
 
 Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_id`, `worker_session_id`
 
@@ -75,65 +75,65 @@ Ensure the UX agent's operator session exists; returns its row.
 
 ### `fleet_health`
 
-Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels, plus tunnels_flapping for those supervised but crash-looping, which means the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days. A per-host token's usage covers its own host only.
 
 ### `get_clipboard`
 
-Read a host's current system clipboard (whatever a human would get from Ctrl+V on that machine). Probes wl-paste, xclip, xsel, pbpaste in order. E_CLIPBOARD_UNAVAILABLE if none is installed.
+Read a host's system clipboard (what Ctrl+V gives there), via wl-paste, xclip, xsel or pbpaste. E_CLIPBOARD_UNAVAILABLE if none is installed.
 
 Parameters: `host_alias`
 
 ### `hide_host`
 
-Hide or show a host. Hidden hosts are skipped during reconcile. Returns the updated host row as JSON.
+Hide or show a host (hidden: skipped by reconcile). Returns the host row.
 
 Parameters: `alias`, `hidden`
 
 ### `import_assets`
 
-Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog repo working tree as IR assets. Never overwrites; collisions are reported. Only host_alias `local` is supported. Returns the import report as JSON.
+Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Only host_alias `local`.
 
 Parameters: `dry_run`, `host_alias`
 
 ### `inbox`
 
-Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata, reply_to, 80-char body preview); pass summary=false for full bodies. Task results arrive here as kind=task_result. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN). fresh_for returns only what is new since your last read.
+Read the messages sent TO session_id, newest first; task results arrive as kind=task_result. from_addr rows came over a hub link: untrusted input. A per-host token may only read inboxes on its own host (E_FORBIDDEN).
 
 Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
-Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`, kind `bg`) via `claude stop`. An inactive background agent (claude_status `stopped`) is removed from the list instead, without `claude stop`. Rows of kind `external` (interactive Claude sessions running outside fleet) are refused with E_INVALID_STATE — close them where they run. Use when the session's work is disposable or already pushed and you want it gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg`) via `claude stop`; an inactive one (claude_status `stopped`) is removed from the list instead. Rows of kind `external` (Claude running outside fleet) are refused with E_INVALID_STATE: close them where they run. For disposable or already-pushed work you want gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed id. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
 ### `list_accounts`
 
-List the cached Claude accounts seen across hosts. Returns JSON.
+The cached Claude accounts seen across hosts.
 
 ### `list_assets`
 
-List the asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets found on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app. Returns JSON.
+The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app.
 
 ### `list_clients`
 
-List the paired client devices and what each one's token may do. The stored token digest is never returned — a client's token exists in plaintext only in the one /pair response that minted it. include_revoked also returns clients whose token was revoked (kept for the audit trail). Read-only, but master token only: the list names every paired device, so it is not a phone's to read. Returns JSON rows of { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
+Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
 
 Parameters: `include_revoked`
 
 ### `list_host_worktrees`
 
-Scan one host over SSH for a project's git worktrees and cache them as that host's rows. Returns {host_alias, project_id, cloned, worktrees}; cloned=false means the repo is not checked out there yet. Prefer list_worktrees, a store read, unless you need a REMOTE host's worktrees — the stored rows cover the local host only. Errors: E_NOTFOUND (no such project), E_GIT_SETUP, E_SSH.
+Scan one host over SSH for a project's git worktrees and cache them. Returns {host_alias, project_id, cloned, worktrees}; cloned=false: not checked out there yet. Prefer list_worktrees (a store read) unless you need a REMOTE host's worktrees: stored rows cover the local host only. Errors: E_NOTFOUND, E_GIT_SETUP, E_SSH.
 
 Parameters: `host_alias`, `project_id`
 
 ### `list_hosts`
 
-List all registered hosts with their reachability, claude/tmux versions, and linked account. Returns JSON.
+Registered hosts: reachability, claude/tmux versions, linked account.
 
 ### `list_layers`
 
-List the catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app. Returns JSON.
+The catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app.
 
 ### `list_peer_links`
 
@@ -141,49 +141,49 @@ List this hub's links to other fleets' hubs: fleet, role, state, pending count, 
 
 ### `list_projects`
 
-List discovered projects (repos fleet can spawn sessions in). Slim rows by default (id, owner, repo, worktree_count, last_session_at); summary=false returns the full nested worktree tree, which is large — pair it with limit.
+Discovered projects (repos fleet can spawn sessions in).
 
 Parameters: `has_sessions`, `limit`, `summary`
 
 ### `list_sessions`
 
-List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, needs_attention (rows that want a person; each carries why and since), include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks). fresh_for returns only what is new since your last read.
+List tmux sessions across reachable hosts: slim rows unless summary=false; the filters combine. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null without a PR or checks).
 
 Parameters: `claude_status`, `force`, `fresh_for`, `host_alias`, `include_lost`, `limit`, `needs_attention`, `project_id`, `status`, `summary`, `tag`, `view`
 
 ### `list_tasks`
 
-List tasks, newest-first (default 50 rows). Filters: requester_session_id, state (queued | running | done | failed | cancelled). Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host.
+Tasks, newest first. Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host.
 
 Parameters: `limit`, `requester_session_id`, `state`
 
 ### `list_worktrees`
 
-List git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match, the array holds at most `limit` (default 100; 0 = no cap). Slim rows by default; summary=false adds the worktree path and the occupant sessions. Narrow with project_id / host_alias — a fleet-wide call answers hundreds of rows.
+Git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match. Narrow with project_id / host_alias: a fleet-wide call answers hundreds of rows.
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
 ### `move_session`
 
-Move a work session to another host, carrying its work as it is: the Claude transcript, unpushed commits, staged/modified/untracked files and small git-ignored files (.env); also the session's Claude directory (subagent transcripts, tool results) and the project's Claude memory, added to the target without replacing anything there (these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the same conversation and the source is killed only once the target runs (keep_source=true leaves it). strict=true refuses instead of carrying: E_MOVE_DIRTY, E_MOVE_UNPUSHED. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
+Move a work session to another host, carrying its work as it is: the transcript, unpushed commits, staged/modified/untracked and small git-ignored files (.env), plus the session's Claude directory and the project's Claude memory (added without replacing anything; these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the conversation and the source is killed only once the target runs. strict refuses instead of carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
 
 Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
 
 ### `new_bg_session`
 
-Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be session_transcript { session_id }. The prompt becomes the row's default friendly name and last_prompt. Pass requester_session_id (yours, from whoami) to list it under that session's background work.
+Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }.
 
 Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_id`
 
 ### `new_session`
 
-Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts. Optional kind="shell" runs a plain interactive shell instead (see new_shell_session for the same thing with start_command); optional friendly_name sets the sidebar label (omit / empty to derive one from the branch).
+Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
 Parameters: `base_branch`, `confirm_nonce`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
-Create a plain-shell tmux session on a host (no Claude Code in the pane — an interactive login shell). Same project/worktree plumbing as new_session, plus an optional start_command that runs once before the shell drops to an interactive prompt; the pane stays alive after it exits so you can attach or send-keys to it. Steer it with send_prompt (typed text + Enter) and read it with capture_session.
+Create a plain-shell tmux session (an interactive login shell, no Claude Code): new_session's project/worktree plumbing plus a start_command. Steer it with send_prompt and read it with capture_session.
 
 Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
 
@@ -193,7 +193,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (a phone, a laptop browser) and return the URL to show as a QR. The code — not a token — travels in the URL FRAGMENT, so no proxy or access log ever sees it; the device posts it to the hub's /pair once and gets a token of its own back. name must be 1-64 characters with no control characters and must not be one a live client already holds. mode is full (drive sessions fleet-wide), readonly (observe only), or peer (another hub's link — see peer_exchange); fleet-admin tools are out of a client's reach either way. Codes live in memory only, so a hub restart invalidates every outstanding one. Master token only. Returns JSON { url, code, expires_in_s, name, mode, trusted }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. Master token only. Returns { url, code, expires_in_s, name, mode, trusted }.
 
 Parameters: `mode`, `name`, `trusted`, `ttl_s`
 
@@ -205,117 +205,117 @@ Parameters: `after`, `fleet_id`, `proto`, `results`, `send`, `wait_ms`
 
 ### `peer_status`
 
-What is a peer session doing? Returns claude_status, current_activity, stuck_kind, context_pct (plus host/name/status) for one session. Cheap pre-check before send_message or broadcast_prompt.
+What is a peer session doing: claude_status, current_activity, stuck_kind, context_pct (plus host/name/status). Cheap check before send_message or broadcast_prompt.
 
 Parameters: `session_id`
 
 ### `plan_sync`
 
-Compute a sync plan: scan the selected hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id valid for 10 minutes. plugin_update fires once a pinned plugin's catalog version changes; a host still on the old version after that stays blocked. Inventory states now include orphan (in the host's fleet manifest, no longer in the catalog). Nothing is written. Pass the plan_id to apply_sync.
+Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. Nothing is written.
 
 Parameters: `host_alias`, `kind`, `name`
 
 ### `probe_host`
 
-Re-probe a registered host's reachability and versions. Returns the updated host row as JSON.
+Re-probe a host's reachability and versions. Returns the host row.
 
 Parameters: `alias`
 
 ### `propose_layers`
 
-Propose an initial layer split from the last scan, grouping assets by the exact set of hosts they are installed on. The largest group becomes 'core'; assets on a single host are returned separately for triage. Read-only: writes nothing. Returns JSON.
+Propose a layer split from the last scan, grouping assets by the exact set of hosts they are on: the largest group becomes 'core'; single-host assets come back separately for triage. Read-only.
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts when the hub is loopback-only; a hub with a public URL is reached directly). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it.
 
 Parameters: `rotate`
 
 ### `recreate_session`
 
-Recreate a session: kill its tmux session and rebuild it fresh in the same worktree, resuming the same Claude conversation. Use when the session is frozen, OOM-killed or out of context, or to revive a ghost — the conversation survives, the process does not. Works for running or ghost sessions. Returns the session row as JSON.
+Recreate a session: kill its tmux session and rebuild it in the same worktree, resuming the same Claude conversation. For a frozen, OOM-killed or out-of-context session, or to revive a ghost: the conversation survives, the process does not. Returns the row.
 
 Parameters: `confirm_nonce`, `force`, `session_id`
 
 ### `refresh_projects`
 
-Rescan the local projects directory for new or removed repositories and worktrees. Returns the fresh project list. On a hub with hub.local_host off it returns E_NOTFOUND: that hub has no local projects directory to scan.
+Rescan the local projects directory for new or removed repositories and worktrees; returns the project list. E_NOTFOUND on a hub with hub.local_host off (no local projects directory).
 
 ### `register_self`
 
-Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force. Address yourself with session_id (from whoami) OR host_alias + tmux_name. A per-host token may only register a session on its own host (E_FORBIDDEN).
+Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force. A per-host token may only register a session on its own host (E_FORBIDDEN).
 
 Parameters: `host_alias`, `session_id`, `tmux_name`
 
 ### `related_sessions`
 
-List sessions related to a given session — those sharing the same project and worktree. Returns JSON.
+Sessions sharing this session's project and worktree.
 
 Parameters: `session_id`
 
 ### `remove_host`
 
-Remove a registered host. Its sessions are orphaned. Returns the removed host row as JSON.
+Remove a host; its sessions are orphaned. Returns the removed row.
 
 Parameters: `alias`
 
 ### `rename_session`
 
-Rename a tmux session on a host. Returns the updated session row as JSON. Address the session with session_id OR host_alias + old_name.
+Rename a tmux session. Returns the updated row.
 
 Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
 ### `repair_session`
 
-Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch and its tmux session run there. Goes past the automatic create/restart/attach checks — may unregister this worktree stale git entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op on a healthy session. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. Gated by mcp.confirm_destructive. Returns a RepairReport (cwd, healthy, actions, warnings, branch_source, tmux, sibling_session_ids). Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.
+Repair a session workspace (the Repair workspace button): make its directory a healthy git worktree on its branch with its tmux session running there. Goes past the automatic checks: may unregister a stale worktree entry, adopt its branch checkout elsewhere, recreate the branch from base once origin confirms it is gone, and respawn a pane whose directory vanished. No-op when healthy. Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. Returns a RepairReport. Errors: E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by mcp.confirm_destructive).
 
 Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
 
 ### `repo_branches`
 
-List local + remote branches for a session's worktree with ahead/behind. Returns JSON array.
+Local + remote branches of a session's worktree, with ahead/behind.
 
 Parameters: `session_id`
 
 ### `repo_changes`
 
-List a session's changed files (git status) in its worktree. Returns JSON array of changed files.
+A session's changed files (git status) in its worktree.
 
 Parameters: `session_id`
 
 ### `repo_commit`
 
-One commit's metadata + changed files. Returns JSON {hash, subject, body, author, date, files}.
+One commit's metadata + changed files: {hash, subject, body, author, date, files}.
 
 Parameters: `hash`, `session_id`
 
 ### `repo_commit_diff`
 
-Diff of one file within a commit. Returns JSON {path, diff, binary, truncated}.
+One file's diff within a commit: {path, diff, binary, truncated}.
 
 Parameters: `hash`, `path`, `session_id`
 
 ### `repo_diff`
 
-Unified diff for one worktree file vs HEAD (untracked files render as all-added). Returns JSON {path, diff, binary, truncated}. fresh_for returns only what is new since your last read.
+Unified diff of one worktree file vs HEAD (untracked: all added): {path, diff, binary, truncated}.
 
 Parameters: `fresh_for`, `path`, `session_id`
 
 ### `repo_file`
 
-Read one worktree file's contents (capped). Returns JSON {path, content, truncated, binary, size}.
+One worktree file's contents (capped): {path, content, truncated, binary, size}.
 
 Parameters: `path`, `session_id`
 
 ### `repo_log`
 
-Commit log (branch graph) for a session's worktree. all=true (default) includes every branch. Returns a JSON array of commits with parents + ref decorations, newest first; `limit` defaults to 50 and `skip` pages through older history.
+Commit log (branch graph) of a session's worktree, newest first, with parents + ref decorations; `skip` pages back.
 
 Parameters: `all`, `limit`, `session_id`, `skip`
 
 ### `repo_tree`
 
-List a session's worktree files (tracked + untracked, gitignore respected). Returns JSON {entries, truncated}.
+A session's worktree files (tracked + untracked, gitignore respected): {entries, truncated}.
 
 Parameters: `session_id`
 
@@ -327,157 +327,157 @@ Parameters: `action`, `confirm_nonce`, `session_id`
 
 ### `resolve_preview`
 
-Compute the effective asset set for one host after its role and contexts are resolved, with provenance: which layer introduced each asset, which layers overrode it, and which layer excluded anything missing. Nothing is written. Requires catalog_configure + catalog_load in the app. Returns JSON.
+One host's effective asset set after its role and contexts resolve, with provenance: the layer that introduced each asset, the ones that overrode it, and the one that excluded anything missing. Nothing is written. Requires catalog_configure + catalog_load in the app.
 
 Parameters: `host_alias`
 
 ### `restart_session`
 
-Restart a tmux session (kill and recreate it in the same place). Use when the Claude REPL is wedged but tmux and the worktree are fine — an in-place relaunch, cheaper than recreate_session. Returns the updated session row as JSON. Address the session with session_id OR host_alias + name.
+Restart a tmux session in place (kill and recreate): for a wedged Claude REPL whose tmux and worktree are fine; cheaper than recreate_session. Returns the updated row.
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
 ### `restore_host_sessions`
 
-Restore sessions a host lost to a reboot or tmux restart: resume each one's Claude conversation in its original worktree under its original name. dry_run=true returns the plan (no ssh, no writes) — call it first, and again after a timeout to see what is still lost. One failing session never fails the others; the result lists every outcome. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet controller is skipped (recreate_session force=true). Paced by restore.batch_size / restore.stagger_ms.
+Restore sessions a host lost to a reboot or tmux restart: resume each one's conversation in its original worktree under its original name. Call dry_run first, and again after a timeout to see what is still lost. One failing session never fails the others; every outcome is listed. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet controller is skipped (recreate_session force=true). Paced by restore.batch_size / restore.stagger_ms.
 
 Parameters: `confirm_nonce`, `dry_run`, `host_alias`, `session_ids`
 
 ### `revoke_client`
 
-Revoke a paired client's token by name. Its next request is refused (the auth layer only resolves live rows) and the name becomes free to pair again; the row itself is kept, revoked, for the audit trail. E_NOTFOUND when no live client holds that name. Master token only. Returns the revoked row as JSON.
+Revoke a paired client's token by name: its next request is refused and the name is free to pair again; the row is kept, revoked, for the audit trail. E_NOTFOUND when no live client has that name. Master token only.
 
 Parameters: `name`
 
 ### `run_prompt`
 
-send_prompt + wait_for_session(turn_gt) + session_transcript in one call: deliver the prompt, wait up to timeout_s (default 120, max 600) for the turn to complete, and return JSON { turn_seq, status: satisfied | timeout, transcript } where transcript is the reply as plain text (null with transcript_error when it cannot be read). Marked as untrusted unless raw=true (master token only). Address the session with session_id.
+send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
 
 Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
 
 ### `safe_kill_session`
 
-Ask a running Claude session to safely persist its work (commit + push), then arm deletion of its worktree + tmux session. Use when retiring a session whose worktree may hold unpushed work and you can wait for it to finish. Returns the row with safe_kill_state=requested; the actual delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', 'failed') arrive via row events. Address the session with session_id OR host_alias + tmux_name.
+Ask a running Claude session to persist its work (commit + push), then arm deletion of its worktree + tmux session: for retiring a session that may hold unpushed work. Returns the row with safe_kill_state=requested; the delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check ('ready' / 'failed' arrive as row events).
 
 Parameters: `confirm_nonce`, `host_alias`, `session_id`, `tmux_name`
 
 ### `scan_assets`
 
-Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts. Returns per-host results as JSON.
+Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts.
 
 Parameters: `host_alias`
 
 ### `send_message`
 
-Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox; deliver=true also pastes it into the pane, wake=true nudges an idle one instead. reply_to threads an answer. Per-host token needs its own host (E_FORBIDDEN); body marked untrusted unless raw=true (master only); repeat client_msg_id to avoid a double send.
+Send a peer-to-peer message (to_session_id or to_addr) to the recipient's inbox; deliver also pastes it into the pane, wake nudges an idle one. reply_to threads an answer. A per-host token needs its own host (E_FORBIDDEN); the body is marked untrusted unless raw=true (master only).
 
 Parameters: `body`, `client_msg_id`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_addr`, `to_session_id`, `wake`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter). The first prompt to a still-unnamed session also becomes its friendly name. Marked untrusted unless raw=true (master only) or a trusted client. keys=Enter|Escape|C-c|1-9 presses a key instead (unmarked; 1-9 answers pending_input). Returns JSON { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working session queues it (queued=true). acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable. Repeat a client_msg_id to retry without delivering twice.
+Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master only) or a trusted client. keys presses a key instead. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
 
 Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_activity`
 
-What the session's pane shows right now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored — the cheap read behind a live indicator, where capture_session is the whole pane. E_INVALID_STATE outside tmux. JSON.
+What the session's pane shows now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored: the cheap read behind a live indicator (capture_session is the whole pane). E_INVALID_STATE outside tmux.
 
 Parameters: `session_id`
 
 ### `session_conversation`
 
-Read a session conversation as structured turns — the shape of the exchange, where session_transcript gives one flat blob. Each turn carries the prompt, its timestamps, and items by kind: text, tool, subagent, compact, command, interrupt (tool inputs and results are never included). Also returns events (this conversation timeline, newest events_limit: default 50, max 200, 0 for none) and context (context-window usage, or null). turns defaults to 10, max 100; the character budget scales with it. Pass claude_session_id (from session_conversations) for an earlier conversation. since_turn narrows the window to what came after that turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
+Read a session conversation as structured turns (session_transcript is one flat blob): each turn's prompt, timestamps and items by kind (text, tool, subagent, compact, command, interrupt; tool inputs and results are never included), plus events (the conversation timeline) and context (context-window usage, or null). Read-only. Errors: E_INVALID, E_INVALID_STATE, E_NO_TRANSCRIPT.
 
 Parameters: `claude_session_id`, `events_limit`, `session_id`, `since_turn`, `turns`
 
 ### `session_conversations`
 
-List the Claude Code conversations a session has run, newest first: claude_session_id, started_at, ended_at, start_source (startup, resume, clear, compact, fork, fleet, unknown), end_reason, model, first_prompt, turns, compactions and current. Pass a claude_session_id to session_conversation to read an earlier one. limit defaults to 20 (max 500). Read-only. A per-host token may only list sessions on its own host.
+The Claude conversations a session has run, newest first: claude_session_id, started_at, ended_at, start_source (startup, resume, clear, compact, fork, fleet, unknown), end_reason, model, first_prompt, turns, compactions, current. Read an earlier one with session_conversation. Read-only; a per-host token only for sessions on its own host.
 
 Parameters: `limit`, `session_id`
 
 ### `session_history`
 
-Return the recorded event timeline for a session (status changes, prompts, stuck, kills, and conversation events: conversation_started, conversation_ended, compact_started, compact_done, turn_done). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON. fresh_for returns only what is new since your last read.
+A session's recorded event timeline, newest first: status changes, prompts, stuck, kills, and conversation events (conversation_started, conversation_ended, compact_started, compact_done, turn_done).
 
 Parameters: `fresh_for`, `limit`, `session_id`
 
 ### `session_transcript`
 
-Read a session's Claude Code transcript (the JSONL Claude writes, not the pane) and return the last assistant turn as plain text — text blocks verbatim, one summary line per tool call, no thinking. since_turn returns every turn after that turn_seq (use send_prompt's turn_seq_before). max_chars caps the text (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply text. fresh_for returns only what is new since your last read. unchanged costs no transcript read.
+Read a session's Claude Code transcript (the JSONL, not the pane): the last assistant turn as plain text, text blocks verbatim, one line per tool call, no thinking. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply. unchanged costs no transcript read.
 
 Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
 
 ### `set_client_trust`
 
-Grant or withdraw trust in a paired client by name: a trusted client's prompts and messages are delivered without the untrusted-content marker, as the master's raw=true is. Trust a device you type on, never an agent's token. E_NOTFOUND for an unknown live name. Master token only. Returns the row as JSON.
+Grant or withdraw trust in a paired client by name: a trusted client's prompts and messages are delivered without the untrusted-content marker, like the master's raw=true. Trust a device you type on, never an agent's token. E_NOTFOUND for an unknown live name. Master token only.
 
 Parameters: `name`, `trusted`
 
 ### `set_clipboard`
 
-Write text to a host's system clipboard. Probes wl-copy, xclip, xsel, pbcopy in order. Capped at 64 KiB. E_CLIPBOARD_UNAVAILABLE if no clipboard helper is installed. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Write a host's system clipboard, via wl-copy, xclip, xsel or pbcopy. E_CLIPBOARD_UNAVAILABLE if none is installed. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `content`, `host_alias`
 
 ### `set_friendly_name`
 
-Set the session's friendly display name (shown when the user toggles friendly names on). Called once per task by the in-session agent — short (3–6 words). Empty string clears. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
+Set the session's friendly display name, once per task by the in-session agent (3–6 words; empty clears). Returns the updated row.
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
 ### `set_host_layers`
 
-Replace a host's layer assignment: one optional role plus context layers in application order. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only. Returns the host's new assignment as JSON.
+Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only.
 
 Parameters: `contexts`, `host_alias`, `role`
 
 ### `set_secret`
 
-Store a value for a ${NAME} placeholder used by the catalog (global, or a per-host override with host_alias). Master token only. The value is never returned or logged.
+Store a value for a catalog ${NAME} placeholder (global, or per host with host_alias). Master token only. The value is never returned or logged.
 
 Parameters: `host_alias`, `name`, `value`
 
 ### `set_session_tags`
 
-Replace a session's tags (short labels such as `review`, `infra`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]; an empty list clears). Tags show in list_sessions rows and list_sessions { tag } filters on them. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
+Replace a session's tags (short labels such as `review`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]), shown and filterable in list_sessions. Returns the updated row.
 
 Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 ### `spawn_review`
 
-Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns the new review session row as JSON.
+Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
 ### `usage_report`
 
-Report ESTIMATED token usage and cost per session, host and UTC day, summed from each session's Claude Code transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in per-model price table (override: usage.prices_json), not a bill. total and by_host sum the live session rows, each over its whole lifetime; by_day comes from the durable daily roll-up (killed sessions included). Optional host_alias; since_secs keeps only sessions whose usage changed in the last N seconds and scopes by_day to that window (default: every session, last 30 days). Sessions are sorted by cost, at most 200. A per-host token only sees its own host. Returns JSON.
+ESTIMATED token usage and cost per session, host and UTC day, from each session's transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in price table (usage.prices_json), not a bill. total and by_host sum live rows over their lifetime; by_day is the durable daily roll-up (killed sessions included). Sessions sorted by cost, at most 200. A per-host token only sees its own host.
 
 Parameters: `host_alias`, `since_secs`
 
 ### `wait_for_reply`
 
-Block until the next message arrives for a session, or timeout_s elapses (default 120, max 600) — avoids polling inbox. Returns { status: satisfied | timeout, message }. Read-only.
+Block until the next message arrives for a session, or timeout_s (instead of polling inbox). Returns { status: satisfied | timeout, message }. Read-only.
 
 Parameters: `after_message_id`, `session_id`, `timeout_s`
 
 ### `wait_for_session`
 
-Block until a session reaches a state, or time out. until="idle": claude_status is idle | completed | stopped | failed (true even for a session that never started a turn). until="turn_gt": turn_seq > `turn` — pass the turn_seq_before that send_prompt returned to wait for the reply to YOUR prompt. Polls the store every 500 ms for up to timeout_s (default 120, max 600). Returns JSON { status: satisfied | timeout, claude_status, turn_seq, last_stop_at, stuck_kind }. Read-only. A per-host token may only wait on sessions on its own host.
+Block until a session reaches a state, or timeout_s. until="idle": claude_status is idle | completed | stopped | failed (true even before a first turn). until="turn_gt": turn_seq > `turn`; pass send_prompt's turn_seq_before to wait for the reply to YOUR prompt. Polls every 500 ms. Returns { status: satisfied | timeout, claude_status, turn_seq, last_stop_at, stuck_kind }. Read-only; a per-host token only for sessions on its own host.
 
 Parameters: `session_id`, `timeout_s`, `turn`, `until`
 
 ### `wait_for_task`
 
-Block until a task reaches done | failed | cancelled or timeout_s elapses (default 120, max 600; polls every 500 ms). Returns JSON { status: satisfied | timeout, task } — task.result holds the worker's paragraph when done. Read-only. A per-host token may only wait on tasks it requested or whose worker is on its host (E_FORBIDDEN).
+Block until a task is done | failed | cancelled, or timeout_s (polls every 500 ms). Returns { status: satisfied | timeout, task }; task.result holds the worker's paragraph. Read-only. A per-host token may only wait on tasks it requested or whose worker is on its host (E_FORBIDDEN).
 
 Parameters: `task_id`, `timeout_s`
 
 ### `whoami`
 
-Find your own fleet row from your tmux session name (`tmux display-message -p '#S'`). Returns the single matching session as JSON (id, host_alias, is_controller, …). E_NOTFOUND when fleet has not reconciled the session yet; E_AMBIGUOUS when the same name exists on several hosts — the error's details list {session_id, host_alias} candidates, pick yours and use session_id from then on.
+Find your own fleet row from your tmux session name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has reconciled it; E_AMBIGUOUS when the name exists on several hosts: pick yours from the error's {session_id, host_alias} candidates and use session_id from then on.
 
 Parameters: `tmux_name`
 

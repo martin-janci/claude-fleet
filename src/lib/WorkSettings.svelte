@@ -110,29 +110,52 @@
     metrics = Object.fromEntries(r.value.map((m) => [m.tracker_id, m]));
   }
 
+  /** The credential leaves this component's state: on Cancel and on every
+   *  way out of connect() that is not success, so nothing is pre-filled the
+   *  next time the form opens (the token went to the backend once, or never). */
+  function forgetCredential() {
+    token = '';
+    email = '';
+  }
+
   async function connect() {
     if (!canConnect || !provider || !info || busy) return;
     busy = true;
     error = null;
     const existing = $trackers.find((t) => t.provider === provider && t.site_url === site);
+    const transport = info.needs === 'host_with_gh' ? `via_cli:${ghHost}` : undefined;
+    const settings =
+      provider === 'jira_dc' && (extraCa.trim() || allowPrivate)
+        ? { extra_ca: extraCa.trim() || null, allow_private_network: allowPrivate }
+        : ghes
+          ? { hostname }
+          : undefined;
     let row: TrackerRow | null = existing ?? null;
     if (!row) {
-      const a = await addTracker(url.trim(), {
-        provider,
-        transport: info.needs === 'host_with_gh' ? `via_cli:${ghHost}` : undefined,
-        settings:
-          provider === 'jira_dc' && (extraCa.trim() || allowPrivate)
-            ? { extra_ca: extraCa.trim() || null, allow_private_network: allowPrivate }
-            : ghes
-              ? { hostname }
-              : undefined,
-      });
+      const a = await addTracker(url.trim(), { provider, transport, settings });
       if (!a.ok) {
         busy = false;
         error = a.error.message;
+        forgetCredential();
         return;
       }
       row = a.value;
+    } else if ((transport && transport !== row.transport) || settings) {
+      // Re-connecting a site that is already a row (say, after a failed test):
+      // what the form carries beyond the credential — the `gh` host, the
+      // Data Center CA and private-network flag — lives on that row, so it is
+      // updated there rather than dropped.
+      const u = await updateTracker(row.id, {
+        transport: transport !== row.transport ? transport : undefined,
+        settings: settings ? { ...(row.settings ?? {}), ...settings } : undefined,
+      });
+      if (!u.ok) {
+        busy = false;
+        error = u.error.message;
+        forgetCredential();
+        return;
+      }
+      row = u.value;
     }
     if (info.needs !== 'host_with_gh') {
       const c = await setTrackerCredential(
@@ -145,6 +168,7 @@
       if (!c.ok) {
         busy = false;
         error = c.error.message;
+        forgetCredential();
         return;
       }
     }
@@ -154,15 +178,17 @@
     void loadMetrics();
     if (!t.ok) {
       error = t.error.message;
+      forgetCredential();
       return;
     }
     if (!t.value.ok) {
       error = t.value.error ?? 'the test failed';
+      forgetCredential();
       return;
     }
     connecting = false;
     url = '';
-    email = '';
+    forgetCredential();
     picked = '';
     hostnameEdit = null;
     extraCa = '';
@@ -407,7 +433,15 @@
         <button class="btn primary" type="submit" data-testid="connect-submit" disabled={!canConnect || busy}
           >{busy ? 'Connecting…' : 'Connect'}</button
         >
-        <button class="btn" type="button" onclick={() => (connecting = false)}>Cancel</button>
+        <button
+          class="btn"
+          type="button"
+          data-testid="connect-cancel"
+          onclick={() => {
+            connecting = false;
+            forgetCredential();
+          }}>Cancel</button
+        >
       </div>
     </form>
   {/if}

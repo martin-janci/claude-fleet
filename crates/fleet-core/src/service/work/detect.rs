@@ -580,8 +580,22 @@ fn run(
     mut events: Vec<Candidate>,
 ) -> Result<bool, IpcError> {
     let now = crate::service::catalog::now_secs();
-    let (branch, pr, pr_events) = state_candidates(st, tv, now);
+    let (mut branch, mut pr, pr_events) = state_candidates(st, tv, now);
     events.extend(pr_events);
+    // One spelling per target: a candidate naming a tracker item by an
+    // alias (a moved issue) reads as the item's current key, the same key
+    // `detection_links` labels its links with.
+    for c in branch
+        .iter_mut()
+        .flatten()
+        .chain(pr.iter_mut().flatten())
+        .chain(events.iter_mut())
+    {
+        let canonical = s.canonical_work_target(&c.target, c.tracker_id)?;
+        if canonical != c.target {
+            c.target = canonical;
+        }
+    }
     let links = s
         .detection_links(st.participant)?
         .into_iter()

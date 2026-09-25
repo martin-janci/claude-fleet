@@ -24,8 +24,8 @@
 //! * **Hierarchy**: sub-issues' `parent`.
 
 use super::{
-    check_http, map_transport, CallKind, Caps, Fetched, Incremental, ItemRef, Page, RefCtx,
-    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
+    check_http, map_transport, retry_after, CallKind, Caps, Fetched, Incremental, ItemRef, Page,
+    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
     DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
@@ -195,9 +195,10 @@ impl GitHub {
         // only the ones that say something about the whole call count.
         for e in v["errors"].as_array().into_iter().flatten() {
             match e["type"].as_str() {
+                // The primary limit: a 200 with the reset in the headers.
                 Some("RATE_LIMITED") => {
                     return Err(TrackerError::RateLimited {
-                        retry_after_secs: None,
+                        retry_after_secs: retry_after(&resp),
                     })
                 }
                 Some("FORBIDDEN") if call == CallKind::View => {
@@ -227,9 +228,11 @@ impl GitHub {
     pub fn snapshot(&self, n: &Value) -> Option<WorkItemSnapshot> {
         let id = n["id"].as_str()?.to_string();
         let number = n["number"].as_u64()?;
-        let repo = n["repository"]["nameWithOwner"]
-            .as_str()?
-            .to_ascii_lowercase();
+        // Both halves validated by `normalize_repo`, so the URL is built
+        // from them rather than taken from the answer (`gh` runs on a
+        // fleet host, which controls what comes back).
+        let name_with_owner = n["repository"]["nameWithOwner"].as_str()?.trim();
+        let repo = normalize_repo(name_with_owner)?;
         let assignees: Vec<String> = n["assignees"]["nodes"]
             .as_array()
             .into_iter()
@@ -248,7 +251,9 @@ impl GitHub {
             key: Some(self.key(&repo, number)),
             aliases: Vec::new(),
             title: n["title"].as_str().unwrap_or_default().to_string(),
-            url: n["url"].as_str().map(str::to_string),
+            url: Some(format!(
+                "https://github.com/{name_with_owner}/issues/{number}"
+            )),
             kind: Some(
                 n["issueType"]["name"]
                     .as_str()

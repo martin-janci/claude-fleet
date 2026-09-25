@@ -314,6 +314,29 @@ fn check_transport(provider: &str, transport: &str) -> Result<(), IpcError> {
     }
 }
 
+/// A host-side transport (`via_host:` curl, `via_cli:` gh) runs its
+/// command with the request on stdin, which a host reached through
+/// fleet-agent cannot do: every request would fail `E_UNSUPPORTED` and the
+/// tick would retry forever, so it is refused when the tracker is set up.
+fn check_host_transport(s: &Store, transport: &str) -> Result<(), IpcError> {
+    let Some(alias) = transport
+        .strip_prefix("via_host:")
+        .or_else(|| transport.strip_prefix("via_cli:"))
+    else {
+        return Ok(());
+    };
+    if s.agent_host_alias(alias)?.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{alias} is reached through fleet-agent, which cannot run curl or gh for a \
+                 tracker; pick a host fleet reaches over SSH"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// A GitHub tracker's `settings.hostname` held to its site (M11.4): an
 /// enterprise site (`https://<host>[/<owner>]`) always has one, whose host
 /// part is the site's — the one given, else the one it had (an update that
@@ -395,6 +418,7 @@ pub fn admin_sync(
                 .map(crate::store::validate_tracker_transport)
                 .transpose()?;
             check_transport(provider, transport.as_deref().unwrap_or("direct"))?;
+            check_host_transport(&s, transport.as_deref().unwrap_or("direct"))?;
             let mut settings = args
                 .settings
                 .as_ref()
@@ -441,8 +465,10 @@ pub fn admin_sync(
                 s.rename_tracker(id, n)?;
             }
             if let Some(t) = args.transport.as_deref() {
-                check_transport(&row.provider, &crate::store::validate_tracker_transport(t)?)?;
-                s.set_tracker_transport(id, t)?;
+                let t = crate::store::validate_tracker_transport(t)?;
+                check_transport(&row.provider, &t)?;
+                check_host_transport(&s, &t)?;
+                s.set_tracker_transport(id, &t)?;
             }
             if let Some(st) = settings {
                 s.set_tracker_settings(id, &st)?;
@@ -520,6 +546,11 @@ pub async fn test_tracker(
                     .map(|v| (v.id.clone(), v.label.clone(), v.query.clone()))
                     .collect::<Vec<_>>(),
             )?;
+            // A view the sync disabled on a 403 runs again after a person
+            // tests the tracker: nothing else ever re-enables it.
+            changed |= s.enable_tracker_views(id)?;
+            // The tracker answered: a 429 back-off still on the row is over.
+            s.set_tracker_not_before(id, None)?;
             changed |= s.set_tracker_state(id, "ok", None)?;
             if changed {
                 s.emit_tracker(id)?;
@@ -665,6 +696,63 @@ mod tests {
         );
     }
 
+    /// A host reached through fleet-agent cannot run curl or gh with the
+    /// request on stdin: `via_host` / `via_cli` on it is refused at add and
+    /// update time, naming fleet-agent, while an SSH host is fine.
+    #[test]
+    fn a_host_side_transport_on_a_fleet_agent_host_is_refused() {
+        let (st, id) = added();
+        {
+            let s = st.lock().unwrap();
+            s.upsert_host("agentbox").unwrap();
+            s.set_host_transport("agentbox", "agent").unwrap();
+            s.upsert_host("sshbox").unwrap();
+        }
+        let e = admin_sync(
+            &WorkAdminArgs {
+                site_url: Some("https://beta.atlassian.net".into()),
+                transport: Some("via_host:agentbox".into()),
+                ..args("add")
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("fleet-agent"), "{}", e.message);
+        assert_eq!(
+            admin_sync(&args("list"), &st)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let e = admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                transport: Some("via_host:agentbox".into()),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("fleet-agent"), "{}", e.message);
+        assert_eq!(
+            st.lock().unwrap().require_tracker(id).unwrap().transport,
+            "direct"
+        );
+        let v = admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                transport: Some("via_host:sshbox".into()),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap();
+        assert_eq!(v["transport"], "via_host:sshbox");
+    }
+
     #[test]
     fn the_site_fence_holds_on_add() {
         let st = Mutex::new(Store::open_in_memory().unwrap());
@@ -689,10 +777,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_stores_the_probe_and_views_and_marks_the_tracker_ok() {
-        let (st, id) = added();
-        let f = FakeTransport::new();
+    /// One successful Jira Cloud probe: identity, tenant, projects, fields,
+    /// sprint check, favourite filters.
+    fn probe_ok(f: &FakeTransport) {
         f.once(
             Method::Get,
             "/myself",
@@ -723,6 +810,13 @@ mod tests {
             "/filter/favourite",
             Ok(Response::json(200, &fixture("filter_favourite.json"))),
         );
+    }
+
+    #[tokio::test]
+    async fn test_stores_the_probe_and_views_and_marks_the_tracker_ok() {
+        let (st, id) = added();
+        let f = FakeTransport::new();
+        probe_ok(&f);
         let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f.clone())))
             .await
             .unwrap();
@@ -735,6 +829,54 @@ mod tests {
             "no project has an open sprint: no sprint view"
         );
         assert_eq!(st.lock().unwrap().list_tracker_views(id).unwrap().len(), 4);
+    }
+
+    /// A view the sync disabled on a 403 is not disabled for good: a
+    /// successful test enables it again (a failed one leaves it alone).
+    #[tokio::test]
+    async fn a_successful_test_enables_the_views_a_403_disabled() {
+        let (st, id) = added();
+        {
+            let s = st.lock().unwrap();
+            s.sync_tracker_views(
+                id,
+                &[
+                    ("mine".into(), "My work".into(), "assignee = me".into()),
+                    ("filter:9".into(), "Secret".into(), "filter = 9".into()),
+                ],
+            )
+            .unwrap();
+            assert!(s.set_tracker_view_enabled(id, "mine", false).unwrap());
+        }
+        let disabled = |st: &Mutex<Store>| -> Vec<String> {
+            st.lock()
+                .unwrap()
+                .list_tracker_views(id)
+                .unwrap()
+                .into_iter()
+                .filter(|v| !v.enabled)
+                .map(|v| v.view_id)
+                .collect()
+        };
+        let f = FakeTransport::new();
+        f.once(Method::Get, "/myself", Ok(Response::new(401, "")));
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f)))
+            .await
+            .unwrap();
+        assert!(!r.ok);
+        assert_eq!(disabled(&st), vec!["mine"], "a failed test changes nothing");
+        let f = FakeTransport::new();
+        probe_ok(&f);
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f)))
+            .await
+            .unwrap();
+        assert!(r.ok, "{:?}", r.error);
+        let views = st.lock().unwrap().list_tracker_views(id).unwrap();
+        assert!(
+            views.iter().any(|v| v.view_id == "mine" && v.enabled),
+            "{views:?}"
+        );
+        assert!(disabled(&st).is_empty(), "every view runs again");
     }
 
     #[tokio::test]

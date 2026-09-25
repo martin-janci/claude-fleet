@@ -331,6 +331,29 @@ describe('QuickSwitcher tickets', () => {
     const [, args] = calls.find(([c]) => c === 'start_work')!;
     expect((args as { args: unknown }).args).toEqual({ item_id: 101, with_brief: true });
     expect(get(newSessionRequest)).toBeNull();
+    // The started session is opened and the switcher is gone.
+    await vi.waitFor(() => expect(get(selectedSession)?.id).toBe(999));
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('Ctrl+Enter on a ticket that already has a live session jumps to it (E_EXISTS)', async () => {
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      calls.push([cmd, args]);
+      const view = (args as { args?: { view?: string } } | undefined)?.args?.view;
+      if (cmd === 'work_tickets' && view === 'mine') return [ticket('ABC-1')];
+      if (cmd === 'work_tickets') return [];
+      if (cmd === 'start_work')
+        throw { code: 'E_EXISTS', message: 'ABC-1 already has a live session', details: { session_id: 7 } };
+      return null;
+    });
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    await fireEvent.input(input, { target: { value: 'abc-1' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+    await vi.waitFor(() => expect(get(selectedSession)?.id).toBe(7));
+    expect(get(newSessionRequest)).toBeNull();
   });
 
   it('a pasted ticket URL offers a lookup row', async () => {
