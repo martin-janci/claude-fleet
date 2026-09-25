@@ -66,7 +66,7 @@ pub struct Ticket {
 /// read every ticket any of them works on); the org fence is added because
 /// the host fence alone would let a host read another org's ticket that a
 /// person force-linked on it.
-fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
+pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
     let Some(h) = scope.host() else {
         return Ok(None);
     };

@@ -275,6 +275,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_resume_plan", Verdict::Routed { tool: "work" }),
     ("resume_work", Verdict::Routed { tool: "work_link" }),
     ("work_purge_impact", Verdict::Routed { tool: "work" }),
+    // Work graph M9.1: the Today view's digest.
+    ("work_today", Verdict::Routed { tool: "work" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).

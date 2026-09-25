@@ -11,6 +11,7 @@ use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::resume::ResumePlan;
+use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, PurgeImpact, WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store, WorkLinkRow};
@@ -126,6 +127,23 @@ pub async fn resume_work(
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SessionRow, IpcError> {
     routed::resume_work(&backend, args, &store, &ssh, &reg).await
+}
+
+/// The Today view's digest (work graph M9.1). `since` is the viewer's local
+/// midnight: the hub does not know the desktop's timezone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkTodayArgs {
+    #[serde(default)]
+    pub since: Option<i64>,
+}
+
+#[tauri::command]
+pub async fn work_today(
+    args: WorkTodayArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Today, IpcError> {
+    routed::work_today(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -354,6 +372,24 @@ pub(crate) mod routed {
                     &fleet_core::service::orgs::OrgScope::All,
                 )
                 .await
+            }
+        }
+    }
+
+    pub async fn work_today(
+        backend: &FleetBackend,
+        args: WorkTodayArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Today, IpcError> {
+        let wire = WorkArgs {
+            action: Some("today".into()),
+            since: args.since,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_today", &wire).await,
+            None => {
+                work::today::today(store, args.since, &fleet_core::service::orgs::OrgScope::All)
             }
         }
     }

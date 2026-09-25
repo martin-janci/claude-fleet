@@ -576,6 +576,22 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "work_today",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "today", "since": 1_700_000_000 }),
+            r#"{"since":1700000000,"now":1700003600,"groups":[{"bucket":"waiting","key":"PAY-7","title":"Refund","sessions":[{"id":4,"name":"pay","host_alias":"h","attention":"waiting","last_activity_at":1700003000}]}],"shipped":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_today(
+                    b,
+                    commands::work::WorkTodayArgs {
+                        since: Some(1_700_000_000),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "work_purge_impact",
             "work",
             json!({ "session_id": null, "key": null, "action": "purge_impact",

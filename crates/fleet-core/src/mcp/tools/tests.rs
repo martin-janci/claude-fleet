@@ -2978,7 +2978,10 @@ fn the_served_definition_budget_stays_bounded() {
     // for an action the hub serves; the two doc lines that listed them by
     // hand were cut to "Default links." / "The decision.". Measured at 69,171
     // on 2026-09-24 (+72); plus 100.
-    const BUDGET_BYTES: usize = 69_271;
+    // Work graph M9.1: `work` gains `today` (the Today view's digest) and
+    // one parameter, `since`. No new tool. Measured at 69,265 on 2026-09-25
+    // (+94); plus 100.
+    const BUDGET_BYTES: usize = 69_365;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

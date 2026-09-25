@@ -699,6 +699,61 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Today (work graph M9.1): BB-3 shipped today (done, and its ended
+    // session left a PR). Each host reads its own host's day inside its org.
+    {
+        let s = fx.t.store.lock().unwrap();
+        let now = crate::service::catalog::now_secs();
+        s.conn_for_test()
+            .execute(
+                "UPDATE work_items SET status_category = 'done', status_changed_at = ?1 \
+                 WHERE id IN (SELECT item_id FROM work_links WHERE snap_tmux = 's-b-old')",
+                [now],
+            )
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE work_links SET snap_pr_url = 'https://github.com/beta/web/pull/3' \
+                 WHERE snap_tmux = 's-b-old'",
+                [],
+            )
+            .unwrap();
+    }
+    m.row(
+        "work",
+        "today",
+        |_, _| json!({ "action": "today", "since": 0 }),
+        |fx, who, a| {
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            let mut ids: Vec<i64> = v["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|g| g["sessions"].as_array().unwrap().iter())
+                .filter_map(|s| s["id"].as_i64())
+                .collect();
+            ids.sort();
+            let shipped: Vec<&str> = v["shipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s["key"].as_str())
+                .collect();
+            let mut want = match who {
+                Who::HostA => vec![fx.s_a, fx.s_x],
+                Who::HostB => vec![fx.s_b],
+                Who::HostNone => vec![fx.s_n],
+                _ => vec![fx.s_a, fx.s_b, fx.s_n, fx.s_x],
+            };
+            want.sort();
+            assert_eq!(ids, want, "{who:?}: {v}");
+            match who {
+                Who::HostA | Who::HostNone => assert!(shipped.is_empty(), "{who:?}: {v}"),
+                _ => assert_eq!(shipped, vec!["BB-3"], "{who:?}: {v}"),
+            }
+        },
+    )
+    .await;
     m.row(
         "work",
         "scopes",

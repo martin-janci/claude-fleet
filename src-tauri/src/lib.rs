@@ -299,6 +299,7 @@ pub fn run() {
             commands::work::work_resume_plan,
             commands::work::resume_work,
             commands::work::work_purge_impact,
+            commands::work::work_today,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,

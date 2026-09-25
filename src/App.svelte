@@ -8,6 +8,7 @@
   import { healthCheck, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
+  import { todayOpen } from './lib/today';
   import TerminalView from './lib/TerminalView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
@@ -582,6 +583,7 @@
     else if (chord === 'settings') settingsOpen.set(true);
     else if (chord === 'agent') void toggleAgent();
     else if (chord === 'scope') cycleScope();
+    else if (chord === 'today') todayOpen.update((v) => !v);
   }
 
   function onKeydown(e: KeyboardEvent) {

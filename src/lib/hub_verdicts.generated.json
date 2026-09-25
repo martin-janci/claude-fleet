@@ -140,7 +140,8 @@
     "work_purge_impact",
     "work_resume_plan",
     "work_scopes",
-    "work_tickets"
+    "work_tickets",
+    "work_today"
   ],
   "routed_unless": [
     {

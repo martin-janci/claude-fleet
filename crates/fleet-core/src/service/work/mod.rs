@@ -9,6 +9,7 @@ pub mod harvest;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
+pub mod today;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -59,6 +60,9 @@ pub struct WorkArgs {
     /// Lookup: a ticket URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Today: unix start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -173,6 +177,8 @@ pub enum WorkAction {
     Orgs,
     /// Proposed orgs from owners and tracker sites (never applied).
     OrgSuggestions,
+    /// The Today view's digest (work graph M9.1).
+    Today,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -189,6 +195,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("scopes", WorkAction::Scopes),
     ("orgs", WorkAction::Orgs),
     ("org_suggestions", WorkAction::OrgSuggestions),
+    ("today", WorkAction::Today),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -217,6 +224,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("work_scopes", "work", "scopes"),
     ("list_orgs", "work", "orgs"),
     ("org_suggestions", "work", "org_suggestions"),
+    ("work_today", "work", "today"),
     ("link_session_work", "work_link", "link"),
     ("reject_session_work", "work_link", "reject"),
     ("unlink_session_work", "work_link", "unlink"),
