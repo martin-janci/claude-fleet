@@ -11,6 +11,13 @@ pub const AWAITING_REBIND_TTL_SECS: i64 = 300;
 /// A second compaction signal within this window is the same compaction
 /// (SessionStart(compact) and PostCompact both fire).
 const COMPACT_DEDUPE_SECS: i64 = 10;
+/// `set_context`'s no-op guard still writes (to re-stamp `context_at`) once
+/// the existing stamp is at least this old, even when tokens/window/source/
+/// model are unchanged — well inside `store/reconcile.rs`'s 120s freshness
+/// window, so an idle session's repeated same-value transcript report
+/// (`service/transcript.rs`, every 5s) never lets the stamp age out from
+/// under it. See `Store::set_context`.
+const CONTEXT_RESTAMP_MARGIN_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartSource {
@@ -472,6 +479,20 @@ impl Store {
     /// calls this on every Stop hook's follow-up, most of which report the
     /// same size as last time) — still written when it would clear
     /// `context_stale`, since that is a real state change.
+    ///
+    /// Also still written once `context_at` is more than
+    /// [`CONTEXT_RESTAMP_MARGIN_SECS`] old, even with unchanged values (fix
+    /// round 1, Important 1): reconcile keeps a transcript value over the
+    /// pane footer only while `context_at` is within its own freshness
+    /// window (`store/reconcile.rs`), and the Conversation panel re-sends
+    /// the SAME transcript value every 5s on an idle session
+    /// (`service/transcript.rs`). Skipping the write entirely on every
+    /// unchanged re-send would let the stamp age out from under that
+    /// window, so reconcile would flip the row to the pane value and the
+    /// next panel poll would write transcript straight back — a visible
+    /// flicker plus two `row_version` bumps and events per cycle. Only
+    /// re-stamping well before the window elapses avoids that while still
+    /// dropping the overwhelming majority of same-value re-sends.
     pub fn set_context(
         &self,
         session_id: i64,
@@ -489,7 +510,8 @@ impl Store {
                  model = COALESCE(?8, model) \
              WHERE id = ?1 AND claude_session_id = ?2 \
                AND (context_stale = 1 OR context_tokens IS NOT ?3 OR context_window IS NOT ?4 \
-                    OR context_source IS NOT ?6 OR model IS NOT COALESCE(?8, model))",
+                    OR context_source IS NOT ?6 OR model IS NOT COALESCE(?8, model) \
+                    OR context_at IS NULL OR context_at < ?7 - ?9)",
             rusqlite::params![
                 session_id,
                 claude_session_id,
@@ -498,7 +520,8 @@ impl Store {
                 pct,
                 source,
                 now_unix(),
-                model
+                model,
+                CONTEXT_RESTAMP_MARGIN_SECS
             ],
         )?;
         if n == 0 {
@@ -671,6 +694,75 @@ mod tests {
             .unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.context.context_tokens, Some(0));
+    }
+
+    /// Task 3 fix round 1, Important 1: the no-op guard must not let
+    /// `context_at` age past reconcile's freshness margin. The Conversation
+    /// panel re-sends the same transcript value every 5s
+    /// (`service/transcript.rs`); reconcile keeps a transcript value over
+    /// the pane footer only while `context_at >= now - 120`
+    /// (`store/reconcile.rs`). A same-value `set_context` that skips the
+    /// write ENTIRELY would let the stamp age past that window on an idle
+    /// session, so reconcile would flip the row to the pane value — then the
+    /// next panel poll would write transcript back: a flicker plus two
+    /// `row_version` bumps + events per cycle. The fix keeps writing (only
+    /// `context_at`) once the stamp is more than 60s old, well inside the
+    /// 120s window, while still dropping same-value re-sends that arrive
+    /// sooner.
+    #[test]
+    fn set_context_restamps_before_the_freshness_margin_erodes() {
+        let (s, _) = store_with_recorder();
+        let id = session(&s);
+        s.rebind_conversation(id, A, StartSource::Fleet, None, None)
+            .unwrap();
+        let first = s
+            .set_context(id, A, 90_000, 200_000, "transcript", None)
+            .unwrap()
+            .unwrap();
+        let v1 = first.row_version;
+        let first_at = first.context.context_at.unwrap();
+
+        // An immediate same-value re-send is still a genuine no-op.
+        let noop = s
+            .set_context(id, A, 90_000, 200_000, "transcript", None)
+            .unwrap();
+        assert!(
+            noop.is_none(),
+            "an immediate repeat must still be a no-op write"
+        );
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().row_version,
+            v1,
+            "the no-op re-send must not bump row_version"
+        );
+
+        // Age the stamp past the 60s re-stamp margin (still well inside
+        // reconcile's 120s freshness window).
+        s.conn
+            .execute(
+                "UPDATE sessions SET context_at = context_at - 61 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+
+        let restamped = s
+            .set_context(id, A, 90_000, 200_000, "transcript", None)
+            .unwrap()
+            .expect(
+                "a same-value re-send after the stamp has aged past the \
+                 60s margin must still write, to re-stamp context_at before \
+                 reconcile's 120s freshness window elapses",
+            );
+        assert!(
+            restamped.context.context_at.unwrap() > first_at - 61,
+            "context_at must be re-stamped to roughly now, not left aged"
+        );
+        assert_eq!(
+            restamped.context.context_source.as_deref(),
+            Some("transcript"),
+            "the source must still read transcript after the re-stamp"
+        );
+        assert_eq!(restamped.context.context_tokens, Some(90_000));
     }
 
     #[test]
