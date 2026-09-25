@@ -290,9 +290,28 @@ async fn a_rate_limited_graphql_answer_backs_off() {
             retry_after_secs: None
         }
     );
-    // A spent quota on a 403 waits until the reset.
+    // The primary limit is a 200 with RATE_LIMITED and the reset in the
+    // headers: waited out, like the 403.
     let f = FakeTransport::new();
     let reset = crate::service::catalog::now_secs() + 120;
+    f.once(
+        Method::Post,
+        "/graphql",
+        Ok(Response::json(
+            200,
+            &json!({"data": null, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}),
+        )
+        .with_header("X-RateLimit-Remaining", "0")
+        .with_header("X-RateLimit-Reset", reset.to_string())),
+    );
+    match github(&f).list(&mine(), None, None).await.unwrap_err() {
+        TrackerError::RateLimited {
+            retry_after_secs: Some(s),
+        } => assert!((110..=121).contains(&s), "{s}"),
+        e => panic!("{e:?}"),
+    }
+    // A spent quota on a 403 waits until the reset.
+    let f = FakeTransport::new();
     f.once(
         Method::Post,
         "/graphql",

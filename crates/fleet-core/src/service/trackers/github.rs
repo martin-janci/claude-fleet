@@ -18,8 +18,8 @@
 //! * **Hierarchy**: sub-issues' `parent`.
 
 use super::{
-    check_http, map_transport, CallKind, Caps, Fetched, Incremental, ItemRef, Page, RefCtx,
-    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
+    check_http, map_transport, retry_after, CallKind, Caps, Fetched, Incremental, ItemRef, Page,
+    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
     DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
@@ -149,9 +149,10 @@ impl GitHub {
         // only the ones that say something about the whole call count.
         for e in v["errors"].as_array().into_iter().flatten() {
             match e["type"].as_str() {
+                // The primary limit: a 200 with the reset in the headers.
                 Some("RATE_LIMITED") => {
                     return Err(TrackerError::RateLimited {
-                        retry_after_secs: None,
+                        retry_after_secs: retry_after(&resp),
                     })
                 }
                 Some("FORBIDDEN") if call == CallKind::View => {
