@@ -31,6 +31,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEAD_MAX: usize = 64 * 1024;
 /// The marker the script prints when the host has no `gh`.
 const NO_GH: &str = "__fleet_no_gh__";
+/// The line each script prints before anything else of its own. Both run
+/// under `bash -lc`, and a login profile (`~/.bash_profile`, `/etc/profile.d`)
+/// that prints to stdout — a greeting, an nvm / conda notice — lands BEFORE
+/// the script's output, so the parsers anchor on this marker, never on byte
+/// 0.
+const BEGIN: &str = "__fleet_begin__";
+
+/// The script's own output: what follows the first [`BEGIN`] line. Searched
+/// as `marker + '\n'` anywhere, since a profile's last line may lack its
+/// newline and glue itself to the marker. The whole of `raw` when the marker
+/// is missing (the script never ran): the callers' error paths then read the
+/// exit code and stderr, exactly as before.
+pub(crate) fn after_begin(raw: &[u8]) -> &[u8] {
+    let needle = format!("{BEGIN}\n");
+    match super::http1::find(raw, needle.as_bytes()) {
+        Some(i) => &raw[i + needle.len()..],
+        None => raw,
+    }
+}
 /// The only API host `gh` is pointed at.
 pub const GITHUB_API_HOST: &str = "api.github.com";
 
@@ -54,7 +73,8 @@ impl GhCliTransport {
     /// fenced). Built from constants and one `shell::quote`d value.
     pub fn script(method: Method, path: &str, has_body: bool) -> String {
         let mut s = format!(
-            "command -v gh >/dev/null 2>&1 || {{ printf '%s\\n' {NO_GH}; exit 0; }}\n\
+            "printf '%s\\n' {BEGIN}\n\
+             command -v gh >/dev/null 2>&1 || {{ printf '%s\\n' {NO_GH}; exit 0; }}\n\
              export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 GH_SPINNER_DISABLED=1 \
              NO_COLOR=1 GH_PAGER=cat\n\
              exec gh api --include --hostname github.com --method {} {}",
@@ -171,13 +191,14 @@ impl HttpTransport for GhCliTransport {
                 first_line(&out.stderr)
             )));
         }
-        if out.stdout.starts_with(NO_GH.as_bytes()) {
+        let stdout = after_begin(&out.stdout);
+        if stdout.starts_with(NO_GH.as_bytes()) {
             return Err(TransportError::Connect(format!(
                 "gh is not installed on {}; install the GitHub CLI there and run `gh auth login`",
                 self.host
             )));
         }
-        if let Some(resp) = parse_included(&out.stdout) {
+        if let Some(resp) = parse_included(stdout) {
             return Ok(resp);
         }
         let err = first_line(&out.stderr);
@@ -213,6 +234,8 @@ set +x
 umask 077
 trap '' PIPE
 unset SSLKEYLOGFILE CURL_HOME
+printf '%s
+' __fleet_begin__
 if ! command -v curl >/dev/null 2>&1; then printf '%s
 ' __fleet_no_curl__; exit 0; fi
 cv=$(curl -q --version 2>/dev/null | sed -n '1s/^curl \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')
@@ -478,7 +501,7 @@ impl HttpTransport for CurlTransport {
                 self.max_body / (1024 * 1024)
             )));
         }
-        parse_curl(&self.host, &out.stdout, self.max_body)
+        parse_curl(&self.host, after_begin(&out.stdout), self.max_body)
     }
 }
 
@@ -584,6 +607,42 @@ mod tests {
         assert!(e.is_unreachable(), "{e}");
     }
 
+    /// `bash -lc` sources the login profile; a greeting it prints lands
+    /// before `gh`'s output and must not hide the status line, the "no gh"
+    /// marker included.
+    #[tokio::test]
+    async fn login_profile_noise_before_the_marker_is_ignored() {
+        for noise in ["Welcome bob\n", "welcome"] {
+            let f = FakeSsh::new();
+            f.on(
+                Match::Any,
+                Reply::ok(&format!(
+                    "{noise}__fleet_begin__\nHTTP/2.0 200 OK\nContent-Type: application/json\n\n{{\"data\":{{}}}}"
+                )),
+            );
+            let r = gh(&f)
+                .send(Request::get("https://api.github.com/user"))
+                .await
+                .unwrap_or_else(|e| panic!("{noise:?}: {e}"));
+            assert_eq!((r.status, r.text().as_str()), (200, "{\"data\":{}}"));
+            let script = f.calls()[0].script().unwrap();
+            assert!(
+                script.starts_with("printf '%s\\n' __fleet_begin__\n"),
+                "the script prints the marker first: {script}"
+            );
+        }
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok("Welcome bob\n__fleet_begin__\n__fleet_no_gh__\n"),
+        );
+        let e = gh(&f)
+            .send(Request::get("https://api.github.com/user"))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("install the GitHub CLI"), "{e}");
+    }
+
     #[tokio::test]
     async fn an_http_error_comes_back_as_a_response_and_output_is_capped() {
         let f = FakeSsh::new();
@@ -628,9 +687,46 @@ mod curl_tests {
 
     fn answer(status: &str, head: &str, body: &str) -> Reply {
         Reply::ok(&format!(
-            "__fleet_status__={status}\n__fleet_curl_exit__=0\n__fleet_head__={}\n{head}{body}",
+            "__fleet_begin__\n__fleet_status__={status}\n__fleet_curl_exit__=0\n__fleet_head__={}\n{head}{body}",
             head.len()
         ))
+    }
+
+    /// `bash -lc` sources the login profile; whatever it prints to stdout
+    /// comes before the script's output and must not be where the status
+    /// line is expected — with or without a trailing newline.
+    #[tokio::test]
+    async fn login_profile_noise_before_the_marker_is_ignored() {
+        for noise in ["Welcome bob\nnvm: using node v20\n", "welcome"] {
+            let f = FakeSsh::new();
+            f.on(
+                Match::Any,
+                Reply::ok(&format!(
+                    "{noise}__fleet_begin__\n__fleet_status__=200\n__fleet_curl_exit__=0\n__fleet_head__=15\nHTTP/2 200 \r\n\r\n{{\"ok\":true}}"
+                )),
+            );
+            let r = curl(&f)
+                .send(Request::get("https://jira.corp.example/x"))
+                .await
+                .unwrap_or_else(|e| panic!("{noise:?}: {e}"));
+            assert_eq!((r.status, r.text().as_str()), (200, "{\"ok\":true}"));
+        }
+        // The marker precedes every outcome, the "no curl" one included.
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok("Welcome bob\n__fleet_begin__\n__fleet_no_curl__\n"),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("curl is not installed"), "{e}");
+        assert!(
+            CurlTransport::script(Method::Get, "https://jira.corp.example/x", 1, false, 1, 1)
+                .contains("\n' __fleet_begin__\n"),
+            "the script prints the marker"
+        );
     }
 
     #[tokio::test]
@@ -923,7 +1019,12 @@ printf '201'
             pipe.write_all(&stdin).await.unwrap();
         }
         let out = child.wait_with_output().await.unwrap();
-        let resp = parse_curl("local", &out.stdout, 4096)
+        assert!(
+            out.stdout.starts_with(b"__fleet_begin__\n"),
+            "the script's first line is the start marker: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let resp = parse_curl("local", after_begin(&out.stdout), 4096)
             .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
         assert_eq!(resp.status, 201);
         assert_eq!(resp.header("x-seen"), Some("yes"));
