@@ -96,6 +96,29 @@ impl Store {
             let it = stmt.query_map([], |r| r.get::<_, i64>(0))?;
             it.collect::<rusqlite::Result<_>>()?
         };
+        // A snooze / never on ANY live confirmed link (the flags are per
+        // link, and `work_link { snooze | never, link_id }` takes a
+        // secondary one): the planner honours the latest snooze and any never.
+        let mut flags: HashMap<i64, (Option<i64>, bool)> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT p.session_id, MAX(l.tidy_snoozed_until), MAX(l.tidy_never) \
+                 FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE l.ended_at IS NULL AND l.state = 'confirmed' AND p.session_id IS NOT NULL \
+                 GROUP BY p.session_id",
+            )?;
+            let it = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    (r.get(1)?, r.get::<_, Option<i64>>(2)?.unwrap_or(0) != 0),
+                ))
+            })?;
+            for row in it {
+                let (sid, f) = row?;
+                flags.insert(sid, f);
+            }
+        }
         let mut extra: HashMap<i64, SessionExtra> = HashMap::new();
         {
             let mut stmt = self
@@ -128,9 +151,12 @@ impl Store {
                         serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok()
                     })
                     .is_some_and(|s| s.is_merged());
+                let (snoozed_until, never) = flags.remove(&row.id).unwrap_or_default();
                 TidySession {
                     link: links.remove(&row.id),
                     in_progress: in_progress.contains(&row.id),
+                    snoozed_until,
+                    never,
                     pr_merged,
                     last_touch_at: touch,
                     open_tasks: tasks.contains(&row.id),
@@ -161,11 +187,28 @@ impl Store {
     /// (there is nothing to collapse it into). Idempotent: an archived link
     /// keeps its first stamp. Emits the row.
     pub fn archive_session_work(&self, session_id: i64) -> Result<usize, IpcError> {
+        self.archive_session_links(session_id, None)
+    }
+
+    /// [`Self::archive_session_work`] restricted to `only` of the session's
+    /// live confirmed links (a per-host token's visible ones, work graph
+    /// M5): a link outside the list is never stamped, and a session whose
+    /// linked work is all outside it answers as one with no linked work.
+    pub fn archive_session_links(
+        &self,
+        session_id: i64,
+        only: Option<&[i64]>,
+    ) -> Result<usize, IpcError> {
         let participant = self.live_participant(session_id)?;
+        let only_json = only
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
         let linked: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
-               AND ended_at IS NULL AND state = 'confirmed')",
-            rusqlite::params![participant],
+               AND ended_at IS NULL AND state = 'confirmed' \
+               AND (?2 IS NULL OR id IN (SELECT value FROM json_each(?2))))",
+            rusqlite::params![participant, only_json],
             |r| r.get(0),
         )?;
         if !linked {
@@ -176,8 +219,9 @@ impl Store {
         }
         let n = self.conn.execute(
             "UPDATE work_links SET archived_at = ?2 WHERE participant_id = ?1 \
-               AND ended_at IS NULL AND state = 'confirmed' AND archived_at IS NULL",
-            rusqlite::params![participant, now_unix()],
+               AND ended_at IS NULL AND state = 'confirmed' AND archived_at IS NULL \
+               AND (?3 IS NULL OR id IN (SELECT value FROM json_each(?3)))",
+            rusqlite::params![participant, now_unix(), only_json],
         )?;
         if n > 0 {
             self.bump_row_for_lifecycle(session_id)?;
@@ -259,8 +303,10 @@ impl Store {
     }
 
     /// The live confirmed link a tidy flag is written to: `link_id` when
-    /// given (it must be the session's), else the session's primary.
-    fn tidy_link(&self, session_id: i64, link_id: Option<i64>) -> Result<i64, IpcError> {
+    /// given (it must be the session's), else the session's primary. The
+    /// service resolves it first so a per-host token's visibility check
+    /// covers the primary too (work graph M5).
+    pub fn tidy_link(&self, session_id: i64, link_id: Option<i64>) -> Result<i64, IpcError> {
         let participant = self.live_participant(session_id)?;
         let found: Option<i64> = self
             .conn

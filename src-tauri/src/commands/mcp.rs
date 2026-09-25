@@ -384,7 +384,14 @@ pub fn install_fleet_hook(
     }
 
     let settings_path = hooks_install::local_settings_path()?;
-    hooks_install::install_hook_at(&settings_path, &base.hook_url(), &token)?;
+    // The SessionStart form follows `work.session_start_context`, as the
+    // enable-time auto-install and remote provisioning do; the plain
+    // `install_hook_at` would downgrade a synchronous install to async.
+    let sync_start = fleet_core::service::settings::get_bool(
+        &*lock(&store)?,
+        fleet_core::service::settings::WORK_SESSION_START_CONTEXT,
+    );
+    hooks_install::install_hook_at_with(&settings_path, &base.hook_url(), &token, sync_start)?;
 
     Ok(format!(
         "Hook installed at {} (http hook, bearer header)\nSettings written to {}",

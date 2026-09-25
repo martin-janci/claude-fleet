@@ -2408,6 +2408,45 @@ pub(super) async fn target_paths(
     }
 }
 
+/// The source's live confirmed work links whose org is not the org the
+/// session will have on `target` (`Store::org_for_new_session`), each as a
+/// warning. A link or a confirm refuses such a crossing unless forced
+/// (`orgs::check_cross_org`, work graph M5); a move has no force flag and
+/// carries every link as it is, so it is the one WARNED cross-org path —
+/// the operator reads the warning, nothing is dropped or refused over it.
+fn cross_org_warnings(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    target: &str,
+) -> Result<Vec<String>, IpcError> {
+    let Some(pid) = row.project_id else {
+        return Ok(Vec::new());
+    };
+    let s = crate::ipc_error::lock(store)?;
+    let target_org = s.org_for_new_session(target, pid)?;
+    let mut links: Vec<crate::store::WorkLinkRow> = s
+        .session_work_links(row.id)?
+        .into_iter()
+        .filter(|l| l.state == "confirmed")
+        .collect();
+    s.fill_link_orgs(&mut links)?;
+    let mut out = Vec::new();
+    for l in &links {
+        let name = l
+            .ref_key
+            .clone()
+            .or_else(|| l.item_id.map(|i| format!("work item {i}")))
+            .unwrap_or_else(|| format!("work link {}", l.id));
+        if let Err(e) = crate::service::orgs::check_cross_org(l.org_id, target_org, &name, false) {
+            out.push(format!(
+                "the work link to {name} crosses the org boundary on {target} and was carried as is: {}",
+                e.message
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// The move's steps (see the module docs).
 async fn move_session_inner(
     args: MoveSessionArgs,
@@ -2430,6 +2469,7 @@ async fn move_session_inner(
         busy: _,
     } = gather(&args, store, ssh, hooks, Some(progress)).await?;
     let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(cross_org_warnings(store, &snap.row, &target)?);
     let mut carried = carry::CarryReport {
         dirty_entries: state.dirty.clone(),
         ..Default::default()
@@ -4539,6 +4579,66 @@ mod tests {
                 assert_eq!(links[0].id, link.id, "the same link, re-pointed");
             }
         }
+    }
+
+    /// A live link that would cross the org boundary on the target (the
+    /// source's host is in Company A, the target's in Company B) is carried
+    /// as is — a move has no force flag — and the report warns, naming it.
+    /// Unassigned hosts, or one org for both, warn of nothing.
+    #[tokio::test]
+    async fn a_link_crossing_the_org_boundary_is_carried_with_a_warning() {
+        let f = fixture();
+        let (a, b) = {
+            let s = f.store.lock().unwrap();
+            let a = s.add_org("Company A", None, false).unwrap().id;
+            let b = s.add_org("Company B", None, false).unwrap().id;
+            s.set_host_org("alpha", Some(a)).unwrap();
+            s.link_session_work(
+                f.source_id,
+                crate::store::WorkTarget::Key("ABC-1"),
+                "manual",
+            )
+            .unwrap();
+            (a, b)
+        };
+        // Same org on both hosts: no crossing.
+        f.store
+            .lock()
+            .unwrap()
+            .set_host_org("beta", Some(a))
+            .unwrap();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, true).await.expect("move");
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+
+        let f = fixture();
+        {
+            let s = f.store.lock().unwrap();
+            let a = s.add_org("Company A", None, false).unwrap().id;
+            let b = s.add_org("Company B", None, false).unwrap().id;
+            s.set_host_org("alpha", Some(a)).unwrap();
+            s.set_host_org("beta", Some(b)).unwrap();
+            s.link_session_work(
+                f.source_id,
+                crate::store::WorkTarget::Key("ABC-1"),
+                "manual",
+            )
+            .unwrap();
+        }
+        let _ = b;
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("the move is not refused");
+        let w = rep
+            .warnings
+            .iter()
+            .find(|w| w.contains("ABC-1") && w.contains("org boundary"))
+            .unwrap_or_else(|| panic!("{:?}", rep.warnings));
+        assert!(w.contains("beta"), "{w}");
+        let s = f.store.lock().unwrap();
+        let links = s.session_work_links(rep.target_session_id).unwrap();
+        assert_eq!(links.len(), 1, "the link followed the move, as is");
     }
 
     #[tokio::test]

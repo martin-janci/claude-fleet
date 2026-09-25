@@ -262,7 +262,8 @@ impl Asana {
     }
 
     /// Up to [`BATCH_MAX`] tasks by gid in one `/batch` call; `None` for a
-    /// task the token cannot see (404 / 403).
+    /// task the token cannot see (404 / 403). Any other per-action failure
+    /// (a 5xx, 412, 400, a short answer) is the batch's: never "not found".
     async fn batch_get(
         &self,
         gids: &[String],
@@ -304,7 +305,12 @@ impl Asana {
                         retry_after_secs: None,
                     })
                 }
-                _ => None,
+                403 | 404 => None,
+                s => {
+                    return Err(TrackerError::Invalid(format!(
+                        "a batch action answered HTTP {s}"
+                    )))
+                }
             });
         }
         Ok(out)
@@ -594,12 +600,21 @@ impl TrackerProvider for Asana {
                 expired: true,
             });
         }
-        let items = self
-            .fetch_gids(&gids)
-            .await?
-            .into_iter()
-            .flatten()
-            .collect();
+        let items = match self.fetch_gids(&gids).await {
+            Ok(got) => got.into_iter().flatten().collect(),
+            // A passing failure of the batch (a 5xx on one action): the
+            // mark stays where it was, so these events are read again next
+            // time, and the caller lists the view whole meanwhile.
+            Err(TrackerError::Invalid(m)) => {
+                tracing::warn!(view = %view.id, "Asana batch failed; keeping the sync mark: {m}");
+                return Ok(Changes {
+                    items: Vec::new(),
+                    mark: mark.map(str::to_string),
+                    expired: true,
+                });
+            }
+            Err(e) => return Err(e),
+        };
         Ok(Changes {
             items,
             mark: next,
