@@ -109,9 +109,12 @@ describe('TicketCard', () => {
     await flush();
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('request_work_handover', { args: { session_id: 31 } });
 
-    const busy = render(TicketCard, { session: row({ claude_status: 'working' }) });
-    await flush();
-    const btn = busy.container.querySelector('[data-testid="ticket-card-handover"]') as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
+    for (const claude_status of ['working', 'blocked', 'stopped', null, undefined]) {
+      const other = render(TicketCard, { session: row({ claude_status }) });
+      await flush();
+      const btn = other.container.querySelector('[data-testid="ticket-card-handover"]') as HTMLButtonElement;
+      expect(btn.disabled, String(claude_status)).toBe(true);
+      other.unmount();
+    }
   });
 });

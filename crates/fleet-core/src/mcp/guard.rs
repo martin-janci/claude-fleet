@@ -812,11 +812,18 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// the operator (`Caller::is_operator`) these — and every `confirm: true`
 /// tool — need a person's approval whatever `mcp.confirm_destructive` says
 /// (work graph M9.7, decision D12). For anyone else they are ungated.
-/// `work_link` is gated only for `start` / `resume`, the actions that
-/// create a session.
+/// Some are gated only for the actions that create a session, at the call
+/// site: `work_link` for `start` / `resume`, `dispatch_task` for
+/// `new_worker`, `restore_host_sessions` unless `dry_run`.
 pub const OPERATOR_CONFIRMS: &[&str] = &[
     "new_session",
     "new_shell_session",
+    "new_bg_session",
+    "spawn_review",
+    "dispatch_task",
+    "restore_host_sessions",
+    "recreate_session",
+    "restart_session",
     "safe_kill_session",
     "work_link",
 ];

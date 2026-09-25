@@ -249,6 +249,125 @@ pub(super) fn resolve_row_and_gate(
     Ok(row)
 }
 
+/// Characters of a free-text argument shown readably in a confirm summary.
+pub(super) const BOUND_TEXT_PREFIX: usize = 40;
+
+/// A free-text argument bound into a confirm summary (work graph M9.7): a
+/// readable, escaped prefix so the person approving sees what it is, and a
+/// digest of the whole so a different text with the same prefix cannot
+/// reuse the approval. `-` when absent.
+pub(super) fn bound_text(text: Option<&str>) -> String {
+    let Some(t) = text else {
+        return "-".into();
+    };
+    let head: String = t.chars().take(BOUND_TEXT_PREFIX).collect();
+    let more = if head.len() < t.len() { "…" } else { "" };
+    format!("{head:?}{more}#{}", guard::content_digest(t))
+}
+
+/// A body (a prompt, a brief) bound into a confirm summary: its size and a
+/// digest, never the text — the same rule as [`broadcast_summary`].
+pub(super) fn bound_body(text: Option<&str>) -> String {
+    match text {
+        None => "-".into(),
+        Some(t) => format!("bytes={}#{}", t.len(), guard::content_digest(t)),
+    }
+}
+
+/// Bound confirmation summary for `new_session`: EVERY argument, so an
+/// approval for one start cannot be replayed with another (say `kind:
+/// "shell"` plus a `start_command`).
+pub(super) fn new_session_summary(p: &NewSessionParams) -> String {
+    format!(
+        "host={} name={} project_id={} worktree_id={:?} new_worktree={} base_branch={} \
+         kind={} start_command={} friendly_name={} resume_claude_session_id={}",
+        bound_text(Some(&p.host_alias)),
+        bound_text(Some(&p.name)),
+        p.project_id,
+        p.worktree_id,
+        bound_text(p.new_worktree.as_deref()),
+        bound_text(p.base_branch.as_deref()),
+        bound_text(p.kind.as_deref()),
+        bound_text(p.start_command.as_deref()),
+        bound_text(p.friendly_name.as_deref()),
+        bound_text(p.resume_claude_session_id.as_deref()),
+    )
+}
+
+/// Bound confirmation summary for `new_shell_session`: every argument.
+pub(super) fn new_shell_session_summary(p: &NewShellSessionParams) -> String {
+    format!(
+        "host={} name={} project_id={} worktree_id={:?} new_worktree={} base_branch={} \
+         kind=\"shell\" start_command={}",
+        bound_text(Some(&p.host_alias)),
+        bound_text(Some(&p.name)),
+        p.project_id,
+        p.worktree_id,
+        bound_text(p.new_worktree.as_deref()),
+        bound_text(p.base_branch.as_deref()),
+        bound_text(p.start_command.as_deref()),
+    )
+}
+
+/// Bound confirmation summary for `new_bg_session`: every argument, the
+/// prompt as a digest.
+pub(super) fn new_bg_session_summary(a: &crate::service::bg_sessions::NewBgSessionArgs) -> String {
+    format!(
+        "host={} name={} requester_session_id={:?} prompt={}",
+        bound_text(Some(&a.host_alias)),
+        bound_text(Some(&a.name)),
+        a.requester_session_id,
+        bound_body(Some(&a.prompt)),
+    )
+}
+
+/// Bound confirmation summary for `dispatch_task` with `new_worker`: the
+/// worker spec, the requester, `raw`, and the prompt as a digest.
+pub(super) fn dispatch_new_worker_summary(
+    spec: &NewWorkerSpec,
+    requester_session_id: Option<i64>,
+    raw: bool,
+    prompt: &str,
+) -> String {
+    format!(
+        "new_worker host={} project_id={} name={} requester_session_id={:?} raw={} prompt={}",
+        bound_text(Some(&spec.host_alias)),
+        spec.project_id,
+        bound_text(spec.name.as_deref()),
+        requester_session_id,
+        raw,
+        bound_body(Some(prompt)),
+    )
+}
+
+/// Bound confirmation summary for `work_link { start | resume }`: every
+/// argument either action reads, the brief as a digest. `repos` names the
+/// `project_ids` (`id:owner/repo`), when they are known.
+pub(super) fn work_link_start_summary(
+    a: &crate::service::work::WorkLinkArgs,
+    repos: &[String],
+) -> String {
+    format!(
+        "{} key={} url={} item_id={:?} link_id={:?} host={} project_id={:?} project_ids={:?} \
+         repos=[{}] mode={} name={} worktree={} with_brief={:?} brief={} force_cross_org={:?}",
+        a.action,
+        bound_text(a.key.as_deref()),
+        bound_text(a.url.as_deref()),
+        a.item_id,
+        a.link_id,
+        bound_text(a.host_alias.as_deref()),
+        a.project_id,
+        a.project_ids,
+        repos.join(", "),
+        bound_text(a.mode.as_deref()),
+        bound_text(a.name.as_deref()),
+        bound_text(a.worktree.as_deref()),
+        a.with_brief,
+        bound_body(a.brief.as_deref()),
+        a.force_cross_org,
+    )
+}
+
 /// Bound confirmation summary for `set_clipboard`: host, byte count AND a
 /// digest of the content, so an approval cannot be replayed with different
 /// same-length text. The text itself never appears (it may be a secret).
