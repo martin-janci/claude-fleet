@@ -1912,7 +1912,10 @@ deliberately.
   action for master, clients and hosts in two orgs and in none. See
   *Organisations and isolation*.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
-  the desktop.
+  the desktop — the file is created owner-only before SQLite opens it, so
+  the WAL sidecars `state.db-wal` and `state.db-shm` (which hold every
+  recent commit, tokens included, while the daemon runs) inherit `0600`
+  too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
   UI confirmation dialog. A hub has no UI to show that dialog to — leave the
