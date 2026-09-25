@@ -273,9 +273,12 @@ pub fn keys_in_text(text: &str, prefixes: &[String]) -> Vec<String> {
 /// another site's URL is not this tracker's. (Each adapter's `recognize`
 /// reads its own site's URLs first, by host.)
 pub fn keys_in_prose(text: &str, prefixes: &[String]) -> Vec<String> {
+    // Words split on whitespace AND on the brackets and commas prose glues a
+    // URL to a key with — `ABC-1(https://…/ABC-9)` — so dropping the
+    // URL-bearing word keeps the key beside it.
     let prose: String = text
-        .split_whitespace()
-        .filter(|w| !w.contains("://"))
+        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ','))
+        .filter(|w| !w.is_empty() && !w.contains("://"))
         .collect::<Vec<_>>()
         .join(" ");
     keys_in_text(&prose, prefixes)
@@ -313,6 +316,20 @@ mod tests {
                 &p
             ),
             vec!["ABC-1", "ABC-2"]
+        );
+    }
+
+    /// A key glued to a URL by a bracket or a comma is still prose: only
+    /// the URL-bearing word is dropped, not the key beside it.
+    #[test]
+    fn a_key_glued_to_a_url_by_a_bracket_or_comma_is_still_prose() {
+        let p = vec!["ABC".to_string()];
+        assert_eq!(
+            keys_in_prose(
+                "ABC-1(https://partner.atlassian.net/browse/ABC-9) then ABC-2,https://x.example/ABC-8, and (ABC-3)",
+                &p
+            ),
+            vec!["ABC-1", "ABC-2", "ABC-3"]
         );
     }
 
