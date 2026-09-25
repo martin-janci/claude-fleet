@@ -187,8 +187,17 @@ describe('TidyReview', () => {
     checks[1].dispatchEvent(onCheckEnter);
     expect(onCheckEnter.defaultPrevented).toBe(false);
     expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'tidy_apply')).toBe(false);
+    // Escape from a focused control still closes the sheet (never destructive).
+    checks[1].focus();
+    const onEsc = chord('Escape');
+    checks[1].dispatchEvent(onEsc);
+    await tick();
+    expect(onEsc.defaultPrevented).toBe(true);
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
     // From the sheet itself the chord still applies.
-    await fireEvent.keyDown(sheet, { key: 'Enter' });
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'Enter' });
     await waitFor(() =>
       expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'tidy_apply')).toBe(true),
     );

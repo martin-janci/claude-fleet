@@ -81,6 +81,13 @@
     // bubbles up from a focused button (close, Confirm, Not this) keeps that
     // button's own meaning: Enter activates it, and never decides the cursor
     // row — which need not be the row whose button has focus.
+    // Escape closes the sheet from anywhere inside it; it is never destructive.
+    if (e.key === 'Escape') {
+      closeSheet();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const target = e.target as HTMLElement | null;
     if (target !== e.currentTarget && !target?.classList.contains('review-row')) return;
     const n = pending.length;

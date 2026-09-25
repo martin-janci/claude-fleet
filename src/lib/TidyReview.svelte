@@ -153,6 +153,13 @@
     // checkbox, the choice select) keeps that control's own meaning: Enter
     // activates it and Space toggles the checkbox under the caret, never the
     // cursor row's — and never applies the tidy.
+    // Escape closes the sheet from anywhere inside it; it is never destructive.
+    if (e.key === 'Escape') {
+      closeSheet();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const target = e.target as HTMLElement | null;
     if (target !== e.currentTarget && !target?.classList.contains('tidy-row')) return;
     const n = ordered.length;

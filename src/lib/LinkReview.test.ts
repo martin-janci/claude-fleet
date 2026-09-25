@@ -98,6 +98,15 @@ describe('LinkReview', () => {
     expect(invoke).not.toHaveBeenCalledWith('confirm_session_work', expect.anything());
     expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
     expect(screen.getByTestId('link-review-sheet')).toBeTruthy();
+    // Escape from a focused button still closes the sheet.
+    close.focus();
+    const onEsc = chord('Escape');
+    close.dispatchEvent(onEsc);
+    await tick();
+    expect(onEsc.defaultPrevented).toBe(true);
+    expect(screen.queryByTestId('link-review-sheet')).toBeNull();
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
     // From the sheet itself the chord still decides the cursor row.
     await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'Enter' });
     expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
