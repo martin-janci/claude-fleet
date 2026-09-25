@@ -207,6 +207,21 @@ impl TrackerSync {
             return Err(TrackerError::Unconfigured);
         }
         let provider = provider_for(t, cred, &self.net)?;
+        self.run_provider(t, provider.as_ref(), views, store, now, pass)
+            .await
+    }
+
+    /// The pass proper, over the provider `run_tracker` built (tests hand
+    /// in their own).
+    async fn run_provider(
+        &self,
+        t: &TrackerRow,
+        provider: &dyn TrackerProvider,
+        views: Vec<crate::store::TrackerViewRow>,
+        store: &Mutex<Store>,
+        now: i64,
+        pass: &mut TrackerPass,
+    ) -> Result<(), TrackerError> {
         let incremental = provider.caps().incremental;
         // (id, updated) seen this pass: the overlap's repeats are dropped.
         let mut seen: HashSet<(String, Option<i64>)> = HashSet::new();
@@ -226,7 +241,7 @@ impl TrackerSync {
                 query: v.query.clone(),
             };
             let listed = read_view(
-                provider.as_ref(),
+                provider,
                 &def,
                 incremental,
                 full,
@@ -254,15 +269,16 @@ impl TrackerSync {
                     continue;
                 }
             };
-            if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
-                if let Ok(s) = lock(store) {
-                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
-                }
-            }
             let newest = items.iter().filter_map(|i| i.updated).max();
             let ids: Vec<String> = items.iter().map(|i| i.external_id.clone()).collect();
             self.store_items(t.id, items, store, &mut seen, pass)?;
+            // The token and the watermark move only once the items they
+            // stand for are stored: a write that fails leaves them to be
+            // read again, not skipped.
             if let Ok(s) = lock(store) {
+                if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
+                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
+                }
                 if let Some(w) = newest {
                     let _ = s.set_tracker_view_watermark(t.id, &v.view_id, w);
                 }

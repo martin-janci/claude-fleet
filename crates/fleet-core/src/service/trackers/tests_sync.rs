@@ -514,8 +514,10 @@ fn the_interval_setting_defaults_turns_off_and_has_a_floor() {
 }
 
 /// A provider whose views are read by sync token (M6.0's opaque mark).
+/// `bad`: its changes carry an item the store refuses (no id).
 struct TokenProvider {
     expired: bool,
+    bad: bool,
 }
 
 #[async_trait::async_trait]
@@ -557,7 +559,7 @@ impl TrackerProvider for TokenProvider {
     ) -> Result<crate::service::trackers::Changes, TrackerError> {
         Ok(crate::service::trackers::Changes {
             items: if mark.is_some() && !self.expired {
-                vec![snap("changed")]
+                vec![snap(if self.bad { "" } else { "changed" })]
             } else {
                 vec![]
             },
@@ -583,7 +585,10 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         query: "1".into(),
     };
     let ids = |v: &[WorkItemSnapshot]| v.iter().map(|i| i.external_id.clone()).collect::<Vec<_>>();
-    let p = TokenProvider { expired: false };
+    let p = TokenProvider {
+        expired: false,
+        bad: false,
+    };
     // No token yet: a whole listing, then a first token.
     let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, None)
         .await
@@ -602,7 +607,10 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         (vec!["changed".into()], false, Some("tok-2"))
     );
     // An expired token: one whole listing, and the fresh token.
-    let p = TokenProvider { expired: true };
+    let p = TokenProvider {
+        expired: true,
+        bad: false,
+    };
     let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, Some("old"))
         .await
         .unwrap();
@@ -610,4 +618,60 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         (ids(&items), full, mark.as_deref()),
         (vec!["whole".into()], true, Some("tok-2"))
     );
+}
+
+/// The token moves only once the items it stands for are stored: a store
+/// write that fails leaves the token where it was, so the next pass reads
+/// the same changes again instead of skipping them.
+#[tokio::test]
+async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
+    let fx = Fx::new();
+    let views = {
+        let s = fx.store.lock().unwrap();
+        s.sync_tracker_views(
+            fx.tracker,
+            &[("project:1".into(), "P".into(), "1".into())],
+        )
+        .unwrap();
+        s.set_tracker_view_mark(fx.tracker, "project:1", Some("tok-1"))
+            .unwrap();
+        s.set_tracker_view_watermark(fx.tracker, "project:1", T0)
+            .unwrap();
+        s.list_tracker_views(fx.tracker).unwrap()
+    };
+    let mark = |fx: &Fx| -> Option<String> {
+        fx.store
+            .lock()
+            .unwrap()
+            .list_tracker_views(fx.tracker)
+            .unwrap()
+            .remove(0)
+            .sync_mark
+    };
+    let sync = fx.sync(|| T0);
+    // Inside FULL_EVERY_SECS of a whole listing, so the view reads changes.
+    sync.last_full
+        .lock()
+        .unwrap()
+        .insert((fx.tracker, "project:1".into()), T0);
+    let row = fx.row();
+    let mut pass = TrackerPass::default();
+    let bad = TokenProvider {
+        expired: false,
+        bad: true,
+    };
+    let r = sync
+        .run_provider(&row, &bad, views.clone(), &fx.store, T0, &mut pass)
+        .await;
+    assert!(r.is_err(), "the store refused the item");
+    assert_eq!(mark(&fx).as_deref(), Some("tok-1"), "the token did not move");
+    let good = TokenProvider {
+        expired: false,
+        bad: false,
+    };
+    sync.run_provider(&row, &good, views, &fx.store, T0, &mut pass)
+        .await
+        .unwrap();
+    assert_eq!(mark(&fx).as_deref(), Some("tok-2"));
+    assert_eq!(pass.changed, 1);
 }
