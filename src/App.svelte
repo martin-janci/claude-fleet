@@ -10,6 +10,7 @@
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
   import { composerInsert } from './lib/conversation';
+  import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
@@ -570,6 +571,12 @@
     sidebarCollapsed = false;
     requestNewSessionOnHost(alias);
   }
+
+  // The Tidy-up sheet lives in the sidebar: a request for it (the Today
+  // view's Stale section) brings a collapsed sidebar back so it can open.
+  $effect(() => {
+    if ($tidyRequest) sidebarCollapsed = false;
+  });
 
   // "Insert into composer" (work graph M9.2) shows where the text went: the
   // selected session's conversation, over Today if it was open.

@@ -25,6 +25,9 @@
     preselected,
     refreshTidy,
     reopenedLoads,
+    requestedTicks,
+    tidyRequest,
+    tidyRequestLive,
     reopenedWork,
     tidyReasonLabel,
     tidyReport,
@@ -66,10 +69,16 @@
     return c.label || c.tmux_name;
   }
 
-  async function openSheet() {
-    ticked = new Set(candidates.filter(preselected).map((c) => c.session_id));
+  async function openSheet(requested: number[] = []) {
+    ticked =
+      requested.length > 0
+        ? requestedTicks(candidates, { sessionIds: requested, at: 0 })
+        : new Set(candidates.filter(preselected).map((c) => c.session_id));
     choice = new Map();
-    cursor = 0;
+    cursor = Math.max(
+      0,
+      ordered.findIndex((c) => requested.includes(c.session_id)),
+    );
     open = true;
     reopenedOpen = false;
     await tick();
@@ -145,6 +154,20 @@
     e.preventDefault();
     e.stopPropagation();
   }
+
+  // A request from elsewhere (the Today view's Stale section): honoured once
+  // the candidates are here, dropped when it is too old to still be meant.
+  $effect(() => {
+    const req = $tidyRequest;
+    if (!req) return;
+    if (!tidyRequestLive(req)) {
+      tidyRequest.set(null);
+      return;
+    }
+    if (candidates.length === 0) return;
+    tidyRequest.set(null);
+    void openSheet(req.sessionIds);
+  });
 
   $effect(() => {
     if (cursor > 0 && cursor >= ordered.length) cursor = Math.max(0, ordered.length - 1);

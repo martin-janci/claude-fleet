@@ -33,6 +33,8 @@
     type OperatorBlocked,
   } from './operator';
   import { agentContext, type AgentContextInput } from './agent_context';
+  import { OPERATOR_COMMANDS } from './operator';
+  import { insertIntoComposer } from './conversation';
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
@@ -86,14 +88,25 @@
 </script>
 
 {#snippet chip()}
-  <button
-    class="chip"
-    data-testid="agent-context-chip"
-    onclick={() => (droppedLabel = ctx!.chipLabel)}
-    title="Send without this context"
-  >
-    {ctx!.chipLabel} ✕
-  </button>
+  {#if ctx}
+    <button
+      class="chip"
+      data-testid="agent-context-chip"
+      onclick={() => (droppedLabel = ctx!.chipLabel)}
+      title="Send without this context"
+    >
+      {ctx!.chipLabel} ✕
+    </button>
+  {/if}
+  <!-- Operator commands (work graph M9): they fill the composer, never send. -->
+  {#each OPERATOR_COMMANDS as c (c.label)}
+    <button
+      class="chip command"
+      data-testid="agent-command"
+      title="Put this request in the box; nothing is sent until you press Enter"
+      onclick={() => session && insertIntoComposer(session.id, c.text)}>{c.label}</button
+    >
+  {/each}
 {/snippet}
 
 {#if $agentPanelOpen}
@@ -137,7 +150,7 @@
         visible={true}
         promptPrefix={ctx?.prefix ?? null}
         blockWhileBusy={true}
-        composerAbove={ctx ? chip : undefined}
+        composerAbove={chip}
       />
     {/if}
   </div>
@@ -203,6 +216,9 @@
     font-size: 0.75rem;
     padding: 0.15rem 0.6rem;
     cursor: pointer;
+  }
+  .chip.command {
+    border-style: dashed;
   }
   .chip:hover {
     color: var(--fg);

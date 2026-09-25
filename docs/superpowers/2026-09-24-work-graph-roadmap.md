@@ -580,8 +580,12 @@ acceptance is still to do.
   sibling per repo on one branch, per-repo duplicate guard; *Also start in*
   in the New-session dialog.
 - **Not built, by decision:** write-back (D3 none), dead-session summaries
-  (D10 off), webhook nudges (D13 no). Today's **Stale** links to M7's
-  Tidy-up sheet once M7 merges.
+  (D10 off), webhook nudges (D13 no).
+- **Follow-ups on M7** (after #268): Today's **Stale** section opens M7's
+  Tidy-up sheet with its stale candidates picked; the agent panel's
+  **Tidy up done tickets** command fills the operator's composer, and the
+  operator's instructions say how to tidy through `work { tidy }` /
+  `work_link { tidy_apply }` without ever turning a safe kill into a kill.
 
 ## Critical path and parallelism
 
@@ -700,4 +704,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   `confirm: true` since M7 (its tidy kills); M9.7's start / resume gate
   therefore runs only for the operator, so a person's start is never gated.
   Tool budget 70,865 (measured 70,765).
+- 2026-09-25: the two M9 follow-ups on M7 (Today → Tidy up, the operator's
+  "Tidy up done tickets"); frontend and the operator's CLAUDE.md only — no
+  new action, no budget change.
 

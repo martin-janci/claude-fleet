@@ -274,4 +274,21 @@ Commit and push before code.
      `ticket_brief_with`, so the fence's end always survives.
   4. **Budget:** M9.7 +328 (69,801, `BUDGET_BYTES` 69,901), M9.3 +64
      (inside), M9.6 +133 (69,998, `BUDGET_BYTES` 70,098).
+- **2026-09-25, follow-ups on M7** (after #268 merged; branch restarted from
+  `main`):
+  1. **Today → Tidy up.** The Stale section shows *Tidy up · n* when M7
+     suggests tidying some of its sessions; it opens the sidebar's Tidy-up
+     sheet with just those ticked (a `tidyRequest` store in `tidy.ts`; App
+     expands a collapsed sidebar for it; a request older than 15 s is
+     dropped rather than opening the sheet later). Nothing is applied until
+     the person confirms in the sheet.
+  2. **Operator "Tidy up done tickets."** A command chip in the agent panel
+     fills the operator's composer with the request (never sends — the same
+     rule as Insert into composer). The operator's CLAUDE.md now says how:
+     `work { tidy }`, show the batch, one `work_link { tidy_apply }`, keep
+     each candidate's action (safe kill stays safe kill); kills wait for the
+     desktop's confirmation (D12), and on a hub it offers archive / snooze
+     instead. The operator's own session is already protected by M7's
+     planner. An operator created before this keeps its old CLAUDE.md until
+     it is recreated (the file is written when the operator is made).
 
