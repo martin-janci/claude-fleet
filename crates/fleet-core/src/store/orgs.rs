@@ -405,23 +405,30 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Delete an org: its rules go with it, its hosts become unassigned.
-    /// Callers refuse first while trackers reference it
-    /// ([`Store::trackers_of_org`]). `false` when there was no such org.
+    /// Delete an org: its rules go with it, its hosts become unassigned, and
+    /// so do its past links (the `snap_org_id` snapshot, which has no FK):
+    /// a removed org's work must not stay fenced from every host forever,
+    /// nor name an org that no longer exists. One transaction. Callers
+    /// refuse first while trackers reference it ([`Store::trackers_of_org`]).
+    /// `false` when there was no such org.
     pub fn remove_org(&self, id: i64) -> Result<bool, IpcError> {
+        let tx = self.conn.unchecked_transaction()?;
         // Explicit, not only the FK actions: they need `foreign_keys = ON`.
-        self.conn.execute(
+        tx.execute(
             "UPDATE hosts SET org_id = NULL WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
-        self.conn.execute(
+        tx.execute(
+            "UPDATE work_links SET snap_org_id = NULL WHERE snap_org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
             "DELETE FROM org_rules WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
-        Ok(self
-            .conn
-            .execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])?
-            > 0)
+        let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// `(id, name)` of the trackers assigned to org `id`.

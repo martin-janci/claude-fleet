@@ -470,6 +470,52 @@ fn crud_and_refusals() {
     assert!(!s.remove_org_rule(r.id).unwrap());
 }
 
+/// Removing an org also unassigns its past links (`snap_org_id`, no FK):
+/// the ended link of a removed org reads as unassigned, not as a fence to
+/// an org that no longer exists. One transaction: nothing changes when the
+/// org does not exist.
+#[test]
+fn remove_org_unassigns_its_past_links_too() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let b = s.add_org("B", None, false).unwrap().id;
+    s.set_host_org("h", Some(a)).unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    s.delete_session(sid).unwrap();
+    let ended = s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(s.link_org(&ended[0]).unwrap(), Some(a), "snapshotted");
+    // Another org's snapshot, for contrast.
+    s.conn
+        .execute(
+            "INSERT INTO work_links (ref_key, state, source, is_primary, created_at, ended_at, snap_org_id) \
+             VALUES ('XYZ-1', 'confirmed', 'manual', 1, 1, 2, ?1)",
+            [b],
+        )
+        .unwrap();
+    assert!(
+        !s.remove_org(a + b + 100).unwrap(),
+        "no such org: nothing changes"
+    );
+    assert_eq!(s.link_org(&ended[0]).unwrap(), Some(a));
+    assert!(s.remove_org(a).unwrap());
+    let ended = s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(s.link_org(&ended[0]).unwrap(), None, "unassigned now");
+    let other: Option<i64> = s
+        .conn
+        .query_row(
+            "SELECT snap_org_id FROM work_links WHERE ref_key = 'XYZ-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(other, Some(b), "B's snapshot is untouched");
+}
+
 /// The migration over a database from before M5: every row lands
 /// unassigned (the default org is "none"), and nothing reads differently.
 #[test]
