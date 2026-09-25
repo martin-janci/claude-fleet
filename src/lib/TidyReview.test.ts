@@ -151,6 +151,49 @@ describe('TidyReview', () => {
     );
   });
 
+  it('Enter on a focused control (Cancel, checkbox, PR link) is not a sheet chord', async () => {
+    candidates = [cand(1, { pr_url: 'https://example.com/pr/1' }), cand(2)];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const sheet = screen.getByTestId('tidy-sheet');
+    const chord = (key: string) =>
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    // Enter on Cancel must reach the button (bubbling keydown, like a real key
+    // press), not apply the tidy with every ticked row.
+    const cancel = screen.getByTestId('tidy-cancel');
+    cancel.focus();
+    const onCancel = chord('Enter');
+    cancel.dispatchEvent(onCancel);
+    await tick();
+    expect(onCancel.defaultPrevented).toBe(false);
+    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
+    // Enter on the PR link opens the link, not the tidy.
+    const link = sheet.querySelector('a')!;
+    const onLink = chord('Enter');
+    link.dispatchEvent(onLink);
+    expect(onLink.defaultPrevented).toBe(false);
+    // Space on the second row's checkbox is its own toggle (cursor is on row
+    // 0, which stays as it was), and Enter there does not apply either.
+    const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+    checks[1].focus();
+    const onCheck = chord(' ');
+    checks[1].dispatchEvent(onCheck);
+    await tick();
+    expect(onCheck.defaultPrevented).toBe(false);
+    expect(checks[0].checked).toBe(true);
+    expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 2');
+    const onCheckEnter = chord('Enter');
+    checks[1].dispatchEvent(onCheckEnter);
+    expect(onCheckEnter.defaultPrevented).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'tidy_apply')).toBe(false);
+    // From the sheet itself the chord still applies.
+    await fireEvent.keyDown(sheet, { key: 'Enter' });
+    await waitFor(() =>
+      expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'tidy_apply')).toBe(true),
+    );
+  });
+
   it('Cancel closes the sheet without applying', async () => {
     candidates = [cand(1)];
     await mount();
