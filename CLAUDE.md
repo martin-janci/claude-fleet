@@ -192,7 +192,7 @@ SessionStart context (M4.5) is built but OFF behind
 nudge, is landed OFF behind `work.classify_nudge`: after three turns with no
 link and 1–5 candidates in the host's scope, one UserPromptSubmit per
 conversation carries a ≤400-char note after the mail
-(`service/work/nudge.rs`, migration 056 `conversations.classify_nudged_at`);
+(`service/work/nudge.rs`, migration 056 `conversations.classify_nudged_at`; migration 057 re-issues the read-cursor delete trigger that a rewrite of 044 left out of some databases);
 Claude's answer, `work_link { source: agent_inferred }`, is only ever a
 pre-selected suggestion (rule R11, strength `inferred`).
 Work graph M5 (organisations) is landed: migration 050 (`orgs`, text-keyed
