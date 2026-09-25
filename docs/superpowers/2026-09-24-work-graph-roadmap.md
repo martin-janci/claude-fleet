@@ -640,6 +640,19 @@ Plan: `plans/2026-09-25-work-graph-m11-long-tail.md`.
 
 **Value:** no silent "not done" is left anywhere in the roadmap.
 
+### M12: ship and operate
+
+Plan: `plans/2026-09-25-work-graph-m12-ship-and-operate.md`.
+
+- **Upgrade path:** proven on a generated pre-work-graph database.
+- **Scale:** budgets for list, today, tickets, tidy and the resolver.
+- **Retention:** for the journal, done tracker items and work timeline events.
+- **Health:** trackers in `fleet_health`, plus an Attention item for a failing tracker.
+- **User guide:** `docs/work-graph.md`.
+- **Decisions revisited:** the decided-against list, with evidence. The user decides.
+
+**Value:** the work graph can be shipped, upgraded into, run for months and explained.
+
 ## Critical path and parallelism
 
 ```
@@ -779,3 +792,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: M11 planned (`plans/2026-09-25-work-graph-m11-long-tail.md`):
   the long tail of every milestone's "not done" line. New decisions
   D17–D20.
+- 2026-09-25: M12 planned (`plans/2026-09-25-work-graph-m12-ship-and-operate.md`):
+  upgrade path, scale, retention, trackers in health, the user guide, and
+  the decided-against list revisited. New decisions D21–D23; D16 is stale
+  (hub-e2e already runs in CI).
