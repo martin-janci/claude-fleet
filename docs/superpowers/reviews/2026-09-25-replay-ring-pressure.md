@@ -198,10 +198,11 @@ is not realistic; it shows where the margin ends.
 `crates/fleet-core/src/store/tracker_items.rs`:
 
 - `upsert_tracker_item` computes, from the before/after comparison it
-  already makes, whether the fields the session row shows moved
-  (`Visible::session_view`). `emit_work_item(id, sessions)` always emits
-  `work:item`. It bumps `row_version` and emits `session:updated` only when
-  `sessions` is true.
+  already makes, which parts of a session row the change moves
+  (`Visible::session_change`, a `SessionChange`). `emit_work_item(id,
+  change)` always emits `work:item`. It bumps `row_version` and emits
+  `session:updated` only for a session whose row shows the item where the
+  change landed (see *Follow-up* below).
 - `mark_tracker_item_unavailable` notifies sessions only on the transition
   from available to unavailable. The row shows the flag, not the reason, so
   a reason-only change no longer does.
@@ -245,6 +246,22 @@ unchanged passes. A unit test in `tracker_items.rs` pins the per-field
 behaviour: a description, assignee or `updated` change moves no session;
 unavailable notifies once; a re-sighting notifies.
 
+### Follow-up: suggestions and rejections
+
+- `emit_work_item` used to notify only sessions whose **live primary
+  link** was the item. A session row also shows an item as its top
+  suggestion (`work_suggested`: key, title, status, url) and as a
+  rejected key (`work_rejected`). Such a session kept the old title,
+  status or key on clients until its next row change.
+- Now every live session with a live link to the item is a candidate,
+  and it gets `session:updated` only when its row shows the item where
+  the change landed: primary work for key, title, status, url or
+  availability; top suggestion for the same minus availability; a
+  rejection for a key change only. The no-op rule above still holds.
+- Pinned by `a_suggested_or_rejected_item_reaches_the_rows_that_show_it`
+  in `store/tracker_items.rs`. The pressure harness links no
+  suggestions, so its numbers are unchanged (re-run after the fix).
+
 ## Decision
 
 Under the plan's rule (*coalesce only if sessions fall out of the ring in
@@ -277,15 +294,6 @@ problem: at the default interval they were under 0.2 frames/min.
      case, ~6 min of reach);
    - the baseline session rate grows well past 0.64 frames/s. The ring is
      dominated by session frames, not by sync.
-3. **A stale-summary gap outside M10.6's scope (not fixed).**
-   - `emit_work_item` notifies only sessions whose **live primary link** is
-     the item.
-   - `work_suggested` on the session row also shows an item's title and
-     status. A session whose *suggestion* points at an item that changes
-     keeps the old title and status on clients until its next row change.
-   - Fixing it adds frames rather than removing them, so it is left for a
-     decision. Suggested owner: M10.1's leftovers or M10.4.
-
 ## Not done, and why
 
 - **The baseline rate (0.64 frames/s) was taken from the `events.rs`
