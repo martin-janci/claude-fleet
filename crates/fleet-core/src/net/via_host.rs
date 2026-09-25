@@ -231,7 +231,11 @@ impl HttpTransport for GhCliTransport {
         let script = Self::script(req.method, &path, req.body.is_some(), hostname.as_deref());
         let quoted = crate::shell::quote(&script);
         let args = ["bash", "-lc", quoted.as_str()];
-        let cap = (self.max_body as usize) + HEAD_MAX;
+        // Room for the answer's headers and a login profile's chatter before
+        // the start marker, above the body cap — the same headroom as curl's
+        // below, so a body exactly at `max_body` is never TooLarge for what
+        // rode along with it.
+        let cap = (self.max_body as usize) + HEAD_MAX + 4096;
         let out = self
             .ssh
             .run_with_stdin(
@@ -852,11 +856,40 @@ mod tests {
         assert!(r.text().contains("Bad credentials"));
 
         let f = FakeSsh::new();
-        f.on(Match::Any, Reply::ok(&"x".repeat(HEAD_MAX + 4096)));
+        f.on(
+            Match::Any,
+            Reply::ok(&"x".repeat(1024 + HEAD_MAX + 4096 + 1)),
+        );
         let mut t = gh(&f);
         t.max_body = 1024;
         let e = t.send(Request::get("https://api.github.com/user")).await;
         assert!(matches!(e, Err(TransportError::TooLarge(_))), "{e:?}");
+    }
+
+    /// The cap has the same headroom as curl's: a login profile's chatter
+    /// before the start marker and the answer's headers ride above
+    /// `max_body`, so a body exactly at the cap behind `HEAD_MAX` of
+    /// chatter is still a response — before the headroom it was TooLarge.
+    #[tokio::test]
+    async fn profile_chatter_and_headers_do_not_eat_the_body_cap() {
+        let noise = "Welcome bob\n".repeat(HEAD_MAX / 12 + 1);
+        assert!(noise.len() > HEAD_MAX);
+        let body = "x".repeat(1024);
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(&format!(
+                "{noise}__fleet_begin__\nHTTP/2.0 200 OK\nContent-Type: text/plain\n\n{body}"
+            )),
+        );
+        let mut t = gh(&f);
+        t.max_body = 1024;
+        let r = t
+            .send(Request::get("https://api.github.com/user"))
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body.len(), 1024);
     }
 }
 

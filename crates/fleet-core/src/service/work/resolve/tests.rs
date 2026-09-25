@@ -442,6 +442,22 @@ fn the_rule_table() {
             expect: &["promote 1 R3 branch", "primary 1"],
         },
         Row {
+            // The events path's Promote carries the promoting signal's
+            // source too: the link is then a `url` link, which R7 (a
+            // branch that moved on) can no longer end.
+            name: "a branch suggestion the first prompt's URL confirms becomes a url link",
+            input: ResolveInput {
+                branch: None,
+                events: vec![Candidate {
+                    first_prompt_sole: true,
+                    ..cand("ABC-1", Signal::PromptUrl, Strength::Strong)
+                }],
+                links: vec![link(1, "ABC-1", "suggested", "branch")],
+                ..input()
+            },
+            expect: &["promote 1 R5 url", "primary 1"],
+        },
+        Row {
             name: "PR text re-read in the same window is not news",
             input: ResolveInput {
                 pr: Some(vec![]),

@@ -337,6 +337,36 @@ fn check_host_transport(s: &Store, transport: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// The reverse of [`check_host_transport`], for the host side: a host some
+/// tracker runs curl or gh on (`via_host:` / `via_cli:`) cannot be switched
+/// to fleet-agent, which can run neither — the tracker would fail every
+/// request and the tick would retry forever. `hosts::add_host` asks before
+/// it writes `transport = agent`; the refusal names the tracker to move
+/// first (`work_admin { action: update, transport }`).
+pub fn refuse_agent_transport_on_tracker_host(s: &Store, alias: &str) -> Result<(), IpcError> {
+    for t in s.list_trackers()? {
+        let (tool, host) = if let Some(h) = t.transport.strip_prefix("via_host:") {
+            ("curl", h)
+        } else if let Some(h) = t.transport.strip_prefix("via_cli:") {
+            ("gh", h)
+        } else {
+            continue;
+        };
+        if host == alias {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "tracker {} ({}) runs {tool} on {alias}, which fleet-agent cannot; point \
+                     the tracker at a host fleet reaches over SSH (work_admin update, \
+                     transport) before switching {alias} to agent",
+                    t.id, t.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A GitHub tracker's `settings.hostname` held to its site (M11.4): an
 /// enterprise site (`https://<host>[/<owner>]`) always has one, whose host
 /// part is the site's — the one given, else the one it had (an update that
@@ -751,6 +781,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v["transport"], "via_host:sshbox");
+    }
+
+    /// The reverse of the rule above: a host a tracker already runs curl or
+    /// gh on cannot be switched to fleet-agent. `add_host` re-adding it
+    /// with `transport: agent` is refused before the probe and any write,
+    /// naming the tracker; the row keeps its transport, and a host no
+    /// tracker runs on is free to become an agent host.
+    #[tokio::test]
+    async fn switching_a_tracker_host_to_fleet_agent_is_refused() {
+        use crate::service::hosts::{add_host, AddHostArgs};
+        let (st, id) = added();
+        st.lock().unwrap().upsert_host("sshbox").unwrap();
+        admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                transport: Some("via_host:sshbox".into()),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap();
+        let fake = crate::ssh_fake::FakeSsh::new();
+        let agent = |alias: &str| AddHostArgs {
+            alias: alias.into(),
+            ssh_alias: alias.into(),
+            transport: Some("agent".into()),
+        };
+        let e = add_host(agent("sshbox"), &st, &fake).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(
+            e.message.contains(&format!("tracker {id}"))
+                && e.message.contains("curl on sshbox")
+                && e.message.contains("fleet-agent"),
+            "{}",
+            e.message
+        );
+        assert!(fake.calls().is_empty(), "refused before the probe");
+        {
+            let s = st.lock().unwrap();
+            let host = s
+                .list_hosts()
+                .unwrap()
+                .into_iter()
+                .find(|h| h.alias == "sshbox")
+                .unwrap();
+            assert_eq!(host.transport, "ssh");
+            assert_eq!(s.require_tracker(id).unwrap().transport, "via_host:sshbox");
+        }
+        add_host(agent("other"), &st, &fake)
+            .await
+            .expect("no tracker runs on it");
     }
 
     #[test]

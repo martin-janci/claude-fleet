@@ -359,9 +359,9 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
             registers: "reconcile_one_host(",
         },
         CreateSite {
-            what: "rename_session",
+            what: "rename_session_with",
             source: LIFECYCLE,
-            signature: "pub async fn rename_session(",
+            signature: "pub(super) async fn rename_session_with(",
             tmux: &["tmux.rename_session(&args.old_name, &args.new_name)"],
             registers: "reconcile_one_host(",
         },
@@ -635,6 +635,105 @@ async fn a_lost_session_with_a_conversation_blocks_its_name() {
         .unwrap()
         .unwrap();
     assert_eq!(row.claude_session_id.as_deref(), Some(RESUME_ID));
+}
+
+/// A tmux executor for the rename race: renaming into `dev-new` lands a
+/// lost session of that name in the store, as a reconcile pass running
+/// beside the rename (with the store lock released) would.
+struct RacingTmux {
+    store: std::sync::Arc<Mutex<crate::store::Store>>,
+    renames: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl crate::tmux::TmuxExec for RacingTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        Ok(Vec::new())
+    }
+    async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
+        self.renames.lock().unwrap().push((old.into(), new.into()));
+        if new == "dev-new" {
+            lost_row(&self.store.lock().unwrap(), "dev-new", Some(RESUME_ID));
+        }
+        Ok(())
+    }
+    async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        None
+    }
+}
+
+/// The lost-name guard runs twice: under the lock before tmux renames, and
+/// again inside `Store::rename_session_row`. A lost row named `new` that
+/// lands between the two is refused by the second — rightly — but by then
+/// tmux already answers to `new`: the pane is renamed back before the
+/// refusal is reported, so tmux and the row agree, and the lost row is
+/// left as it was.
+#[tokio::test]
+async fn a_lost_name_that_lands_during_the_tmux_rename_is_refused_and_renamed_back() {
+    let store = std::sync::Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-old", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+    }
+    let tmux = RacingTmux {
+        store: std::sync::Arc::clone(&store),
+        renames: Mutex::new(Vec::new()),
+    };
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let err = rename_session_with(
+        RenameSessionArgs {
+            host_alias: "local".into(),
+            old_name: "dev-old".into(),
+            new_name: "dev-new".into(),
+        },
+        &store,
+        &ssh,
+        &tmux,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert!(
+        err.message.starts_with("dev-new belongs to a lost session"),
+        "{}",
+        err.message
+    );
+    assert_eq!(
+        *tmux.renames.lock().unwrap(),
+        vec![
+            ("dev-old".to_string(), "dev-new".to_string()),
+            ("dev-new".to_string(), "dev-old".to_string()),
+        ],
+        "renamed, refused, renamed back"
+    );
+    let s = store.lock().unwrap();
+    assert!(
+        s.get_session("dev-old", "local").unwrap().is_some(),
+        "the row keeps its name"
+    );
+    assert!(
+        s.lost_resumable_session_named("local", "dev-new")
+            .unwrap()
+            .is_some(),
+        "the lost row is untouched"
+    );
 }
 
 /// A lost row with no conversation has nothing to resume, so the name is

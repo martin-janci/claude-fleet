@@ -1122,6 +1122,19 @@ pub async fn rename_session(
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
+    let tmux = exec_for(&args.host_alias, ssh);
+    rename_session_with(args, store, ssh, &*tmux).await
+}
+
+/// [`rename_session`] with its tmux executor as a parameter — the seam a
+/// test drives the race below through with a fake.
+pub(super) async fn rename_session_with(
+    args: RenameSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    tmux: &dyn crate::tmux::TmuxExec,
+) -> Result<SessionRow, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.old_name)?;
     crate::validate::tmux_name(&args.new_name)?;
     // The operator's identity IS `(host, tmux name)`, so a rename does not
@@ -1140,7 +1153,6 @@ pub async fn rename_session(
         // its timeline, participant and restore entry. Refuse first.
         reject_lost_session_name(&s, &args.host_alias, &args.new_name)?;
     }
-    let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     // The session now answers to `new_name`, which may be a name fleet killed
     // a moment ago; the reconcile below must be free to insert it.
@@ -1149,9 +1161,26 @@ pub async fn rename_session(
     // keys rows on the tmux name, and left alone it would insert a new row
     // and reap this one — its id, participant (inbox, address), timeline
     // and conversations with it.
-    {
+    let carried = {
         let s = lock(store)?;
-        s.rename_session_row(&args.host_alias, &args.old_name, &args.new_name, now_unix())?;
+        s.rename_session_row(&args.host_alias, &args.old_name, &args.new_name, now_unix())
+    };
+    if let Err(e) = carried {
+        // The store runs the lost-name guard once more, under its own lock:
+        // a lost row named `new_name` can land between the check above and
+        // here (the tmux rename runs with the lock released), and refusing
+        // it is right — but tmux already answers to `new_name`. Put the
+        // pane back before reporting, so it and the row still agree.
+        if let Err(back) = tmux.rename_session(&args.new_name, &args.old_name).await {
+            return Err(IpcError::new(
+                &e.code,
+                format!(
+                    "{}; and tmux could not be renamed back from {} to {}: {}",
+                    e.message, args.new_name, args.old_name, back.message
+                ),
+            ));
+        }
+        return Err(e);
     }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = lock(store)?;
