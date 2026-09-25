@@ -1352,75 +1352,11 @@ async fn a_listener_already_dialling_us_refuses_the_link_terminally() {
 
 // ---- the supervisor -----------------------------------------------------------
 
-struct Unreachable {
-    calls: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl crate::http_client::HubTransport for Unreachable {
-    async fn post_json(
-        &self,
-        _url: &str,
-        _bearer: &str,
-        _body: String,
-    ) -> Result<crate::http_client::HubResponse, String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err("connection refused".into())
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_supervisor_runs_a_dialer_link_and_stops_it_once_revoked() {
-    let (a, a_ssh) = hub("fleet-a");
-    let link = a
-        .lock()
-        .unwrap()
-        .insert_dialer_link("https://b.example", "t")
-        .unwrap();
-    let transport = Arc::new(Unreachable {
-        calls: AtomicUsize::new(0),
-    });
-    let cancel = CancellationToken::new();
-    let h = super::supervisor::spawn_peer_supervisor(
-        a.clone(),
-        a_ssh,
-        transport.clone(),
-        cancel.clone(),
-    );
-    let row = || a.lock().unwrap().peer_link(link).unwrap().unwrap();
-    let t0 = std::time::Instant::now();
-    loop {
-        let r = row();
-        if r.last_error.is_some() {
-            assert_eq!(r.state, "retrying");
-            assert!(
-                r.last_error
-                    .as_deref()
-                    .unwrap()
-                    .contains("connection refused"),
-                "{:?}",
-                r.last_error
-            );
-            break;
-        }
-        assert!(t0.elapsed() < Duration::from_secs(1), "no attempt in 1 s");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    a.lock().unwrap().revoke_peer_link(link, 1).unwrap();
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    let settled = transport.calls.load(Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(
-        transport.calls.load(Ordering::SeqCst),
-        settled,
-        "a revoked link is no longer dialled"
-    );
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(6), h)
-        .await
-        .unwrap()
-        .unwrap();
-}
+// The supervisor's own stop of a revoked link (the loop parked in the
+// peer's long-poll, cancelled by the rescan, not restarted) is in
+// `supervisor.rs`'s tests, where the running map and the loop's exit are in
+// reach: over the public `spawn_peer_supervisor` a cancel and the loop's
+// own `Revoked` exit read the same from outside.
 
 /// B's `/mcp` as a `HubTransport`: the bearer names a peer client token on
 /// B (401 once revoked, as the auth layer answers), the body is the
