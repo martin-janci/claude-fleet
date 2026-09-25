@@ -699,8 +699,12 @@
       ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
       project_ids: [projectId, ...alsoIn],
       host_alias: host,
+      name: friendlyName.trim() || undefined,
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
       with_brief: briefOn,
+      // The brief and name as edited, the same as a single start: the
+      // backend applies them to every sibling.
+      brief: briefOn && briefEdited ? briefDraft : undefined,
     });
     busy = false;
     if (!r.ok) {

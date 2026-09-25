@@ -89,6 +89,44 @@ describe('TodayView', () => {
     expect(screen.getByTestId('today-error').textContent).toContain('hub unreachable');
   });
 
+  it('a hub without work_today keeps the plain empty state and stops re-asking on row events', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      for (const code of ['E_FORBIDDEN', 'E_HUB_PROTOCOL', 'E_INVALID']) {
+        vi.mocked(invoke).mockClear();
+        vi.mocked(invoke).mockImplementation(async () => {
+          throw { code, message: `${code}: work_today is not a client-callable tool` };
+        });
+        const { unmount } = render(TodayView);
+        await flush();
+        const asked = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_today').length;
+        expect(asked()).toBe(1);
+        expect(screen.queryByTestId('today-error')).toBeNull();
+        expect(screen.getByTestId('details-empty').textContent).toBe('Pick a session to see details.');
+        // A row event would normally refresh 2 s later; not on this hub.
+        sessions.set([session('mefistos', 'pay', { id: 41 })]);
+        vi.advanceTimersByTime(2_500);
+        await flush();
+        expect(asked()).toBe(1);
+        expect(screen.queryByTestId('today-error')).toBeNull();
+        unmount();
+      }
+      // Any other refusal still shows, and the row events keep refreshing.
+      vi.mocked(invoke).mockClear();
+      vi.mocked(invoke).mockImplementation(async () => {
+        throw { code: 'E_HUB', message: 'hub unreachable' };
+      });
+      render(TodayView);
+      await flush();
+      sessions.set([session('mefistos', 'old', { id: 42 })]);
+      vi.advanceTimersByTime(2_500);
+      await flush();
+      expect(vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_today').length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('Stale sessions fleet suggests tidying open Tidy up with just those picked (M9)', async () => {
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'work_today') return digest;

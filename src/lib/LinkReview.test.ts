@@ -72,6 +72,39 @@ describe('LinkReview', () => {
     expect(screen.queryByTestId('link-review-sheet')).toBeNull();
   });
 
+  it('Enter/Backspace/y/n from a focused button are not sheet chords', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const chord = (key: string) =>
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    // Cursor is on row 0. Enter on row 1's "Not this" must reach that button
+    // (a bubbling keydown, like a real key press), not confirm row 0.
+    const notThis = screen.getAllByTestId('link-review-no')[1];
+    notThis.focus();
+    for (const key of ['Enter', 'Backspace', 'y', 'n']) {
+      const ev = chord(key);
+      notThis.dispatchEvent(ev);
+      expect(ev.defaultPrevented).toBe(false);
+    }
+    // Enter on close must close, not confirm.
+    const close = screen.getByTestId('link-review-close');
+    close.focus();
+    const onClose = chord('Enter');
+    close.dispatchEvent(onClose);
+    expect(onClose.defaultPrevented).toBe(false);
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('confirm_session_work', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+    expect(screen.getByTestId('link-review-sheet')).toBeTruthy();
+    // From the sheet itself the chord still decides the cursor row.
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'Enter' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 1, link_id: 11 },
+    });
+  });
+
   it('clicking a suggestion shows only that session; closing the sheet lifts it', async () => {
     sessions.set(rows());
     render(LinkReview);

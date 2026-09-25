@@ -116,6 +116,35 @@ describe('Settings → Work, standalone', () => {
     ).toEqual(['list_trackers']);
   });
 
+  it('forgets the token and email on Cancel and on a failed add, so nothing is pre-filled next time', async () => {
+    const inv = route([]);
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), { target: { value: 'https://acme.atlassian.net' } });
+    await fireEvent.input(screen.getByTestId('connect-email'), { target: { value: 'me@acme.com' } });
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('connect-cancel'));
+    await tick();
+    expect(screen.queryByTestId('connect-form')).toBeNull();
+    await fireEvent.click(screen.getByTestId('connect-jira'));
+    await tick();
+    expect((screen.getByTestId('connect-token') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-email') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-submit') as HTMLButtonElement).disabled).toBe(true);
+    // A failed add_tracker keeps the form open with the error, but not the secret.
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'add_tracker') throw { code: 'E_INVALID', message: 'not a tracker site' };
+      if (cmd === 'list_trackers') return [];
+      return null;
+    });
+    await fireEvent.input(screen.getByTestId('connect-email'), { target: { value: 'me@acme.com' } });
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(screen.getByTestId('connect-error').textContent).toMatch(/not a tracker site/));
+    expect((screen.getByTestId('connect-token') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-email') as HTMLInputElement).value).toBe('');
+  });
+
   it('shows a failed test in the form', async () => {
     route([], {
       add_tracker: row({ state: 'unconfigured' }),
@@ -181,6 +210,84 @@ describe('Settings → Work, other providers (work graph M6)', () => {
       transport: 'via_cli:devbox',
     });
     expect(inv.mock.calls.some((c) => c[0] === 'set_tracker_credential')).toBe(false);
+  });
+
+  it('re-connecting an existing Data Center site updates its CA and private-network flag on the row', async () => {
+    const dc = row({
+      id: 9,
+      provider: 'jira_dc',
+      name: 'corp',
+      site_url: 'https://jira.corp.example',
+      state: 'unreachable',
+      has_credential: true,
+      settings: { allow_private_network: false },
+    });
+    const inv = route([dc], {
+      update_tracker: { ...dc, settings: { extra_ca: 'PEM', allow_private_network: true } },
+      set_tracker_credential: dc,
+      test_tracker: { tracker: { ...dc, state: 'ok' }, ok: true, views: ['My work'] },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await fireEvent.click(screen.getByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), { target: { value: 'https://jira.corp.example' } });
+    await fireEvent.change(screen.getByTestId('connect-provider'), { target: { value: 'jira_dc' } });
+    await tick();
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.input(screen.getByTestId('connect-ca'), { target: { value: 'PEM' } });
+    await fireEvent.click(screen.getByTestId('connect-private'));
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
+    const cmds = inv.mock.calls
+      .map((c) => c[0])
+      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions'].includes(c as string));
+    // No second row; the settings reach the existing one before the credential.
+    expect(cmds).toEqual(['update_tracker', 'set_tracker_credential', 'test_tracker']);
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toEqual({
+      tracker_id: 9,
+      transport: undefined,
+      settings: { extra_ca: 'PEM', allow_private_network: true },
+    });
+    const cred = inv.mock.calls.find((c) => c[0] === 'set_tracker_credential')!;
+    expect((cred[1] as { args: Record<string, unknown> }).args).toMatchObject({ tracker_id: 9, secret: TOKEN });
+  });
+
+  it('re-connecting an existing GitHub site with another gh host updates its transport', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([
+      { alias: 'devbox', ssh_alias: null, reachable: true } as never,
+      { alias: 'other', ssh_alias: null, reachable: true } as never,
+    ]);
+    const gh = row({
+      id: 7,
+      provider: 'github',
+      name: 'acme (GitHub)',
+      site_url: 'https://github.com/acme',
+      transport: 'via_cli:devbox',
+      has_credential: false,
+      state: 'unreachable',
+    });
+    const inv = route([gh], {
+      update_tracker: { ...gh, transport: 'via_cli:other' },
+      test_tracker: { tracker: { ...gh, transport: 'via_cli:other', state: 'ok' }, ok: true, views: ['My issues'] },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await fireEvent.click(screen.getByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://github.com/acme/api/issues/42' },
+    });
+    await tick();
+    await fireEvent.change(screen.getByTestId('connect-gh-host'), { target: { value: 'other' } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'test_tracker')).toBe(true));
+    expect(inv.mock.calls.some((c) => c[0] === 'add_tracker')).toBe(false);
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toMatchObject({
+      tracker_id: 7,
+      transport: 'via_cli:other',
+    });
   });
 
   it('connects Asana with a token and no email', async () => {
