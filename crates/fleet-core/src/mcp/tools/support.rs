@@ -902,6 +902,14 @@ pub(super) struct InboxSummary {
     pub(super) from_addr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) to_addr: Option<String>,
+    /// `true` for a row from another hub over a link (`from_addr` set): the
+    /// preview is that peer's text with the untrusted-content marker
+    /// stripped for room, so the flag carries what the marker would (D8:
+    /// every rendering of peer text says it is untrusted). Absent for a
+    /// local row. Unforgeable: a peer's own marker lines are neutralised in
+    /// `apply.rs`, and this field comes from the row, never the body.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) untrusted: bool,
 }
 
 pub(super) const INBOX_PREVIEW_CHARS: usize = 80;
@@ -915,8 +923,10 @@ impl From<crate::store::SessionMessage> for InboxSummary {
         // can run well past `INBOX_PREVIEW_CHARS`, so an unstripped preview
         // is all marker and no message. `from_addr` is set only for a
         // remote row, and the row is still flagged foreign via that same
-        // field either way, so stripping the marker here loses no signal.
-        let preview_source: &str = if m.from_addr.is_some() {
+        // field AND the `untrusted` flag below, so stripping the marker
+        // here loses no signal.
+        let untrusted = m.from_addr.is_some();
+        let preview_source: &str = if untrusted {
             guard::strip_marker(&m.body)
         } else {
             &m.body
@@ -934,6 +944,7 @@ impl From<crate::store::SessionMessage> for InboxSummary {
             body_preview,
             from_addr: m.from_addr,
             to_addr: m.to_addr,
+            untrusted,
         }
     }
 }

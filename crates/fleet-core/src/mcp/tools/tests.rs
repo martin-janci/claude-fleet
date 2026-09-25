@@ -825,6 +825,18 @@ fn a_remote_messages_inbox_preview_strips_the_untrusted_marker() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "short reply");
+    // D8: every rendering of peer text says it is untrusted — the slim row
+    // lost the marker to the preview cap, so it carries the flag instead.
+    assert!(summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert_eq!(v["untrusted"], true, "{v}");
+    assert!(
+        !v["body_preview"]
+            .as_str()
+            .unwrap()
+            .contains("[claude-fleet"),
+        "{v}"
+    );
 }
 
 /// A local message's `body` carries no marker, so the preview is untouched.
@@ -844,6 +856,12 @@ fn a_local_messages_inbox_preview_is_the_raw_body() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "hi there");
+    assert!(!summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert!(
+        v.get("untrusted").is_none(),
+        "a local row carries no flag: {v}"
+    );
 }
 
 #[test]
