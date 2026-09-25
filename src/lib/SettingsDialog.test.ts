@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts, type HostRow } from './hosts';
-import { composerPresets, resetComposerPresets, DEFAULT_PRESETS } from './composer_presets';
+import { composerPresets, flushComposerPresets } from './composer_presets';
 
 const sample: HostRow[] = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -454,31 +454,52 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
   });
 
-  it('lists the composer presets and edits them in place', async () => {
-    resetComposerPresets();
+  it('lists the composer presets and edits them in place, saving through the backend', async () => {
+    // The list is fleet state now (`service::quick_replies`), so the editor
+    // starts from what the backend served and every edit is a write to it —
+    // debounced, which is why each assertion flushes.
+    const seeded = [
+      { label: 'Clear', text: '/clear' },
+      { label: 'Compact', text: '/compact' },
+    ];
+    composerPresets.set(seeded);
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a?: { entries?: unknown }) => {
+      if (cmd === 'quick_replies') return seeded;
+      if (cmd === 'set_quick_replies') return a?.entries;
+      return base(cmd, a);
+    });
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
     const section = screen.getByTestId('composer-section');
     expect(section.textContent).toContain('Conversation composer');
     const labels = screen.getAllByTestId('preset-label') as HTMLInputElement[];
-    expect(labels).toHaveLength(DEFAULT_PRESETS.length);
-    expect(labels[0].value).toBe(DEFAULT_PRESETS[0].label);
+    expect(labels).toHaveLength(seeded.length);
+    expect(labels[0].value).toBe('Clear');
 
     await fireEvent.input(labels[0], { target: { value: 'Wipe' } });
     expect(get(composerPresets)[0].label).toBe('Wipe');
     const texts = screen.getAllByTestId('preset-text') as HTMLTextAreaElement[];
     await fireEvent.input(texts[0], { target: { value: '/clear now' } });
     expect(get(composerPresets)[0].text).toBe('/clear now');
+    await flushComposerPresets();
+    expect(inv).toHaveBeenCalledWith('set_quick_replies', {
+      entries: [{ label: 'Wipe', text: '/clear now' }, seeded[1]],
+    });
 
     await fireEvent.click(screen.getByTestId('preset-add'));
-    expect(get(composerPresets)).toHaveLength(DEFAULT_PRESETS.length + 1);
-    expect(screen.getAllByTestId('preset-label')).toHaveLength(DEFAULT_PRESETS.length + 1);
+    expect(get(composerPresets)).toHaveLength(seeded.length + 1);
+    expect(screen.getAllByTestId('preset-label')).toHaveLength(seeded.length + 1);
 
     await fireEvent.click(screen.getAllByTestId('preset-remove')[0]);
-    expect(get(composerPresets)[0].label).toBe(DEFAULT_PRESETS[1].label);
+    expect(get(composerPresets)[0].label).toBe('Compact');
 
+    // Reset stores nothing and takes the backend's built-ins back.
+    inv.mockClear();
     await fireEvent.click(screen.getByTestId('preset-reset'));
-    expect(get(composerPresets)).toEqual(DEFAULT_PRESETS);
+    await flushComposerPresets();
+    expect(inv).toHaveBeenCalledWith('set_quick_replies', { entries: [] });
   });
 });
 

@@ -758,6 +758,33 @@ impl HubBackend {
         Ok(page.worktrees)
     }
 
+    /// `commands::quick_replies::quick_replies`.
+    ///
+    /// Sends no `set` key at all rather than `set: null` — a present-but-null
+    /// `set` is "replace with nothing" to a stricter reader than today's
+    /// `Option`, and the difference between those two readings is a fleet's
+    /// whole chip row.
+    pub async fn quick_replies(
+        &self,
+    ) -> Result<Vec<fleet_core::service::quick_replies::QuickReply>, IpcError> {
+        self.route("quick_replies", &json!({})).await
+    }
+
+    /// `commands::quick_replies::set_quick_replies`.
+    ///
+    /// Its own call rather than an argument to the one above, because the two
+    /// commands are two rows in the table even though they reach one tool:
+    /// `route` takes the COMMAND name and looks the tool up, so each command
+    /// has to name itself here. The answer is the stored list either way, so
+    /// the write needs no follow-up read to see what the hub made of it.
+    pub async fn set_quick_replies(
+        &self,
+        entries: Vec<fleet_core::service::quick_replies::QuickReply>,
+    ) -> Result<Vec<fleet_core::service::quick_replies::QuickReply>, IpcError> {
+        self.route("set_quick_replies", &json!({ "set": entries }))
+            .await
+    }
+
     /// `commands::tasks::list_tasks`.
     pub async fn list_tasks(
         &self,

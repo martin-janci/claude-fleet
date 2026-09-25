@@ -137,6 +137,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // The composer's shared chip row. One tool both reads and replaces the
+    // list, so it is classified as a write and a `readonly` client cannot
+    // call it at all — not even to read. That is deliberate: a readonly
+    // device draws no chip row (every chip is a prompt it may not send), so
+    // the read it loses is a read it has no screen for, and the alternative
+    // — a second tool whose only job is the read — costs every connected
+    // client another definition for a list of at most 24 short strings.
+    ToolPolicy {
+        name: "quick_replies",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "add_host",
         access: Access::Master,

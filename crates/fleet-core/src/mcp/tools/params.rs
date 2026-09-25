@@ -569,6 +569,14 @@ pub struct RegisterSelfParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct QuickRepliesParams {
+    /// The whole chip list to store, replacing what is there ([] restores the
+    /// built-in defaults). Omit to read the current list instead.
+    #[serde(default)]
+    pub set: Option<Vec<crate::service::quick_replies::QuickReply>>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SetClipboardParams {
     /// Host alias whose clipboard to overwrite.
     pub host_alias: String,

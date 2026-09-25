@@ -231,6 +231,12 @@ Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks, an
 
 Parameters: `rotate`
 
+### `quick_replies`
+
+Read or replace the fleet's quick replies: the shared chip row every composer draws above its prompt box, as [{label, text}] (label is what the button says, text what it sends). Call with no arguments to read. Pass `set` to replace the whole list (max 24 chips; [] restores the built-in defaults). Last write wins — there is no per-chip add or remove. Errors: E_INVALID (too many chips, a chip with no text, a label or text over its cap).
+
+Parameters: `set`
+
 ### `recreate_session`
 
 Recreate a session: kill its tmux session and rebuild it fresh in the same worktree, resuming the same Claude conversation. Use when the session is frozen, OOM-killed or out of context, or to revive a ghost — the conversation survives, the process does not. Works for running or ghost sessions. Returns the session row as JSON.
@@ -580,6 +586,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`
+- `commands::quick_replies::quick_replies`
+- `commands::quick_replies::set_quick_replies`
 - `commands::sessions::get_fleet_settings`
 - `commands::sessions::set_fleet_setting`
 - `commands::tasks::list_tasks`

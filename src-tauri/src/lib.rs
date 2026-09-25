@@ -347,6 +347,8 @@ pub fn run() {
             commands::sessions::dismiss_agent_session,
             commands::sessions::new_bg_session,
             commands::sessions::purge_project,
+            commands::quick_replies::quick_replies,
+            commands::quick_replies::set_quick_replies,
             commands::sessions::get_fleet_settings,
             commands::sessions::set_fleet_setting,
             commands::tasks::list_tasks,

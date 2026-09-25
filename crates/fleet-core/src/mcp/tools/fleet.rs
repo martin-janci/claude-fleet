@@ -91,6 +91,33 @@ impl FleetTools {
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Read or replace the fleet's quick replies: the \
+        shared chip row every composer draws above its prompt box, as \
+        [{label, text}] (label is what the button says, text what it sends). \
+        Call with no arguments to read. Pass `set` to replace the whole list \
+        (max 24 chips; [] restores the built-in defaults). Last write wins — \
+        there is no per-chip add or remove. Errors: E_INVALID (too many \
+        chips, a chip with no text, a label or text over its cap).")]
+    pub(super) async fn quick_replies(
+        &self,
+        Parameters(p): Parameters<QuickRepliesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Chip TEXT is a prompt the operator wrote; the count is the whole
+        // audit line, same rule as set_clipboard's body.
+        audit(
+            "quick_replies",
+            &match &p.set {
+                Some(entries) => format!("set={}", entries.len()),
+                None => "read".to_string(),
+            },
+        );
+        let entries = match p.set {
+            Some(entries) => quick_replies::replace(&self.store, entries).map_err(to_mcp_err)?,
+            None => quick_replies::list(&self.store).map_err(to_mcp_err)?,
+        };
+        ok_json_compact(&entries)
+    }
+
     #[tool(
         description = "Register a new host. transport is \"ssh\" (the default: \
         probed first, persisted only if reachable) or \"agent\" (a host the hub \

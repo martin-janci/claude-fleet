@@ -597,6 +597,13 @@ What a client may do:
   `session_transcript`, `session_conversation`, `session_history`, `repo_*`,
   `wait_for_*`, …). Anything that sends, kills, deletes or writes answers
   `E_FORBIDDEN`.
+- **The composer's chip row is shared.** `quick_replies` is one tool that both
+  reads and replaces the fleet's quick replies — the prompt presets the
+  desktop composer and the phone both draw above their text box — so it is
+  classified as a write: a `full` client may call it and a `readonly` one is
+  not shown it (a readonly device draws no chip row to begin with). The list
+  itself is fleet state in the hub's database, not a device preference, so a
+  chip written on the laptop is on the phone and the other way round.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
@@ -1641,7 +1648,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 175 commands, 72 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
