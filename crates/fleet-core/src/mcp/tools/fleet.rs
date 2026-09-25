@@ -322,6 +322,51 @@ impl FleetTools {
         ok_json(&ClientSummary::from(row))
     }
 
+    // ---- operator settings ----
+
+    #[tool(description = "Read the operator settings (ticks, GC, playbooks, \
+        projects roots, move, usage, reports, work graph): each key's \
+        effective value, the default when unset. Master token only. Returns \
+        a JSON object of key to string.")]
+    pub(super) async fn get_settings(&self) -> Result<CallToolResult, McpError> {
+        audit("get_settings", "");
+        let all = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings::read_all(&s)
+        };
+        ok_json_compact(&all)
+    }
+
+    #[tool(description = "Change one operator setting, a key get_settings \
+        returns, validated against its shape. E_INVALID for an unknown or \
+        derived key or a bad value; mcp.*, hub.* and controller.* are not \
+        settable. Read on the next tick. Master token only. Returns the \
+        settings, as get_settings.")]
+    pub(super) async fn set_setting(
+        &self,
+        Parameters(p): Parameters<SetSettingParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // The key only: a value is not a secret here, but the audit trail
+        // keeps values out of every tool alike.
+        audit("set_setting", &format!("key={}", p.key.escape_debug()));
+        let value = match p.value {
+            serde_json::Value::String(v) => v,
+            serde_json::Value::Null => return Err(mcp_err(
+                codes::E_INVALID,
+                "value is required: to go back to the default, set the default get_settings shows",
+                None,
+            )),
+            other => other.to_string(),
+        };
+        let all = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings::set(&s, &p.key, &value).map_err(to_mcp_err)?;
+            crate::service::settings::read_all(&s)
+        };
+        tracing::info!(key = %p.key.escape_debug(), "[mcp] changed a setting");
+        ok_json_compact(&all)
+    }
+
     // ---- workspace repair ----
 }
 
