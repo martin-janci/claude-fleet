@@ -15,6 +15,7 @@ use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::trackers::admin::{self, TestReport, WorkAdminArgs};
+use fleet_core::service::trackers::sync::SyncMetrics;
 use fleet_core::service::trackers::tickets::{MultiStart, Ticket};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store, TrackerRow};
@@ -179,6 +180,26 @@ pub fn remove_tracker(
         &store,
     )?;
     Ok(())
+}
+
+/// Work graph M11.4: the tracker sync's counters for each tracker's last
+/// pass (this process's sync, in memory). Fleet administration like the
+/// rest: `work_admin { action: status }` is master-only on the hub.
+#[tauri::command]
+pub fn tracker_sync_metrics(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<SyncMetrics>, IpcError> {
+    backend.refuse_local_only("tracker_sync_metrics")?;
+    let v = admin::admin_sync(
+        &WorkAdminArgs {
+            action: "status".into(),
+            ..Default::default()
+        },
+        &store,
+    )?;
+    serde_json::from_value(v)
+        .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
 }
 
 // --- reads and start (routed) -------------------------------------------------

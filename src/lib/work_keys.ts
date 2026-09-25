@@ -82,6 +82,8 @@ export interface RecognizeCtx {
 
 /** One recognised reference (mirrors the Rust `Match`, minus its span). */
 export interface TicketRef {
+  /** `repo_issue`: a GitHub issue of a named repository — a bare `#123`
+   *  against the session's repo, or an enterprise `host/owner/repo#123`. */
   kind: 'key' | 'url' | 'repo_issue';
   /** `ABC-123`, `owner/repo#42`, `asana:<task>`. */
   key: string;
@@ -117,7 +119,34 @@ function decode(s: string): string {
   }
 }
 
-function ticketUrl(raw: string): { key: string; provider: string; host: string } | null {
+/** A GitHub owner or repository name (mirrors `github_name` in
+ *  `recognize.rs`). */
+function githubName(s: string): boolean {
+  return s.length > 0 && s.length <= 100 && /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(s);
+}
+
+/** The configured GitHub Enterprise hosts (work graph M11.4): every GitHub
+ *  tracker's host that is not github.com, lower case. Only these hosts'
+ *  URLs and `host/owner/repo#n` refs are recognised — never an arbitrary
+ *  host's. */
+function ghesHosts(ctx: RecognizeCtx): string[] {
+  const out: string[] = [];
+  for (const t of ctx.trackers ?? []) {
+    if (t.provider !== 'github') continue;
+    const h = t.host.toLowerCase();
+    if (h && h !== 'github.com' && h !== 'www.github.com' && !out.includes(h)) out.push(h);
+  }
+  return out;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function ticketUrl(
+  raw: string,
+  ctx: RecognizeCtx,
+): { key: string; provider: string; host: string } | null {
   const rest = raw.slice(raw.indexOf('://') + 3);
   const cut = rest.search(/[/?#]/);
   const authority = cut < 0 ? rest : rest.slice(0, cut);
@@ -145,6 +174,13 @@ function ticketUrl(raw: string): { key: string; provider: string; host: string }
     const k = segs[1] === 'issue' && segs[2] ? wholeKey(segs[2]) : null;
     return k ? { key: k, provider: 'linear', host } : null;
   }
+  if (ghesHosts(ctx).includes(host)) {
+    const [o, r, kind, n] = segs;
+    if (o && r && githubName(o) && githubName(r) && kind === 'issues' && n && /^\d{1,9}$/.test(n)) {
+      return { key: `${host}/${o.toLowerCase()}/${r.toLowerCase()}#${n}`, provider: 'github', host };
+    }
+    return null;
+  }
   for (const pair of query.split('&')) {
     if (pair.startsWith('selectedIssue=')) {
       const k = wholeKey(decode(pair.slice('selectedIssue='.length)));
@@ -167,7 +203,7 @@ export function extractTicketRefs(text: string | null | undefined, ctx: Recogniz
     const raw = m[0].replace(/[.,;:!?]+$/, '');
     const at = m.index ?? 0;
     urls.push([at, at + raw.length]);
-    const t = ticketUrl(raw);
+    const t = ticketUrl(raw, ctx);
     if (!t) continue;
     const tracker = (ctx.trackers ?? []).find((x) => x.host.toLowerCase() === t.host);
     found.push({
@@ -200,6 +236,32 @@ export function extractTicketRefs(text: string | null | undefined, ctx: Recogniz
         upper_written: upper,
       },
     });
+  }
+  // `host/owner/repo#n` of a configured enterprise host (M11.4).
+  for (const host of ghesHosts(ctx)) {
+    const re = new RegExp(
+      `(?<![A-Za-z0-9._\\-/:@])${escapeRe(host)}\\/([A-Za-z0-9_.-]+)\\/([A-Za-z0-9_.-]+)#(\\d{1,9})(?![A-Za-z0-9_])`,
+      'gi',
+    );
+    for (const m of text.matchAll(re)) {
+      const at = m.index ?? 0;
+      const [whole, o, r, n] = m;
+      if (inUrl(at) || !githubName(o) || !githubName(r)) continue;
+      const tracker = (ctx.trackers ?? []).find(
+        (x) => x.provider === 'github' && x.host.toLowerCase() === host,
+      );
+      found.push({
+        at,
+        ref: {
+          kind: 'repo_issue',
+          key: `${host}/${o.toLowerCase()}/${r.toLowerCase()}#${n}`,
+          tracker_id: tracker ? tracker.id : null,
+          provider: 'github',
+          text: whole,
+          upper_written: false,
+        },
+      });
+    }
   }
   const repo = ctx.repo;
   if (repo && repo.includes('/')) {

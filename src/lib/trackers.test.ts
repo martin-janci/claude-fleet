@@ -334,3 +334,99 @@ describe('keys across providers', () => {
     ]);
   });
 });
+
+// --- work graph M11.4: GitHub Enterprise Server and sync metrics -------------
+
+import { ghesHostOk, ghesHostname, describeSyncMetrics } from './trackers';
+
+describe('GitHub Enterprise Server', () => {
+  it('a GitHub-shaped issue URL on another host is offered with its hostname', () => {
+    expect(inferProvider('https://GHE.corp.example/Acme/API/issues/42')).toEqual({
+      provider: 'github',
+      site: 'https://ghe.corp.example/acme',
+      key: 'ghe.corp.example/acme/api#42',
+      hostname: 'ghe.corp.example',
+    });
+    expect(inferProvider('https://ghe.corp.example:8443/acme/api/issues/7')).toEqual({
+      provider: 'github',
+      site: 'https://ghe.corp.example/acme',
+      key: 'ghe.corp.example/acme/api#7',
+      hostname: 'ghe.corp.example:8443',
+    });
+    for (const bad of [
+      'https://ghe.corp.example/acme',
+      'https://ghe.corp.example/acme/api/pull/7',
+      'https://ghe.corp.example/.x/api/issues/7',
+      'https://127.0.0.1/acme/api/issues/7',
+      'https://[::1]/acme/api/issues/7',
+      'https://localhost/acme/api/issues/7',
+      'https://ghe/acme/api/issues/7',
+      'http://ghe.corp.example/acme/api/issues/7',
+      'https://u:p@ghe.corp.example/acme/api/issues/7',
+      'https://acme.atlassian.net:8443/acme/api/issues/7',
+      'https://github.com:8443/acme/api/issues/7',
+    ]) {
+      expect(inferProvider(bad), bad).toBeNull();
+    }
+  });
+
+  it('the host fence mirrors the backend', () => {
+    for (const ok of ['ghe.corp.example', 'git-hub.x1.example']) expect(ghesHostOk(ok), ok).toBe(true);
+    for (const bad of [
+      'localhost',
+      'a.localhost',
+      '127.0.0.1',
+      'ghe',
+      'github.com',
+      'api.github.com',
+      'github.com.evil.example',
+      'x.github.com',
+      'metadata.google.internal',
+      'a;b.example',
+      '-a.example',
+      'GHE.example',
+    ]) {
+      expect(ghesHostOk(bad), bad).toBe(false);
+    }
+  });
+
+  it('claims keep github.com and each enterprise instance apart', () => {
+    const gh = tracker({ id: 2, provider: 'github', site_url: 'https://github.com/acme', config: {} });
+    const ghe = tracker({
+      id: 5,
+      provider: 'github',
+      site_url: 'https://ghe.corp.example/acme',
+      settings: { hostname: 'ghe.corp.example:8443' },
+      config: {},
+    });
+    const list = [gh, ghe];
+    expect(trackerClaims('acme/api#42', list).map((t) => t.id)).toEqual([2]);
+    expect(trackerClaims('ghe.corp.example/acme/api#42', list).map((t) => t.id)).toEqual([5]);
+    expect(trackerClaims('ghe.other.example/acme/api#42', list)).toEqual([]);
+    expect(trackerClaims('ghe.corp.example/other/api#42', list)).toEqual([]);
+    expect(ghesHostname(ghe)).toBe('ghe.corp.example:8443');
+    expect(ghesHostname({ ...ghe, settings: {} })).toBe('ghe.corp.example');
+    expect(ghesHostname(gh)).toBeNull();
+    expect(ghesHostname(tracker())).toBeNull();
+  });
+});
+
+describe('describeSyncMetrics', () => {
+  it('one line for a pass, nothing before the first one', () => {
+    expect(describeSyncMetrics(null)).toBeNull();
+    expect(describeSyncMetrics({ tracker_id: 1, last_pass_at: null })).toBeNull();
+    expect(
+      describeSyncMetrics({
+        tracker_id: 1,
+        last_pass_at: 5,
+        duration_ms: 950,
+        items_listed: 3,
+        items_changed: 1,
+        frames_emitted: 2,
+      }),
+    ).toBe('last pass 950 ms · 3 listed · 1 changed · 2 frames');
+    expect(describeSyncMetrics({ tracker_id: 1, last_pass_at: 5, duration_ms: 61_000 })).toBe(
+      'last pass 61.0 s · 0 listed · 0 changed · 0 frames',
+    );
+  });
+});

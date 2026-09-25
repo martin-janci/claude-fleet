@@ -288,20 +288,41 @@ pub fn canonical_key(raw: &str) -> String {
     }
 }
 
-/// `owner/repo#n` → `(owner/repo, n)`, both names `[A-Za-z0-9_.-]`.
+/// `owner/repo#n` → `(owner/repo, n)`, both names `[A-Za-z0-9_.-]`; a
+/// GitHub Enterprise Server issue's `host/owner/repo#n` (work graph M11.4)
+/// → `(host/owner/repo, n)`, the host a DNS name
+/// ([`super::trackers::ghes_host_ok`], lower case, no port).
 pub fn github_ref(s: &str) -> Option<(&str, u64)> {
     let (repo, n) = s.rsplit_once('#')?;
-    let (o, r) = repo.split_once('/')?;
+    split_github_repo(repo)?;
+    if n.is_empty() || n.len() > 9 {
+        return None;
+    }
+    Some((repo, n.parse().ok()?))
+}
+
+/// A GitHub reference's repository part → `(enterprise host, owner/repo)`:
+/// `owner/repo` is github.com's (`None`), `host/owner/repo` an enterprise
+/// instance's. `None` when it is neither.
+pub fn split_github_repo(repo: &str) -> Option<(Option<&str>, &str)> {
     let name_ok = |x: &str| {
         !x.is_empty()
             && !x.starts_with(['.', '-'])
             && x.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
     };
-    if !(name_ok(o) && name_ok(r)) || n.is_empty() || n.len() > 9 {
-        return None;
+    let parts: Vec<&str> = repo.split('/').collect();
+    match parts.as_slice() {
+        [o, r] if name_ok(o) && name_ok(r) => Some((None, repo)),
+        [h, o, r]
+            if super::trackers::ghes_host_ok(&h.to_ascii_lowercase())
+                && name_ok(o)
+                && name_ok(r) =>
+        {
+            Some((Some(h), &repo[h.len() + 1..]))
+        }
+        _ => None,
     }
-    Some((repo, n.parse().ok()?))
 }
 
 /// `PREFIX-123`: a letter, then 1–9 of `[A-Za-z0-9_]`, a dash, 1–7 digits —

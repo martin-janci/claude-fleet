@@ -165,8 +165,9 @@ impl SessionChange {
     }
 }
 
-/// The trackers that may answer `key` (M6): a GitHub `owner/repo#n` the
-/// GitHub trackers whose scope covers the repository; an `asana:<gid>` every
+/// The trackers that may answer `key` (M6): a GitHub `owner/repo#n` (or an
+/// enterprise `host/owner/repo#n`, M11.4) the GitHub trackers of that
+/// instance whose scope covers the repository; an `asana:<gid>` every
 /// Asana tracker (the gid is global, the tracker that has it answers); a
 /// ticket key the trackers that own its prefix (Jira projects, Linear
 /// teams).
@@ -202,9 +203,25 @@ pub fn tracker_claims(trackers: &[super::TrackerRow], key: &str) -> Vec<i64> {
         .collect()
 }
 
-/// A GitHub tracker's scope covers `repo` (`owner/repo`, lower case): its
-/// `settings.repos` when set, else the site's owner, else everything.
+/// A GitHub tracker's scope covers `repo` (`owner/repo` on github.com, or
+/// `host/owner/repo` on an enterprise instance, lower case): the same
+/// instance as the tracker's site (M11.4), then its `settings.repos` when
+/// set, else the site's owner, else everything on that instance.
 pub fn github_covers(t: &super::TrackerRow, repo: &str) -> bool {
+    let Some((site_host, site_owner)) = super::trackers::github_site(&t.site_url) else {
+        return false;
+    };
+    let Some((host, repo)) = super::work::split_github_repo(repo) else {
+        return false;
+    };
+    let same_instance = match (site_host.as_deref(), host) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    };
+    if !same_instance {
+        return false;
+    }
     if !t.settings.repos.is_empty() {
         return t
             .settings
@@ -212,15 +229,10 @@ pub fn github_covers(t: &super::TrackerRow, repo: &str) -> bool {
             .iter()
             .any(|r| r.eq_ignore_ascii_case(repo));
     }
-    match t
-        .site_url
-        .trim_end_matches('/')
-        .strip_prefix("https://github.com/")
-        .filter(|o| !o.is_empty())
-    {
+    match site_owner {
         Some(owner) => repo
             .split_once('/')
-            .is_some_and(|(o, _)| o.eq_ignore_ascii_case(owner)),
+            .is_some_and(|(o, _)| o.eq_ignore_ascii_case(&owner)),
         None => true,
     }
 }
