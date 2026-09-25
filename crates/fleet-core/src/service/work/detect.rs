@@ -358,11 +358,18 @@ fn state_candidates(
         c.untracked = r.contains('#') && !github_tracker;
         pr.push(c);
     }
+    // A PR text naming more than the dump guard's worth of work (a release
+    // PR, an audit) is a reference list: none of it is this session's work,
+    // and dropping it here withdraws what a shorter text proposed (R7).
+    let text_distinct: BTreeSet<&str> = sig.text.iter().map(String::as_str).collect();
+    let no_refs = Vec::new();
+    let text = if text_distinct.len() > DUMP_GUARD_MAX {
+        &no_refs
+    } else {
+        &sig.text
+    };
     let mut events = Vec::new();
-    for (signal, refs) in [
-        (Signal::PrText, &sig.text),
-        (Signal::Trailer, &sig.trailers),
-    ] {
+    for (signal, refs) in [(Signal::PrText, text), (Signal::Trailer, &sig.trailers)] {
         for r in refs {
             let target = match (r.strip_prefix('#'), st.repo.as_deref()) {
                 (Some(n), Some(repo)) => format!("{}#{n}", repo.to_ascii_lowercase()),

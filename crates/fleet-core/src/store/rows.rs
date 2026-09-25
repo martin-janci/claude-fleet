@@ -246,6 +246,9 @@ pub struct SessionRow {
     pub work_rejected: Vec<String>,
     /// The session's top link SUGGESTION (work graph M4: a guess no one has
     /// decided), with the number of live suggestions in `suggestions`.
+    /// Once the session has confirmed work, a weak suggestion (a mention in
+    /// a prompt, a PR text, a trailer) no longer counts here: only a strong
+    /// one asks for a decision. The link itself stays in `work_links`.
     /// Kept apart from `work` on purpose: a peer older than M4 reads only
     /// `work`, so it can never mistake a guess for a link — and a guess
     /// never moves a session into a work group.
@@ -334,13 +337,23 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                          'suggestions', (SELECT COUNT(*) FROM work_links s2 \
                                           WHERE s2.participant_id = p.id \
                                             AND s2.ended_at IS NULL \
-                                            AND s2.state = 'suggested'), \
+                                            AND s2.state = 'suggested' \
+                                            AND (s2.strength IS NOT 'weak' OR NOT EXISTS \
+                                                 (SELECT 1 FROM work_links c \
+                                                   WHERE c.participant_id = p.id \
+                                                     AND c.ended_at IS NULL \
+                                                     AND c.is_primary = 1 \
+                                                     AND c.state = 'confirmed'))), \
                          'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.state = 'suggested' \
         LEFT JOIN work_items i ON i.id = l.item_id \
        WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
+         AND (l.strength IS NOT 'weak' OR NOT EXISTS \
+              (SELECT 1 FROM work_links c \
+                WHERE c.participant_id = p.id AND c.ended_at IS NULL \
+                  AND c.is_primary = 1 AND c.state = 'confirmed')) \
        ORDER BY l.preselected DESC, \
                 CASE l.strength WHEN 'strong' THEN 0 ELSE 1 END, \
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
