@@ -538,6 +538,68 @@ async fn a_per_host_token_never_sees_or_touches_another_orgs_candidates() {
     assert!(exec.calls().is_empty());
 }
 
+/// `work_link { snooze | never | archive }` without `link_id` resolves the
+/// primary first and checks it: B's forced link on A's own session is never
+/// flagged by A's token, with or without the id, and archive stamps only
+/// what the scope sees.
+#[test]
+fn lifecycle_flags_without_link_id_never_reach_another_orgs_primary() {
+    use crate::service::work::{work_link, WorkLinkArgs};
+    let o = orgs();
+    let (scope, b_link) = {
+        let s = o.store.lock().unwrap();
+        (
+            OrgScope::for_host(&s, "local").unwrap(),
+            s.session_work_links(o.x_sess).unwrap()[0].id,
+        )
+    };
+    let args = |sid: i64, action: &str, link_id: Option<i64>| WorkLinkArgs {
+        session_id: Some(sid),
+        action: action.into(),
+        link_id,
+        ..Default::default()
+    };
+    for (action, link_id) in [
+        ("never", None),
+        ("snooze", None),
+        ("never", Some(b_link)),
+        ("snooze", Some(b_link)),
+    ] {
+        let err = work_link(&args(o.x_sess, action, link_id), &o.store, &scope).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND, "{action} {link_id:?}");
+        assert!(!err.message.contains("BB-"));
+    }
+    assert_eq!(
+        work_link(&args(o.x_sess, "archive", None), &o.store, &scope)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID,
+        "no visible linked work to archive under"
+    );
+    let flags = |sid: i64| -> (i64, Option<i64>, Option<i64>) {
+        o.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT tidy_never, tidy_snoozed_until, archived_at FROM work_links \
+                 WHERE ended_at IS NULL AND participant_id = \
+                   (SELECT id FROM participants WHERE session_id = ?1 AND retired_at IS NULL)",
+                [sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(flags(o.x_sess), (0, None, None), "B's link is untouched");
+    // The same calls on A's own link work, and the master flags B's.
+    work_link(&args(o.a_sess, "never", None), &o.store, &scope).unwrap();
+    work_link(&args(o.a_sess, "archive", None), &o.store, &scope).unwrap();
+    let (never, _, archived) = flags(o.a_sess);
+    assert!(never == 1 && archived.is_some());
+    work_link(&args(o.x_sess, "never", None), &o.store, &OrgScope::All).unwrap();
+    assert_eq!(flags(o.x_sess).0, 1);
+}
+
 #[tokio::test]
 async fn auto_tidy_follows_the_org_override() {
     let o = orgs();

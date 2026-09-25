@@ -316,8 +316,23 @@ async fn apply_one(
             tidy_kill(store, exec, snap, s, &format!("{source}:{action}")).await
         }
         "archive" => {
+            // A per-host token stamps only the links it sees (work graph M5).
+            let only = if scope.is_all() {
+                None
+            } else {
+                let st = lock(store)?;
+                let mut links = st.session_work_links(s.row.id)?;
+                st.fill_link_orgs(&mut links)?;
+                Some(
+                    links
+                        .iter()
+                        .filter(|l| scope.sees_link(l))
+                        .map(|l| l.id)
+                        .collect::<Vec<i64>>(),
+                )
+            };
             record(store, s, &format!("{source}:archive:archived"));
-            lock(store)?.archive_session_work(s.row.id)?;
+            lock(store)?.archive_session_links(s.row.id, only.as_deref())?;
             Ok("archived")
         }
         "snooze" | "never" if !scope.is_all() && !link_visible(scope, s, item.link_id) => {
