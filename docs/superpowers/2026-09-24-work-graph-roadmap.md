@@ -532,6 +532,13 @@ fleet-mobile's `claude/cloud-fleet-work-graph-m8` is superseded by it. Note
 the plan's Revisions item 4 (an absent `work` on a row means none), which
 #32 follows.
 
+**M8.6** (the phone catches up with M4.6, M5 and M9.1–M9.3): `org_id` joins
+`PHONE_SESSION_FIELDS` (hub side, no contract bump); on fleet-mobile the
+*Today* sheet with *Copy standup*, a ticket's acceptance criteria and past
+work, *Ask for a handover* followed on the timeline, org labels and an org
+filter, and the `agent_inferred` wording — on fleet-mobile's
+`claude/cloud-fleet-work-graph-m8-6`, per the M8 plan's §M8.6.
+
 ### M9: beyond
 
 The ideas the review ranked, for when M1–M8 have settled.

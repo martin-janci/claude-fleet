@@ -405,3 +405,20 @@ each gated on the hub's `tools/list` like the rest of M8. No contract bump.
      and the journal reaches a phone only inside `context`.
   5. No `work:link` / `work:journal` event exists. Link changes arrive as
      `session:updated`, and handover progress as `session:event`.
+- **2026-09-25, M8.6 built** in fleet-mobile on
+  `claude/cloud-fleet-work-graph-m8-6` (on `main` after #33 and #34). As
+  planned, with these specifics:
+  1. *Today* sends local midnight through a `utcOffsetSeconds`
+     expect/actual; the app has no date library.
+  2. The Kotlin `standupText` keeps the desktop's test cases by name. One
+     departure: a session the phone has no row for yet keeps the digest's
+     own `org_id` instead of dropping out of every org.
+  3. The org directory is re-read with *My work* on a pull, not only on
+     `ready`.
+  4. A card the hub has not cached (`cached: false`) shows nothing, and the
+     description stays.
+  5. Past work is listed even while a session is live on the ticket.
+  6. The handover button needs a running fleet session: not background, a
+     shell, or external. The hub decides idle.
+  7. The work sheet now shows its own errors, since a banner behind a modal
+     sheet could not be read.
