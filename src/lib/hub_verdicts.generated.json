@@ -78,6 +78,7 @@
     "set_host_token_mode",
     "set_tracker_credential",
     "test_tracker",
+    "tracker_sync_metrics",
     "tunnel_status",
     "update_org",
     "update_tracker"

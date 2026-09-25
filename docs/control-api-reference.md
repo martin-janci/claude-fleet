@@ -548,6 +548,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::set_tracker_credential`
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
+- `commands::trackers::tracker_sync_metrics`
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
 - `commands::trackers::work_lookup`
