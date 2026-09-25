@@ -285,17 +285,31 @@ impl Store {
                         }
                         PrimaryRef::None => None,
                     };
-                    self.conn.execute(
-                        "UPDATE work_links SET is_primary = 0 \
-                         WHERE participant_id = ?1 AND ended_at IS NULL",
-                        rusqlite::params![participant],
-                    )?;
-                    if let Some(id) = id {
-                        self.conn.execute(
-                            "UPDATE work_links SET is_primary = 1 \
-                             WHERE id = ?1 AND state = 'confirmed' AND ended_at IS NULL",
-                            rusqlite::params![id],
-                        )?;
+                    match (r, id) {
+                        (PrimaryRef::None, _) => {
+                            self.conn.execute(
+                                "UPDATE work_links SET is_primary = 0 \
+                                 WHERE participant_id = ?1 AND ended_at IS NULL",
+                                rusqlite::params![participant],
+                            )?;
+                        }
+                        // One guarded statement: the old primary is cleared
+                        // only when the new one is a live confirmed link of
+                        // this participant. A Promote skipped above (cross-
+                        // org) left it suggested, so nothing moves.
+                        (_, Some(id)) => {
+                            self.conn.execute(
+                                "UPDATE work_links SET is_primary = (id = ?2) \
+                                 WHERE participant_id = ?1 AND ended_at IS NULL \
+                                   AND EXISTS(SELECT 1 FROM work_links n WHERE n.id = ?2 \
+                                       AND n.participant_id = ?1 AND n.state = 'confirmed' \
+                                       AND n.ended_at IS NULL)",
+                                rusqlite::params![participant, id],
+                            )?;
+                        }
+                        // The target's Create was skipped (cross-org): the
+                        // session keeps the primary it has.
+                        (_, None) => {}
                     }
                 }
             }

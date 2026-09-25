@@ -50,6 +50,23 @@ fn trust(f: &Fx) {
     set_project_trust(&f.s, f.project, true).unwrap();
 }
 
+/// A tracker item with `key` under `tracker`; its id.
+fn tracker_item(s: &Store, tracker: i64, ext: &str, key: &str) -> i64 {
+    s.upsert_tracker_item(
+        tracker,
+        &crate::store::TrackerItemWrite {
+            external_id: ext.into(),
+            key: Some(key.into()),
+            title: "Pay".into(),
+            status_name: "To Do".into(),
+            status_category: "todo".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .id
+}
+
 #[test]
 fn a_first_prompt_reference_is_a_preselected_suggestion_that_never_regroups() {
     let f = fx();
@@ -429,4 +446,51 @@ fn the_branch_is_the_last_main_thread_git_branch() {
     .join("\n");
     assert_eq!(branch_from_jsonl(&jsonl).as_deref(), Some("abc-3-z"));
     assert_eq!(branch_from_jsonl(""), None);
+}
+
+/// Work graph M5: a state candidate that crosses orgs is neither created
+/// nor promoted — and the Primary change that follows it must not demote
+/// the primary the session already has (a manual link from an earlier
+/// conversation), or the session would be left with no work at all.
+#[test]
+fn a_cross_org_branch_candidate_leaves_the_existing_primary_alone() {
+    let f = fx();
+    trust(&f);
+    let a = f.s.add_org("A", None, false).unwrap();
+    let b = f.s.add_org("B", None, false).unwrap();
+    f.s.set_host_org("h", Some(a.id)).unwrap();
+    let other =
+        f.s.add_tracker("jira", "Other", "https://other.atlassian.net")
+            .unwrap();
+    f.s.set_tracker_probe(
+        other.id,
+        None,
+        &TrackerConfig {
+            key_prefixes: vec!["XYZ".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    f.s.set_tracker_org(other.id, Some(b.id)).unwrap();
+    tracker_item(&f.s, other.id, "9", "XYZ-9");
+
+    let sid = session(&f, "dev", "c1");
+    f.s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    f.s.rebind_conversation(sid, "c2", StartSource::Clear, None, None)
+        .unwrap();
+    assert!(f.s.set_current_branch(sid, "xyz-9-fix").unwrap());
+    resolve_session(&f.s, sid).unwrap();
+
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(
+        row.work.as_ref().and_then(|w| w.key.as_deref()),
+        Some("ABC-1"),
+        "the manual primary survives a skipped cross-org candidate: {row:?}"
+    );
+    assert_eq!(
+        links(&f.s, sid),
+        vec![("ABC-1".into(), "confirmed".into(), "manual".into(), None)],
+        "another org's item is never linked or suggested here"
+    );
 }
