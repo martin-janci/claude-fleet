@@ -504,23 +504,25 @@ pub fn resume_session_args(
 }
 
 /// Keys with a resume between its re-checked guards and its link, per
-/// store (the store's address tells one fleet's registry from another's,
-/// which only matters to tests): a second resume of one of them meanwhile
-/// is refused with `E_EXISTS` (the store lock is not held across the spawn,
-/// so the guards alone would let two callers spawn two sessions on one
-/// conversation).
-static IN_FLIGHT: Mutex<std::collections::BTreeSet<(usize, String)>> =
+/// store (`Store::instance_id` tells one fleet's registry from another's,
+/// which only matters to tests — and, unlike the store's address, is never
+/// reused by a store built where a dropped one was): a second resume of one
+/// of them meanwhile is refused with `E_EXISTS` (the store lock is not held
+/// across the spawn, so the guards alone would let two callers spawn two
+/// sessions on one conversation).
+static IN_FLIGHT: Mutex<std::collections::BTreeSet<(u64, String)>> =
     Mutex::new(std::collections::BTreeSet::new());
 
 /// One key's claim; released on drop, whatever the resume's outcome.
-struct InFlight(usize, String);
+#[derive(Debug)]
+struct InFlight(u64, String);
 
-fn store_key(store: &Arc<Mutex<Store>>) -> usize {
-    Arc::as_ptr(store) as usize
+fn store_key(store: &Store) -> u64 {
+    store.instance_id()
 }
 
 impl InFlight {
-    fn claim(store: &Arc<Mutex<Store>>, key: &str) -> Result<Self, IpcError> {
+    fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
         let mut set = IN_FLIGHT
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "the resume registry is poisoned"))?;
@@ -653,7 +655,7 @@ where
                 ));
             }
         }
-        let claim = InFlight::claim(store, &plan.key)?;
+        let claim = InFlight::claim(&s, &plan.key)?;
         let new_args = resume_session_args(&s, &plan, &args.mode)?;
         // The resumed session links the work: the same integrity rule as a
         // link, for every caller (M5).
@@ -1187,11 +1189,32 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.message.contains("jump"), "{}", err.message);
-        assert!(!IN_FLIGHT
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(id, _)| *id == store_key(&st)));
+        let key = store_key(&st.lock().unwrap());
+        assert!(!IN_FLIGHT.lock().unwrap().iter().any(|(id, _)| *id == key));
+    }
+
+    /// The registry is keyed by the store's instance id, never its address:
+    /// two stores never alias — not even one built where a dropped one was —
+    /// and a claim is released on drop.
+    #[test]
+    fn the_in_flight_registry_never_aliases_two_stores() {
+        let a = crate::store::Store::open_in_memory().unwrap();
+        let first = InFlight::claim(&a, "ABC-1").unwrap();
+        assert_eq!(
+            InFlight::claim(&a, "ABC-1").unwrap_err().code,
+            codes::E_EXISTS
+        );
+        let b = crate::store::Store::open_in_memory().unwrap();
+        assert_ne!(a.instance_id(), b.instance_id());
+        let _other = InFlight::claim(&b, "ABC-1").expect("another store's key is not this one's");
+        drop(first);
+        let _again = InFlight::claim(&a, "ABC-1").expect("released on drop");
+        let a_id = a.instance_id();
+        drop(_again);
+        drop(a);
+        let c = crate::store::Store::open_in_memory().unwrap();
+        assert_ne!(c.instance_id(), a_id, "an id is never reused");
+        let _fresh = InFlight::claim(&c, "ABC-1").expect("a new store starts clean");
     }
 
     #[test]

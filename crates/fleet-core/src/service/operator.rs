@@ -1791,9 +1791,13 @@ mod tests {
                 label: "kill_session",
             },
             GuardSite {
-                what: "rename_session",
+                // The body moved into `rename_session_with` (the tmux
+                // executor as a parameter, so a test can drive the rename
+                // race with a fake); `rename_session` only builds the
+                // executor and calls it, the same shape as `kill_session`.
+                what: "rename_session_with",
                 source: LIFECYCLE,
-                signature: "pub async fn rename_session(",
+                signature: "pub(super) async fn rename_session_with(",
                 label: "rename_session",
             },
             GuardSite {

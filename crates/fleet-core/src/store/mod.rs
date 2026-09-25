@@ -73,9 +73,21 @@ pub use work_journal::{
 };
 pub use work_tidy::ReopenedWork;
 
+/// One number per `Store` ever built in this process, never reused — see
+/// [`Store::instance_id`].
+static NEXT_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_instance() -> u64 {
+    NEXT_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Store {
     conn: Connection,
     bus: StoreBus,
+    /// This store's place in a process-wide registry keyed per store (the
+    /// work resume's in-flight keys): monotonic, so a store built where a
+    /// dropped one was never inherits its entries the way an address would.
+    instance: u64,
     /// In-memory record of the sessions fleet itself killed, so a reconcile
     /// pass that probed before a kill cannot re-insert its row once the kill
     /// has reaped it. Process-local on purpose — see [`reconcile::KillMemory`].
@@ -264,6 +276,7 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         };
         store.migrate()?;
@@ -302,6 +315,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         })
     }
@@ -314,6 +328,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         };
         store.migrate()?;
@@ -328,10 +343,18 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// A number no other `Store` of this process has or will have — the key
+    /// for a process-wide, per-store registry. An address is not one: a
+    /// store dropped and another built where it was would alias.
+    pub fn instance_id(&self) -> u64 {
+        self.instance
     }
 
     /// The raw connection, for a test outside `store` that has to set up a

@@ -133,6 +133,13 @@ pub async fn add_host(
             ));
         }
     }
+    // A host some tracker runs curl or gh on cannot become an agent host,
+    // which can run neither: the trackers' rule, asked from this side too,
+    // before the probe and any write.
+    if args.transport.as_deref() == Some("agent") {
+        let s = lock(store)?;
+        crate::service::trackers::admin::refuse_agent_transport_on_tracker_host(&s, &args.alias)?;
+    }
     // An agent host is, by definition, one the hub cannot dial — that is the
     // whole reason it needs an agent — so an SSH probe must not be the price
     // of admission. Nor can the agent dial in first: the per-host token it
