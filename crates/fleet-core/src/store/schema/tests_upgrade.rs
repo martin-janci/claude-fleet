@@ -52,9 +52,12 @@ fn integrity_ok(store: &Store) {
     assert!(dangling.is_empty(), "dangling foreign keys: {dangling:?}");
 }
 
+/// `(schema objects as (type, name, sql), recorded versions, row count per table)`.
+type Fingerprint = (Vec<(String, String, Option<String>)>, Vec<i64>, Vec<i64>);
+
 /// Everything a re-run could change: the schema objects, the recorded
 /// versions, every table's row count.
-fn fingerprint(store: &Store) -> (Vec<(String, String, Option<String>)>, Vec<i64>, Vec<i64>) {
+fn fingerprint(store: &Store) -> Fingerprint {
     let mut stmt = store
         .conn
         .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
