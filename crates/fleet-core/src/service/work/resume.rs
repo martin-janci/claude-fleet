@@ -503,35 +503,42 @@ pub fn resume_session_args(
     })
 }
 
-/// Keys with a resume between its re-checked guards and its link, process
-/// wide: a second resume of one of them meanwhile is refused with
-/// `E_EXISTS` (the store lock is not held across the spawn, so the guards
-/// alone would let two callers spawn two sessions on one conversation).
-static IN_FLIGHT: Mutex<std::collections::BTreeSet<String>> =
+/// Keys with a resume between its re-checked guards and its link, per
+/// store (the store's address tells one fleet's registry from another's,
+/// which only matters to tests): a second resume of one of them meanwhile
+/// is refused with `E_EXISTS` (the store lock is not held across the spawn,
+/// so the guards alone would let two callers spawn two sessions on one
+/// conversation).
+static IN_FLIGHT: Mutex<std::collections::BTreeSet<(usize, String)>> =
     Mutex::new(std::collections::BTreeSet::new());
 
 /// One key's claim; released on drop, whatever the resume's outcome.
-struct InFlight(String);
+struct InFlight(usize, String);
+
+fn store_key(store: &Arc<Mutex<Store>>) -> usize {
+    Arc::as_ptr(store) as usize
+}
 
 impl InFlight {
-    fn claim(key: &str) -> Result<Self, IpcError> {
+    fn claim(store: &Arc<Mutex<Store>>, key: &str) -> Result<Self, IpcError> {
         let mut set = IN_FLIGHT
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "the resume registry is poisoned"))?;
-        if !set.insert(key.to_string()) {
+        let id = store_key(store);
+        if !set.insert((id, key.to_string())) {
             return Err(IpcError::new(
                 codes::E_EXISTS,
                 format!("{key} is being resumed already; wait for that session, then jump to it"),
             ));
         }
-        Ok(InFlight(key.to_string()))
+        Ok(InFlight(id, key.to_string()))
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
         if let Ok(mut set) = IN_FLIGHT.lock() {
-            set.remove(&self.0);
+            set.remove(&(self.0, std::mem::take(&mut self.1)));
         }
     }
 }
@@ -646,7 +653,7 @@ where
                 ));
             }
         }
-        let claim = InFlight::claim(&plan.key)?;
+        let claim = InFlight::claim(store, &plan.key)?;
         let new_args = resume_session_args(&s, &plan, &args.mode)?;
         // The resumed session links the work: the same integrity rule as a
         // link, for every caller (M5).
@@ -1180,7 +1187,11 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.message.contains("jump"), "{}", err.message);
-        assert!(IN_FLIGHT.lock().unwrap().is_empty());
+        assert!(!IN_FLIGHT
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == store_key(&st)));
     }
 
     #[test]
