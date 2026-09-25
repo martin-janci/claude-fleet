@@ -776,7 +776,7 @@ async fn a_via_host_tracker_is_read_through_curl_on_its_host() {
         "vpnbox",
         Match::contains("/rest/api/3/issue/bulkfetch"),
         Reply::ok(&format!(
-            "__fleet_status__=200\n__fleet_head__={}\n{head}{body}",
+            "__fleet_status__=200\n__fleet_curl_exit__=0\n__fleet_head__={}\n{head}{body}",
             head.len()
         )),
     );
