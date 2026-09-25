@@ -29,12 +29,12 @@ prompt box, unsent.
 |---|---|---|---|
 | M9.1 Today view + Copy standup | no | no (cache and rows only; the clipboard is the user's own action) | **implement** |
 | M9.2 Ticket context card | no | no (cache only; inserts, never sends) | **implement** |
-| M9.3 Agent-written handover | **D9** | a turn of the session's model on a live pane | plan only |
-| M9.4 Dead-session summaries | **D10** | runs `claude -p` on a host (tokens, a model call) | plan only |
-| M9.5 Tracker write-back | **D3** (open since M3) | writes to Jira / other trackers | plan only |
-| M9.6 Multi-repo start | **D11** | creates N sessions / worktrees | plan only |
-| M9.7 Operator (AgentFab) work commands | **D12** | starts / kills sessions | plan only |
-| M9.8 Webhook nudges | **D13** | an inbound, internet-facing endpoint | plan only |
+| M9.3 Agent-written handover | D9 decided: on demand | a turn of the session's model, only when a person asks | **implement** (on demand only) |
+| M9.4 Dead-session summaries | D10 decided: off | runs `claude -p` on a host (tokens, a model call) | not built |
+| M9.5 Tracker write-back | D3 decided: none | writes to Jira / other trackers | not built |
+| M9.6 Multi-repo start | D11 decided: same branch name, prior projects offered | creates N sessions / worktrees, only when a person asks | **implement** |
+| M9.7 Operator (AgentFab) work commands | D12 decided: always confirm | starts / kills sessions, each confirmed on the desktop | **implement** (the confirm gate; "tidy up" needs M7) |
+| M9.8 Webhook nudges | D13 decided: no | an inbound, internet-facing endpoint | not built |
 
 ## Facts this plan builds on (verified 2026-09-24 at `main` 6fbd26f)
 
@@ -239,4 +239,8 @@ Commit and push before code.
      M3/M5 fence rather than re-deriving it.
   9. No `CONTRACT_REVISION` bump, no new tool, no migration; every new wire
      struct's optional fields are `#[serde(default)]`.
+- **2026-09-25, decisions.** The user took the defaults for D9–D13 and kept
+  D3 at none: M9.3 (on demand only), M9.6 and M9.7 are now to be built;
+  M9.4 (summaries off), M9.5 (no write-back) and M9.8 (no webhooks) stay
+  planned and are not built. `main` (M6) was merged into the branch first.
 
