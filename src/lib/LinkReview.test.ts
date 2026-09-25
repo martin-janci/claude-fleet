@@ -1,6 +1,6 @@
 // Work graph M4.4: the batch review of link suggestions (pill, sheet, j/k and
 // y/n) and the Undo toast of an automatic link.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -112,6 +112,54 @@ describe('LinkReview', () => {
     expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
       args: { session_id: 1, link_id: 11 },
     });
+  });
+
+  it('a decided row leaves the list, the cursor stays on a row, and the sheet closes itself when nothing is left', async () => {
+    sessions.set(rows());
+    // Each decision answers the row without its suggestion (a next one, if
+    // any, would ride in on the same row update).
+    vi.mocked(invoke).mockImplementation(async (_cmd: string, a?: unknown) => {
+      const id = (a as { args: { session_id: number } }).args.session_id;
+      return { ...rows().find((r) => r.id === id)!, work_suggested: null };
+    });
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const sheet = screen.getByTestId('link-review-sheet');
+    // Cursor on the second row (session 2): reject it.
+    await fireEvent.keyDown(sheet, { key: 'j' });
+    await fireEvent.keyDown(sheet, { key: 'n' });
+    expect(invoke).toHaveBeenLastCalledWith('reject_session_work', {
+      args: { session_id: 2, link_id: 12 },
+    });
+    await waitFor(() => expect(screen.getAllByTestId('link-review-row')).toHaveLength(1));
+    const left = screen.getByTestId('link-review-row');
+    expect(left.dataset.sessionId).toBe('1');
+    // The cursor was on index 1, which no longer exists: it is clamped onto
+    // the remaining row, so the next chord decides that one and not nothing.
+    expect(left.classList.contains('cursor')).toBe(true);
+    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('1 link suggestion · Review');
+    await fireEvent.keyDown(sheet, { key: 'y' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 1, link_id: 11 },
+    });
+    await waitFor(() => expect(screen.queryByTestId('link-review-sheet')).toBeNull());
+    expect(screen.queryByTestId('link-review-pill')).toBeNull();
+  });
+
+  it('a decision the hub refuses is a toast, and the row stays to be decided again', async () => {
+    sessions.set(rows());
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'confirm_session_work') throw { code: 'E_HUB', message: 'hub unreachable' };
+      return null;
+    });
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'y' });
+    await waitFor(() => expect(get(toasts).map((t) => t.message)).toEqual([expect.stringMatching(/^Confirm failed: hub unreachable/)]));
+    expect(screen.getAllByTestId('link-review-row')).toHaveLength(2);
+    expect(screen.getByTestId('link-review-sheet')).toBeTruthy();
   });
 
   it('clicking a suggestion shows only that session; closing the sheet lifts it', async () => {
