@@ -424,9 +424,23 @@ export function displayKey(key: string): string {
 }
 
 /** `owner/repo#n` → the lower-case `owner/repo`, else null. */
-function githubRepo(key: string): string | null {
+export function githubRepo(key: string): string | null {
   const m = key.match(/^([A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*)#\d{1,9}$/);
   return m ? m[1].toLowerCase() : null;
+}
+
+/** The family two keys must share to count as the same tracker's work: a
+ *  GitHub `owner/repo#n` its lower-case `owner/repo`, an `asana:<gid>`
+ *  `asana`, a ticket key its upper-case project prefix (`ABC-12` → `ABC`);
+ *  null for a key with no family. Never the dash prefix of a GitHub or
+ *  Asana key: `acme-corp/web#7` is not `ACME-*`. */
+export function keyFamily(key: string | null | undefined): string | null {
+  if (!key) return null;
+  const repo = githubRepo(key);
+  if (repo) return repo;
+  if (key.startsWith('asana:')) return 'asana';
+  const prefix = key.split('-')[0]?.toUpperCase();
+  return prefix || null;
 }
 
 /** The trackers that may answer `key` — the backend's `tracker_claims`: a
