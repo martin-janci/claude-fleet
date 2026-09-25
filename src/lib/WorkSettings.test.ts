@@ -84,10 +84,16 @@ describe('Settings → Work, standalone', () => {
     await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
     await fireEvent.click(screen.getByTestId('connect-submit'));
     await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
-    // The Organisations section (work graph M5) reads its own lists on mount.
+    // The Organisations section (work graph M5) reads its own lists on mount,
+    // and the sync metrics (M11.4) are read on mount and after a test.
     const cmds = inv.mock.calls
       .map((c) => c[0])
-      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions'].includes(c as string));
+      .filter(
+        (c) =>
+          !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(
+            c as string,
+          ),
+      );
     expect(cmds).toEqual(['add_tracker', 'set_tracker_credential', 'test_tracker']);
     const cred = inv.mock.calls.find((c) => c[0] === 'set_tracker_credential')![1] as {
       args: { tracker_id: number; username: string; secret: string };
@@ -112,7 +118,7 @@ describe('Settings → Work, standalone', () => {
     expect(
       inv.mock.calls
         .map((c) => c[0])
-        .filter((c) => !['list_orgs', 'org_suggestions'].includes(c as string)),
+        .filter((c) => !['list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(c as string)),
     ).toEqual(['list_trackers']);
   });
 
@@ -230,5 +236,139 @@ describe('Settings → Work, other providers (work graph M6)', () => {
         section_map_confirmed: true,
       },
     });
+  });
+});
+
+describe('Settings → Work, GitHub Enterprise Server and sync metrics (work graph M11.4)', () => {
+  const ghe = (over: Partial<TrackerRow> = {}): TrackerRow =>
+    row({
+      id: 9,
+      provider: 'github',
+      name: 'acme (ghe.corp.example)',
+      site_url: 'https://ghe.corp.example/acme',
+      transport: 'via_cli:devbox',
+      has_credential: false,
+      settings: { hostname: 'ghe.corp.example:8443' },
+      ...over,
+    });
+
+  it('offers a pasted enterprise issue URL as GitHub with the hostname prefilled', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([{ alias: 'devbox', ssh_alias: null, reachable: true } as never]);
+    const inv = route([], {
+      add_tracker: ghe({ state: 'unconfigured' }),
+      test_tracker: { tracker: ghe(), ok: true, views: ['My issues'] },
+    });
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://ghe.corp.example:8443/Acme/api/issues/42' },
+    });
+    await tick();
+    expect(screen.getByTestId('connect-site').textContent).toContain('https://ghe.corp.example/acme');
+    expect(screen.getByTestId('connect-site').textContent).toContain('ghe.corp.example/acme/api#42');
+    const field = screen.getByTestId('connect-ghes-hostname') as HTMLInputElement;
+    expect(field.value).toBe('ghe.corp.example:8443');
+    expect(screen.queryByTestId('connect-token')).toBeNull();
+    await fireEvent.change(screen.getByTestId('connect-gh-host'), { target: { value: 'devbox' } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'test_tracker')).toBe(true));
+    const add = inv.mock.calls.find((c) => c[0] === 'add_tracker')!;
+    expect((add[1] as { args: Record<string, unknown> }).args).toMatchObject({
+      url: 'https://ghe.corp.example:8443/Acme/api/issues/42',
+      provider: 'github',
+      transport: 'via_cli:devbox',
+      settings: { hostname: 'ghe.corp.example:8443' },
+    });
+    expect(inv.mock.calls.some((c) => c[0] === 'set_tracker_credential')).toBe(false);
+  });
+
+  it('sends the hostname as edited, and cannot connect without one', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([{ alias: 'devbox', ssh_alias: null, reachable: true } as never]);
+    const inv = route([], {
+      add_tracker: ghe({ state: 'unconfigured' }),
+      test_tracker: { tracker: ghe(), ok: true, views: ['My issues'] },
+    });
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://ghe.corp.example/acme/api/issues/42' },
+    });
+    await tick();
+    await fireEvent.change(screen.getByTestId('connect-gh-host'), { target: { value: 'devbox' } });
+    const field = screen.getByTestId('connect-ghes-hostname');
+    expect((field as HTMLInputElement).value).toBe('ghe.corp.example');
+    await fireEvent.input(field, { target: { value: '' } });
+    await tick();
+    expect((screen.getByTestId('connect-submit') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(field, { target: { value: 'ghe.corp.example:9443' } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'add_tracker')).toBe(true));
+    const add = inv.mock.calls.find((c) => c[0] === 'add_tracker')!;
+    expect((add[1] as { args: { settings: unknown } }).args.settings).toEqual({
+      hostname: 'ghe.corp.example:9443',
+    });
+  });
+
+  it('a URL on an unknown host that is not GitHub-shaped is still not recognised', async () => {
+    route([]);
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    for (const value of [
+      'https://intranet.corp.example/wiki/page',
+      'https://127.0.0.1/acme/api/issues/1',
+      'https://localhost/acme/api/issues/1',
+    ]) {
+      await fireEvent.input(screen.getByTestId('connect-url'), { target: { value } });
+      await tick();
+      expect(screen.getByTestId('connect-url-error'), value).toBeInTheDocument();
+      expect(screen.queryByTestId('connect-ghes-hostname')).toBeNull();
+    }
+  });
+
+  it('shows the enterprise host badge and each tracker’s last sync pass', async () => {
+    const inv = route([ghe(), row()], {
+      tracker_sync_metrics: [
+        {
+          tracker_id: 9,
+          last_pass_at: 1000,
+          duration_ms: 1234,
+          items_listed: 40,
+          items_changed: 3,
+          frames_emitted: 12,
+          last_error: null,
+        },
+        { tracker_id: 4, last_pass_at: null },
+      ],
+    });
+    render(WorkSettings, { props: { now: () => 1000 } });
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(2));
+    expect(screen.getByTestId('tracker-ghes-host').textContent).toBe('GHES ghe.corp.example:8443');
+    await waitFor(() => expect(screen.getAllByTestId('tracker-metrics')).toHaveLength(1));
+    expect(screen.getByTestId('tracker-metrics').textContent).toContain(
+      'last pass 1.2 s · 40 listed · 3 changed · 12 frames',
+    );
+    expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(true);
+  });
+
+  it('shows a failed pass’s error, and asks for no metrics on a paired desktop', async () => {
+    route([ghe()], {
+      tracker_sync_metrics: [
+        { tracker_id: 9, last_pass_at: 1000, duration_ms: 80, last_error: 'the tracker could not be reached' },
+      ],
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('tracker-metrics-error')).toBeInTheDocument());
+    expect(screen.getByTestId('tracker-metrics').textContent).toContain('last pass 80 ms');
+    expect(screen.getByTestId('tracker-metrics-error').textContent).toContain('could not be reached');
+
+    hubStatus.set(remote);
+    trackers.set([]);
+    const inv = route([ghe()]);
+    render(WorkSettings);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'list_trackers')).toBe(true));
+    expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(false);
   });
 });
