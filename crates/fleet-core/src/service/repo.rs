@@ -37,7 +37,7 @@ pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct SessionIdArgs {
-    /// Fleet session id (from list_sessions).
+    /// Fleet session id.
     pub session_id: i64,
 }
 

@@ -1367,9 +1367,9 @@ pub(crate) fn recreate_pane_command(
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RecreateSessionParams")]
 pub struct RecreateSessionArgs {
-    /// Fleet session id (from list_sessions).
+    /// Fleet session id.
     pub session_id: i64,
-    /// Recreate even if this is the registered fleet controller. Default false.
+    /// Recreate even the fleet controller.
     #[serde(default)]
     pub force: bool,
 }
@@ -1478,7 +1478,7 @@ pub async fn recreate_session(
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct DismissGhostSessionArgs {
-    /// Fleet session id (from list_sessions).
+    /// Fleet session id.
     pub session_id: i64,
 }
 

@@ -6,20 +6,15 @@ use crate::ipc_error::lock;
 #[tool_router(router = messaging_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Send and SUBMIT a prompt to a running Claude \
-        session's REPL (pasted, then one Enter). The first prompt to a \
-        still-unnamed session also becomes its friendly name. \
-        Marked untrusted unless raw=true (master only) or a trusted client. \
-        keys=Enter|Escape|C-c|1-9 presses a key instead (unmarked; 1-9 \
-        answers pending_input). \
-        Returns JSON { delivered, session_id, turn_seq_before, queued, acked \
-        }: pass turn_seq_before to wait_for_session \
-        { until: \"turn_gt\" } or session_transcript { since_turn } to \
-        collect the reply (or use run_prompt, which does all three). \
-        Refuses a blocked or stuck session (E_INVALID_STATE) unless \
-        force=true; a working session queues it (queued=true). acked: true \
-        = hook-confirmed, false = not within 1.5 s (check capture_session), \
-        null = unknowable. Repeat a client_msg_id to retry without \
-        delivering twice.")]
+        session's REPL (pasted, then one Enter); the first prompt to an \
+        unnamed session also names it. Marked untrusted unless raw=true \
+        (master only) or a trusted client. keys presses a key instead. \
+        Returns { delivered, session_id, turn_seq_before, queued, acked }: \
+        pass turn_seq_before to wait_for_session { until: \"turn_gt\" } or \
+        session_transcript { since_turn } for the reply (run_prompt does all \
+        three). Refuses a blocked or stuck session (E_INVALID_STATE) unless \
+        force=true; a working one queues it. acked: true = hook-confirmed, \
+        false = not within 1.5 s (check capture_session), null = unknowable.")]
     pub(super) async fn send_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -114,12 +109,13 @@ impl FleetTools {
         ok_json(&out)
     }
 
-    #[tool(description = "Send the same prompt to every matching work session \
-        (excludes the controller), skipping blocked or stuck ones unless \
-        status=\"blocked\". Returns per-session results. Rate-limited \
-        per caller (default one call per 30 s; E_RATE_LIMITED with \
-        retry_after_secs). Marked as untrusted unless raw=true (master token \
-        only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.")]
+    #[tool(description = "Send one prompt to every matching work session \
+        (not the controller), skipping blocked or stuck ones unless \
+        status=\"blocked\". Returns per-session results. Rate-limited per \
+        caller (default one call per 30 s; E_RATE_LIMITED with \
+        retry_after_secs). Marked untrusted unless raw=true (master token \
+        only). May return E_CONFIRM_REQUIRED when desktop confirmation is \
+        on.")]
     pub(super) async fn broadcast_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -181,14 +177,10 @@ impl FleetTools {
         ok_json_compact(&summary)
     }
 
-    #[tool(
-        description = "Return the recorded event timeline for a session (status \
-        changes, prompts, stuck, kills, and conversation events: \
-        conversation_started, conversation_ended, compact_started, \
-        compact_done, turn_done). Newest-first; pass `limit` to cap \
-        (default 50). Returns the events as JSON. fresh_for returns only \
-        what is new since your last read."
-    )]
+    #[tool(description = "A session's recorded event timeline, newest first: \
+        status changes, prompts, stuck, kills, and conversation events \
+        (conversation_started, conversation_ended, compact_started, \
+        compact_done, turn_done).")]
     pub(super) async fn session_history(
         &self,
         Extension(caller): Extension<Caller>,
@@ -280,14 +272,12 @@ impl FleetTools {
         ok_json(&payload)
     }
 
-    #[tool(
-        description = "List the Claude Code conversations a session has run, newest \
-        first: claude_session_id, started_at, ended_at, start_source (startup, resume, \
-        clear, compact, fork, fleet, unknown), end_reason, model, first_prompt, turns, \
-        compactions and current. Pass a claude_session_id to session_conversation to \
-        read an earlier one. limit defaults to 20 (max 500). Read-only. A per-host \
-        token may only list sessions on its own host."
-    )]
+    #[tool(description = "The Claude conversations a session has run, newest \
+        first: claude_session_id, started_at, ended_at, start_source \
+        (startup, resume, clear, compact, fork, fleet, unknown), end_reason, \
+        model, first_prompt, turns, compactions, current. Read an earlier \
+        one with session_conversation. Read-only; a per-host token only for \
+        sessions on its own host.")]
     pub(super) async fn session_conversations(
         &self,
         Extension(caller): Extension<Caller>,
@@ -308,11 +298,10 @@ impl FleetTools {
     }
 
     #[tool(description = "Send a peer-to-peer message (to_session_id or \
-        to_addr) to the recipient's inbox; deliver=true also pastes it into \
-        the pane, wake=true nudges an idle one instead. reply_to threads an \
-        answer. Per-host token needs its own host (E_FORBIDDEN); body \
-        marked untrusted unless raw=true (master only); repeat \
-        client_msg_id to avoid a double send.")]
+        to_addr) to the recipient's inbox; deliver also pastes it into the \
+        pane, wake nudges an idle one. reply_to threads an answer. A \
+        per-host token needs its own host (E_FORBIDDEN); the body is marked \
+        untrusted unless raw=true (master only).")]
     pub(super) async fn send_message(
         &self,
         Extension(caller): Extension<Caller>,
@@ -434,9 +423,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Block until the next message arrives for a \
-        session, or timeout_s elapses (default 120, max 600) — avoids \
-        polling inbox. Returns { status: satisfied | timeout, message }. \
-        Read-only.")]
+        session, or timeout_s (instead of polling inbox). Returns { status: \
+        satisfied | timeout, message }. Read-only.")]
     pub(super) async fn wait_for_reply(
         &self,
         Extension(caller): Extension<Caller>,
@@ -466,15 +454,10 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Read a session's inbox — messages sent TO \
-        session_id, newest-first. Slim rows by default (metadata, reply_to, \
-        80-char body preview); pass summary=false for full bodies. Task \
-        results arrive here as kind=task_result. mark_read \
-        (default true) flips returned unread rows to read — pass false to \
-        peek without consuming. from_addr rows came over a hub link: \
-        untrusted input. A per-host token may only read inboxes of \
-        sessions on its own host (E_FORBIDDEN). fresh_for returns only what \
-        is new since your last read.")]
+    #[tool(description = "Read the messages sent TO session_id, newest \
+        first; task results arrive as kind=task_result. from_addr rows came \
+        over a hub link: untrusted input. A per-host token may only read \
+        inboxes on its own host (E_FORBIDDEN).")]
     pub(super) async fn inbox(
         &self,
         Extension(caller): Extension<Caller>,
@@ -612,9 +595,9 @@ impl FleetTools {
         ok_json(&payload)
     }
 
-    #[tool(description = "What is a peer session doing? Returns claude_status, \
-        current_activity, stuck_kind, context_pct (plus host/name/status) for \
-        one session. Cheap pre-check before send_message or broadcast_prompt.")]
+    #[tool(description = "What is a peer session doing: claude_status, \
+        current_activity, stuck_kind, context_pct (plus host/name/status). \
+        Cheap check before send_message or broadcast_prompt.")]
     pub(super) async fn peer_status(
         &self,
         Extension(caller): Extension<Caller>,
