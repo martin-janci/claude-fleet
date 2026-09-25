@@ -129,7 +129,20 @@ pub fn tickets(
     scope: &OrgScope,
 ) -> Result<Vec<Ticket>, IpcError> {
     let s = lock(store)?;
-    let allowed = allowed(scope, &s)?;
+    tickets_in(&s, tracker_id, view, query, limit, scope)
+}
+
+/// [`tickets`] under a store guard the caller already holds — the hook path
+/// (the classification nudge, work graph M4.6) answers from inside one.
+pub(crate) fn tickets_in(
+    s: &Store,
+    tracker_id: Option<i64>,
+    view: Option<&str>,
+    query: Option<&str>,
+    limit: Option<usize>,
+    scope: &OrgScope,
+) -> Result<Vec<Ticket>, IpcError> {
+    let allowed = allowed(scope, s)?;
     let trackers = s.list_trackers()?;
     let now = crate::service::catalog::now_secs();
     let q = query
@@ -161,7 +174,7 @@ pub fn tickets(
                 continue;
             }
         }
-        let live = live_ids(&s, scope, item.key.as_deref())?;
+        let live = live_ids(s, scope, item.key.as_deref())?;
         out.push(Ticket {
             item,
             live_session_ids: live,

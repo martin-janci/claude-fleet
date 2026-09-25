@@ -342,7 +342,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
         LEFT JOIN work_items i ON i.id = l.item_id \
        WHERE p.session_id = sessions.id AND p.retired_at IS NULL \
        ORDER BY l.preselected DESC, \
-                CASE l.strength WHEN 'strong' THEN 0 ELSE 1 END, \
+                CASE l.strength WHEN 'strong' THEN 0 WHEN 'inferred' THEN 1 ELSE 2 END, \
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
