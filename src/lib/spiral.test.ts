@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/svelte';
-import { describe, it, expect } from 'vitest';
+import { flushSync } from 'svelte';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import SpiralLoader from './SpiralLoader.svelte';
 import { SPIRAL_PATH, SPIRAL_CYCLE_MS, cubicBezier, spiralFrame } from './spiral';
 
@@ -66,5 +67,48 @@ describe('SpiralLoader', () => {
     render(SpiralLoader, { props: { label: 'Loading', size: 24 } });
     const svg = screen.getByRole('img', { name: 'Loading' });
     expect(svg.getAttribute('height')).toBe('24');
+  });
+});
+
+describe('SpiralLoader animation', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function stubRaf() {
+    let queued: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      queued.push(cb);
+      return queued.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => {
+      queued = [];
+    });
+    return (now: number) => {
+      const run = queued;
+      queued = [];
+      run.forEach((cb) => cb(now));
+      flushSync();
+    };
+  }
+
+  it('moves the stroke on every frame', () => {
+    const frame = stubRaf();
+    render(SpiralLoader);
+    flushSync();
+    const path = screen.getByTestId('spiral-loader').querySelector('path')!;
+    frame(1000);
+    const first = [path.getAttribute('stroke-dashoffset'), path.getAttribute('transform')];
+    frame(1250);
+    expect([path.getAttribute('stroke-dashoffset'), path.getAttribute('transform')]).not.toEqual(first);
+  });
+
+  it('holds the still frame while paused', () => {
+    const frame = stubRaf();
+    render(SpiralLoader, { props: { paused: true } });
+    flushSync();
+    const path = screen.getByTestId('spiral-loader').querySelector('path')!;
+    const still = path.getAttribute('stroke-dashoffset');
+    frame(1000);
+    frame(1250);
+    expect(path.getAttribute('stroke-dashoffset')).toBe(still);
   });
 });
