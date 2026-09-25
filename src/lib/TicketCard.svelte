@@ -8,7 +8,8 @@
   import { insertIntoComposer } from './conversation';
   import { openExternal } from './open_external';
   import { loadTicketCard, canInsertInto, type TicketCard } from './ticket_card';
-  import { requestWorkHandover } from './work';
+  import { requestWorkHandover, handoverOutcome, handoverOutcomeLine, type HandoverOutcome } from './work';
+  import { sessionHistory } from './timeline';
   import { push, pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -56,7 +57,26 @@
     asking = false;
     if (r.ok) push({ kind: 'success', message: `Asked for a ${key} handover; it is kept when the reply ends` });
     else pushError(r.error, 'Asking for a handover failed');
+    void loadOutcome(session.id);
   }
+
+  // The latest outcome (M10.1): the newest `handover_*` event on the
+  // session's timeline — re-read after an ask and whenever a turn ends
+  // (the Stop hook is what settles a request).
+  let outcome = $state<HandoverOutcome | null>(null);
+  let outcomeSeq = 0;
+  async function loadOutcome(id: number) {
+    const mine = ++outcomeSeq;
+    const r = await sessionHistory(id, 200);
+    if (mine !== outcomeSeq) return;
+    outcome = r.ok && Array.isArray(r.value) ? handoverOutcome(r.value) : null;
+  }
+  $effect(() => {
+    const id = session.id;
+    void session.turn_seq;
+    if (!key) return;
+    void loadOutcome(id);
+  });
 
   function insert() {
     if (!card || !canInsert) return;
@@ -123,6 +143,11 @@
           : 'Only an idle Claude session can be asked for a handover')}
       onclick={() => void askHandover()}>Ask for a handover</button
     >
+    {#if outcome}
+      <p class="muted handover {outcome.state}" data-testid="ticket-card-handover-outcome" data-state={outcome.state}>
+        {handoverOutcomeLine(outcome)}
+      </p>
+    {/if}
   </section>
 {/if}
 
@@ -163,5 +188,13 @@
   }
   .muted {
     color: var(--fg-muted);
+  }
+  .handover {
+    margin: 0.3rem 0 0;
+    font-size: 0.85rem;
+  }
+  .handover.missing,
+  .handover.failed {
+    color: var(--warn, #e0a030);
   }
 </style>

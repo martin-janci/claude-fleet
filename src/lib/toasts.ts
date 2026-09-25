@@ -9,7 +9,7 @@ import { reportError } from './error_report';
 // user-facing now goes through here so one region (Toasts.svelte, mounted in
 // App.svelte) shows it with the code visible and lets the user dismiss it.
 
-export type ToastKind = 'info' | 'success' | 'error';
+export type ToastKind = 'info' | 'success' | 'warning' | 'error';
 
 /** One inline button on a toast (e.g. `Undo`). Running it dismisses the toast. */
 export interface ToastAction {

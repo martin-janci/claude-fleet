@@ -2,9 +2,23 @@
 // the note on what a start left out.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
-import { invoke } from '@tauri-apps/api/core';
-import { siblingCandidates, multiStartNote, shownSiblings, startWorkMulti } from './multi_start';
+
+vi.mock('./result', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./result')>();
+  return { ...actual, invokeCmd: vi.fn() };
+});
+import { invokeCmd } from './result';
+import {
+  siblingCandidates,
+  multiStartNote,
+  multiStartKind,
+  multiStartToast,
+  crossOrgRetry,
+  shownSiblings,
+  startWorkMulti,
+  type MultiStart,
+} from './multi_start';
+import { toasts, clearToasts, runToastAction } from './toasts';
 import { sessions, resetTombstonesForTests } from './sessions';
 import { session } from './hosts_fixture';
 import type { ProjectTreeRow } from './projects';
@@ -75,10 +89,11 @@ describe('shownSiblings', () => {
 });
 
 describe('startWorkMulti', () => {
+  const invoked = invokeCmd as ReturnType<typeof vi.fn>;
   beforeEach(() => {
     resetTombstonesForTests();
     sessions.set([]);
-    vi.mocked(invoke).mockReset();
+    invoked.mockReset();
   });
 
   it('sends one start and takes every started row into the store', async () => {
@@ -86,15 +101,18 @@ describe('startWorkMulti', () => {
     const app = session('h', 'app-abc-7', { id: 71, project_id: 1 });
     const web = session('h', 'web-abc-7', { id: 72, project_id: 2 });
     sessions.set([other]);
-    vi.mocked(invoke).mockResolvedValue({
-      key: 'ABC-7',
-      started: [app, web],
-      skipped: [{ project_id: 3, session_id: 5, reason: 'already running' }],
+    invoked.mockResolvedValue({
+      ok: true,
+      value: {
+        key: 'ABC-7',
+        started: [app, web],
+        skipped: [{ project_id: 3, session_id: 5, reason: 'already running' }],
+      },
     });
     const args = { reference: 'ABC-7', project_id: 1, host_alias: 'h', name: 'abc-7', project_ids: [2, 3] };
     const r = await startWorkMulti(args);
-    expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke).toHaveBeenCalledWith('start_work_multi', { args });
+    expect(invoked).toHaveBeenCalledTimes(1);
+    expect(invoked).toHaveBeenCalledWith('start_work_multi', { args });
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.value.started.map((s) => s.id)).toEqual([71, 72]);
@@ -103,7 +121,7 @@ describe('startWorkMulti', () => {
     const ids = get(sessions).map((s) => s.id).sort((a, b) => a - b);
     expect(ids).toEqual([70, 71, 72]);
     // A started row that was already listed is replaced, not doubled.
-    vi.mocked(invoke).mockResolvedValue({ key: 'ABC-7', started: [{ ...web, friendly_name: 'web' }] });
+    invoked.mockResolvedValue({ ok: true, value: { key: 'ABC-7', started: [{ ...web, friendly_name: 'web' }] } });
     await startWorkMulti(args);
     const rows = get(sessions);
     expect(rows).toHaveLength(3);
@@ -113,7 +131,7 @@ describe('startWorkMulti', () => {
   it('a refusal is the answer and the store is untouched', async () => {
     const other = session('h', 'other', { id: 70 });
     sessions.set([other]);
-    vi.mocked(invoke).mockRejectedValue({ code: 'E_FORBIDDEN', message: 'ABC-7 is not visible' });
+    invoked.mockResolvedValue({ ok: false, error: { code: 'E_FORBIDDEN', message: 'ABC-7 is not visible' } });
     const r = await startWorkMulti({ reference: 'ABC-7', project_id: 1, project_ids: [2] });
     expect(r).toEqual({ ok: false, error: { code: 'E_FORBIDDEN', message: 'ABC-7 is not visible' } });
     expect(get(sessions)).toEqual([other]);
@@ -121,10 +139,66 @@ describe('startWorkMulti', () => {
 
   it('an answer without a started list (an older hub, or nothing started) merges nothing and is still ok', async () => {
     sessions.set([]);
-    vi.mocked(invoke).mockResolvedValue({ key: 'ABC-7', failed: [{ project_id: 2, code: 'E_SSH', message: 'host down' }] });
+    invoked.mockResolvedValue({
+      ok: true,
+      value: { key: 'ABC-7', failed: [{ project_id: 2, code: 'E_SSH', message: 'host down' }] },
+    });
     const r = await startWorkMulti({ reference: 'ABC-7', project_id: 1, project_ids: [2] });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.value.failed?.[0].code).toBe('E_SSH');
     expect(get(sessions)).toEqual([]);
+  });
+});
+
+describe('the multi-start toast (M10.1)', () => {
+  const invoked = invokeCmd as ReturnType<typeof vi.fn>;
+  const label = (id: number) => `p${id}`;
+  beforeEach(() => {
+    invoked.mockReset();
+    clearToasts();
+  });
+
+  it('is a warning when anything failed, half-started or ran out of time; info otherwise', () => {
+    const only: MultiStart = { key: 'A-1', started: [], skipped: [{ project_id: 1, reason: 'x' }] };
+    expect(multiStartKind(only)).toBe('info');
+    expect(multiStartKind({ key: 'A-1', started: [], failed: [{ project_id: 2, code: 'E_SSH', message: 'down' }] })).toBe('warning');
+    expect(
+      multiStartKind({ key: 'A-1', started: [], warnings: [{ project_id: 2, session_id: 9, code: 'E_SQLITE', message: 'x' }] }),
+    ).toBe('warning');
+    const late: MultiStart = { key: 'A-1', started: [], skipped: [{ project_id: 3, reason: 'deadline' }] };
+    expect(multiStartKind(late)).toBe('warning');
+    expect(multiStartNote(late, label)).toBe('Started 0; p3: not started, out of time');
+    expect(
+      multiStartNote({ key: 'A-1', started: [], warnings: [{ project_id: 2, session_id: 9, code: 'E_SQLITE', message: 'its link failed' }] }, label),
+    ).toBe('Started 0; p2: started, but its link failed');
+  });
+
+  it('offers "Start anyway" for a cross-org failure, re-calling with force_cross_org in those repos only', async () => {
+    const r: MultiStart = {
+      key: 'B-2',
+      started: [],
+      failed: [
+        { project_id: 1, code: 'E_FORBIDDEN', message: 'B-2 belongs to organisation 2', cross_org: true },
+        { project_id: 2, code: 'E_SSH', message: 'host down' },
+      ],
+    };
+    expect(crossOrgRetry(r)).toEqual([1]);
+    const args = { reference: 'B-2', project_ids: [1, 2], host_alias: 'h' };
+    const t = multiStartToast(args, r, label)!;
+    expect(t.kind).toBe('warning');
+    expect(t.action?.label).toBe('Start anyway');
+    invoked.mockResolvedValueOnce({ ok: true, value: { key: 'B-2', started: [] } });
+    const { push } = await import('./toasts');
+    push(t);
+    const id = get(toasts)[0].id;
+    runToastAction(id);
+    await vi.waitFor(() => expect(invoked).toHaveBeenCalled());
+    expect(invoked).toHaveBeenCalledWith('start_work_multi', {
+      args: { reference: 'B-2', project_ids: [1], host_alias: 'h', force_cross_org: true },
+    });
+    // A forced start never offers itself again.
+    expect(multiStartToast({ ...args, force_cross_org: true }, r, label)?.action).toBeUndefined();
+    // No cross-org failure: no action.
+    expect(multiStartToast(args, { key: 'B-2', started: [], failed: [r.failed![1]] }, label)?.action).toBeUndefined();
   });
 });

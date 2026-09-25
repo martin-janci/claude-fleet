@@ -699,6 +699,16 @@ impl FleetTools {
             ));
         }
         let scope = self.org_scope(&caller)?;
+        // A multi-repo start's projects are checked before anything else,
+        // the operator's confirmation included: a request that can only be
+        // refused is never put to a person.
+        let multi = match (args.action.as_str(), args.project_ids.as_deref()) {
+            ("start", Some(ids)) => Some(
+                crate::service::trackers::tickets::multi_start_ids(args.project_id, ids)
+                    .map_err(to_mcp_err)?,
+            ),
+            _ => None,
+        };
         if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
@@ -802,15 +812,8 @@ impl FleetTools {
             return ok_json(&report);
         }
         if args.action == "start" {
-            if let Some(ids) = args.project_ids.as_ref().filter(|v| !v.is_empty()) {
+            if let Some(ids) = multi.as_deref() {
                 // Work graph M9.6: one sibling per repository, same branch.
-                if args.project_id.is_some() {
-                    return Err(mcp_err(
-                        "E_INVALID",
-                        "pass project_id or project_ids, not both",
-                        None,
-                    ));
-                }
                 let out = crate::service::trackers::tickets::start_work_many(
                     &self.store,
                     &self.ssh,

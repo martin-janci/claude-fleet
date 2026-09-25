@@ -512,29 +512,6 @@ pub fn start_name(key: &str, title: &str) -> String {
     t.trim().chars().take(80).collect()
 }
 
-/// The `E_EXISTS` for `key` already running in `other`, ending in `then`.
-/// The session is named (and its ids given) only when `scope` sees the
-/// row: still one live session per key, but an isolated org's session is
-/// not named to a host outside it (D7).
-fn already_live(key: &str, other: &SessionRow, scope: &OrgScope, then: &str) -> IpcError {
-    if !scope.sees_row(other) {
-        return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
-    }
-    IpcError::new(
-        codes::E_EXISTS,
-        format!(
-            "{key} already has a live session ({} on {}); {then}",
-            other.friendly_name.as_deref().unwrap_or(&other.tmux_name),
-            other.host_alias
-        ),
-    )
-    .with_details(serde_json::json!({
-        "session_id": other.id,
-        "host_alias": other.host_alias,
-        "tmux_name": other.tmux_name,
-    }))
-}
-
 /// Resolve the item a start names (cache, else live), then plan where it
 /// lands. `E_EXISTS` (with the session) when the key already has a live
 /// session; `E_AMBIGUOUS` (with candidates) when no project can be picked.
@@ -544,6 +521,27 @@ pub async fn plan_start(
     scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<StartPlan, IpcError> {
+    let ticket = resolve_start(store, args, scope, net).await?;
+    plan_resolved(store, args, scope, &ticket)
+}
+
+/// The ticket a start names, resolved once: its key, title and (when a
+/// tracker knows it) item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartTicket {
+    pub key: String,
+    pub title: String,
+    pub item_id: Option<i64>,
+}
+
+/// Resolve the item a start names: the cache, else one live lookup. A key
+/// no tracker knows still starts work (trackers never gate).
+pub async fn resolve_start(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    scope: &OrgScope,
+    net: &TrackerNet,
+) -> Result<StartTicket, IpcError> {
     let (key, title, item_id) = match (args.item_id, args.reference.as_deref()) {
         (Some(id), None) => {
             let s = lock(store)?;
@@ -578,6 +576,73 @@ pub async fn plan_start(
             ))
         }
     };
+    Ok(StartTicket {
+        key,
+        title,
+        item_id,
+    })
+}
+
+/// A per-host token starting work on another host.
+fn host_fence(h: &str) -> IpcError {
+    IpcError::new(
+        codes::E_FORBIDDEN,
+        format!("a per-host token starts work only on its own host ({h})"),
+    )
+}
+
+/// `E_EXISTS` naming `row` (or not, when the scope cannot see it — an
+/// isolated org's session is not named to a host outside it, D7). `what`
+/// qualifies the session ("on branch x"); `then` is what to do about it.
+fn already_running(
+    key: &str,
+    row: &SessionRow,
+    scope: &OrgScope,
+    what: &str,
+    then: &str,
+) -> IpcError {
+    if !scope.sees_row(row) {
+        return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
+    }
+    IpcError::new(
+        codes::E_EXISTS,
+        format!(
+            "{key} already has a live session{what} ({} on {}); {then}",
+            row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
+            row.host_alias
+        ),
+    )
+    .with_details(serde_json::json!({
+        "session_id": row.id,
+        "host_alias": row.host_alias,
+        "tmux_name": row.tmux_name,
+    }))
+}
+
+/// Plan where a resolved ticket's start lands. `E_EXISTS` (with the
+/// session) when the key already has a live session — in THIS project for a
+/// multi-repo start, where a live session on the start's branch counts too,
+/// linked or not (a sibling that spawned but failed to link, or a person's
+/// own session there); `E_AMBIGUOUS` (with candidates) when no project can
+/// be picked.
+pub fn plan_resolved(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    scope: &OrgScope,
+    ticket: &StartTicket,
+) -> Result<StartPlan, IpcError> {
+    let StartTicket {
+        key,
+        title,
+        item_id,
+    } = ticket.clone();
+    // The host fence answers first: a per-host token asking for another
+    // host learns nothing about the sessions there.
+    if let (Some(h), Some(asked)) = (scope.host(), args.host_alias.as_deref()) {
+        if asked != h {
+            return Err(host_fence(h));
+        }
+    }
     let s = lock(store)?;
     let item_org = item_id.map(|id| s.item_org(id)).transpose()?.flatten();
     let live = live_work_on(&s, &key, item_org)?;
@@ -585,7 +650,7 @@ pub async fn plan_start(
         .iter()
         .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
     {
-        return Err(already_live(&key, row, scope, "jump to it"));
+        return Err(already_running(&key, row, scope, "", "jump to it"));
     }
     // Where this kind of work last ran: a GitHub issue's own repository's
     // project first, else the newest link with the same key prefix.
@@ -662,10 +727,7 @@ pub async fn plan_start(
     };
     if let Some(h) = scope.host() {
         if host_alias != h {
-            return Err(IpcError::new(
-                codes::E_FORBIDDEN,
-                format!("a per-host token starts work only on its own host ({h})"),
-            ));
+            return Err(host_fence(h));
         }
     }
     // Data integrity, for every caller (M5): a ticket of one org is not
@@ -697,6 +759,27 @@ pub async fn plan_start(
         .into_iter()
         .find(|w| w.project_id == project_id && w.name == branch)
         .map(|w| w.id);
+    if args.per_project {
+        // A live session already on this branch in this project, linked or
+        // not: a retry after a spawn whose link failed must not start a
+        // second one on the same checkout. A fresh worktree has no row until
+        // the next scan, so its sessions are matched by their worktree key.
+        if let Some(row) = s.list_sessions_for_host(&host_alias)?.iter().find(|r| {
+            r.project_id == Some(project_id)
+                && r.status == "running"
+                && r.lost_at.is_none()
+                && ((worktree_id.is_some() && r.worktree_id == worktree_id)
+                    || r.worktree_key.as_deref() == Some(branch.as_str()))
+        }) {
+            return Err(already_running(
+                &key,
+                row,
+                scope,
+                &format!(" on branch {branch}"),
+                "jump to it",
+            ));
+        }
+    }
     let name = match args
         .name
         .as_deref()
@@ -826,7 +909,10 @@ pub fn start_prompt(key: &str) -> String {
 /// Do the start. `spawn` makes the session (production: `new_session`);
 /// `scope` is the caller's, for the refusal when another start won
 /// meanwhile. Returns the new row, linked `started`, and whether a brief
-/// was queued.
+/// was queued. A session that spawned but could not be linked is an error
+/// here, naming that session as `orphan_session_id` so nobody has to find
+/// it; a multi-repo start reports it as started with a warning
+/// ([`start_one`]).
 pub async fn start_with<F, Fut>(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
@@ -834,6 +920,43 @@ pub async fn start_with<F, Fut>(
     scope: &OrgScope,
     spawn: F,
 ) -> Result<(SessionRow, bool), IpcError>
+where
+    F: FnOnce(crate::service::sessions::NewSessionArgs) -> Fut,
+    Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+{
+    let one = start_one(store, plan, brief, scope, spawn).await?;
+    match one.warning {
+        Some(e) => {
+            let mut d = e.details.clone().unwrap_or_else(|| serde_json::json!({}));
+            if let Some(o) = d.as_object_mut() {
+                o.insert("orphan_session_id".into(), one.row.id.into());
+            }
+            Err(e.with_details(d))
+        }
+        None => Ok((one.row, one.queued)),
+    }
+}
+
+/// What [`start_one`] made: the row, whether its brief was queued, and the
+/// error that followed a successful spawn (the link or the brief), if any.
+#[derive(Debug)]
+pub struct StartOutcome {
+    pub row: SessionRow,
+    pub queued: bool,
+    pub warning: Option<IpcError>,
+}
+
+/// Spawn one session and link it `started`. `Err` only when the spawn
+/// failed: once a session exists, a failure to link it (another start of
+/// the same key won meanwhile, refused for `scope`) or to queue its brief
+/// comes back as the outcome's `warning`, with the session.
+pub async fn start_one<F, Fut>(
+    store: &Arc<Mutex<Store>>,
+    plan: &StartPlan,
+    brief: Option<String>,
+    scope: &OrgScope,
+    spawn: F,
+) -> Result<StartOutcome, IpcError>
 where
     F: FnOnce(crate::service::sessions::NewSessionArgs) -> Fut,
     Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
@@ -854,18 +977,33 @@ where
         resume_claude_session_id: None,
     };
     let row = spawn(args).await?;
+    match link_started(store, plan, brief, scope, &row) {
+        Ok((linked, queued)) => Ok(StartOutcome {
+            row: linked.unwrap_or(row),
+            queued,
+            warning: None,
+        }),
+        Err(e) => Ok(StartOutcome {
+            row,
+            queued: false,
+            warning: Some(e),
+        }),
+    }
+}
+
+/// Link a spawned session `started` and queue its brief. Returns the
+/// re-read row and whether the brief was queued.
+fn link_started(
+    store: &Arc<Mutex<Store>>,
+    plan: &StartPlan,
+    brief: Option<String>,
+    scope: &OrgScope,
+    row: &SessionRow,
+) -> Result<(Option<SessionRow>, bool), IpcError> {
     let s = lock(store)?;
     // The guard `plan_start` checked under is long gone (the spawn is an
     // SSH round trip): another start of the same key may have won since.
-    // Re-check under the guard that writes the link, and name the session
-    // this start made but did not link, so nobody has to find it.
-    let orphaned = |e: IpcError| -> IpcError {
-        let mut d = e.details.clone().unwrap_or_else(|| serde_json::json!({}));
-        if let Some(o) = d.as_object_mut() {
-            o.insert("orphan_session_id".into(), row.id.into());
-        }
-        e.with_details(d)
-    };
+    // Re-check under the guard that writes the link.
     let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
     if let Some((_, other)) = live_work_on(&s, &plan.key, item_org)?
         .into_iter()
@@ -874,23 +1012,23 @@ where
         })
     {
         // The same two-branch refusal as `plan_start`'s (D7): a winner the
-        // caller may not see is not named, and only the orphan is given.
-        return Err(orphaned(already_live(
+        // caller may not see is not named.
+        return Err(already_running(
             &plan.key,
             &other,
             scope,
+            "",
             &format!(
                 "the session this start made ({}) is not linked to it",
                 row.tmux_name
             ),
-        )));
+        ));
     }
     let target = match plan.item_id {
         Some(id) => WorkTarget::Item(id),
         None => WorkTarget::Key(&plan.key),
     };
-    s.link_session_work(row.id, target, "started")
-        .map_err(orphaned)?;
+    s.link_session_work(row.id, target, "started")?;
     let queued = match brief {
         Some(body) if !body.trim().is_empty() => {
             let body: String = body
@@ -905,8 +1043,7 @@ where
         }
         _ => false,
     };
-    let row = s.get_session_by_id(row.id)?.unwrap_or(row);
-    Ok((row, queued))
+    Ok((s.get_session_by_id(row.id)?, queued))
 }
 
 /// `work_link { action: start }` end to end over the real `new_session`.
@@ -946,7 +1083,45 @@ pub async fn start_work(
 /// At most this many repositories in one start.
 pub const MULTI_START_MAX: usize = 8;
 
-/// A repository a multi-repo start left alone: the key already runs there.
+/// The wall clock one multi-repo start may spend, under the MCP Lifecycle
+/// cap (300 s) that bounds `work_link`'s work: past it the call is dropped
+/// and its reply lost, so the starts stop short of it and report the rest.
+pub const MULTI_START_BUDGET: std::time::Duration = std::time::Duration::from_secs(270);
+
+/// A start is begun only with at least this much of the budget left; the
+/// rest are reported `skipped` with reason [`SKIP_DEADLINE`].
+pub const START_RESERVE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// The `reason` of a repository skipped because the budget ran out.
+pub const SKIP_DEADLINE: &str = "deadline";
+
+/// Validate a multi-repo start's projects before anything else runs (the
+/// operator's confirmation included): not with `project_id`, not empty, at
+/// most [`MULTI_START_MAX`] distinct. Returns them deduplicated, in order.
+pub fn multi_start_ids(project_id: Option<i64>, project_ids: &[i64]) -> Result<Vec<i64>, IpcError> {
+    if project_id.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "pass project_id or project_ids, not both",
+        ));
+    }
+    let mut ids: Vec<i64> = Vec::new();
+    for id in project_ids {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    if ids.is_empty() || ids.len() > MULTI_START_MAX {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("a multi-repo start takes 1 to {MULTI_START_MAX} project_ids"),
+        ));
+    }
+    Ok(ids)
+}
+
+/// A repository a multi-repo start left alone: the key already runs there,
+/// or (reason [`SKIP_DEADLINE`]) the time ran out before its turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartSkip {
     pub project_id: i64,
@@ -961,6 +1136,33 @@ pub struct StartFailure {
     pub project_id: i64,
     pub code: String,
     pub message: String,
+    /// The refusal was the cross-org rule: `force_cross_org` would start it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cross_org: bool,
+}
+
+impl StartFailure {
+    fn of(project_id: i64, e: &IpcError) -> Self {
+        StartFailure {
+            project_id,
+            code: e.code.to_string(),
+            message: e.message.to_string(),
+            cross_org: e
+                .details
+                .as_ref()
+                .is_some_and(|d| d["cross_org"] == serde_json::json!(true)),
+        }
+    }
+}
+
+/// A session a multi-repo start made that is not fully set up: it runs
+/// (it is in `started`), but its link or brief failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartWarning {
+    pub project_id: i64,
+    pub session_id: i64,
+    pub code: String,
+    pub message: String,
 }
 
 /// `work_link { action: start, project_ids }`: one sibling session per
@@ -970,6 +1172,8 @@ pub struct MultiStart {
     pub key: String,
     #[serde(default)]
     pub started: Vec<SessionRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<StartWarning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<StartSkip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -993,35 +1197,74 @@ pub fn siblings_line(key: &str, here: &str, others: &[String], branch: &str) -> 
     line
 }
 
-/// Plan and start one sibling per project; `spawn` makes a session. A repo
-/// where the key already runs is skipped (naming the session), one that
-/// fails to plan or spawn is reported, and the rest still start. Returns
-/// the result and the rows whose brief was queued.
-pub async fn start_many<F, Fut>(
+/// `owner/repo on host` for each plan; `project N` when the store cannot
+/// say (a label never fails the start).
+fn sibling_labels(store: &Mutex<Store>, plans: &[StartPlan]) -> Vec<String> {
+    let s = store.lock().ok();
+    plans
+        .iter()
+        .map(|p| {
+            let repo = s
+                .as_ref()
+                .and_then(|s| s.get_project(p.project_id).ok().flatten())
+                .map(|r| format!("{}/{}", r.owner, r.repo))
+                .unwrap_or_else(|| format!("project {}", p.project_id));
+            format!("{repo} on {}", p.host_alias)
+        })
+        .collect()
+}
+
+/// The brief one sibling queues: the person's own, or the ticket's (only
+/// when its org may reach the plan's host), with the siblings line.
+fn sibling_brief(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    plan: &StartPlan,
+    sib: &str,
+) -> Result<Option<String>, IpcError> {
+    Ok(match (&args.brief, args.with_brief) {
+        (Some(b), _) => Some(format!("{sib}\n\n{b}")),
+        (None, true) if brief_visible_on(store, plan)? => {
+            Some(ticket_brief_with(store, plan, sib)?)
+        }
+        (None, _) => None,
+    })
+}
+
+/// Plan and start one sibling per project; `spawn` makes a session and
+/// `started` runs right after each one whose brief was queued (production:
+/// typing its start prompt), so a sibling never waits on the others.
+///
+/// The ticket is resolved once, so every repository gets one title and one
+/// branch. A repo where the key (or a live session on the branch) already
+/// runs is skipped, naming the session; one that fails to plan, brief or
+/// spawn goes into `failed`; a session that spawned but failed to link is
+/// `started` with a warning; and the rest still start. Starts run one at a
+/// time (they share the host's SSH master), each begun only with
+/// [`START_RESERVE`] left before `deadline`; the rest are skipped with
+/// reason [`SKIP_DEADLINE`], and a start that outruns it is `E_TIMEOUT`.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_many<F, Fut, P>(
     store: &Arc<Mutex<Store>>,
     args: &StartArgs,
     project_ids: &[i64],
     scope: &OrgScope,
     net: &TrackerNet,
+    deadline: tokio::time::Instant,
     mut spawn: F,
-) -> Result<(MultiStart, Vec<SessionRow>), IpcError>
+    mut started: P,
+) -> Result<MultiStart, IpcError>
 where
     F: FnMut(crate::service::sessions::NewSessionArgs) -> Fut,
     Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+    P: FnMut(&SessionRow, &str),
 {
-    let mut ids: Vec<i64> = Vec::new();
-    for id in project_ids {
-        if !ids.contains(id) {
-            ids.push(*id);
-        }
-    }
-    if ids.is_empty() || ids.len() > MULTI_START_MAX {
-        return Err(IpcError::new(
-            codes::E_INVALID,
-            format!("a multi-repo start takes 1 to {MULTI_START_MAX} project_ids"),
-        ));
-    }
-    let mut out = MultiStart::default();
+    let ids = multi_start_ids(args.project_id, project_ids)?;
+    let ticket = resolve_start(store, args, scope, net).await?;
+    let mut out = MultiStart {
+        key: ticket.key.clone(),
+        ..Default::default()
+    };
     let mut plans: Vec<StartPlan> = Vec::new();
     for pid in &ids {
         let one = StartArgs {
@@ -1029,40 +1272,26 @@ where
             per_project: true,
             ..args.clone()
         };
-        match plan_start(store, &one, scope, net).await {
+        match plan_resolved(store, &one, scope, &ticket) {
             Ok(p) => plans.push(p),
             Err(e) if e.code == codes::E_EXISTS => out.skipped.push(StartSkip {
                 project_id: *pid,
                 session_id: e.details.as_ref().and_then(|d| d["session_id"].as_i64()),
                 reason: e.message.to_string(),
             }),
-            Err(e) => out.failed.push(StartFailure {
-                project_id: *pid,
-                code: e.code.to_string(),
-                message: e.message.to_string(),
-            }),
+            Err(e) => out.failed.push(StartFailure::of(*pid, &e)),
         }
     }
-    if let Some(p) = plans.first() {
-        out.key = p.key.clone();
-    }
-    let labels: Vec<String> = {
-        let s = lock(store)?;
-        plans
-            .iter()
-            .map(|p| {
-                let repo = s
-                    .get_project(p.project_id)
-                    .ok()
-                    .flatten()
-                    .map(|r| format!("{}/{}", r.owner, r.repo))
-                    .unwrap_or_else(|| format!("project {}", p.project_id));
-                format!("{repo} on {}", p.host_alias)
-            })
-            .collect()
-    };
-    let mut queued_rows = Vec::new();
+    let labels = sibling_labels(store, &plans);
     for (i, plan) in plans.iter().enumerate() {
+        if deadline.saturating_duration_since(tokio::time::Instant::now()) < START_RESERVE {
+            out.skipped.push(StartSkip {
+                project_id: plan.project_id,
+                session_id: None,
+                reason: SKIP_DEADLINE.to_string(),
+            });
+            continue;
+        }
         let others: Vec<String> = labels
             .iter()
             .enumerate()
@@ -1070,31 +1299,45 @@ where
             .map(|(_, l)| l.clone())
             .collect();
         let sib = siblings_line(&plan.key, &labels[i], &others, &plan.branch);
-        let brief = match (&args.brief, args.with_brief) {
-            (Some(b), _) => Some(format!("{sib}\n\n{b}")),
-            (None, true) if brief_visible_on(store, plan)? => {
-                Some(ticket_brief_with(store, plan, &sib)?)
+        let brief = match sibling_brief(store, args, plan, &sib) {
+            Ok(b) => b,
+            Err(e) => {
+                out.failed.push(StartFailure::of(plan.project_id, &e));
+                continue;
             }
-            (None, _) => None,
         };
-        match start_with(store, plan, brief, scope, &mut spawn).await {
-            Ok((row, queued)) => {
-                if queued {
-                    queued_rows.push(row.clone());
+        let one =
+            tokio::time::timeout_at(deadline, start_one(store, plan, brief, scope, &mut spawn))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(IpcError::new(
+                        codes::E_TIMEOUT,
+                        "the start outran the call's time; it may have partially completed",
+                    ))
+                });
+        match one {
+            Ok(one) => {
+                if one.queued {
+                    started(&one.row, &plan.key);
                 }
-                out.started.push(row);
+                if let Some(e) = one.warning {
+                    out.warnings.push(StartWarning {
+                        project_id: plan.project_id,
+                        session_id: one.row.id,
+                        code: e.code.to_string(),
+                        message: e.message.to_string(),
+                    });
+                }
+                out.started.push(one.row);
             }
-            Err(e) => out.failed.push(StartFailure {
-                project_id: plan.project_id,
-                code: e.code.to_string(),
-                message: e.message.to_string(),
-            }),
+            Err(e) => out.failed.push(StartFailure::of(plan.project_id, &e)),
         }
     }
-    Ok((out, queued_rows))
+    Ok(out)
 }
 
-/// [`start_many`] over the real `new_session`, typing each start prompt.
+/// [`start_many`] over the real `new_session`, typing each sibling's start
+/// prompt as soon as it is up, within [`MULTI_START_BUDGET`].
 pub async fn start_work_many(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<crate::ssh::SshClient>,
@@ -1104,19 +1347,24 @@ pub async fn start_work_many(
     scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<MultiStart, IpcError> {
-    let (out, queued) = start_many(store, args, project_ids, scope, net, |a| {
-        crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
-    })
-    .await?;
-    for row in &queued {
-        crate::service::work::resume::spawn_start_prompt(
-            Arc::clone(store),
-            Arc::clone(ssh),
-            row,
-            start_prompt(&out.key),
-        );
-    }
-    Ok(out)
+    start_many(
+        store,
+        args,
+        project_ids,
+        scope,
+        net,
+        tokio::time::Instant::now() + MULTI_START_BUDGET,
+        |a| crate::service::sessions::new_session(a, store.as_ref(), ssh, reg),
+        |row, key| {
+            crate::service::work::resume::spawn_start_prompt(
+                Arc::clone(store),
+                Arc::clone(ssh),
+                row,
+                start_prompt(key),
+            );
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
