@@ -82,10 +82,7 @@ impl FleetTools {
         let resource_key = row.id.to_string();
         let (decision, generation, stored_anchor, stored_watermark) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let reader_exists = s
-                .get_session_by_id(reader)
-                .map_err(|e| to_mcp_err(e.into()))?
-                .is_some();
+            let reader_exists = resolve_reader(&s, &caller, reader)?;
             let stored = s
                 .get_read_cursor(reader, "session_transcript", &resource_key)
                 .map_err(to_mcp_err)?;

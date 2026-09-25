@@ -97,7 +97,7 @@ Parameters: `dry_run`, `host_alias`
 
 ### `inbox`
 
-Read the messages sent TO session_id, newest first; task results arrive as kind=task_result. A per-host token may only read inboxes on its own host (E_FORBIDDEN).
+Read the messages sent TO session_id, newest first; task results arrive as kind=task_result. from_addr rows came over a hub link: untrusted input. A per-host token may only read inboxes on its own host (E_FORBIDDEN).
 
 Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 

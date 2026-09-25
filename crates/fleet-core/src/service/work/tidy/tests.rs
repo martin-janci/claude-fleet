@@ -224,6 +224,45 @@ async fn a_shared_worktree_is_plain_killed_and_archive_keeps_tmux() {
     assert!(row.work.unwrap().archived_at.is_some());
 }
 
+/// A review session runs in its source's worktree: the source is only ever
+/// plain-killed while the review lives, never safe-killed (whose completion
+/// removes the tree the review is using).
+#[tokio::test]
+async fn a_tree_a_live_review_uses_is_only_plain_killed() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let a = seed(&store, "a", "done");
+    {
+        let s = store.lock().unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let review = s
+            .upsert_session("a-review", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET kind = 'review', worktree_key = 'a' WHERE id = ?1",
+                [review],
+            )
+            .unwrap();
+    }
+    let exec = FakeExec {
+        dirty: vec!["a".into()],
+        ..Default::default()
+    };
+    let plan = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = plan
+        .candidates
+        .iter()
+        .find(|c| c.session_id == a)
+        .expect("the done source is still a candidate");
+    assert_eq!(c.action, TidyAction::Kill);
+    let report = tidy_apply(&store, &exec, &[item(a, "safe_kill")], &OrgScope::All, NOW)
+        .await
+        .unwrap();
+    assert!(report.results[0].ok, "{report:?}");
+    assert_eq!(exec.calls(), vec!["kill a"]);
+    assert_eq!(exec.inspects.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn host_scope_and_bad_requests_are_per_item_or_refused() {
     let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -267,6 +306,53 @@ async fn host_scope_and_bad_requests_are_per_item_or_refused() {
             .len(),
         1
     );
+}
+
+/// A refused item never writes to the session it named: a per-host token
+/// could otherwise flood (and so evict, at the timeline's cap) the history
+/// of any session on any host, or of an id that does not exist at all.
+#[tokio::test]
+async fn a_refused_item_writes_no_event_to_the_foreign_session() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let a = seed(&store, "a", "done");
+    let count = |kind: &str| -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT count(*) FROM session_events WHERE kind = ?1",
+                [kind],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let exec = FakeExec::default();
+    let items: Vec<TidyApplyItem> = (0..5)
+        .map(|_| item(a, "snooze"))
+        .chain(std::iter::once(item(999_999, "kill")))
+        .collect();
+    let r = tidy_apply(&store, &exec, &items, &host("other"), NOW)
+        .await
+        .unwrap();
+    assert!(r
+        .results
+        .iter()
+        .all(|r| !r.ok && r.error.as_deref().unwrap().contains("not found")));
+    assert_eq!(count("gc_failed"), 0, "a refused id gets no timeline row");
+    assert!(store
+        .lock()
+        .unwrap()
+        .list_session_events(999_999, 10)
+        .unwrap()
+        .is_empty());
+    // A failure on a session the caller does see is still recorded.
+    let r = tidy_apply(&store, &exec, &[item(a, "explode")], &host("local"), NOW)
+        .await
+        .unwrap();
+    assert!(!r.results[0].ok);
+    assert_eq!(count("gc_failed"), 1);
+    assert!(exec.calls().is_empty());
 }
 
 const GC_OFF: GcConfig = GcConfig {
@@ -489,6 +575,68 @@ async fn a_per_host_token_never_sees_or_touches_another_orgs_candidates() {
     assert!(!got[1].0 && got[1].1.unwrap().contains("no such live work link"));
     assert_eq!(got[2], (true, None));
     assert!(exec.calls().is_empty());
+}
+
+/// `work_link { snooze | never | archive }` without `link_id` resolves the
+/// primary first and checks it: B's forced link on A's own session is never
+/// flagged by A's token, with or without the id, and archive stamps only
+/// what the scope sees.
+#[test]
+fn lifecycle_flags_without_link_id_never_reach_another_orgs_primary() {
+    use crate::service::work::{work_link, WorkLinkArgs};
+    let o = orgs();
+    let (scope, b_link) = {
+        let s = o.store.lock().unwrap();
+        (
+            OrgScope::for_host(&s, "local").unwrap(),
+            s.session_work_links(o.x_sess).unwrap()[0].id,
+        )
+    };
+    let args = |sid: i64, action: &str, link_id: Option<i64>| WorkLinkArgs {
+        session_id: Some(sid),
+        action: action.into(),
+        link_id,
+        ..Default::default()
+    };
+    for (action, link_id) in [
+        ("never", None),
+        ("snooze", None),
+        ("never", Some(b_link)),
+        ("snooze", Some(b_link)),
+    ] {
+        let err = work_link(&args(o.x_sess, action, link_id), &o.store, &scope).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND, "{action} {link_id:?}");
+        assert!(!err.message.contains("BB-"));
+    }
+    assert_eq!(
+        work_link(&args(o.x_sess, "archive", None), &o.store, &scope)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID,
+        "no visible linked work to archive under"
+    );
+    let flags = |sid: i64| -> (i64, Option<i64>, Option<i64>) {
+        o.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT tidy_never, tidy_snoozed_until, archived_at FROM work_links \
+                 WHERE ended_at IS NULL AND participant_id = \
+                   (SELECT id FROM participants WHERE session_id = ?1 AND retired_at IS NULL)",
+                [sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(flags(o.x_sess), (0, None, None), "B's link is untouched");
+    // The same calls on A's own link work, and the master flags B's.
+    work_link(&args(o.a_sess, "never", None), &o.store, &scope).unwrap();
+    work_link(&args(o.a_sess, "archive", None), &o.store, &scope).unwrap();
+    let (never, _, archived) = flags(o.a_sess);
+    assert!(never == 1 && archived.is_some());
+    work_link(&args(o.x_sess, "never", None), &o.store, &OrgScope::All).unwrap();
+    assert_eq!(flags(o.x_sess).0, 1);
 }
 
 #[tokio::test]

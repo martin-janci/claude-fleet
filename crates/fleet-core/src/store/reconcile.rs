@@ -3174,6 +3174,84 @@ mod tests {
     }
 
     #[test]
+    fn renaming_onto_a_lost_sessions_name_is_refused_and_keeps_it() {
+        // A `lost` row that can still be restored (host reboot survival) is
+        // not a ghost to dismiss: tmux accepts the name (the lost session is
+        // not in tmux), so the store must refuse, naming it — with its
+        // timeline and participant intact, and the renamed row untouched.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let t = now_unix();
+        let keep = observed_row(&mut store, &bus, "dev-a", t - 100);
+        let lost = store
+            .upsert_session("dev-b", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.set_claude_session_id(lost, "c-lost").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='host_reboot' \
+                 WHERE id=?2",
+                rusqlite::params![t - 50, lost],
+            )
+            .unwrap();
+        let participant = store.ensure_participant_for_session(lost).unwrap();
+        store
+            .insert_session_event(lost, "prompt_sent", Some("hi"))
+            .unwrap();
+
+        let err = store
+            .rename_session_row("alpha", "dev-a", "dev-b", t)
+            .unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+        assert!(
+            err.message.contains(&format!("id {lost}")),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            store.get_session("dev-a", "alpha").unwrap().unwrap().id,
+            keep.id,
+            "nothing was renamed"
+        );
+        let row = store
+            .get_session_by_id(lost)
+            .unwrap()
+            .expect("the lost row survives");
+        assert_eq!(
+            (row.tmux_name.as_str(), row.status.as_str()),
+            ("dev-b", "ghost")
+        );
+        assert_eq!(
+            store.participant_for_session(lost).unwrap().map(|p| p.id),
+            Some(participant)
+        );
+        let events: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id=?1",
+                [lost],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1, "its timeline survives");
+        // Dismissed (no conversation to resume), it is a ghost and gives way.
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET claude_session_id = NULL WHERE id=?1",
+                [lost],
+            )
+            .unwrap();
+        let renamed = store
+            .rename_session_row("alpha", "dev-a", "dev-b", t)
+            .unwrap()
+            .expect("renamed");
+        assert_eq!(renamed.id, keep.id);
+        assert!(store.get_session_by_id(lost).unwrap().is_none());
+    }
+
+    #[test]
     fn renaming_a_name_with_no_row_is_a_no_op() {
         let (store, _bus) = store_with_recorder();
         store.upsert_host("alpha").unwrap();

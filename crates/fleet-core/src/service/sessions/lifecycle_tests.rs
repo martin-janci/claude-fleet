@@ -776,3 +776,92 @@ async fn an_unheld_resume_id_gets_past_the_guards() {
         .unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
 }
+
+/// Work graph M10.2 (found by the hub e2e): a session started in a worktree
+/// is linked to that worktree's row, which reconcile never does — tidy-up,
+/// safe kill and the idle killer inspect a work session's tree only through
+/// it. A new worktree gets its row (for the session's host); a system
+/// project, or a start in the main checkout, links nothing.
+#[test]
+fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    s.upsert_host("h").unwrap();
+    let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+    let row = |name: &str, host: &str| {
+        s.upsert_session(name, host, Some(pid), None, 0, 0, "running", None)
+            .unwrap()
+    };
+    let args = |host: &str, worktree_id: Option<i64>, new_worktree: Option<&str>| NewSessionArgs {
+        host_alias: host.into(),
+        project_id: pid,
+        worktree_id,
+        name: "n".into(),
+        call_id: None,
+        new_worktree: new_worktree.map(str::to_string),
+        base_branch: None,
+        kind: None,
+        start_command: None,
+        friendly_name: None,
+        resume_claude_session_id: None,
+    };
+
+    // A new worktree on local: its row is created and linked.
+    let a = row("a", "local");
+    let wid = link_new_session_worktree(
+        &s,
+        a,
+        &args("local", None, Some("abc-1-fix")),
+        "/p/o/r/.worktrees/abc-1-fix",
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let w = s.get_worktree_row(wid).unwrap().unwrap();
+    assert_eq!(
+        (w.name.as_str(), w.path.as_str(), w.host_alias.as_str()),
+        ("abc-1-fix", "/p/o/r/.worktrees/abc-1-fix", "local")
+    );
+    assert_eq!(w.branch.as_deref(), Some("abc-1-fix"));
+    assert_eq!(
+        s.get_session_by_id(a).unwrap().unwrap().worktree_id,
+        Some(wid)
+    );
+
+    // On a remote host: that host's row, never the local one of that name.
+    let b = row("b", "h");
+    let rid = link_new_session_worktree(
+        &s,
+        b,
+        &args("h", None, Some("abc-1-fix")),
+        "/home/u/projects/github.com/o/r/.worktrees/abc-1-fix",
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(rid, wid);
+    assert_eq!(s.get_worktree_row(rid).unwrap().unwrap().host_alias, "h");
+
+    // An existing worktree: that one.
+    let c = row("c", "local");
+    assert_eq!(
+        link_new_session_worktree(&s, c, &args("local", Some(wid), None), "/x", false).unwrap(),
+        Some(wid)
+    );
+    assert_eq!(
+        s.get_session_by_id(c).unwrap().unwrap().worktree_id,
+        Some(wid)
+    );
+
+    // The main checkout, or a system project: nothing.
+    let d = row("d", "local");
+    assert_eq!(
+        link_new_session_worktree(&s, d, &args("local", None, None), "/p/o/r", false).unwrap(),
+        None
+    );
+    assert_eq!(
+        link_new_session_worktree(&s, d, &args("local", None, Some("x")), "/sys", true).unwrap(),
+        None
+    );
+    assert_eq!(s.get_session_by_id(d).unwrap().unwrap().worktree_id, None);
+}
