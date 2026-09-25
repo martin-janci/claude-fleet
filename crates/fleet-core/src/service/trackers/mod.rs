@@ -529,10 +529,11 @@ impl TrackerNet {
             )),
             TransportKind::Direct => Ok(Arc::new(DirectTransport::new(policy))),
             TransportKind::ViaCli(h) => match row.provider.as_str() {
-                "github" => Ok(Arc::new(crate::net::via_host::GhCliTransport::new(
-                    ssh(&h)?,
-                    h,
-                ))),
+                // An enterprise instance (M11.4): `gh --hostname` it.
+                "github" => Ok(Arc::new(
+                    crate::net::via_host::GhCliTransport::new(ssh(&h)?, h)
+                        .with_enterprise(row.settings.hostname.clone()),
+                )),
                 p => Err(TrackerError::Refused(format!(
                     "no trusted CLI is known for {p} trackers"
                 ))),
@@ -610,7 +611,14 @@ pub fn default_net() -> TrackerNet {
 /// SSRF fence, enforced by every transport before anything is sent).
 pub fn host_policy(row: &TrackerRow) -> HostPolicy {
     match row.provider.as_str() {
-        "github" => Arc::new(|h: &str| h == crate::net::via_host::GITHUB_API_HOST),
+        "github" => match row.settings.hostname.as_deref() {
+            // An enterprise instance (M11.4): its own host, nothing else.
+            Some(ghes) => {
+                let host = crate::store::ghes_host_part(ghes).to_ascii_lowercase();
+                Arc::new(move |h: &str| h.eq_ignore_ascii_case(&host))
+            }
+            None => Arc::new(|h: &str| h == crate::net::via_host::GITHUB_API_HOST),
+        },
         "asana" => Arc::new(|h: &str| h == asana::API_HOST),
         "linear" => Arc::new(|h: &str| h == linear::API_HOST),
         // Exactly the configured site's host: nothing else, not a subdomain.
