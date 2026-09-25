@@ -129,6 +129,17 @@ fn participants_have_address(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 056: `conversations` already has
+/// `classify_nudged_at`. See [`Migration`].
+fn conversations_have_nudge_stamp(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'classify_nudged_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 047: `work_links` already has its
 /// `role` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
 /// [`Migration`].
@@ -543,6 +554,13 @@ const MIGRATIONS: &[Migration] = &[
     // `participants(peer_link_id)` index (federation review G17):
     // `CREATE INDEX IF NOT EXISTS`, safe to re-run.
     Migration::plain(55, include_str!("../../migrations/055_peer_link_index.sql")),
+    // Work graph M4.6: `conversations.classify_nudged_at`, the once-per-
+    // conversation stamp of the classification nudge. Guarded: ADD COLUMN.
+    Migration {
+        version: 56,
+        sql: include_str!("../../migrations/056_classify_nudge.sql"),
+        already_applied: Some(conversations_have_nudge_stamp),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

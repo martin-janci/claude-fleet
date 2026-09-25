@@ -394,12 +394,11 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
       API is enabled): toggling the setting takes effect on the next
       provision. The SessionStart answer also delivers undelivered handover
       briefs, whole, when they fit the 4,000 chars.
-  14. **Not done:** M4.6 (the opt-in classification nudge, skipped by
+  14. **Not done (at the time):** M4.6 (the opt-in classification nudge, skipped by
       design of this pass); the phone does not show suggestions (M8); the
       remote-host SessionStart measurement; the manual acceptance on a real
       fleet.
-- **2026-09-25, M10.4.** M4.6 is **decided against** (D14): detection
-  plus the batch review covers it; nothing is built. The remote-host
+- **2026-09-25, M10.4.** (M4.6 itself landed separately, #273, OFF.) The remote-host
   SessionStart measurement has a reproducible procedure
   (`scripts/measure-session-start.sh`) and a placeholder table in M4.5,
   to be filled by the user; D5 stays open.
@@ -413,3 +412,47 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
   same target (the PR head naming it) makes it tracked again, and a GitHub
   tracker lifts the rule. Tests: two resolver table rows and a store-level
   test in `detect/tests.rs`.
+- **2026-09-25, M4.6 landed** (OFF by default, `work.classify_nudge`), on
+  `claude/cloud-fleet-work-graph-m8` restarted from `main`. Verified with
+  `cargo fmt`, `clippy -D warnings` (workspace), `cargo test` (fleet-core,
+  claude-fleet, fleet-hub; only the four chmod tests that fail as root fail)
+  and `pnpm check` / `pnpm test`. As built, and where it departs from the
+  task text above:
+  1. **The answer names its own source.** The note asks for
+     `work_link { action: link, source: agent_inferred }`, not
+     `source: agent`: an `agent` link stays what the friendly-name skill
+     means by it, a confirmed declaration, and a guess must not be able to
+     pass for one. `agent_inferred` never reaches `link_session_work`; it
+     is one `Signal::AgentInferred` event through the resolver
+     (`detect::on_agent_inference`), so R9 holds (a rejected pair is not
+     proposed again) and the org / cross-org checks of `link` apply first.
+  2. **Tier and rule.** `Strength::Inferred` sits between `weak` and
+     `strong` (stored as `inferred`; the row's top suggestion orders
+     strong, inferred, then the rest). Rule **R11** (R10 was M2.2's carry):
+     always a pre-selected suggestion, never confirmed, not even as a sole
+     first-prompt candidate in a trusted project; as an event source it
+     decays at the next conversation boundary like a prompt key.
+  3. **"No link after 3 prompts"** is read as `conversations.turns >= 3`
+     (completed turns; so it fires on the fourth prompt at the earliest)
+     and NO live link, confirmed or suggested — a suggestion means
+     detection already has a guess. A rejection alone does not count as a
+     link, and a rejected key is not offered.
+  4. **Candidates.** The person's *My work* tickets inside the host's scope
+     (the M5 org boundary AND M3's host fence — the note is read by the
+     Claude on the host, exactly like the M4.5 SessionStart context) plus
+     keyed local items changed in the last 14 days. There is no
+     project-to-tracker mapping, so "the repo maps to a tracker or has
+     local items" is "there is at least one candidate". More than five: it
+     stays quiet.
+  5. **Delivery.** `service::hooks::prompt_submit_context` packs mail and
+     then the note under one lock; the note never displaces mail — when
+     the mail fills the 8,000 / 200 budget it waits, unstamped, for a later
+     prompt. Stamped per conversation (migration 056,
+     `conversations.classify_nudged_at`) only when delivered, with a
+     `work_classify_nudge` timeline event. The instruction and keys are
+     fleet's; the titles ride in one untrusted fence and are cut, or
+     dropped, to keep the note at 400 chars.
+  6. **Surface.** One schema doc line (`source`), inside the existing
+     tool-surface headroom (71,098 of 71,166 B); no new action, tool, verdict
+     or contract change. The setting has its Settings → Work toggle.
+

@@ -373,6 +373,13 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
+                // A new worker is a start: the operator's needs a person (D12).
+                self.confirm_gate(
+                    "dispatch_task",
+                    p.confirm_nonce.as_deref(),
+                    &dispatch_new_worker_summary(&spec, p.requester_session_id, p.raw, &p.prompt),
+                    &caller,
+                )?;
                 let name = spec.name.unwrap_or_default();
                 let row = sessions::new_session(
                     sessions::NewSessionArgs {
@@ -699,20 +706,11 @@ impl FleetTools {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
             // start or resume is never gated.)
+            let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
             self.confirm_gate(
                 "work_link",
                 args.confirm_nonce.as_deref(),
-                &format!(
-                    "{} key={:?} url={:?} item_id={:?} host={:?} project_id={:?} project_ids={:?} mode={:?}",
-                    args.action,
-                    args.key,
-                    args.url,
-                    args.item_id,
-                    args.host_alias,
-                    args.project_id,
-                    args.project_ids,
-                    args.mode
-                ),
+                &work_link_start_summary(&args, &repos),
                 &caller,
             )?;
         }
@@ -891,6 +889,22 @@ impl FleetTools {
             }
             _ => ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?),
         }
+    }
+
+    /// `id:owner/repo` for each project id, for a confirm summary; an
+    /// unknown id is shown bare (the start refuses it later).
+    fn repo_labels(&self, ids: &[i64]) -> Result<Vec<String>, McpError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        Ok(ids
+            .iter()
+            .map(|id| match s.get_project(*id) {
+                Ok(Some(p)) => format!("{id}:{}/{}", p.owner, p.repo),
+                _ => id.to_string(),
+            })
+            .collect())
     }
 
     /// The caller's org scope (work graph M5), read under a short lock.

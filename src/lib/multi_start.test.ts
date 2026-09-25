@@ -1,7 +1,7 @@
 // Multi-repo start (work graph M9.6): which projects the dialog offers, and
 // the note on what a start left out.
 import { describe, it, expect } from 'vitest';
-import { siblingCandidates, multiStartNote } from './multi_start';
+import { siblingCandidates, multiStartNote, shownSiblings } from './multi_start';
 import type { ProjectTreeRow } from './projects';
 import type { WorkLink } from './work';
 
@@ -53,5 +53,18 @@ describe('multiStartNote', () => {
         label,
       ),
     ).toBe('Started 0; p1: already running; p2: host down');
+  });
+});
+
+describe('shownSiblings', () => {
+  it('keeps only ticked projects the dialog still offers, in ticking order', () => {
+    const offered = [
+      { id: 2, label: 'acme/web' },
+      { id: 3, label: 'acme/api' },
+    ];
+    expect(shownSiblings([3, 9, 2], offered)).toEqual([3, 2]);
+    expect(shownSiblings([9], offered)).toEqual([]);
+    expect(shownSiblings([2], [])).toEqual([]);
+    expect(shownSiblings([], offered)).toEqual([]);
   });
 });

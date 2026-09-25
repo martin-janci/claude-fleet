@@ -312,7 +312,7 @@ export function workKeyFor(
 
 /** Link sources detection writes (mirrors `AUTO_SOURCES` in `work.ts`, kept
  *  here so this module stays free of command wrappers). */
-const AUTO_LINK_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt'];
+const AUTO_LINK_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred'];
 
 function linkWhy(source: string, rule: string | null | undefined): string {
   const label: Record<string, string> = {
@@ -321,6 +321,7 @@ function linkWhy(source: string, rule: string | null | undefined): string {
     trailer: 'a commit trailer',
     url: 'a ticket URL in a prompt',
     prompt: 'a prompt',
+    agent_inferred: "Claude's guess when asked",
   };
   const from = label[source] ? `linked from ${label[source]}` : `linked (${source})`;
   return rule ? `${from} · rule ${rule}` : from;

@@ -164,7 +164,7 @@ This is M10.3's document: run once by the user on a real hub with Jira Cloud and
 | # | Question | Options | Default |
 |---|---|---|---|
 | D5 | (re-asked with remote numbers) SessionStart work context on by default? | on · off | off until the remote numbers are under ~300 ms p95 |
-| D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | decided against: detection plus batch review covers it |
+| D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | built, off by default (#273) |
 | D15 | Handover and multi-start on the phone? | read-only M9 only · also the actions | read-only only (Today + card) |
 | D16 | Run `hub-e2e` in GitHub CI (not only locally)? | local opt-in · CI on `main` pushes | local opt-in, as today |
 
@@ -211,5 +211,6 @@ M10.6 (independent; reuses M10.2's fake tracker)
     prints Markdown rows (min / median / p95 / max, and curl's exit code,
     with a warning when a case did not behave as named). The M4 plan has
     a placeholder table "to be measured by the user". D5 stays open.
-  - **M4.6.** Not built: decided against (D14, default). The roadmap's M4
-    status says so, and D14–D16 are in its decisions table.
+  - **M4.6.** Landed on `main` separately (#273, OFF behind
+    `work.classify_nudge`); D14 therefore reads *built, off by default*.
+    D14–D16 are in the roadmap's decisions table.

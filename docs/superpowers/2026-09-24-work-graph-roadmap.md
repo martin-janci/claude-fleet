@@ -343,12 +343,15 @@ acceptance on a real fleet is still to do.
 - **M4.5** (51fc47b): SessionStart work context behind
   `work.session_start_context`, **off**; measured and recorded (D5 stays
   the user's).
-- **M4.6** (the opt-in classification nudge): **decided against (D14,
-  2026-09-25)**; detection plus the batch review covers it. Not built.
+- **M4.6** (landed 2026-09-25, OFF behind `work.classify_nudge`): the
+  opt-in classification nudge — one ≤ 400-char note per conversation after
+  three link-less turns with 1–5 candidates in the host's scope; Claude's
+  answer (`source: agent_inferred`) is a pre-selected suggestion only (R11).
+  See the M4 plan's Revisions.
 - **Remote-host SessionStart measurement:** the procedure is written
   (`scripts/measure-session-start.sh`, M10.4) and the M4 plan has a
   placeholder table; **to be measured by the user**. D5 stays open.
-- **Not done:** suggestions on the phone (M8).
+  (Suggestions on the phone landed with M8.)
 
 **Value:** most sessions are linked correctly without touching anything, and
 every link says why. **Tests:** the resolver table (conflicts, a sticky reject,
@@ -531,6 +534,13 @@ fleet-mobile's `claude/cloud-fleet-work-graph-m8` is superseded by it. Note
 the plan's Revisions item 4 (an absent `work` on a row means none), which
 #32 follows.
 
+**M8.6** (the phone catches up with M4.6, M5 and M9.1–M9.3): `org_id` joins
+`PHONE_SESSION_FIELDS` (hub side, no contract bump); on fleet-mobile the
+*Today* sheet with *Copy standup*, a ticket's acceptance criteria and past
+work, *Ask for a handover* followed on the timeline, org labels and an org
+filter, and the `agent_inferred` wording — on fleet-mobile's
+`claude/cloud-fleet-work-graph-m8-6`, per the M8 plan's §M8.6.
+
 ### M9: beyond
 
 The ideas the review ranked, for when M1–M8 have settled.
@@ -611,8 +621,8 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - **M10.4** (branch `claude/cloud-fleet-work-graph-m10`): Today's Stale
   opens the Tidy-up sheet narrowed to those sessions (Show all widens it);
   the work filters have chips; the remote SessionStart measurement has a
-  script and a placeholder table for the user (D5 open); M4.6 decided
-  against (D14). Frontend and docs only: no new tool, action, command,
+  script and a placeholder table for the user (D5 open). M4.6 was built
+  on its own branch and merged (#273, OFF), which settles D14. Frontend and docs only: no new tool, action, command,
   migration or contract bump.
 - M10.0 (the plan) is committed; M10.1–M10.3, M10.5 and M10.6 are not
   started.
@@ -646,7 +656,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 | D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before** |
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always** |
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
-| D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Decided against (D14, 2026-09-25):** detection plus batch review covers it |
+| D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
 | D15 | Handover and multi-start on the phone (M10.5)? | read-only M9 only · also the actions | Read-only only (Today + card) |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | Local opt-in, as today |
 
@@ -747,6 +757,8 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: M10.4 on `claude/cloud-fleet-work-graph-m10`: Today → Tidy-up
   narrowed to the stale sessions, the work-filter chips, the remote
   SessionStart measurement procedure (`scripts/measure-session-start.sh`;
-  numbers to be taken by the user, D5 open), M4.6 decided against (D14).
-  D14–D16 added to the decisions table with their defaults. No new tool,
+  numbers to be taken by the user, D5 open). D14–D16 added to the decisions table with their defaults. No new tool,
   action, command, migration or contract bump; the tool budget is untouched.
+- 2026-09-25: `main` merged into M10.4. M4.6 had landed on `main` (#273,
+  OFF behind `work.classify_nudge`), so M10.4's "decided against" is
+  withdrawn: D14 reads *built, off by default*.

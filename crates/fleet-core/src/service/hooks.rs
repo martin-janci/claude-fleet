@@ -447,6 +447,73 @@ pub fn take_pending_delivery(
     Some(packed)
 }
 
+/// Everything a UserPromptSubmit answer carries as `additionalContext`, in
+/// order: handover briefs and inbox mail ([`take_pending_delivery`]), then
+/// the classification nudge (work graph M4.6) when it fires and still fits
+/// the budget after the mail. All under ONE lock acquisition; `None` when
+/// there is nothing to say.
+///
+/// The nudge never displaces mail: when the mail took the budget it waits
+/// for a later prompt of the same conversation, unstamped. It is stamped on
+/// the conversation only when this answer actually carries it.
+pub fn prompt_submit_context(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<String> {
+    use crate::service::delivery::{CTX_MAX_CHARS, CTX_MAX_LINES};
+    let s = lock(store).ok()?;
+    let mail = take_pending_delivery_locked(&s, payload, ctx, false)
+        .map(|(p, _)| p.text)
+        .unwrap_or_default();
+    let nudge = prompt_nudge_locked(&s, payload, ctx).filter(|(_, n, _)| {
+        let sep = usize::from(!mail.is_empty());
+        mail.chars().count() + 2 * sep + n.chars().count() <= CTX_MAX_CHARS
+            && mail.lines().count() + sep + n.lines().count() <= CTX_MAX_LINES
+    });
+    let Some((row_id, text, conversation)) = nudge else {
+        return (!mail.is_empty()).then_some(mail);
+    };
+    let now = crate::service::catalog::now_secs();
+    if let Err(e) = s.mark_conversation_nudged(row_id, &conversation, now) {
+        // Unstamped, it would fire again on the next prompt: say so, and
+        // do not send it now rather than risk a note on every prompt.
+        tracing::warn!(error = %e.message, "[work] could not stamp the classification nudge");
+        return (!mail.is_empty()).then_some(mail);
+    }
+    let _ = s.insert_session_event(row_id, "work_classify_nudge", None);
+    Some(if mail.is_empty() {
+        text
+    } else {
+        format!("{mail}\n\n{text}")
+    })
+}
+
+/// The classification nudge for this prompt, if it fires: `(row id, text,
+/// conversation id)`. Only for the row's CURRENT conversation — a nested
+/// `claude -p` sharing the pane never gets it (see
+/// [`take_pending_delivery_locked`]).
+fn prompt_nudge_locked(
+    s: &Store,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<(i64, String, String)> {
+    let (row, _) = resolve_hook_row(s, payload, ctx, false).ok()??;
+    let current = row.claude_session_id.clone()?;
+    if payload.session_id.as_deref() != Some(current.as_str()) {
+        return None;
+    }
+    let now = crate::service::catalog::now_secs();
+    match crate::service::work::nudge::classify_nudge(s, &row, &current, now) {
+        Ok(Some(text)) => Some((row.id, text, current)),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!(error = %e.message, "[work] classification nudge failed");
+            None
+        }
+    }
+}
+
 /// As [`take_pending_delivery`], plus what a `Stop` should do about it, and
 /// the streak bookkeeping that keeps a block from repeating forever — decided
 /// and stamped under the SAME lock acquisition as the delivery itself (see
@@ -3189,6 +3256,116 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// Beta three turns into `conv-b` with the classification nudge on and
+    /// one keyed local item to offer (work graph M4.6).
+    fn nudge_ready(store: &Arc<Mutex<Store>>) -> (i64, i64, HookPayload) {
+        let s = store.lock().unwrap();
+        let (a, b) = (seed(&s, "alpha"), seed(&s, "beta"));
+        s.rebind_conversation(b, "conv-b", StartSource::Fleet, None, None)
+            .unwrap();
+        for _ in 0..crate::service::work::nudge::NUDGE_AFTER_TURNS {
+            s.conversation_bump_turns(b, "conv-b").unwrap();
+        }
+        crate::service::settings::set(&s, crate::service::settings::WORK_CLASSIFY_NUDGE, "true")
+            .unwrap();
+        s.create_local_work_item(Some("PAY-7"), "Refund retries")
+            .unwrap();
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        (a, b, payload)
+    }
+
+    /// Mail first, then the nudge; the nudge fires once per conversation.
+    #[test]
+    fn a_prompt_carries_mail_then_the_classification_nudge_once() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (a, b, payload) = nudge_ready(&store);
+        store
+            .lock()
+            .unwrap()
+            .insert_message(a, b, "ping", "message", None)
+            .unwrap();
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+        };
+
+        let text = prompt_submit_context(&store, &payload, &ctx).expect("mail and nudge");
+        let (mail, nudge) = (
+            text.find("ping").unwrap(),
+            text.find("[claude-fleet: work]").unwrap(),
+        );
+        assert!(mail < nudge, "the nudge is packed AFTER the mail: {text}");
+        assert!(text.contains("PAY-7") && text.contains("agent_inferred"));
+
+        assert_eq!(
+            prompt_submit_context(&store, &payload, &ctx),
+            None,
+            "mail stamped, nudge stamped: nothing more this conversation"
+        );
+        let s = store.lock().unwrap();
+        assert!(s.conversation_nudged(b, "conv-b").unwrap());
+    }
+
+    /// A nudge never displaces mail: when the mail fills the budget it waits,
+    /// unstamped, and rides the next prompt on its own.
+    #[test]
+    fn the_nudge_waits_when_the_mail_fills_the_budget() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (a, b, payload) = nudge_ready(&store);
+        store
+            .lock()
+            .unwrap()
+            .insert_message(a, b, &"m".repeat(7_700), "message", None)
+            .unwrap();
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+        };
+
+        let first = prompt_submit_context(&store, &payload, &ctx).expect("the mail");
+        assert!(first.contains(&"m".repeat(100)));
+        assert!(
+            !first.contains("[claude-fleet: work]"),
+            "no room left for the nudge"
+        );
+        assert!(first.chars().count() <= crate::service::delivery::CTX_MAX_CHARS);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
+
+        let second = prompt_submit_context(&store, &payload, &ctx).expect("the nudge alone");
+        assert!(second.starts_with("[claude-fleet: work]"), "{second}");
+    }
+
+    /// A nested `claude -p` sharing the pane (another conversation id) never
+    /// gets the nudge, and does not use it up.
+    #[test]
+    fn a_foreign_conversation_never_gets_the_nudge() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (_, b, _) = nudge_ready(&store);
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+        };
+        let foreign = HookPayload {
+            session_id: Some("conv-nested".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        assert_eq!(prompt_submit_context(&store, &foreign, &ctx), None);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
     }
 
     #[test]

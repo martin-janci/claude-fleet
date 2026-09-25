@@ -42,15 +42,12 @@
   const url = $derived(card?.url ?? session.work?.url ?? null);
 
   // Work graph M9.3: ask the session to write its hand-off (on demand only).
-  // Only an idle REPL is asked; the hub refuses the rest and says why.
+  // Only an idle REPL is asked: `stopped` or unknown may be a bare shell,
+  // where the prompt would run as commands. The hub refuses the rest too.
   let asking = $state(false);
   const askBlocked = $derived(hubActionBlocked('request_work_handover', $hubStatus, $hubConnection));
   const canAsk = $derived(
-    askBlocked === null &&
-      canInsertInto(session) &&
-      session.claude_status !== 'working' &&
-      session.claude_status !== 'blocked' &&
-      !session.stuck_kind,
+    askBlocked === null && canInsertInto(session) && session.claude_status === 'idle' && !session.stuck_kind,
   );
   async function askHandover() {
     if (!key || asking) return;
