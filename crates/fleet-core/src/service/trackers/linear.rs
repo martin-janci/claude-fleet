@@ -94,7 +94,10 @@ impl Linear {
         }
     }
 
-    async fn gql(
+    /// One GraphQL exchange: the whole answer (`data` and `errors`), once
+    /// the errors that speak for the whole call (rate limit, auth, a
+    /// forbidden view) and the HTTP status are mapped.
+    async fn gql_envelope(
         &self,
         query: &str,
         variables: Value,
@@ -130,16 +133,93 @@ impl Linear {
             }
         }
         check_http(&resp, call)?;
-        let v = v.ok_or_else(|| TrackerError::Invalid("not a GraphQL answer".into()))?;
+        v.ok_or_else(|| TrackerError::Invalid("not a GraphQL answer".into()))
+    }
+
+    /// The `data` of one GraphQL exchange; an answer without it fails.
+    async fn gql(
+        &self,
+        query: &str,
+        variables: Value,
+        call: CallKind,
+    ) -> Result<Value, TrackerError> {
+        let v = self.gql_envelope(query, variables, call).await?;
         if v["data"].is_null() {
-            let m = v["errors"][0]["message"]
-                .as_str()
-                .unwrap_or("a GraphQL answer without data");
-            return Err(TrackerError::Invalid(
-                crate::logging::redact(m).chars().take(200).collect(),
-            ));
+            return Err(Self::no_data(&v));
         }
         Ok(v["data"].clone())
+    }
+
+    /// The error for an answer without `data`: its first message.
+    fn no_data(v: &Value) -> TrackerError {
+        let m = v["errors"][0]["message"]
+            .as_str()
+            .unwrap_or("a GraphQL answer without data");
+        TrackerError::Invalid(crate::logging::redact(m).chars().take(200).collect())
+    }
+
+    /// Up to [`FETCH_MAX`] issues by id or identifier, one aliased
+    /// `issue(id:)` lookup each; `None` for one Linear does not have (or the
+    /// key may not read).
+    ///
+    /// `Query.issue` is non-null, so one missing issue does not come back
+    /// as a `null` next to the others: it nulls the root `data`, with a
+    /// field error whose `path` names the alias. Those aliases are
+    /// unavailable, and the rest are asked for again without them; each
+    /// round drops at least one, so the rounds are bounded by the chunk.
+    async fn lookup_chunk(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<Option<WorkItemSnapshot>>, TrackerError> {
+        let mut found: Vec<Option<WorkItemSnapshot>> = vec![None; ids.len()];
+        let mut pending: Vec<usize> = (0..ids.len()).collect();
+        for _ in 0..ids.len() {
+            if pending.is_empty() {
+                break;
+            }
+            let mut decls = Vec::new();
+            let mut fields = Vec::new();
+            let mut vars = Map::new();
+            for (k, i) in pending.iter().enumerate() {
+                decls.push(format!("$i{k}: String!"));
+                fields.push(format!("i{k}: issue(id: $i{k}) {{ ...I }}"));
+                vars.insert(format!("i{k}"), json!(ids[*i]));
+            }
+            let query = format!(
+                "query({}) {{ {} }} {ISSUE_FIELDS}",
+                decls.join(", "),
+                fields.join(" ")
+            );
+            let v = self
+                .gql_envelope(&query, Value::Object(vars), CallKind::Other)
+                .await?;
+            if let Some(d) = v["data"].as_object() {
+                for (k, i) in pending.iter().enumerate() {
+                    found[*i] = self.snapshot(&d[&format!("i{k}")]);
+                }
+                break;
+            }
+            // No data: which aliases do the field errors name?
+            let failed: Vec<usize> = v["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e["path"][0].as_str())
+                .filter_map(|alias| alias.strip_prefix('i')?.parse::<usize>().ok())
+                .filter(|k| *k < pending.len())
+                .collect();
+            if failed.is_empty() {
+                // Not a per-field failure: the whole call went wrong.
+                return Err(Self::no_data(&v));
+            }
+            pending = pending
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| !failed.contains(k))
+                .map(|(_, i)| *i)
+                .collect();
+        }
+        Ok(found)
     }
 
     /// Normalise one issue node.
@@ -373,25 +453,10 @@ impl TrackerProvider for Linear {
             .filter_map(|(i, a)| a.clone().map(|a| (i, a)))
             .collect();
         for chunk in askable.chunks(FETCH_MAX) {
-            let mut decls = Vec::new();
-            let mut fields = Vec::new();
-            let mut vars = Map::new();
-            for (k, (_, id)) in chunk.iter().enumerate() {
-                decls.push(format!("$i{k}: String!"));
-                fields.push(format!("i{k}: issue(id: $i{k}) {{ ...I }}"));
-                vars.insert(format!("i{k}"), json!(id));
-            }
-            let query = format!(
-                "query({}) {{ {} }} {ISSUE_FIELDS}",
-                decls.join(", "),
-                fields.join(" ")
-            );
-            // A missing issue is a per-field error next to the others' data.
-            let d = self
-                .gql(&query, Value::Object(vars), CallKind::Other)
-                .await?;
-            for (k, (i, id)) in chunk.iter().enumerate() {
-                found[*i] = self.snapshot(&d[format!("i{k}")]).map(|mut s| {
+            let ids: Vec<String> = chunk.iter().map(|(_, id)| id.clone()).collect();
+            let got = self.lookup_chunk(&ids).await?;
+            for ((i, id), s) in chunk.iter().zip(got) {
+                found[*i] = s.map(|mut s| {
                     // Asked under an identifier it no longer has: moved.
                     let asked = id.to_ascii_uppercase();
                     if matches!(refs[*i], ItemRef::Key(_) | ItemRef::Url(_))
