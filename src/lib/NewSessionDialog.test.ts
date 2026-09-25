@@ -1639,6 +1639,12 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     await tick();
     await fireEvent.click(screen.getByTestId('create-btn'));
     await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+    // The jump is the point: the live session is opened, nothing is shown
+    // as an error and no plain session is created instead.
+    expect(get(selectedSession)?.id).toBe(5);
+    expect(screen.queryByRole('alert')).toBeNull();
+    const cmds = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(cmds).not.toContain('new_session');
     sessionsModule.sessions.set([]);
   });
 });
