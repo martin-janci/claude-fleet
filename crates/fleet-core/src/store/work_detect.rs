@@ -127,6 +127,38 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The item's CURRENT key for a detected target that names a tracker
+    /// item by an alias (a moved Jira issue), else the target as given. The
+    /// resolver keys links and candidates by one spelling, so a candidate
+    /// seen under an alias meets the link (or the rejection, R9) made for
+    /// the item, instead of being created again on every run.
+    pub fn canonical_work_target(
+        &self,
+        target: &str,
+        tracker_id: Option<i64>,
+    ) -> Result<String, IpcError> {
+        let Ok(key) = super::normalize_work_ref(target) else {
+            return Ok(target.to_string());
+        };
+        let current: Option<String> = match tracker_id {
+            Some(tid) => self
+                .conn
+                .query_row(
+                    "SELECT key FROM work_items WHERE tracker_id = ?1 AND (key = ?2 OR EXISTS \
+                       (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) WHERE value = ?2)) \
+                     ORDER BY (key = ?2) DESC, id LIMIT 1",
+                    rusqlite::params![tid, key],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten(),
+            None => self.tracker_item_for_key(&key)?.and_then(|i| i.key),
+        };
+        Ok(current
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| target.to_string()))
+    }
+
     /// Delivered handover bodies addressed to `participant`, newest first
     /// (the loop guard: text fleet injected must not count as evidence).
     pub fn recent_handover_bodies(
@@ -182,6 +214,20 @@ impl Store {
                     if crosses(item_id)? {
                         continue;
                     }
+                    // One live link per item and participant, however the
+                    // target was spelled: a second one would sit beside a
+                    // decision (R1 / R9) or double a suggestion.
+                    if let Some(item) = item_id {
+                        let dup: bool = self.conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
+                               AND ended_at IS NULL AND item_id = ?2)",
+                            rusqlite::params![participant, item],
+                            |r| r.get(0),
+                        )?;
+                        if dup {
+                            continue;
+                        }
+                    }
                     let state = match state {
                         NewState::Suggested => "suggested",
                         NewState::Confirmed => "confirmed",
@@ -222,6 +268,7 @@ impl Store {
                 LinkChange::Promote {
                     link_id,
                     rule,
+                    source,
                     strength,
                     evidence,
                 } => {
@@ -238,10 +285,12 @@ impl Store {
                         continue;
                     }
                     let old = self.link_evidence(*link_id)?;
+                    // The link is now the promoting signal's (R7 ends a
+                    // `branch` / `pr` link when that signal moves on).
                     self.conn.execute(
                         "UPDATE work_links SET state = 'confirmed', rule = ?2, strength = ?3, \
                            evidence = ?4, decided_at = ?5, claude_session_id = ?6, \
-                           preselected = 0 \
+                           source = ?7, preselected = 0 \
                          WHERE id = ?1 AND state = 'suggested' AND ended_at IS NULL",
                         rusqlite::params![
                             link_id,
@@ -249,7 +298,8 @@ impl Store {
                             strength.as_str(),
                             encode_evidence(&old, evidence),
                             now,
-                            conversation
+                            conversation,
+                            source
                         ],
                     )?;
                 }
@@ -285,17 +335,31 @@ impl Store {
                         }
                         PrimaryRef::None => None,
                     };
-                    self.conn.execute(
-                        "UPDATE work_links SET is_primary = 0 \
-                         WHERE participant_id = ?1 AND ended_at IS NULL",
-                        rusqlite::params![participant],
-                    )?;
-                    if let Some(id) = id {
-                        self.conn.execute(
-                            "UPDATE work_links SET is_primary = 1 \
-                             WHERE id = ?1 AND state = 'confirmed' AND ended_at IS NULL",
-                            rusqlite::params![id],
-                        )?;
+                    match (r, id) {
+                        (PrimaryRef::None, _) => {
+                            self.conn.execute(
+                                "UPDATE work_links SET is_primary = 0 \
+                                 WHERE participant_id = ?1 AND ended_at IS NULL",
+                                rusqlite::params![participant],
+                            )?;
+                        }
+                        // One guarded statement: the old primary is cleared
+                        // only when the new one is a live confirmed link of
+                        // this participant. A Promote skipped above (cross-
+                        // org) left it suggested, so nothing moves.
+                        (_, Some(id)) => {
+                            self.conn.execute(
+                                "UPDATE work_links SET is_primary = (id = ?2) \
+                                 WHERE participant_id = ?1 AND ended_at IS NULL \
+                                   AND EXISTS(SELECT 1 FROM work_links n WHERE n.id = ?2 \
+                                       AND n.participant_id = ?1 AND n.state = 'confirmed' \
+                                       AND n.ended_at IS NULL)",
+                                rusqlite::params![participant, id],
+                            )?;
+                        }
+                        // The target's Create was skipped (cross-org): the
+                        // session keeps the primary it has.
+                        (_, None) => {}
                     }
                 }
             }
@@ -359,6 +423,9 @@ impl Store {
 
     /// End a live session's link because its state signal moved on (R7):
     /// the same snapshot the retirement trigger takes, plus the reason.
+    /// `snap_branch` is the branch the link's own `branch` evidence saw
+    /// (the value that just changed), else the worktree's — never a PR
+    /// closing ref's text, which is a ticket key.
     fn end_live_link(
         &self,
         link_id: i64,
@@ -373,7 +440,10 @@ impl Store {
                snap_name = (SELECT friendly_name FROM sessions WHERE id = ?2), \
                snap_project_id = (SELECT project_id FROM sessions WHERE id = ?2), \
                snap_worktree = (SELECT worktree_key FROM sessions WHERE id = ?2), \
-               snap_branch = COALESCE(json_extract(evidence, '$[0].text'), \
+               snap_branch = COALESCE( \
+                 (SELECT json_extract(j.value, '$.text') FROM json_each(evidence) j \
+                   WHERE json_extract(j.value, '$.signal') = 'branch' \
+                   ORDER BY j.key DESC LIMIT 1), \
                  (SELECT w.branch FROM sessions s JOIN worktrees w ON w.id = s.worktree_id \
                    WHERE s.id = ?2)), \
                snap_pr_url = (SELECT pr_url FROM sessions WHERE id = ?2), \
@@ -457,12 +527,15 @@ impl Store {
 
     /// Fleet already knows `key`: an item carries it (or an alias), or some
     /// link names it. With no tracker, only such keys count from a prompt.
+    /// A removed tracker's rows do not count (a link to one still does).
     pub fn work_key_known(&self, key: &str) -> Result<bool, IpcError> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM work_items WHERE key = ?1) \
+            "SELECT EXISTS(SELECT 1 FROM work_items WHERE key = ?1 \
+                           AND (tracker_id IS NULL OR tracker_id IN (SELECT id FROM trackers))) \
                  OR EXISTS(SELECT 1 FROM work_links WHERE ref_key = ?1) \
                  OR EXISTS(SELECT 1 FROM work_items, json_each(COALESCE(aliases, '[]')) j \
-                           WHERE j.value = ?1)",
+                           WHERE j.value = ?1 \
+                             AND (tracker_id IS NULL OR tracker_id IN (SELECT id FROM trackers)))",
             rusqlite::params![key],
             |r| r.get(0),
         )?)

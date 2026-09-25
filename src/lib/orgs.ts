@@ -75,10 +75,15 @@ export const UNASSIGNED: ScopeId = 'unassigned';
 
 export const orgs = writable<OrgDetail[]>([]);
 
+let loadSeq = 0;
+
+/** Reload the orgs. A stale answer (one a later load overtook) never
+ *  overwrites the newer one. */
 export async function loadOrgs(): Promise<Result<OrgDetail[]>> {
+  const seq = ++loadSeq;
   const r = await invokeCmd<OrgDetail[]>('list_orgs');
   // A hub older than M5 (or a test double) may answer nothing usable.
-  if (r.ok) orgs.set(Array.isArray(r.value) ? r.value : []);
+  if (r.ok && seq === loadSeq) orgs.set(Array.isArray(r.value) ? r.value : []);
   return r;
 }
 

@@ -561,14 +561,19 @@ pub(crate) fn map_transport(e: crate::net::https::TransportError) -> TrackerErro
     }
 }
 
+/// The longest wait a tracker's `Retry-After` or reset header can ask for:
+/// anything longer would park the tracker's sync until a restart.
+pub const MAX_RETRY_AFTER_SECS: u64 = 3600;
+
 /// `Retry-After` in seconds, else the seconds until `X-RateLimit-Reset`
-/// (a unix time: GitHub, Linear) when the quota is spent.
+/// (a unix time: GitHub, Linear) when the quota is spent; never more than
+/// [`MAX_RETRY_AFTER_SECS`].
 pub(crate) fn retry_after(resp: &crate::net::https::Response) -> Option<u64> {
     if let Some(s) = resp
         .header("Retry-After")
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
-        return Some(s);
+        return Some(s.min(MAX_RETRY_AFTER_SECS));
     }
     let spent = resp
         .header("X-RateLimit-Remaining")
@@ -587,7 +592,7 @@ pub(crate) fn retry_after(resp: &crate::net::https::Response) -> Option<u64> {
     } else {
         reset
     };
-    Some((reset - crate::service::catalog::now_secs()).clamp(1, 3600) as u64)
+    Some((reset - crate::service::catalog::now_secs()).clamp(1, MAX_RETRY_AFTER_SECS as i64) as u64)
 }
 
 /// Map a non-2xx answer for the providers after Jira (GitHub, Asana,
@@ -751,6 +756,27 @@ mod tests {
             assert_eq!(parse_timestamp(&format_timestamp(t)), Some(t));
         }
         assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
+    }
+
+    /// An unbounded `Retry-After` (or reset) would park a tracker's sync
+    /// until a restart: the wait is capped.
+    #[test]
+    fn retry_after_is_bounded() {
+        use crate::net::https::Response;
+        let r = Response::new(429, "").with_header("Retry-After", "4000000000000000000");
+        assert_eq!(retry_after(&r), Some(MAX_RETRY_AFTER_SECS));
+        assert_eq!(
+            check_http(&r, CallKind::Other),
+            Err(TrackerError::RateLimited {
+                retry_after_secs: Some(MAX_RETRY_AFTER_SECS)
+            })
+        );
+        let r = Response::new(429, "").with_header("Retry-After", "30");
+        assert_eq!(retry_after(&r), Some(30));
+        let r = Response::new(403, "")
+            .with_header("X-RateLimit-Remaining", "0")
+            .with_header("X-RateLimit-Reset", "9999999999");
+        assert_eq!(retry_after(&r), Some(MAX_RETRY_AFTER_SECS));
     }
 
     #[test]

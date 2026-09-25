@@ -196,7 +196,8 @@
   );
   // A clicked suggestion narrows the tree to its one session (see
   // session_focus.ts): past every other filter, so the row can't be hidden
-  // by the host, bg-agent, scope, recency or search filters it arrived under.
+  // by the host, bg-agent, scope, recency or search filters it arrived under
+  // — nor by a work group's collapsed Done section when its link is archived.
   const focus = $derived($sessionFocus);
   const viewHost = $derived(focus ? 'all' : $hostFilter);
   const viewBg = $derived(focus ? true : $showBgAgents);
@@ -1031,7 +1032,9 @@
           {@const isCollapsed = collapsedWork.has(g.key)}
           {@const pr = workGroupPrSummary(g.sessions)}
           {@const ticket = workGroupTicket(g.key, g.sessions)}
-          {@const split = splitArchived(g.sessions, (s) => needsYou(s, attentionOpts))}
+          {@const split = focus
+            ? { live: g.sessions, archived: [] }
+            : splitArchived(g.sessions, (s) => needsYou(s, attentionOpts))}
           {@const reopened = reopenedKeys.get(g.key)}
           {@const groupColor = orgColorOf(
             { org_id: g.sessions[0]?.work?.org_id ?? g.sessions[0]?.org_id ?? null },

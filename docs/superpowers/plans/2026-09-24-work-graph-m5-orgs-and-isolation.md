@@ -256,6 +256,7 @@ M5.4 (`/security-review`) before they are pushed.
 | D7 (new) | Isolate sessions (list, message, dispatch) across orgs? | Off per org; the user turns it on per org |
 | new | May a host with no org see org data? | No, only unassigned |
 | new | Cross-org link from the desktop? | Refused unless `force_cross_org` (data integrity) |
+| new | A `move_session` whose target host puts the session in another org than its live links? | Warned, not refused: the move has no force flag and carries every link as it is, so the report's `warnings` names each link that now crosses the boundary (the one accepted cross-org path) |
 
 ## Revisions
 

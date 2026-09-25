@@ -427,8 +427,98 @@ fn invalid_utf8_in_a_chunked_response_decodes_lossily_via_split_response() {
     assert_eq!(r.body, "\u{FFFD}");
 }
 
+/// The other prefix [`is_connect_failure`] matches. The refused-port test
+/// above pins `connect …`; this pins `TLS handshake with …` against the real
+/// [`connect`], the same way: a loopback listener that accepts and hangs up
+/// is a peer that was REACHED over TCP but never completed a handshake — the
+/// breaker must count it as unreachable (no `/mcp` socket ever came up), and
+/// the reason must not come back as the plain `connect ` arm either. Opens no
+/// outward socket; the trust store must load for the handshake to start at
+/// all, which `the_platform_trust_store_yields_roots` asserts separately.
+#[tokio::test]
+async fn a_real_failed_tls_handshake_is_recognised_as_a_connect_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback listener");
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        // Accept, then drop: the client's ClientHello meets EOF.
+        let (sock, _) = listener.accept().await.expect("the client connects");
+        drop(sock);
+    });
+    let at = Endpoint::parse(&format!("https://127.0.0.1:{port}/mcp")).expect("parses");
+    let reason = connect(&at)
+        .await
+        .err()
+        .expect("a peer that hangs up cannot complete a handshake");
+    server.await.unwrap();
+    assert!(
+        reason.starts_with(&format!("TLS handshake with 127.0.0.1:{port} failed: ")),
+        "connect() said {reason:?}, which is not the TLS-handshake spelling"
+    );
+    assert!(
+        is_connect_failure(&reason),
+        "connect() said {reason:?}, which the breaker would not recognise"
+    );
+}
+
 // --- the trust store, loaded off the runtime and never cached as a failure ---
 
 // The two trust-store source assertions (`the_trust_store_is_never_loaded_on_a_runtime_worker`,
 // `a_failed_trust_store_read_is_not_remembered`) live with the code in
-// `crate::net::tls` (work graph M3.0).
+// `crate::net::tls` (work graph M3.0). They inspect `tls.rs` only; the one
+// below is the half of the old desktop assertion that looked at the
+// TRANSPORT file.
+
+/// Before the move, `the_trust_store_is_never_loaded_on_a_runtime_worker`
+/// read `remote.rs` — the transport — and required that the trust store was
+/// read in one place and the connector built only behind `spawn_blocking`.
+/// The transport now delegates to [`crate::net::tls`] through
+/// [`crate::net::conn::connect`], and `tls.rs`'s own test guards that file;
+/// what nothing guarded any more is the transport growing a second reader or
+/// a second cache of its own — the regression the desktop test existed for,
+/// which `tls.rs` cannot see from where it sits. A source assertion, for the
+/// same reason as the original: the defect is a *thread*, not observable
+/// in-process.
+#[test]
+fn the_transport_reaches_the_trust_store_only_through_net_tls() {
+    for (name, src) in [
+        ("mod.rs", include_str!("mod.rs")),
+        ("http1.rs", include_str!("http1.rs")),
+    ] {
+        let code: Vec<&str> = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        for forbidden in [
+            "load_native_certs",
+            "build_tls_connector",
+            "tls_connector(",
+            "TlsConnector",
+            "RootCertStore",
+            "ClientConfig",
+            "OnceLock",
+            "spawn_blocking",
+        ] {
+            let hits: Vec<&&str> = code.iter().filter(|l| l.contains(forbidden)).collect();
+            assert!(
+                hits.is_empty(),
+                "http_client/{name} must not touch the trust store or a TLS connector \
+                 itself (`{forbidden}`); that is `crate::net::tls`'s, reached through \
+                 `crate::net::conn::connect`: {hits:#?}"
+            );
+        }
+    }
+    // And the one socket opener really is the shared one.
+    let src = include_str!("mod.rs");
+    let body = src
+        .split("pub async fn connect(at: &Endpoint)")
+        .nth(1)
+        .expect("`connect` is defined in mod.rs");
+    let body = &body[..body.find("\n}\n").expect("`connect` has a body")];
+    assert!(
+        body.contains("crate::net::conn::connect(&at.at, CONNECT_TIMEOUT)"),
+        "`connect` must delegate to `crate::net::conn::connect`, whose TLS arm goes \
+         through `net::tls::tls_connector` (blocking pool, no cached failure): {body}"
+    );
+}

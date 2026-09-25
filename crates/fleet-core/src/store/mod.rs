@@ -173,10 +173,92 @@ fn tune_file_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// `chmod 600` one file, best-effort: a missing file is fine (a sidecar
+/// SQLite has not created yet), any other failure is logged, never fatal.
+/// No-op off unix.
+fn set_owner_only(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "[store] chmod 600 failed; the file may be readable by other users"
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// The WAL sidecars SQLite keeps beside `path` while a connection is open.
+fn sidecar_paths(path: &std::path::Path) -> [std::path::PathBuf; 2] {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_owned();
+    shm.push("-shm");
+    [wal.into(), shm.into()]
+}
+
+/// Make `path` owner-only BEFORE SQLite opens it.
+///
+/// The database holds bearer tokens (the MCP master token, client and peer
+/// link tokens, tracker secrets) in plaintext, and in WAL mode every recent
+/// commit lives in `<path>-wal` until a checkpoint. SQLite creates `-wal`
+/// and `-shm` with the main file's mode at that moment and never re-chmods
+/// them, so a chmod after the open (what the callers used to do) leaves the
+/// sidecars at the umask-derived mode for the life of the process — and
+/// across a crash, since a leftover `-wal` is reused. Creating the file 0600
+/// here means the sidecars inherit 0600; an existing file is tightened first
+/// for the same reason.
+fn restrict_before_open(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if path.exists() {
+            set_owner_only(path);
+            return;
+        }
+        // An empty file is a valid (empty) SQLite database. `create_new`: a
+        // file that appeared in between is an existing database, and the
+        // open below reads it as such.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => set_owner_only(path),
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "[store] could not pre-create the database owner-only"
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 impl Store {
     pub fn open_with_bus(path: &std::path::Path, bus: Arc<dyn EventBus>) -> Result<Self> {
+        restrict_before_open(path);
         let conn = Connection::open(path)?;
         tune_file_connection(&conn)?;
+        // A database that already existed with a wider mode may have left a
+        // `-wal` / `-shm` behind (a crash, an older build) that SQLite reuses
+        // as they are; tighten them too, now that WAL is on.
+        for sidecar in sidecar_paths(path) {
+            set_owner_only(&sidecar);
+        }
         let store = Self {
             conn,
             bus: StoreBus::new(bus),
@@ -461,6 +543,49 @@ mod tests {
         // lose the last commits but never corrupts the database.
         assert_eq!(pragma::<i64>(&s, "synchronous"), 1);
         assert!(pragma::<i64>(&s, "busy_timeout") >= 1000);
+    }
+
+    /// The bearer tokens live in `state.db-wal` until a checkpoint, and
+    /// SQLite gives the sidecars the main file's mode when it creates them:
+    /// the main file must be 0600 BEFORE the open, not chmodded after it.
+    #[cfg(unix)]
+    #[test]
+    fn file_store_and_its_wal_sidecars_are_owner_only_while_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let wal = dir.path().join("state.db-wal");
+        let shm = dir.path().join("state.db-shm");
+
+        // A fresh database: created 0600, so the sidecars inherit 0600.
+        let s = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        s.set_controller("mac", "dev-fleet").unwrap();
+        assert!(
+            wal.exists() && shm.exists(),
+            "WAL sidecars exist while open"
+        );
+        assert_eq!(mode(&db), 0o600, "state.db");
+        assert_eq!(mode(&wal), 0o600, "state.db-wal");
+        assert_eq!(mode(&shm), 0o600, "state.db-shm");
+
+        // A leftover sidecar with a wider mode (a crash under an older build)
+        // is tightened by the next open even though SQLite reuses it.
+        std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let again = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        assert_eq!(mode(&wal), 0o600, "leftover state.db-wal");
+        drop(again);
+        drop(s);
+
+        // A database that already existed with a wider mode is tightened
+        // before the open, so its new sidecars are 0600 too.
+        assert!(!wal.exists(), "the WAL is gone after the last close");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let s = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        s.set_controller("mac", "dev-fleet").unwrap();
+        assert_eq!(mode(&db), 0o600, "existing state.db");
+        assert_eq!(mode(&wal), 0o600, "existing database's state.db-wal");
+        assert_eq!(mode(&shm), 0o600, "existing database's state.db-shm");
     }
 
     /// `fleet-hub pair` / `token show` read beside a live daemon. In WAL a
