@@ -653,7 +653,14 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.code, codes::E_INVALID);
         assert!(e.message.contains("fleet-agent"), "{}", e.message);
-        assert_eq!(admin_sync(&args("list"), &st).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(
+            admin_sync(&args("list"), &st)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let e = admin_sync(
             &WorkAdminArgs {
                 tracker_id: Some(id),
