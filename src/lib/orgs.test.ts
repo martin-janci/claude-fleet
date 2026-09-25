@@ -23,6 +23,7 @@ import {
   effectiveScope,
   orgColorById,
   loadOrgs,
+  createFromSuggestion,
   type OrgDetail,
 } from './orgs';
 import { appChord, scopeChordLabel } from './app_views';
@@ -286,5 +287,79 @@ describe('loadOrgs', () => {
     first([org(1, 'older')]);
     expect((await a).ok).toBe(true);
     expect(get(orgs).map((o) => o.name)).toEqual(['newer']);
+  });
+});
+
+describe('createFromSuggestion', () => {
+  const mocked = vi.mocked(invoke);
+  const cmds = () => mocked.mock.calls.map((c) => c[0]);
+
+  beforeEach(() => {
+    mocked.mockReset();
+  });
+
+  it('a tracker suggestion makes the org, assigns the tracker, then re-reads the list', async () => {
+    mocked.mockImplementation(async (cmd: string) => {
+      if (cmd === 'add_org') return org(9, 'Beta');
+      if (cmd === 'list_orgs') return [org(9, 'Beta')];
+      return null;
+    });
+    const r = await createFromSuggestion({ name: 'Beta', tracker_id: 5, sessions: 0, reason: 'a tracker named Beta' });
+    expect(r.ok && r.value.id).toBe(9);
+    expect(cmds()).toEqual(['add_org', 'assign_tracker_org', 'list_orgs']);
+    expect(mocked).toHaveBeenCalledWith('add_org', { args: { name: 'Beta', color: null, isolate_sessions: false } });
+    expect(mocked).toHaveBeenCalledWith('assign_tracker_org', { args: { tracker_id: 5, org_id: 9 } });
+    expect(get(orgs).map((o) => o.name)).toEqual(['Beta']);
+  });
+
+  it('owner and tracker together: the rule first, then the tracker, both on the new org', async () => {
+    mocked.mockImplementation(async (cmd: string) => (cmd === 'add_org' ? org(9, 'Beta') : cmd === 'list_orgs' ? [] : null));
+    const r = await createFromSuggestion({ name: 'Beta', owner: 'beta', tracker_id: 5, sessions: 2, reason: 'x' });
+    expect(r.ok).toBe(true);
+    expect(cmds()).toEqual(['add_org', 'add_org_rule', 'assign_tracker_org', 'list_orgs']);
+    expect(mocked).toHaveBeenCalledWith('add_org_rule', { args: { org_id: 9, owner: 'beta' } });
+    expect(mocked).toHaveBeenCalledWith('assign_tracker_org', { args: { tracker_id: 5, org_id: 9 } });
+  });
+
+  it('a refused add_org is the answer, and nothing else is tried', async () => {
+    orgs.set([org(1, 'A')]);
+    mocked.mockRejectedValue({ code: 'E_INVALID', message: 'an org named Beta exists' });
+    const r = await createFromSuggestion({ name: 'Beta', owner: 'beta', tracker_id: 5, sessions: 0, reason: 'x' });
+    expect(r).toEqual({ ok: false, error: { code: 'E_INVALID', message: 'an org named Beta exists' } });
+    expect(cmds()).toEqual(['add_org']);
+    expect(get(orgs).map((o) => o.name)).toEqual(['A']);
+  });
+
+  it('a refused rule is the answer: the tracker is not assigned and the list not re-read', async () => {
+    mocked.mockImplementation(async (cmd: string) => {
+      if (cmd === 'add_org') return org(9, 'Beta');
+      if (cmd === 'add_org_rule') throw { code: 'E_INVALID', message: 'owner beta is already ruled' };
+      return null;
+    });
+    const r = await createFromSuggestion({ name: 'Beta', owner: 'beta', tracker_id: 5, sessions: 0, reason: 'x' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe('owner beta is already ruled');
+    expect(cmds()).toEqual(['add_org', 'add_org_rule']);
+  });
+
+  it('a refused tracker assignment is the answer, and the list is not re-read', async () => {
+    mocked.mockImplementation(async (cmd: string) => {
+      if (cmd === 'add_org') return org(9, 'Beta');
+      if (cmd === 'assign_tracker_org') throw { code: 'E_NOT_FOUND', message: 'tracker 5' };
+      return null;
+    });
+    const r = await createFromSuggestion({ name: 'Beta', tracker_id: 5, sessions: 0, reason: 'x' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe('E_NOT_FOUND');
+    expect(cmds()).toEqual(['add_org', 'assign_tracker_org']);
+  });
+
+  it('a tracker id of 0 is still a tracker; only a missing one is skipped', async () => {
+    mocked.mockImplementation(async (cmd: string) => (cmd === 'add_org' ? org(9, 'Beta') : cmd === 'list_orgs' ? [] : null));
+    await createFromSuggestion({ name: 'Beta', tracker_id: 0, sessions: 0, reason: 'x' });
+    expect(cmds()).toEqual(['add_org', 'assign_tracker_org', 'list_orgs']);
+    mocked.mockClear();
+    await createFromSuggestion({ name: 'Beta', owner: 'beta', tracker_id: null, sessions: 0, reason: 'x' });
+    expect(cmds()).toEqual(['add_org', 'add_org_rule', 'list_orgs']);
   });
 });
