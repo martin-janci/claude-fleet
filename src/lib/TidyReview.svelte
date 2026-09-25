@@ -307,7 +307,13 @@
     {#if only && shown.length < candidates.length}
       <p class="hint only" data-testid="tidy-only">
         From Today's Stale · {shown.length} of {candidates.length}
-        <button class="pill" data-testid="tidy-show-all" onclick={() => (only = null)}>Show all</button>
+        <!-- Its own keys: the sheet's ↵ would otherwise apply, not widen. -->
+        <button
+          class="pill"
+          data-testid="tidy-show-all"
+          onkeydown={(e) => e.stopPropagation()}
+          onclick={() => (only = null)}>Show all</button
+        >
       </p>
     {/if}
     {#if blocked}<p class="hint" role="note">{blocked}</p>{/if}

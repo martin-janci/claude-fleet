@@ -206,6 +206,16 @@ describe('TidyReview', () => {
     expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
   });
 
+  it('Enter on Show all never applies (M10.4)', async () => {
+    candidates = [cand(1), cand(2)];
+    await mount();
+    requestTidy([2]);
+    await waitFor(() => expect(screen.getByTestId('tidy-show-all')).toBeTruthy());
+    await fireEvent.keyDown(screen.getByTestId('tidy-show-all'), { key: 'Enter' });
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+  });
+
   it('the pill after a Today request opens the whole sheet again (M10.4)', async () => {
     candidates = [cand(1), cand(2)];
     await mount();
