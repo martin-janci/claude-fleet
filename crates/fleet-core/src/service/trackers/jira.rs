@@ -36,7 +36,7 @@ use super::{
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// `bulkfetch`'s limit.
@@ -54,6 +54,25 @@ pub struct JiraCloud {
     config: TrackerConfig,
     cred: Option<TrackerCredential>,
     transport: Arc<dyn HttpTransport>,
+}
+
+/// What one `bulkfetch` answered.
+#[derive(Default)]
+struct BulkAnswer {
+    by_id: HashMap<String, WorkItemSnapshot>,
+    /// Key → id.
+    by_key: HashMap<String, String>,
+    /// The asked ids or keys Jira reported in `issueErrors` (upper-cased):
+    /// missing, or not visible.
+    errored: HashSet<String>,
+}
+
+/// `s` with the old key `k` it was asked under recorded as an alias.
+fn with_alias(mut s: WorkItemSnapshot, k: &str) -> WorkItemSnapshot {
+    if !s.aliases.iter().any(|a| a == k) {
+        s.aliases.push(k.to_string());
+    }
+    s
 }
 
 impl JiraCloud {
@@ -183,6 +202,37 @@ impl JiraCloud {
         keys.sort();
         keys.dedup();
         Ok(keys)
+    }
+
+    /// One `bulkfetch` of `refs` (ids or keys, at most [`BULK_MAX`]).
+    async fn bulk(&self, refs: &[String]) -> Result<BulkAnswer, TrackerError> {
+        let body = json!({
+            "issueIdsOrKeys": refs,
+            "fields": self.fields(),
+        });
+        let v = self
+            .call(
+                Request::post_json(self.url("/rest/api/3/issue/bulkfetch"), &body),
+                Call::Other,
+            )
+            .await?;
+        let mut got = BulkAnswer::default();
+        for issue in v["issues"].as_array().into_iter().flatten() {
+            if let Some(s) = self.snapshot(issue) {
+                if let Some(k) = &s.key {
+                    got.by_key.insert(k.clone(), s.external_id.clone());
+                }
+                got.by_id.insert(s.external_id.clone(), s);
+            }
+        }
+        for e in v["issueErrors"].as_array().into_iter().flatten() {
+            for r in e["issueIdsOrKeys"].as_array().into_iter().flatten() {
+                if let Some(r) = r.as_str() {
+                    got.errored.insert(r.to_ascii_uppercase());
+                }
+            }
+        }
+        Ok(got)
     }
 
     /// Normalise one issue.
@@ -404,50 +454,56 @@ impl TrackerProvider for JiraCloud {
             .filter_map(|(i, (_, n))| n.clone().map(|n| (i, n)))
             .collect();
         for chunk in askable.chunks(BULK_MAX) {
-            let body = json!({
-                "issueIdsOrKeys": chunk.iter().map(|(_, r)| r.reference()).collect::<Vec<_>>(),
-                "fields": self.fields(),
-            });
-            let v = self
-                .call(
-                    Request::post_json(self.url("/rest/api/3/issue/bulkfetch"), &body),
-                    Call::Other,
-                )
-                .await?;
-            let mut by_id: HashMap<String, WorkItemSnapshot> = HashMap::new();
-            let mut by_key: HashMap<String, String> = HashMap::new();
-            for issue in v["issues"].as_array().into_iter().flatten() {
-                if let Some(s) = self.snapshot(issue) {
-                    if let Some(k) = &s.key {
-                        by_key.insert(k.clone(), s.external_id.clone());
-                    }
-                    by_id.insert(s.external_id.clone(), s);
-                }
-            }
+            let refs: Vec<String> = chunk.iter().map(|(_, r)| r.reference()).collect();
+            let got = self.bulk(&refs).await?;
+            let mut used: HashSet<String> = HashSet::new();
+            // Keys Jira neither answered under their own key nor reported
+            // as failed: asked under an old key, answered under the new.
+            let mut leftover: Vec<(usize, String)> = Vec::new();
             for (i, r) in chunk {
                 let hit = match r {
                     ItemRef::Key(k) => {
                         let k = k.to_ascii_uppercase();
-                        match by_key.get(&k) {
-                            Some(id) => by_id.get(id).cloned(),
-                            // Asked for a key, answered under another: the
-                            // issue moved. Jira resolves old keys, so the one
-                            // unmatched answer of a single-key chunk is it.
-                            None if chunk.len() == 1 && by_id.len() == 1 => {
-                                by_id.values().next().cloned().map(|mut s| {
-                                    if !s.aliases.contains(&k) {
-                                        s.aliases.push(k.clone());
-                                    }
-                                    s
-                                })
+                        match got.by_key.get(&k) {
+                            Some(id) => got.by_id.get(id).cloned(),
+                            None => {
+                                if !got.errored.contains(&k) {
+                                    leftover.push((*i, k));
+                                }
+                                None
                             }
-                            None => None,
                         }
                     }
-                    other => by_id.get(&other.reference()).cloned(),
+                    other => got.by_id.get(&other.reference()).cloned(),
                 };
                 if let Some(s) = hit {
+                    used.insert(s.external_id.clone());
                     answers.insert(*i, Fetched::Found(Box::new(s)));
+                }
+            }
+            if leftover.is_empty() {
+                continue;
+            }
+            // Jira resolves old keys: the answers no asked reference matched
+            // are the moved issues. One of each pairs up; more than one is
+            // ambiguous, so those keys are asked for again one at a time.
+            let spare: Vec<&WorkItemSnapshot> = got
+                .by_id
+                .values()
+                .filter(|s| !used.contains(&s.external_id))
+                .collect();
+            if spare.is_empty() {
+                // Nothing came back for them: unavailable, no second ask.
+                continue;
+            }
+            if let ([(i, k)], [s]) = (leftover.as_slice(), spare.as_slice()) {
+                answers.insert(*i, Fetched::Found(Box::new(with_alias((*s).clone(), k))));
+                continue;
+            }
+            for (i, k) in leftover {
+                let one = self.bulk(std::slice::from_ref(&k)).await?;
+                if let (1, Some(s)) = (one.by_id.len(), one.by_id.into_values().next()) {
+                    answers.insert(i, Fetched::Found(Box::new(with_alias(s, &k))));
                 }
             }
         }
