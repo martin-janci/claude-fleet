@@ -289,6 +289,15 @@ fn resolve<'a>(
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
 }
 
+/// Who applies an item (its scope), what the timeline calls it (`manual`,
+/// `auto:<reason>`), and when.
+#[derive(Clone, Copy)]
+struct ApplyCtx<'a> {
+    scope: &'a OrgScope,
+    source: &'a str,
+    now: i64,
+}
+
 /// Apply one item to a session [`resolve`] found in the caller's scope,
 /// against a fresh snapshot.
 async fn apply_one(
@@ -297,10 +306,9 @@ async fn apply_one(
     snap: &Snapshot,
     s: &TidySession,
     item: &TidyApplyItem,
-    scope: &OrgScope,
-    source: &str,
-    now: i64,
+    ctx: ApplyCtx<'_>,
 ) -> Result<&'static str, IpcError> {
+    let ApplyCtx { scope, source, now } = ctx;
     let action = item.action.as_str();
     let destructive = matches!(action, "safe_kill" | "kill" | "archive");
     if destructive {
@@ -389,7 +397,12 @@ pub async fn tidy_apply(
             // could otherwise flood, and so evict, any session's history).
             Err(e) => Err(e),
             Ok(s) => {
-                let result = apply_one(store, exec, &snap, s, item, scope, "manual", now).await;
+                let ctx = ApplyCtx {
+                    scope,
+                    source: "manual",
+                    now,
+                };
+                let result = apply_one(store, exec, &snap, s, item, ctx).await;
                 if let Err(e) = &result {
                     tracing::info!(session_id = s.row.id, action = %item.action, error = %e.message, "[tidy] item failed");
                     if let Ok(st) = store.lock() {
@@ -457,7 +470,12 @@ pub async fn auto_tidy(
         let Ok(s) = resolve(&snap, &OrgScope::All, c.session_id) else {
             continue;
         };
-        match apply_one(store, exec, &snap, s, &item, &OrgScope::All, &source, now).await {
+        let ctx = ApplyCtx {
+            scope: &OrgScope::All,
+            source: &source,
+            now,
+        };
+        match apply_one(store, exec, &snap, s, &item, ctx).await {
             Ok(_) => acted += 1,
             Err(e) => {
                 tracing::warn!(session_id = c.session_id, error = %e.message, "[tidy] auto-tidy failed");
