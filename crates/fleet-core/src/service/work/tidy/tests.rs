@@ -269,6 +269,53 @@ async fn host_scope_and_bad_requests_are_per_item_or_refused() {
     );
 }
 
+/// A refused item never writes to the session it named: a per-host token
+/// could otherwise flood (and so evict, at the timeline's cap) the history
+/// of any session on any host, or of an id that does not exist at all.
+#[tokio::test]
+async fn a_refused_item_writes_no_event_to_the_foreign_session() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let a = seed(&store, "a", "done");
+    let count = |kind: &str| -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT count(*) FROM session_events WHERE kind = ?1",
+                [kind],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let exec = FakeExec::default();
+    let items: Vec<TidyApplyItem> = (0..5)
+        .map(|_| item(a, "snooze"))
+        .chain(std::iter::once(item(999_999, "kill")))
+        .collect();
+    let r = tidy_apply(&store, &exec, &items, &host("other"), NOW)
+        .await
+        .unwrap();
+    assert!(r
+        .results
+        .iter()
+        .all(|r| !r.ok && r.error.as_deref().unwrap().contains("not found")));
+    assert_eq!(count("gc_failed"), 0, "a refused id gets no timeline row");
+    assert!(store
+        .lock()
+        .unwrap()
+        .list_session_events(999_999, 10)
+        .unwrap()
+        .is_empty());
+    // A failure on a session the caller does see is still recorded.
+    let r = tidy_apply(&store, &exec, &[item(a, "explode")], &host("local"), NOW)
+        .await
+        .unwrap();
+    assert!(!r.results[0].ok);
+    assert_eq!(count("gc_failed"), 1);
+    assert!(exec.calls().is_empty());
+}
+
 const GC_OFF: GcConfig = GcConfig {
     enabled: false,
     bg_idle_secs: 0,

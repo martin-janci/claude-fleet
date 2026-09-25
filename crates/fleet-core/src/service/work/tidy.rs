@@ -273,29 +273,34 @@ async fn tidy_kill(
     Ok(outcome)
 }
 
-/// Apply one item against a fresh snapshot.
+/// The item's session under the caller's scope. Outside it (or unknown)
+/// reads exactly as a session that does not exist (no existence oracle, as
+/// M5's fence) — and, the id being caller-supplied, nothing is ever written
+/// to it: [`tidy_apply`] records a failure only once this has succeeded.
+fn resolve<'a>(
+    snap: &'a Snapshot,
+    scope: &OrgScope,
+    session_id: i64,
+) -> Result<&'a TidySession, IpcError> {
+    snap.sessions
+        .iter()
+        .find(|s| s.row.id == session_id)
+        .filter(|s| in_scope(scope, &s.row.host_alias, s.row.org_id))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+/// Apply one item to a session [`resolve`] found in the caller's scope,
+/// against a fresh snapshot.
 async fn apply_one(
     store: &Mutex<Store>,
     exec: &dyn GcExec,
     snap: &Snapshot,
+    s: &TidySession,
     item: &TidyApplyItem,
     scope: &OrgScope,
     source: &str,
     now: i64,
 ) -> Result<&'static str, IpcError> {
-    // Outside the caller's scope reads exactly as a session that does not
-    // exist (no existence oracle, as M5's fence).
-    let s = snap
-        .sessions
-        .iter()
-        .find(|s| s.row.id == item.session_id)
-        .filter(|s| in_scope(scope, &s.row.host_alias, s.row.org_id))
-        .ok_or_else(|| {
-            IpcError::new(
-                codes::E_NOTFOUND,
-                format!("session {} not found", item.session_id),
-            )
-        })?;
     let action = item.action.as_str();
     let destructive = matches!(action, "safe_kill" | "kill" | "archive");
     if destructive {
@@ -363,13 +368,22 @@ pub async fn tidy_apply(
     let snap = Snapshot::take(store)?;
     let mut report = TidyApplyReport::default();
     for item in items {
-        let result = apply_one(store, exec, &snap, item, scope, "manual", now).await;
-        if let Err(e) = &result {
-            tracing::info!(session_id = item.session_id, action = %item.action, error = %e.message, "[tidy] item failed");
-            if let Ok(s) = store.lock() {
-                let _ = s.insert_session_event(item.session_id, "gc_failed", Some(&e.message));
+        let result = match resolve(&snap, scope, item.session_id) {
+            // Not visible: refused in the report only. An id outside the
+            // caller's scope never gets a timeline row (a per-host token
+            // could otherwise flood, and so evict, any session's history).
+            Err(e) => Err(e),
+            Ok(s) => {
+                let result = apply_one(store, exec, &snap, s, item, scope, "manual", now).await;
+                if let Err(e) = &result {
+                    tracing::info!(session_id = s.row.id, action = %item.action, error = %e.message, "[tidy] item failed");
+                    if let Ok(st) = store.lock() {
+                        let _ = st.insert_session_event(s.row.id, "gc_failed", Some(&e.message));
+                    }
+                }
+                result
             }
-        }
+        };
         report.results.push(TidyApplyResult {
             session_id: item.session_id,
             action: item.action.clone(),
@@ -425,7 +439,10 @@ pub async fn auto_tidy(
             days: None,
         };
         let source = format!("auto:{}", c.reason.as_str());
-        match apply_one(store, exec, &snap, &item, &OrgScope::All, &source, now).await {
+        let Ok(s) = resolve(&snap, &OrgScope::All, c.session_id) else {
+            continue;
+        };
+        match apply_one(store, exec, &snap, s, &item, &OrgScope::All, &source, now).await {
             Ok(_) => acted += 1,
             Err(e) => {
                 tracing::warn!(session_id = c.session_id, error = %e.message, "[tidy] auto-tidy failed");
