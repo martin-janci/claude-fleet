@@ -181,12 +181,41 @@ async fn run_tmux_script(
     Ok(())
 }
 
+/// Who composed a prompt fleet delivers: it decides whether the prompt may
+/// name a still-unnamed session (UX-05) and whether it counts as a person
+/// using the session (work graph M7: a touch un-archives the session's
+/// work and grants it the tidy planner's one-hour protection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Origin {
+    /// A person's (or the operator's) own prompt: may name the session,
+    /// and touches it.
+    Person,
+    /// A person's prompt that must not name the session — a broadcast,
+    /// where one body would stamp the same name onto every target row, or
+    /// a review seed — but still a person using it: touches.
+    Unlabeled,
+    /// Fleet's own words (safe-kill instructions, an inbox delivery nudge,
+    /// a peer's wake nudge, an agent handover request): neither names nor
+    /// touches. A done session a chatty peer keeps nudging must still
+    /// reach tidy.
+    Fleet,
+}
+
+impl Origin {
+    /// May this prompt give a still-unnamed session its sidebar label?
+    fn names(self) -> bool {
+        self == Origin::Person
+    }
+    /// Is this a person using the session (a touch, work graph M7)?
+    fn touches(self) -> bool {
+        self != Origin::Fleet
+    }
+}
+
 /// Deliver one prompt into a session's REPL.
 ///
-/// `label` decides whether this prompt may give a still-unnamed session its
-/// sidebar label. `false` for prompts fleet itself composes (safe-kill,
-/// inbox delivery, a review seed) and for a broadcast, where one body would
-/// stamp the same name onto every target row (UX-05).
+/// `origin` says who composed the prompt: see [`Origin`] for what fleet's
+/// own prompts (safe-kill, inbox delivery, a peer's wake) must not do.
 pub(super) async fn send_prompt_inner(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -194,7 +223,7 @@ pub(super) async fn send_prompt_inner(
     tmux_name: &str,
     prompt: &str,
     submit: bool,
-    label: bool,
+    origin: Origin,
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
@@ -225,11 +254,16 @@ pub(super) async fn send_prompt_inner(
                 .collect();
             Some(truncated)
         });
-        record_prompt_outcome(store, host_alias, tmux_name, &body, label);
-        // A prompt is a touch (work graph M7), also where no hook reports it.
-        if let Ok(s) = lock(store) {
-            if let Err(e) = s.touch_session_by_name(host_alias, tmux_name) {
-                tracing::debug!(error = %e.message, "[work] touch after a prompt failed");
+        record_prompt_outcome(store, host_alias, tmux_name, &body, origin.names());
+        // A person's prompt is a touch (work graph M7), also where no hook
+        // reports it. Fleet's own prompts are not: a peer's wake nudge or
+        // the safe-kill instructions must not keep a done session out of
+        // tidy (the hook's own touch, `touch_for_prompt`, is unchanged).
+        if origin.touches() {
+            if let Ok(s) = lock(store) {
+                if let Err(e) = s.touch_session_by_name(host_alias, tmux_name) {
+                    tracing::debug!(error = %e.message, "[work] touch after a prompt failed");
+                }
             }
         }
     }
@@ -573,15 +607,17 @@ pub async fn send_prompt(
         &args.tmux_name,
         &args.prompt,
         args.submit,
-        true,
+        Origin::Person,
     )
     .await
 }
 
 /// Deliver a prompt fleet itself composed (safe-kill instructions, an inbox
-/// message header) into a session's REPL. Identical to [`send_prompt`] but
-/// it never names the session: the body describes fleet's request, not the
-/// user's work (UX-05).
+/// message header, a peer's wake nudge) into a session's REPL. Identical to
+/// [`send_prompt`] but it never names the session — the body describes
+/// fleet's request, not the user's work (UX-05) — and it never touches it:
+/// only a person's prompt un-archives the session's work or protects it
+/// from tidy ([`Origin::Fleet`]).
 pub async fn send_system_prompt(
     host_alias: &str,
     tmux_name: &str,
@@ -590,7 +626,16 @@ pub async fn send_system_prompt(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<(), IpcError> {
-    send_prompt_inner(store, ssh, host_alias, tmux_name, prompt, submit, false).await
+    send_prompt_inner(
+        store,
+        ssh,
+        host_alias,
+        tmux_name,
+        prompt,
+        submit,
+        Origin::Fleet,
+    )
+    .await
 }
 
 // --- broadcast_prompt (fan-out to matching work sessions) ------------------
@@ -727,7 +772,7 @@ pub async fn broadcast_prompt(
             &row.tmux_name,
             &prompt,
             submit,
-            false,
+            Origin::Unlabeled,
         )
         .await;
         match res {
@@ -907,5 +952,111 @@ mod prompt_tests {
         assert!(!hist.iter().any(|e| e.kind == "prompt_sent"), "{hist:?}");
         let row = s.get_session_by_id(sid).unwrap().unwrap();
         assert!(row.last_prompt.is_none(), "{row:?}");
+    }
+
+    /// Only a person's prompt is a touch. Fleet's own words — a peer's wake
+    /// nudge, the safe-kill instructions, an inbox delivery — go through
+    /// `send_system_prompt` and must not un-archive the session's work or
+    /// stamp `last_touch_at` (the tidy planner's one-hour protection):
+    /// with auto-tidy on, a chatty peer would otherwise keep a done session
+    /// out of tidy indefinitely. Same real-tmux precedent as the keys test
+    /// above; skipped when `tmux` isn't on PATH (the macOS CI runner).
+    #[tokio::test]
+    async fn a_system_prompt_never_touches_a_session_but_a_persons_prompt_does() {
+        if tokio::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "skipping a_system_prompt_never_touches_a_session_but_a_persons_prompt_does: no tmux on PATH"
+            );
+            return;
+        }
+        let name = format!("fleet-test-send-prompt-touch-{}", std::process::id());
+        let created = tokio::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &name])
+            .output()
+            .await
+            .expect("spawn tmux");
+        assert!(created.status.success(), "{created:?}");
+        struct KillOnDrop(String);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .args(["kill-session", "-t", &self.0])
+                    .output();
+            }
+        }
+        let _guard = KillOnDrop(name.clone());
+
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let sid = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let sid = s
+                .upsert_session(&name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            // A done session, collapsed under its work (M7's UI-only archive).
+            s.link_session_work(sid, crate::store::WorkTarget::Key("ABC-1"), "manual")
+                .unwrap();
+            assert_eq!(s.archive_session_work(sid).unwrap(), 1);
+            sid
+        };
+        let archived = |s: &Store| {
+            s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work
+                .and_then(|w| w.archived_at)
+        };
+        let touched = |s: &Store| {
+            s.tidy_sessions()
+                .unwrap()
+                .into_iter()
+                .find(|t| t.row.id == sid)
+                .expect("the session is a tidy candidate")
+                .last_touch_at
+        };
+        let ssh = Arc::new(SshClient::new());
+
+        // The peer wake path (`peer::apply::apply_inbound`) hands its nudge
+        // to `send_system_prompt`, as do safe-kill and inbox delivery.
+        send_system_prompt(
+            "local",
+            &name,
+            "[fleet] message #7 from another fleet is in your inbox",
+            true,
+            &store,
+            &ssh,
+        )
+        .await
+        .expect("wake nudge");
+        {
+            let s = store.lock().unwrap();
+            assert!(archived(&s).is_some(), "a wake nudge must not un-archive");
+            assert_eq!(touched(&s), None, "a wake nudge is not a touch");
+            // It was still delivered and recorded, just not as a person's use.
+            let hist = s.list_session_events(sid, 10).unwrap();
+            assert!(hist.iter().any(|e| e.kind == "prompt_sent"), "{hist:?}");
+        }
+
+        send_prompt(
+            SendPromptArgs {
+                host_alias: "local".into(),
+                tmux_name: name.clone(),
+                prompt: "fix the failing test".into(),
+                submit: true,
+                keys: None,
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .expect("a person's prompt");
+        let s = store.lock().unwrap();
+        assert_eq!(archived(&s), None, "a person's prompt un-archives");
+        assert!(touched(&s).is_some(), "a person's prompt is a touch");
     }
 }
