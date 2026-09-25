@@ -449,6 +449,27 @@ async fn a_429_waits_out_retry_after_then_resumes() {
     assert_eq!(fx.row().state, "ok");
 }
 
+/// An absurd `Retry-After` neither overflows nor parks the tracker past
+/// `MAX_RETRY_SECS` (plus jitter).
+#[tokio::test]
+async fn a_huge_retry_after_is_clamped() {
+    let fx = Fx::new();
+    fx.fake.once(
+        Method::Post,
+        "/search/jql",
+        Ok(Response::new(429, "").with_header("Retry-After", "4000000000000000000")),
+    );
+    let sync = fx.sync(|| T0);
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.row().state, "rate_limited");
+    let nb = sync.not_before.lock().unwrap()[&fx.tracker];
+    assert!(nb > T0, "{nb}");
+    assert!(
+        nb <= T0 + (MAX_RETRY_SECS + MAX_RETRY_SECS / 4) as i64,
+        "{nb}"
+    );
+}
+
 #[tokio::test]
 async fn offline_marks_the_tracker_unreachable_and_the_cache_still_answers() {
     let fx = Fx::new();

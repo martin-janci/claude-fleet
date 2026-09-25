@@ -52,6 +52,9 @@ pub const UNBOUND_MAX: usize = 100;
 pub const NEGATIVE_TTL_SECS: i64 = 3600;
 /// Wait after a 429 with no `Retry-After`.
 pub const DEFAULT_RETRY_SECS: u64 = 60;
+/// Longest a 429's `Retry-After` parks a tracker: a tracker (or anyone
+/// answering for one) must not be able to park the sync until a restart.
+pub const MAX_RETRY_SECS: u64 = 3600;
 
 /// States a pass runs for.
 pub fn runnable(state: &str) -> bool {
@@ -173,9 +176,12 @@ impl TrackerSync {
             Err(e) => {
                 pass.error = Some(e.explain());
                 if let TrackerError::RateLimited { retry_after_secs } = &e {
-                    let wait = retry_after_secs.unwrap_or(DEFAULT_RETRY_SECS);
+                    let wait = retry_after_secs
+                        .unwrap_or(DEFAULT_RETRY_SECS)
+                        .min(MAX_RETRY_SECS);
+                    let deadline = now.saturating_add(wait.saturating_add(jitter(wait)) as i64);
                     if let Ok(mut m) = self.not_before.lock() {
-                        m.insert(t.id, now + (wait + jitter(wait)) as i64);
+                        m.insert(t.id, deadline);
                     }
                 }
                 tracing::warn!(tracker_id = t.id, result = ?e.state(), "tracker sync failed");
