@@ -6,7 +6,8 @@
   //   reason, rows preselected, a per-row choice (Safe kill by default for
   //   the kill reasons, Archive only, Snooze 7 d, Never for this work), and
   //   the footer "Tidy n · Cancel". Keyboard: j/k move, space toggles, ↵
-  //   applies, esc closes.
+  //   applies, esc closes. Clicking a row narrows the sidebar to that
+  //   session and opens it, to look before tidying; closing lifts that.
   // - "Reopened · n" (accent) lists work that came back after being done,
   //   with its past sessions and Resume; it stays until resumed, done again
   //   or dismissed. A newly reopened item also toasts once.
@@ -38,6 +39,7 @@
   import { sessions } from './sessions';
   import { effectiveScope, scopeOf } from './orgs';
   import { inScope } from './tidy';
+  import { clearSessionFocus, focusSession } from './session_focus';
 
   /** How often the candidates are re-read (they change on the scale of hours). */
   const REFRESH_MS = 60_000;
@@ -59,6 +61,9 @@
   let ticked = $state<Set<number>>(new Set());
   let choice = $state<Map<number, TidyChoice>>(new Map());
   let sheet = $state<HTMLDivElement | null>(null);
+  // Whether a click here set the sidebar focus: only then does closing the
+  // sheet clear it (the link-suggestion sheet may own it).
+  let focused = false;
 
   const tickedCount = $derived(ordered.filter((c) => ticked.has(c.session_id)).length);
 
@@ -74,6 +79,23 @@
     reopenedOpen = false;
     await tick();
     sheet?.focus();
+  }
+
+  function closeSheet() {
+    open = false;
+    if (focused) clearSessionFocus();
+    focused = false;
+  }
+
+  function focusAt(i: number, e: MouseEvent) {
+    cursor = i;
+    // The row's own controls (checkbox, choice, PR link, Resume) keep their
+    // meaning; only a click on the row itself focuses it.
+    if ((e.target as HTMLElement | null)?.closest('input, select, a, button')) return;
+    const c = ordered[i];
+    if (!c) return;
+    focused = true;
+    focusSession(c.session_id, rowName(c));
   }
 
   function toggle(id: number) {
@@ -112,7 +134,7 @@
     } else {
       push({ kind: 'info', message: `Tidied ${done} session${done === 1 ? '' : 's'}` });
     }
-    open = false;
+    closeSheet();
   }
 
   function onSheetKey(e: KeyboardEvent) {
@@ -137,7 +159,7 @@
         void apply();
         break;
       case 'Escape':
-        open = false;
+        closeSheet();
         break;
       default:
         return;
@@ -148,7 +170,7 @@
 
   $effect(() => {
     if (cursor > 0 && cursor >= ordered.length) cursor = Math.max(0, ordered.length - 1);
-    if (open && ordered.length === 0) open = false;
+    if (open && ordered.length === 0) closeSheet();
     if (reopenedOpen && $reopenedWork.length === 0) reopenedOpen = false;
   });
 
@@ -200,7 +222,7 @@
         title="Work that came back after being done"
         onclick={() => {
           reopenedOpen = !reopenedOpen;
-          open = false;
+          closeSheet();
         }}
       >Reopened · {$reopenedWork.length}</button>
     {/if}
@@ -266,7 +288,8 @@
           role="option"
           aria-selected={ticked.has(c.session_id)}
           tabindex="-1"
-          onclick={() => (cursor = i)}
+          title="Show only this session in the sidebar"
+          onclick={(e) => focusAt(i, e)}
           onkeydown={() => {}}
         >
           <input
@@ -314,7 +337,7 @@
         disabled={busy || tickedCount === 0 || blocked !== null}
         onclick={() => void apply()}>Tidy {tickedCount}</button
       >
-      <button class="pill" data-testid="tidy-cancel" onclick={() => (open = false)}>Cancel</button>
+      <button class="pill" data-testid="tidy-cancel" onclick={closeSheet}>Cancel</button>
     </div>
   </div>
 {/if}

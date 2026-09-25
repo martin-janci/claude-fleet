@@ -9,6 +9,8 @@ import { invoke } from '@tauri-apps/api/core';
 import TidyReview from './TidyReview.svelte';
 import { EMPTY_REPORT, reopenedLoads, reopenedWork, tidyReport, type TidyCandidate } from './tidy';
 import { toasts } from './toasts';
+import { get } from 'svelte/store';
+import { sessionFocus } from './session_focus';
 
 const cand = (id: number, over: Partial<TidyCandidate> = {}): TidyCandidate => ({
   session_id: id,
@@ -35,6 +37,7 @@ beforeEach(() => {
   reopenedWork.set([]);
   reopenedLoads.set(0);
   toasts.set([]);
+  sessionFocus.set(null);
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -62,6 +65,21 @@ async function mount() {
 }
 
 describe('TidyReview', () => {
+  it('clicking a row shows only that session; its checkbox does not; Cancel lifts it', async () => {
+    candidates = [cand(1), cand(2)];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const row = screen.getAllByTestId('tidy-row')[1];
+    await fireEvent.click(row.querySelector('[data-testid="tidy-check"]')!);
+    expect(get(sessionFocus)).toBeNull();
+    await fireEvent.click(row.querySelector('.name')!);
+    expect(get(sessionFocus)).toEqual({ id: 2, label: 's2' });
+    await fireEvent.click(screen.getByTestId('tidy-cancel'));
+    await tick();
+    expect(get(sessionFocus)).toBeNull();
+  });
+
   it('shows nothing when there is nothing to tidy or reopened', async () => {
     await mount();
     expect(screen.queryByTestId('tidy-pill')).toBeNull();

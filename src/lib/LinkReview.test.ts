@@ -12,6 +12,8 @@ import { sessions, sessionsLoaded, type SessionRow, type SessionWork } from './s
 import { session } from './hosts_fixture';
 import { toasts, runToastAction } from './toasts';
 import { describeEvidence, newAutoLinks, autoLinkSnapshot } from './work';
+import { sessionFocus } from './session_focus';
+import { selectedSession, selectSession } from './selection';
 
 const sg = (link_id: number, key: string): SessionWork => ({
   link_id,
@@ -35,6 +37,8 @@ beforeEach(() => {
   toasts.set([]);
   sessionsLoaded.set(false);
   sessions.set([]);
+  sessionFocus.set(null);
+  selectSession(null);
 });
 
 describe('LinkReview', () => {
@@ -66,6 +70,26 @@ describe('LinkReview', () => {
     await fireEvent.keyDown(sheet, { key: 'Escape' });
     await tick();
     expect(screen.queryByTestId('link-review-sheet')).toBeNull();
+  });
+
+  it('clicking a suggestion shows only that session; closing the sheet lifts it', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    await fireEvent.click(screen.getAllByTestId('link-review-row')[1]);
+    expect(get(sessionFocus)).toEqual({ id: 2, label: 'b' });
+    expect(get(selectedSession)?.id).toBe(2);
+    // y now decides the clicked row.
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'y' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 2, link_id: 12 },
+    });
+    await fireEvent.click(screen.getByTestId('link-review-close'));
+    await tick();
+    expect(get(sessionFocus)).toBeNull();
+    // The session stays open in the center pane.
+    expect(get(selectedSession)?.id).toBe(2);
   });
 
   it('toasts a new automatic link with an Undo that rejects it', async () => {
