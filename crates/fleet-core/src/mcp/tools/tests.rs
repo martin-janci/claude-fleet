@@ -4318,6 +4318,9 @@ fn one_full_row() -> serde_json::Value {
         suggestions: 1,
         ..Default::default()
     });
+    // With an org, for the same reason: `org_id` is skipped when no org
+    // claims the session.
+    row.org_id = Some(3);
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -4347,6 +4350,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_stop_at",
             "last_turn_at",
             "needs_attention",
+            "org_id",
             "pending_input",
             "project_id",
             "safe_kill_state",
