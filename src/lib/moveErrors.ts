@@ -3,6 +3,7 @@
 // on where things stand.
 import type { MoveStep } from './moveProgress';
 import type { IpcError } from './result';
+import { crossOrgOf } from './work';
 
 export interface MoveFailure {
   what: string;
@@ -11,9 +12,15 @@ export interface MoveFailure {
    *  replace, so the confirmation can name them, and `more` — how many the
    *  backend's cap (`carry::LEFTOVER_CAP`) left out of `paths` — so a
    *  truncated confirmation can say so instead of understating what it is
-   *  about to delete; `null` means there is nothing the app can do — only the
-   *  user, on that host. */
-  action: { kind: 'retry' } | { kind: 'clean'; paths: string[]; more: number } | null;
+   *  about to delete; `force_cross_org` is the org-boundary refusal (work
+   *  graph M5), which a retry with `forceCrossOrg` carries through with a
+   *  warning; `null` means there is nothing the app can do — only the user,
+   *  on that host. */
+  action:
+    | { kind: 'retry' }
+    | { kind: 'clean'; paths: string[]; more: number }
+    | { kind: 'force_cross_org' }
+    | null;
 }
 
 /** A frontend-only marker meaning "this run ended because you undid the
@@ -157,8 +164,35 @@ function partialWhat(details: unknown, toHost: string): string {
   return 'The new session started, but the last step of the move failed.';
 }
 
-function what(error: IpcError, toHost: string): { what: string; action: Action } {
+/** `E_FORBIDDEN` with `cross_org: true` (`orgs::check_cross_org`'s shape, as
+ *  `crossOrgOf` reads it): a live work link of the source belongs to one
+ *  org and the target host would put the session in another. Any other
+ *  `E_FORBIDDEN` is a plain refusal. */
+function forbiddenWhat(
+  error: IpcError,
+  toHost: string,
+  orgName: (id: number) => string | undefined,
+): { what: string; action: Action } {
+  const c = crossOrgOf(error);
+  if (!c) return { what: error.message, action: { kind: 'retry' } };
+  const w = orgName(c.workOrgId) ?? `organisation ${c.workOrgId}`;
+  const s = orgName(c.sessionOrgId) ?? `organisation ${c.sessionOrgId}`;
+  return {
+    what:
+      `This session's work belongs to ${w}, and on ${toHost} the session would belong to ${s}. ` +
+      "Fleet does not carry one company's work into another's session by mistake.",
+    action: { kind: 'force_cross_org' },
+  };
+}
+
+function what(
+  error: IpcError,
+  toHost: string,
+  orgName: (id: number) => string | undefined,
+): { what: string; action: Action } {
   switch (error.code) {
+    case 'E_FORBIDDEN':
+      return forbiddenWhat(error, toHost, orgName);
     case 'E_MOVE_DIRTY':
       return {
         what: 'The source has uncommitted work, and this move was asked to refuse that.',
@@ -244,6 +278,9 @@ export function describeMoveError(
   status: 'failed' | 'partial',
   toHost: string,
   reached: MoveStep | null,
+  /** Org names for the cross-org sentence; an id it does not know reads as
+   *  `organisation <id>`. */
+  orgName: (id: number) => string | undefined = () => undefined,
 ): MoveFailure {
   const nothingCopied =
     (reached === null || NOTHING_COPIED_YET.has(reached)) &&
@@ -262,6 +299,6 @@ export function describeMoveError(
       action: { kind: 'retry' },
     };
   }
-  const { what: text, action } = what(error, toHost);
+  const { what: text, action } = what(error, toHost, orgName);
   return { what: text, standing, action };
 }

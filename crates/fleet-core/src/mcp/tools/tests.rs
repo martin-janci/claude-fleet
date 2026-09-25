@@ -3288,7 +3288,12 @@ fn the_served_definition_budget_stays_bounded() {
     // restore_host_sessions, recreate_session and restart_session (no new
     // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
     // plus 100.
-    const BUDGET_BYTES: usize = 71_658;
+    // Review fix: `move_session { force_cross_org }` (work graph M5 — a
+    // move whose live links would cross the org boundary is refused unless
+    // forced), one flag with a one-line doc plus a clause on the errors
+    // list, already cut to the bone. Measured at 71,871 on 2026-09-25
+    // (+313); plus 100.
+    const BUDGET_BYTES: usize = 71_971;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3572,6 +3577,7 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
         confirm_nonce: None,
         dry_run,
         when: crate::service::move_session::When::Now,
+        force_cross_org: false,
     };
 
     let err = t

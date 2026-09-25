@@ -939,7 +939,11 @@ What else to know:
 - **Linking across orgs is refused for everyone**, the master included,
   unless `force_cross_org: true`: it is a data-integrity rule that stops
   Company B's ticket from being attached to a Company A session by mistake
-  (the desktop explains it and offers "Link anyway"). Detection never
+  (the desktop explains it and offers "Link anyway"). A `move_session` to a
+  host whose org the session's live links are not in is refused the same
+  way, before anything is copied; `force_cross_org: true` carries the links
+  as they are and the report's `warnings` names each crossing (the Transfer
+  sheet offers "Move anyway"). Detection never
   guesses across orgs, and the sync never binds (nor fetches) a bare key
   for another org's session.
 - **Sessions are not fenced by default.** `isolate_sessions` (per org, off
