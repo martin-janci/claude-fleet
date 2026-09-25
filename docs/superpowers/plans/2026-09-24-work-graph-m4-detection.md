@@ -222,7 +222,25 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
   A remote host behind the reverse tunnel was **not** measured (no remote
   host in the build environment): its hook posts to the tunnel's loopback
   end, so a dead tunnel should look like "refused" and a wedged hub like
-  "not answering". Claude Code **2.1.281** was verified to read a
+  "not answering".
+
+  **Remote host (M10.4): to be measured by the user.** The procedure is
+  `scripts/measure-session-start.sh --ssh <host> [--pane %N] [--hub-stopped]`,
+  run from the operator's machine against a provisioned remote host. It
+  times the exact installed command on that host (1 s connect, 2 s cap,
+  `|| true`) in the four cases above plus "hub stopped, tunnel alive", and
+  prints rows to paste here (min / median / p95 / max and curl's exit
+  code). The agents' build environment has no remote host, so no number is
+  recorded yet; D5 stays open, with the default "off until the remote
+  numbers are under ~300 ms p95" (M10 plan).
+
+  | Hub (remote host, through the tunnel) | min / median / p95 / max, ms | curl exit |
+  |---|---|---|
+  | up, answering | to be measured by the user | |
+  | down, port refused | to be measured by the user | |
+  | host unreachable (packets dropped) | to be measured by the user | |
+  | up but not answering | to be measured by the user | |
+  | hub stopped, tunnel alive | to be measured by the user | | Claude Code **2.1.281** was verified to read a
   synchronous SessionStart command hook's `additionalContext` (the model
   quoted a key only the hook's answer contained). The setting stays **off**:
   whether ~1–2 s on a bad day is acceptable is decision D5, the user's.
@@ -380,6 +398,11 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
       design of this pass); the phone does not show suggestions (M8); the
       remote-host SessionStart measurement; the manual acceptance on a real
       fleet.
+- **2026-09-25, M10.4.** M4.6 is **decided against** (D14): detection
+  plus the batch review covers it; nothing is built. The remote-host
+  SessionStart measurement has a reproducible procedure
+  (`scripts/measure-session-start.sh`) and a placeholder table in M4.5,
+  to be filled by the user; D5 stays open.
 - **2026-09-24, R3u (the user's call on the open question).** A PR closing
   ref that no configured tracker can resolve — a GitHub `owner/repo#n` while
   there is no GitHub tracker (M6) — is never linked automatically, not even
