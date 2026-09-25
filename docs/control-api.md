@@ -987,7 +987,12 @@ via `curl -H @"$HOME/.claude/fleet-hook.headers"` (a single `Authorization:
 Bearer <host-token>` line, mode `0600`, written by the same provisioning /
 local-install code path as `settings.json`) so the token never appears in the
 command string itself, plus `-H "X-Fleet-Pane: ${TMUX_PANE:-}"` so `resolve_hook_row`
-can match the row by pane directly. Hosts pick up the `SessionStart` /
+can match the row by pane directly. With `work.session_start_context` on,
+the hooks are instead installed as the synchronous form, which also sends
+`X-Fleet-Sync: 1`: only a SessionStart carrying that header can have its
+answer read by Claude, so only then does fleet include a pending handover
+brief in it and stamp the brief delivered — the async form gets the work
+context alone and the brief waits for the next `UserPromptSubmit`. Hosts pick up the `SessionStart` /
 `PreCompact` / `PostCompact` entries only once re-provisioned —
 `provision_hosts` refreshes them on its next run; the local host installs them
 automatically on app start.

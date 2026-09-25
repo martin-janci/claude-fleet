@@ -1475,6 +1475,7 @@ async fn run_matrix(isolate: bool) {
             let ctx = crate::service::hooks::HookContext {
                 caller: &c,
                 pane_id: None,
+                sync_start: true,
             };
             crate::service::hooks::session_start_context(&store, &p, &ctx)
         };
