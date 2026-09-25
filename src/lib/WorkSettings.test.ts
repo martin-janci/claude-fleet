@@ -271,7 +271,7 @@ describe('Settings → Work, other providers (work graph M6)', () => {
     await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
     const cmds = inv.mock.calls
       .map((c) => c[0])
-      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions'].includes(c as string));
+      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(c as string));
     // No second row; the settings reach the existing one before the credential.
     expect(cmds).toEqual(['update_tracker', 'set_tracker_credential', 'test_tracker']);
     const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
