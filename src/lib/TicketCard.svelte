@@ -8,6 +8,8 @@
   import { insertIntoComposer } from './conversation';
   import { openExternal } from './open_external';
   import { loadTicketCard, canInsertInto, type TicketCard } from './ticket_card';
+  import { requestWorkHandover } from './work';
+  import { push, pushError } from './toasts';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -36,6 +38,24 @@
 
   const canInsert = $derived(!!card && canInsertInto(session));
   const url = $derived(card?.url ?? session.work?.url ?? null);
+
+  // Work graph M9.3: ask the session to write its hand-off (on demand only).
+  // Only an idle REPL is asked; the hub refuses the rest and says why.
+  let asking = $state(false);
+  const canAsk = $derived(
+    canInsertInto(session) &&
+      session.claude_status !== 'working' &&
+      session.claude_status !== 'blocked' &&
+      !session.stuck_kind,
+  );
+  async function askHandover() {
+    if (!key || asking) return;
+    asking = true;
+    const r = await requestWorkHandover(session.id);
+    asking = false;
+    if (r.ok) push({ kind: 'success', message: `Asked for a ${key} handover; it is kept when the reply ends` });
+    else pushError(r.error, 'Asking for a handover failed');
+  }
 
   function insert() {
     if (!card || !canInsert) return;
@@ -91,6 +111,16 @@
         onclick={insert}>{inserted ? 'Inserted' : 'Insert into composer'}</button
       >
     {/if}
+    <button
+      class="btn btn--quiet"
+      type="button"
+      data-testid="ticket-card-handover"
+      disabled={!canAsk || asking}
+      title={canAsk
+        ? 'Ask this session to write a handover for the next session on this work (it uses one turn)'
+        : 'Only an idle Claude session can be asked for a handover'}
+      onclick={() => void askHandover()}>Ask for a handover</button
+    >
   </section>
 {/if}
 

@@ -892,6 +892,16 @@ fn apply_stop_hook(
                 tracing::debug!(error = %e.message, "[journal] progress not stored");
             }
         }
+        // An agent-written handover asked for (work graph M9.3): settled by
+        // this turn's reply, markers and all.
+        if let Err(e) = crate::service::work::agent_handover::on_stop(
+            &s,
+            before.id,
+            &session_id,
+            payload.last_assistant_message.as_deref(),
+        ) {
+            tracing::debug!(error = %e.message, "[work] handover not settled");
+        }
         let has_open_tasks = s
             .open_tasks_for_worker(before.id)
             .map(|v| !v.is_empty())

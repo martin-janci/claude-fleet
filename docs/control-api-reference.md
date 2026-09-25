@@ -485,7 +485,7 @@ Parameters: `action`, `auth_kind`, `color`, `confirm_nonce`, `credential_ref`, `
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket. handover {session_id}: ask it to write its hand-off.
 
 Parameters: `action`, `brief`, `confirm_nonce`, `force_cross_org`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
@@ -524,6 +524,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::work_purge_impact`
 - `commands::work::work_today`
 - `commands::work::work_ticket_card`
+- `commands::work::request_work_handover`
 - `commands::trackers::add_tracker`
 - `commands::trackers::update_tracker`
 - `commands::trackers::set_tracker_credential`

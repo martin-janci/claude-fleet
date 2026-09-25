@@ -1065,6 +1065,22 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "request_work_handover",
+            "work_link",
+            json!({ "session_id": 5, "action": "handover", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::request_work_handover(
+                    b,
+                    commands::work::RequestWorkHandoverArgs { session_id: 5 },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "resume_work",
             "work_link",
             // Only the resume fields travel; an older hub never sees them

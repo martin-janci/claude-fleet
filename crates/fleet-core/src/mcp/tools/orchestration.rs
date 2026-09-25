@@ -648,7 +648,7 @@ impl FleetTools {
         suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
-        ticket.")]
+        ticket. handover {session_id}: ask it to write its hand-off.")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -697,6 +697,18 @@ impl FleetTools {
                 ),
                 &caller,
             )?;
+        }
+        if args.action == "handover" {
+            // Work graph M9.3: ask a live session to write its hand-off (on
+            // demand only, D9). The host and org fences are inside.
+            let sid = args
+                .session_id
+                .ok_or_else(|| mcp_err("E_INVALID", "handover needs session_id", None))?;
+            let row =
+                crate::service::work::agent_handover::request(&self.store, &self.ssh, sid, &scope)
+                    .await
+                    .map_err(to_mcp_err)?;
+            return ok_json(&row);
         }
         if args.action == "resume" {
             // The host fence (a per-host token resumes only onto its own

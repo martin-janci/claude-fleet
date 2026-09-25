@@ -98,4 +98,20 @@ describe('TicketCard', () => {
     await flush();
     expect(screen.getByTestId('ticket-card-error').textContent).toContain('not visible');
   });
+
+  it('Ask for a handover calls the hub for this session, and only an idle one', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'work_ticket_card' ? card() : cmd === 'request_work_handover' ? row() : null,
+    );
+    render(TicketCard, { session: row({ claude_status: 'idle' }) });
+    await flush();
+    await fireEvent.click(screen.getByTestId('ticket-card-handover'));
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('request_work_handover', { args: { session_id: 31 } });
+
+    const busy = render(TicketCard, { session: row({ claude_status: 'working' }) });
+    await flush();
+    const btn = busy.container.querySelector('[data-testid="ticket-card-handover"]') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
 });

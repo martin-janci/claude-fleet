@@ -3001,6 +3001,9 @@ fn the_served_definition_budget_stays_bounded() {
     // new_shell_session, safe_kill_session and work_link, so the operator's
     // starts and kills can carry an approval. Measured at 69,801 on
     // 2026-09-25 (+328); plus 100.
+    // Work graph M9.3: `work_link` gains `handover` (one enum value and a
+    // clause of description). Measured at 69,865 on 2026-09-25 (+64): inside
+    // the headroom, not raised.
     const BUDGET_BYTES: usize = 69_901;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()

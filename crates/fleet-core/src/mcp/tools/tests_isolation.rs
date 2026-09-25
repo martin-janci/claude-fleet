@@ -750,6 +750,49 @@ async fn run_matrix(isolate: bool) {
     )
     .await;
     same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
+    // Agent-written handover (work graph M9.3): a caller asks only its own
+    // sessions; the send itself fails here for want of a real host.
+    m.row(
+        "work_link",
+        "handover",
+        |fx, who| json!({ "action": "handover", "session_id": own(fx, who) }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            assert!(
+                !matches!(code(a), "E_FORBIDDEN" | "E_NOTFOUND" | "E_INVALID")
+                    && !text(a).contains("not visible"),
+                "{who:?}: {a:?}"
+            );
+        },
+    )
+    .await;
+    // Host A on s_x (A's session carrying B's ticket): the work is not A's
+    // to read, so the session reads as having none.
+    let x = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "handover", "session_id": fx.s_x }),
+    )
+    .await;
+    is_code(Who::HostA, &x, "E_INVALID", "B's work on an A session");
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "handover", "session_id": fx.s_b }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "handover", "session_id": 999_999 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &fx.s_b.to_string(), "999999");
     // Today (work graph M9.1): BB-3 shipped today (done, and its ended
     // session left a PR). Each host reads its own host's day inside its org.
     {

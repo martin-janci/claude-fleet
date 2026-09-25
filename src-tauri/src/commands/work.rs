@@ -130,6 +130,22 @@ pub async fn resume_work(
     routed::resume_work(&backend, args, &store, &ssh, &reg).await
 }
 
+/// Ask a live session to write its hand-off (work graph M9.3, on demand).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestWorkHandoverArgs {
+    pub session_id: i64,
+}
+
+#[tauri::command]
+pub async fn request_work_handover(
+    args: RequestWorkHandoverArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<SessionRow, IpcError> {
+    routed::request_work_handover(&backend, args, &store, &ssh).await
+}
+
 /// The Today view's digest (work graph M9.1). `since` is the viewer's local
 /// midnight: the hub does not know the desktop's timezone.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -356,6 +372,31 @@ pub(crate) mod routed {
             None => {
                 work::work_resume_plan(&args, store, ssh, &fleet_core::service::orgs::OrgScope::All)
                     .await
+            }
+        }
+    }
+
+    pub async fn request_work_handover(
+        backend: &FleetBackend,
+        args: RequestWorkHandoverArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<SessionRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "handover".into(),
+            session_id: Some(args.session_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("request_work_handover", &wire).await,
+            None => {
+                work::agent_handover::request(
+                    store,
+                    ssh,
+                    args.session_id,
+                    &fleet_core::service::orgs::OrgScope::All,
+                )
+                .await
             }
         }
     }

@@ -279,6 +279,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_today", Verdict::Routed { tool: "work" }),
     // Work graph M9.2: the ticket context card, from the hub's cache.
     ("work_ticket_card", Verdict::Routed { tool: "work" }),
+    // Work graph M9.3: ask a session for its hand-off (on demand, D9).
+    (
+        "request_work_handover",
+        Verdict::Routed { tool: "work_link" },
+    ),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).

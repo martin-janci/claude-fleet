@@ -458,6 +458,16 @@ Index by area (names only; see the reference for details):
   and `composer_text` — the ticket text fenced as untrusted, for inserting
   into a prompt. A per-host token reads only its own host's day and cards
   for its own work, and gets `composer_text` without the plain fields.
+  `work_link { action: "handover", session_id }` (M9.3, on demand only)
+  asks a live, idle Claude session linked to work to write the hand-off the
+  next session will need: fleet types one prompt asking for it between two
+  nonce-tagged marker lines, and the next Stop hook keeps the text between
+  them as a work-journal `note` from the `agent`. The resume brief and
+  `work { action: "context" }` show the newest one first, fenced as
+  untrusted. Refused while the session is busy, waiting on a dialog or
+  stuck, without work, when a request is already pending (30 min), and for
+  the operator's own session. Timeline: `handover_requested`,
+  `handover_written`, `handover_missing`, `handover_send_failed`.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

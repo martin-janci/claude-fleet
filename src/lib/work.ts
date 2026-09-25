@@ -412,3 +412,15 @@ export function pastWorkSummary(links: readonly WorkLink[], nowMs: number = Date
   return `${n} session${n === 1 ? '' : 's'}${ago}`;
 }
 
+/**
+ * Ask a live session to write its hand-off for the next session on its work
+ * (work graph M9.3, on demand only). Fleet types one prompt into the idle
+ * REPL; the reply is read by the next Stop hook and kept in the work journal,
+ * where the resume brief shows it first. Answers the session's row.
+ */
+export async function requestWorkHandover(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('request_work_handover', { args: { session_id: sessionId } });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+

@@ -3,6 +3,7 @@
 //! agnostic entry the MCP tools `work` / `work_link` and the desktop commands
 //! share, so a paired desktop and a local one answer the same way.
 
+pub mod agent_handover;
 pub mod card;
 pub mod detect;
 pub mod handover;
@@ -216,6 +217,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "trust_project",
     "resume",
     "start",
+    "handover",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -240,6 +242,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
+    ("request_work_handover", "work_link", "handover"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -458,7 +461,10 @@ pub fn work_link<'a>(
     store: &Mutex<Store>,
     scope: &OrgScope,
 ) -> Result<SessionRow, IpcError> {
-    if matches!(args.action.as_str(), "resume" | "start" | "trust_project") {
+    if matches!(
+        args.action.as_str(),
+        "resume" | "start" | "trust_project" | "handover"
+    ) {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!("{} has its own entry point", args.action),
@@ -575,8 +581,8 @@ pub fn work_link<'a>(
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "unknown work_link action {other:?}; one of link, reject, unlink, confirm, \
-                     trust_project, resume, start"
+                    "unknown work_link action {other:?}; one of {}",
+                    WORK_LINK_ACTIONS.join(", ")
                 ),
             ))
         }

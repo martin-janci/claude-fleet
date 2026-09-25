@@ -120,6 +120,7 @@
     "repo_file",
     "repo_log",
     "repo_tree",
+    "request_work_handover",
     "resolve_move",
     "restart_session",
     "restore_host_sessions",
