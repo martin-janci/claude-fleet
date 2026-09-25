@@ -327,6 +327,24 @@ async fn a_rate_limited_graphql_answer_backs_off() {
     }
 }
 
+/// The item's URL is built from the validated repository and number, never
+/// taken from the answer: `gh` runs on a fleet host, which controls it.
+#[test]
+fn the_issue_url_is_built_not_taken_from_the_answer() {
+    let f = FakeTransport::new();
+    let mut n = fixture("github", "nodes_two.json")["data"]["nodes"][0].clone();
+    n["url"] = json!("https://github.com.login-verify.example/acme/api/issues/42");
+    let s = github(&f).snapshot(&n).unwrap();
+    assert_eq!(
+        s.url.as_deref(),
+        Some("https://github.com/Acme/api/issues/42")
+    );
+    assert_eq!(s.key.as_deref(), Some("acme/api#42"));
+    // A repository name that is not one yields no item at all.
+    n["repository"]["nameWithOwner"] = json!("acme/api?x=1");
+    assert!(github(&f).snapshot(&n).is_none());
+}
+
 /// End to end through `via_cli`: the provider, `TrackerNet`'s transport
 /// selection and `gh` on the host, answered by a scripted SSH.
 #[tokio::test]

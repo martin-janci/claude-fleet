@@ -182,9 +182,11 @@ impl GitHub {
     pub fn snapshot(&self, n: &Value) -> Option<WorkItemSnapshot> {
         let id = n["id"].as_str()?.to_string();
         let number = n["number"].as_u64()?;
-        let repo = n["repository"]["nameWithOwner"]
-            .as_str()?
-            .to_ascii_lowercase();
+        // Both halves validated by `normalize_repo`, so the URL is built
+        // from them rather than taken from the answer (`gh` runs on a
+        // fleet host, which controls what comes back).
+        let name_with_owner = n["repository"]["nameWithOwner"].as_str()?.trim();
+        let repo = normalize_repo(name_with_owner)?;
         let assignees: Vec<String> = n["assignees"]["nodes"]
             .as_array()
             .into_iter()
@@ -203,7 +205,9 @@ impl GitHub {
             key: Some(issue_key(&repo, number)),
             aliases: Vec::new(),
             title: n["title"].as_str().unwrap_or_default().to_string(),
-            url: n["url"].as_str().map(str::to_string),
+            url: Some(format!(
+                "https://github.com/{name_with_owner}/issues/{number}"
+            )),
             kind: Some(
                 n["issueType"]["name"]
                     .as_str()
