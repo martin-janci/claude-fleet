@@ -150,18 +150,19 @@ impl TrackerSync {
             ..Default::default()
         };
         let now = (self.clock)();
-        // The deadline is kept here and on the row (`set_tracker_not_before`):
-        // the row's copy is what a `lookup` honours and what survives a
-        // restart.
-        let in_memory = self
-            .not_before
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&t.id).copied());
-        let on_row = lock(store)
-            .ok()
-            .and_then(|s| s.tracker_not_before(t.id).ok().flatten());
-        let waiting = in_memory.is_some_and(|nb| nb > now) || on_row.is_some_and(|nb| nb > now);
+        // The deadline lives on the row (`set_tracker_not_before`): that copy
+        // is what a `lookup` honours, what survives a restart, and what a
+        // successful `test_tracker` clears — so the row alone decides. The
+        // copy kept here is the fallback for a row that cannot be read.
+        let waiting = match lock(store).and_then(|s| s.tracker_not_before(t.id)) {
+            Ok(on_row) => on_row.is_some_and(|nb| nb > now),
+            Err(_) => self
+                .not_before
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&t.id).copied())
+                .is_some_and(|nb| nb > now),
+        };
         if !runnable(&t.state) || waiting {
             pass.skipped = true;
             return pass;

@@ -610,6 +610,81 @@ async fn a_429_deadline_is_kept_on_the_row_and_cleared_by_a_good_pass() {
     );
 }
 
+/// The row is the one deadline the tick reads: a successful `test_tracker`
+/// clears it, and the SAME sync — whose own memory of the 429 would have
+/// parked the tracker for up to `MAX_RETRY_SECS` — runs on its next pass,
+/// while a lookup was already allowed again.
+#[tokio::test]
+async fn a_good_test_ends_the_wait_for_the_sync_that_saw_the_429() {
+    let fx = Fx::new();
+    fx.fake
+        .once(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::new(429, "").with_header("Retry-After", "3600")),
+        )
+        .always(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
+        );
+    let sync = fx.sync(|| T0);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_some(), "{p:?}");
+    assert_eq!(fx.row().state, "rate_limited");
+    assert!(
+        sync.run_pass(&fx.store).await.unwrap()[0].skipped,
+        "inside the wait"
+    );
+    // The operator presses Test (the quota is back): the probe answers.
+    fx.fake
+        .once(
+            Method::Get,
+            "/myself",
+            Ok(Response::json(200, &fixture("myself.json"))),
+        )
+        .once(
+            Method::Get,
+            "/_edge/tenant_info",
+            Ok(Response::json(200, &fixture("tenant_info.json"))),
+        )
+        .once(
+            Method::Get,
+            "startAt=0",
+            Ok(Response::json(200, &fixture("project_search_p2.json"))),
+        )
+        .once(
+            Method::Get,
+            "/rest/api/3/field",
+            Ok(Response::json(200, &fixture("fields.json"))),
+        )
+        .once(
+            Method::Get,
+            "/filter/favourite",
+            Ok(Response::json(200, &fixture("filter_favourite.json"))),
+        );
+    let r = crate::service::trackers::admin::test_tracker(
+        fx.tracker,
+        &fx.store,
+        &TrackerNet::fake(Arc::new(fx.fake.clone())),
+    )
+    .await
+    .unwrap();
+    assert!(r.ok, "{:?}", r.error);
+    assert_eq!(
+        fx.store
+            .lock()
+            .unwrap()
+            .tracker_not_before(fx.tracker)
+            .unwrap(),
+        None
+    );
+    // Still at T0, an hour inside what this sync remembers: it runs.
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_none(), "{p:?}");
+    assert_eq!(fx.row().state, "ok");
+}
+
 /// An absurd `Retry-After` neither overflows nor parks the tracker past
 /// `MAX_RETRY_SECS` (plus jitter).
 #[tokio::test]
