@@ -923,18 +923,35 @@ impl Store {
     /// * `old` is remembered like a kill: that same stale pass still lists
     ///   `old`, and with no row left under that name it would insert the
     ///   session a second time.
+    ///
+    /// A `lost` row under `new` that is still restorable (host reboot
+    /// survival: `lost_at` set and a conversation to resume) is NOT a ghost
+    /// to dismiss: the rename is refused with `E_EXISTS` naming it, so its
+    /// timeline, participant and restore entry survive. The service refuses
+    /// before tmux renames anything (`reject_lost_session_name`); this is
+    /// the store's own guard. The dismissal and the rename are one
+    /// transaction.
     pub fn rename_session_row(
         &self,
         host_alias: &str,
         old: &str,
         new: &str,
         now: i64,
-    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         if old == new {
-            return self.get_session(old, host_alias);
+            return Ok(self.get_session(old, host_alias)?);
         }
-        let stale: Option<i64> = self
-            .conn
+        if let Some(lost) = self.lost_resumable_session_named(host_alias, new)? {
+            return Err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_EXISTS,
+                format!(
+                    "{new} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
+                    lost.id
+                ),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let stale: Option<i64> = tx
             .query_row(
                 "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
                 rusqlite::params![host_alias, new],
@@ -942,10 +959,20 @@ impl Store {
             )
             .optional()?;
         if let Some(id) = stale {
-            self.delete_session(id)?;
+            // A dead ghost gives way: what `delete_session` does, inside
+            // this transaction (its event is emitted after the commit).
+            tx.execute(
+                "DELETE FROM session_events WHERE session_id=?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL \
+                 WHERE session_id = ?2 AND retired_at IS NULL",
+                rusqlite::params![now_unix(), id],
+            )?;
+            tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         }
-        let id: Option<i64> = self
-            .conn
+        let id: Option<i64> = tx
             .query_row(
                 "UPDATE sessions SET tmux_name=?3, last_reconciled_at=?4 \
                  WHERE host_alias=?1 AND tmux_name=?2 RETURNING id",
@@ -953,9 +980,13 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
+        tx.commit()?;
+        if let Some(gone) = stale {
+            self.bus.session_killed(gone);
+        }
         self.note_kill(host_alias, old, now);
         match id {
-            Some(id) => self.emit_session(id),
+            Some(id) => Ok(self.emit_session(id)?),
             None => Ok(None),
         }
     }

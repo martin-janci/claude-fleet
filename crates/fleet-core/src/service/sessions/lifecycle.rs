@@ -1105,6 +1105,10 @@ pub async fn rename_session(
             &args.old_name,
             "rename_session",
         )?;
+        // tmux would accept the new name (a lost session is not in tmux),
+        // and the row carry-over below would then dismiss the lost row —
+        // its timeline, participant and restore entry. Refuse first.
+        reject_lost_session_name(&s, &args.host_alias, &args.new_name)?;
     }
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
