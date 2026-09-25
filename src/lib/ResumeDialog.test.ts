@@ -107,6 +107,68 @@ describe('ResumeDialog', () => {
     expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'resume_work')).toBe(false);
   });
 
+  it('picking another host re-reads the plan and the brief for it, and the start lands there', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      const args = (a as { args: { host_alias?: string | null; with_brief?: boolean } }).args;
+      if (cmd === 'work_resume_plan') {
+        const host = args.host_alias ?? 'h';
+        return plan({
+          host_alias: host,
+          modes: [
+            { mode: 'last', ok: true },
+            { mode: 'brief', ok: true },
+            { mode: 'fresh', ok: true },
+          ],
+          ...(args.with_brief ? { brief: `brief for ${host}` } : {}),
+        });
+      }
+      if (cmd === 'resume_work') return session('g', 'dev-g', { id: 43 });
+      return null;
+    });
+    const onclose = vi.fn();
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose } });
+    await settle();
+    expect(screen.getByTestId('resume-where')).toHaveTextContent('Lands on h');
+    expect((screen.getByTestId('resume-mode-last') as HTMLInputElement).checked).toBe(true);
+    await fireEvent.change(screen.getByTestId('resume-host'), { target: { value: 'g' } });
+    await settle();
+    const plans = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_resume_plan');
+    expect((plans.at(-1)![1] as { args: { host_alias: string | null } }).args.host_alias).toBe('g');
+    expect(screen.getByTestId('resume-where')).toHaveTextContent('Lands on g');
+    // The brief is built for the chosen host, not the plan's own.
+    await fireEvent.click(screen.getByTestId('resume-mode-brief'));
+    await settle();
+    expect((screen.getByTestId('resume-brief') as HTMLTextAreaElement).value).toBe('brief for g');
+    await fireEvent.click(screen.getByTestId('resume-start'));
+    await settle();
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === 'resume_work')!;
+    expect(call[1]).toEqual({
+      args: { key: 'ABC-1', mode: 'brief', link_id: 5, host_alias: 'g', brief: 'brief for g' },
+    });
+    expect(get(selectedSession)?.id).toBe(43);
+    expect(onclose).toHaveBeenCalled();
+  });
+
+  it('a resume the hub refuses shows its reason and keeps the dialog open', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      const args = (a as { args: { with_brief?: boolean } }).args;
+      if (cmd === 'work_resume_plan') return plan(args.with_brief ? { brief: 'built brief' } : {});
+      if (cmd === 'resume_work') throw { code: 'E_SSH', message: 'h is unreachable' };
+      return null;
+    });
+    const onclose = vi.fn();
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose } });
+    await settle();
+    await fireEvent.click(screen.getByTestId('resume-start'));
+    await settle();
+    expect(screen.getByTestId('resume-error')).toHaveTextContent('h is unreachable');
+    expect(onclose).not.toHaveBeenCalled();
+    expect(get(selectedSession)).toBeNull();
+    // Not stuck on "Starting…": it can be tried again.
+    expect((screen.getByTestId('resume-start') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId('resume-start')).toHaveTextContent('Fresh with brief');
+  });
+
   it('an older hub (its plain link list for an answer) is explained, not offered', async () => {
     vi.mocked(invoke).mockImplementation(async () => [{ id: 1, state: 'confirmed', source: 'manual', created_at: 1 }]);
     render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
