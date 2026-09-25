@@ -24,11 +24,10 @@ use std::pin::Pin;
 pub struct RestoreHostSessionsArgs {
     /// Host whose lost sessions to restore.
     pub host_alias: String,
-    /// Return the plan only: no ssh calls, no writes. Default false.
+    /// The plan only: no ssh, no writes.
     #[serde(default)]
     pub dry_run: bool,
-    /// Restrict to these fleet session ids. Default: every restorable lost
-    /// session on the host.
+    /// Only these sessions (default: every restorable one).
     #[serde(default)]
     pub session_ids: Option<Vec<i64>>,
 }
