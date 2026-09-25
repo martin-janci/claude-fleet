@@ -138,6 +138,14 @@ describe('work events', () => {
       prefixes: ['ABC', 'TEAM'],
     });
   });
+
+  it('the retro-link reveal never counts a GitHub or Asana key as a Jira prefix', () => {
+    const t = tracker({ config: { key_prefixes: ['ACME'] } });
+    expect(
+      sessionsMentioning(t, ['acme-corp/api#3', 'acme-corp/web#9', 'acme-corp/web#10', 'asana:1207000000000001']),
+    ).toEqual({ count: 0, prefixes: [] });
+    expect(sessionsMentioning(t, ['acme-corp/web#9', 'ACME-4'])).toEqual({ count: 1, prefixes: ['ACME'] });
+  });
 });
 
 describe('ticketBriefPreview fence (M3 review)', () => {

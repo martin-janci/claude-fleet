@@ -579,7 +579,9 @@ export function ticketBriefPreview(t: TicketRow, branch: string): string {
   return out;
 }
 
-/** Retro-link reveal: how many live sessions carry a key of `t`'s prefixes. */
+/** Retro-link reveal: how many live sessions carry a key of `t`'s prefixes.
+ *  A GitHub `owner/repo#n` or an `asana:<gid>` key mentions no prefix, even
+ *  when its owner reads like one (`acme-corp/web#7` is not `ACME-*`). */
 export function sessionsMentioning(
   t: TrackerRow,
   keys: readonly (string | null | undefined)[],
@@ -588,7 +590,8 @@ export function sessionsMentioning(
   let count = 0;
   const hit = new Set<string>();
   for (const k of keys) {
-    const p = k?.split('-')[0]?.toUpperCase();
+    if (!k || githubRepo(k) || k.startsWith('asana:')) continue;
+    const p = k.split('-')[0]?.toUpperCase();
     if (p && prefixes.includes(p)) {
       count++;
       hit.add(p);
