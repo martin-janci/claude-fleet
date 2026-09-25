@@ -79,7 +79,7 @@ pub struct TrackerSync {
     not_before: Mutex<HashMap<i64, i64>>,
     last_full: Mutex<HashMap<(i64, String), i64>>,
     unknown_keys: Mutex<HashMap<(i64, String), i64>>,
-    clock: fn() -> i64,
+    clock: Box<dyn Fn() -> i64 + Send + Sync>,
 }
 
 fn now() -> i64 {
@@ -102,13 +102,13 @@ impl TrackerSync {
             not_before: Mutex::new(HashMap::new()),
             last_full: Mutex::new(HashMap::new()),
             unknown_keys: Mutex::new(HashMap::new()),
-            clock: now,
+            clock: Box::new(now),
         }
     }
 
     #[cfg(test)]
-    fn with_clock(mut self, clock: fn() -> i64) -> Self {
-        self.clock = clock;
+    fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
         self
     }
 
