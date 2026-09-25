@@ -1909,6 +1909,25 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
   });
 
+  it('a linked key with no title can be named from its group header (roadmap M1)', async () => {
+    const work = { link_id: 3, item_id: null, key: 'LOC-1', title: '', source: 'manual', state: 'confirmed' };
+    const a = { ...sessionFor(1, 'dev-a'), work } as ReturnType<typeof sessionFor>;
+    const titled = { ...sessionFor(1, 'dev-b'), work: { ...work, key: 'LOC-2', item_id: 9, title: 'Named' } } as ReturnType<typeof sessionFor>;
+    mockBackend(workProjects, [a, titled]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const names = await screen.findAllByTestId('work-name');
+    expect(names).toHaveLength(1);
+    await fireEvent.click(names[0]);
+    await tick();
+    const input = screen.getByTestId('work-name-input');
+    await fireEvent.input(input, { target: { value: ' Search spike ' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(mockedInvoke).toHaveBeenCalledWith('name_work', { args: { key: 'LOC-1', title: 'Search spike' } });
+  });
+
   it('rolls up PRs and the worst CI state on the group header', async () => {
     const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'], pr_url: 'https://x/pull/1', ci_status: 'passing' as const };
     const b = { ...sessionFor(1, 'dev-b'), tags: ['PAY-7'], pr_url: 'https://x/pull/2', ci_status: 'failing' as const };

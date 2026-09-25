@@ -1047,6 +1047,29 @@ fn routed_mutation_cases() -> Vec<Case> {
                         key: Some("ABC-1".into()),
                         item_id: None,
                         force_cross_org: false,
+                        started: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "link_session_work",
+            "work_link",
+            // The New session dialog's link (roadmap M1): source `started`.
+            json!({ "session_id": 7, "action": "link", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": "started" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::link_session_work(
+                    b,
+                    commands::work::LinkSessionWorkArgs {
+                        session_id: 7,
+                        key: Some("ABC-1".into()),
+                        item_id: None,
+                        force_cross_org: false,
+                        started: true,
                     },
                     s,
                 ))
@@ -1304,6 +1327,24 @@ fn routed_mutation_cases() -> Vec<Case> {
                 block_on(commands::work::routed::dismiss_reopened(
                     b,
                     commands::work::DismissReopenedArgs { item_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "name_work",
+            "work_link",
+            json!({ "session_id": null, "action": "name", "key": "LOC-1", "item_id": null,
+                    "link_id": null, "source": null, "name": "Search spike" }),
+            r#"{"id":3,"source":"local","key":"LOC-1","title":"Search spike","created_at":1,"updated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::name_work(
+                    b,
+                    commands::work::NameWorkArgs {
+                        key: Some("LOC-1".into()),
+                        title: "Search spike".into(),
+                    },
                     s,
                 ))
                 .map(|_| ())
@@ -1996,6 +2037,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 key: Some("ABC-1".into()),
                 item_id: None,
                 force_cross_org: false,
+                started: false,
             },
             &st,
         )),

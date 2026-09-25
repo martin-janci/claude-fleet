@@ -322,6 +322,7 @@ export const ROUTED_ACTIONS = [
   'snooze_tidy',
   'never_tidy',
   'dismiss_reopened',
+  'name_work',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

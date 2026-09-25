@@ -110,7 +110,7 @@ pub struct WorkLinkArgs {
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
-    /// Start: session name.
+    /// Start: session name. name: the work's title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Start: worktree name.
@@ -172,6 +172,20 @@ pub fn trust_project(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<Projec
             .into_iter()
             .collect(),
     })
+}
+
+/// `work_link { action: name, name, key? }` (roadmap M1, "Name this work…"):
+/// create or retitle a local work item; links naming its key as a bare
+/// reference bind to it. See [`Store::name_local_work`].
+pub fn name_work(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+) -> Result<crate::store::WorkItemRow, IpcError> {
+    let title = args
+        .name
+        .as_deref()
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "name needs name (the title)"))?;
+    lock(store)?.name_local_work(args.key.as_deref(), title)
 }
 
 /// `work { action: context }`: the full handover context of a key.
@@ -257,6 +271,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "never",
     "dismiss",
     "tidy_apply",
+    "name",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -291,6 +306,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("never_tidy", "work_link", "never"),
     ("tidy_apply", "work_link", "tidy_apply"),
     ("dismiss_reopened", "work_link", "dismiss"),
+    ("name_work", "work_link", "name"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -512,7 +528,7 @@ pub fn work_link<'a>(
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply"
+        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply" | "name"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -805,6 +821,97 @@ mod tests {
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
+    }
+
+    /// Roadmap M1, "Name this work…": a title for a bare key binds the
+    /// sessions that named it, a retitle reaches them, a tracker's key is
+    /// refused, and a keyless name is a new item.
+    #[test]
+    fn naming_work_titles_every_session_that_named_its_key() {
+        let (st, sid) = store();
+        let row = work_link(
+            &WorkLinkArgs {
+                key: Some("loc-1".into()),
+                ..link(sid, "link")
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        let w = row.work.unwrap();
+        assert_eq!((w.item_id, w.key.as_deref()), (None, Some("LOC-1")));
+
+        let name = |key: Option<&str>, title: &str| {
+            name_work(
+                &WorkLinkArgs {
+                    action: "name".into(),
+                    key: key.map(Into::into),
+                    name: Some(title.into()),
+                    ..Default::default()
+                },
+                &st,
+            )
+        };
+        let item = name(Some("LOC-1"), "Search spike").unwrap();
+        let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+        let w = row.work.unwrap();
+        assert_eq!(
+            (w.item_id, w.title.as_str()),
+            (Some(item.id), "Search spike")
+        );
+        let again = name(Some("loc-1"), "Search, v2").unwrap();
+        assert_eq!(again.id, item.id, "a retitle, not a second item");
+        let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().title, "Search, v2");
+        assert_eq!(
+            st.lock().unwrap().session_work_links(sid).unwrap().len(),
+            1,
+            "still one link"
+        );
+
+        assert_eq!(name(None, " ").unwrap_err().code, codes::E_INVALID);
+        let loose = name(None, "Notes").unwrap();
+        assert!(loose.key.is_none() && loose.id != item.id);
+        assert_eq!(
+            work_link(&link(sid, "name"), &st, &OrgScope::All)
+                .unwrap_err()
+                .code,
+            codes::E_INVALID,
+            "name has its own entry point"
+        );
+    }
+
+    #[test]
+    fn a_trackers_key_is_not_renamed_locally() {
+        let (st, _) = store();
+        {
+            let s = st.lock().unwrap();
+            let t = s
+                .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &crate::store::TrackerItemWrite {
+                    external_id: "1".into(),
+                    key: Some("ABC-1".into()),
+                    title: "From Jira".into(),
+                    status_category: "todo".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let err = name_work(
+            &WorkLinkArgs {
+                action: "name".into(),
+                key: Some("ABC-1".into()),
+                name: Some("Mine".into()),
+                ..Default::default()
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
     }
 
     /// Work graph M4.4: confirm / reject a suggestion by link id, and trust

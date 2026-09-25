@@ -663,7 +663,7 @@ impl FleetTools {
         ticket (project_ids: one per repo). handover {session_id}: ask it to \
         write its hand-off. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
-        kill when dirty).")]
+        kill when dirty). name {name, key?}: name work (a local item).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -742,6 +742,19 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
             return ok_json(&row);
+        }
+        if args.action == "name" {
+            // Local items are fleet-wide, not one host's to name.
+            if caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "name is not available to a per-host token",
+                    None,
+                ));
+            }
+            return ok_json(
+                &crate::service::work::name_work(&args, &self.store).map_err(to_mcp_err)?,
+            );
         }
         if args.action == "trust_project" {
             // Trust is fleet configuration, not one host's to change.

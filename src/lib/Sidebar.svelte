@@ -52,6 +52,7 @@
     type WorkGroup,
   } from './sidebar_index';
   import { workGroupPrSummary, workGroupTicket, workKeyFor, worktreeBranchById } from './work_keys';
+  import { nameWork } from './work';
   import { statusDotClass, unavailableLabel } from './trackers';
   import {
     ciStatusColor,
@@ -518,6 +519,30 @@
     if (next.has(key)) next.delete(key);
     else next.add(key);
     return next;
+  }
+
+  // "Name this work…" (roadmap M1): a work group whose key has no title yet
+  // takes one inline; it becomes a local work item, and every linked row
+  // shows it through its own `session_updated`.
+  let namingKey = $state<string | null>(null);
+  let nameDraft = $state('');
+  let naming = $state(false);
+  function startNaming(e: Event, key: string) {
+    e.stopPropagation();
+    namingKey = key;
+    nameDraft = '';
+  }
+  async function submitName(key: string) {
+    const title = nameDraft.trim();
+    if (!title || naming) return;
+    naming = true;
+    const r = await nameWork(key, title);
+    naming = false;
+    if (!r.ok) {
+      pushError(r.error, `Naming ${key} failed`);
+      return;
+    }
+    namingKey = null;
   }
 
   function toggleWorkCollapse(key: string) {
@@ -1030,6 +1055,14 @@
                       : ticket.title}>{ticket.title}</span
                   >{/if}</span
               >
+              {#if !ticket?.title && g.sessions.some((s) => s.work?.key === g.key)}
+                <button
+                  class="work-name-btn"
+                  data-testid="work-name"
+                  title="Name this work: give {g.key} a title"
+                  onclick={(e) => startNaming(e, g.key)}
+                >Name…</button>
+              {/if}
               {#if pr.prCount > 0}
                 <span
                   class="work-pr"
@@ -1047,6 +1080,31 @@
               <span class="count">{split.live.length}</span>
             </div>
 
+            {#if namingKey === g.key}
+              <div class="work-name-row">
+                <!-- svelte-ignore a11y_autofocus -->
+                <input
+                  class="work-name-input"
+                  data-testid="work-name-input"
+                  aria-label="Title for {g.key}"
+                  placeholder="What is {g.key}?"
+                  autofocus
+                  disabled={naming}
+                  bind:value={nameDraft}
+                  onkeydown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') void submitName(g.key);
+                    else if (e.key === 'Escape') namingKey = null;
+                  }}
+                />
+                <button
+                  class="work-name-btn"
+                  data-testid="work-name-save"
+                  disabled={naming || !nameDraft.trim()}
+                  onclick={() => void submitName(g.key)}
+                >Save</button>
+              </div>
+            {/if}
             {#if !isCollapsed}
               {#each split.live as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
@@ -1485,6 +1543,26 @@
     font-size: 0.75rem;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .work-name-btn {
+    margin-left: 0.4rem;
+    font-size: 0.7rem;
+    padding: 0 0.35rem;
+    color: var(--fg-muted);
+    background: transparent;
+    border: 1px solid var(--border, #444);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .work-name-row {
+    display: flex;
+    gap: 0.3rem;
+    padding: 0.15rem 0.5rem 0.15rem 1.6rem;
+  }
+  .work-name-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.75rem;
   }
   .done-row {
     display: flex;

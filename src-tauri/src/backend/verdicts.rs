@@ -287,6 +287,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("never_tidy", Verdict::Routed { tool: "work_link" }),
     ("tidy_apply", Verdict::Routed { tool: "work_link" }),
     ("dismiss_reopened", Verdict::Routed { tool: "work_link" }),
+    // Roadmap M1, "Name this work…": an action of the existing `work_link`.
+    ("name_work", Verdict::Routed { tool: "work_link" }),
     // Work graph M2.4: resume past work, and what a purge would strand.
     ("work_resume_plan", Verdict::Routed { tool: "work" }),
     ("resume_work", Verdict::Routed { tool: "work_link" }),

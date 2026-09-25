@@ -303,6 +303,7 @@ pub fn run() {
             commands::work::never_tidy,
             commands::work::tidy_apply,
             commands::work::dismiss_reopened,
+            commands::work::name_work,
             commands::work::set_work_project_trust,
             commands::work::work_resume_plan,
             commands::work::resume_work,

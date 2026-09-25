@@ -126,4 +126,23 @@ describe('SessionRowItem work menu', () => {
       args: { session_id: 7, key: 'ABC-1' },
     });
   });
+
+  it('a bare key the row links takes the typed text as its title (Name this work)', async () => {
+    const work = { link_id: 3, item_id: null, key: 'LOC-1', title: '', source: 'manual', state: 'confirmed' };
+    render(SessionRowItem, { props: props(live({ work } as Partial<SessionRow>), { key: 'LOC-1', source: 'link' } as WorkKey) });
+    await openMenu();
+    const btn = screen.getByTestId('work-name') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('work-input'), { target: { value: 'Search spike' } });
+    await fireEvent.click(btn);
+    await tick();
+    expect(invoke).toHaveBeenCalledWith('name_work', { args: { key: 'LOC-1', title: 'Search spike' } });
+  });
+
+  it('an item that already has a title offers no Name', async () => {
+    const work = { link_id: 3, item_id: 9, key: 'ABC-1', title: 'Jira', source: 'manual', state: 'confirmed' };
+    render(SessionRowItem, { props: props(live({ work } as Partial<SessionRow>), { key: 'ABC-1', source: 'link' } as WorkKey) });
+    await openMenu();
+    expect(screen.queryByTestId('work-name')).toBeNull();
+  });
 });

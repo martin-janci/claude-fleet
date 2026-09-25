@@ -41,6 +41,7 @@
     confirmSessionWork,
     describeEvidence,
     linkSessionWork,
+    nameWork,
     rejectSessionWork,
     rejectWorkLink,
     sessionWorkLinks,
@@ -257,6 +258,28 @@
       what: key.toUpperCase(),
       retry: () => linkSessionWork(sess.id, { key }, { forceCrossOrg: true }),
     });
+  }
+
+  // "Name this work…" (roadmap M1): a bare key the row links (no item yet)
+  // takes the draft as its title — a local work item every row naming the
+  // key then shows.
+  const nameableKey = $derived(
+    sess.work && sess.work.item_id == null && sess.work.key ? sess.work.key : null,
+  );
+  async function nameThisWork(e?: Event) {
+    e?.stopPropagation();
+    const key = nameableKey;
+    const title = workDraft.trim();
+    if (!key || !title || workBusy) return;
+    workBusy = true;
+    const r = await nameWork(key, title);
+    workBusy = false;
+    if (!r.ok) {
+      pushError(r.error, `Naming ${key} failed`);
+      return;
+    }
+    workMenuOpen = false;
+    workDraft = '';
   }
 
   function rejectWork(e: Event) {
@@ -682,6 +705,15 @@
               disabled={workBusy || !workDraft.trim()}
               onclick={setWork}
             >Set</button>
+            {#if nameableKey}
+              <button
+                class="work-btn"
+                data-testid="work-name"
+                disabled={workBusy || !workDraft.trim()}
+                title="Name this work: the text above becomes {nameableKey}'s title"
+                onclick={nameThisWork}
+              >Name {nameableKey}</button>
+            {/if}
             {#if rowWork}
               <button
                 class="work-btn"

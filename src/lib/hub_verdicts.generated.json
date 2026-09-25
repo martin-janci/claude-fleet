@@ -104,6 +104,7 @@
     "list_trackers",
     "list_worktrees",
     "move_session",
+    "name_work",
     "never_tidy",
     "new_bg_session",
     "new_session",

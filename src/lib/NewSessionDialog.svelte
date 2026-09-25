@@ -2,7 +2,7 @@
   import { onMount, onDestroy, untrack } from 'svelte';
   import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
-  import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
+  import { endedWorkLinks, linkSessionWork, pastWorkSummary, type WorkLink } from './work';
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
@@ -797,6 +797,10 @@
     // current when the response lands.
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
+    // The key the new session is for (roadmap M1): linked `started` once it
+    // exists, so the row carries its work from the first frame instead of
+    // waiting for detection to read the branch.
+    const submittedKey = chosenKind === 'work' ? plannedKey : null;
     busy = true;
     error = null;
     createController = new AbortController();
@@ -837,7 +841,15 @@
       return;
     }
     remember(submittedHost, submittedWorktreeId);
-    onCreate(r.value);
+    let created = r.value;
+    if (submittedKey) {
+      // Best effort: the session exists either way, and detection can still
+      // link its branch key; a failure is said, never a failed create.
+      const linked = await linkSessionWork(created.id, { key: submittedKey }, { started: true });
+      if (linked.ok) created = linked.value;
+      else pushError(linked.error, `Linking ${submittedKey} failed`);
+    }
+    onCreate(created);
   }
 
   function cancelCreate() {

@@ -1635,3 +1635,62 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     sessionsModule.sessions.set([]);
   });
 });
+
+describe('NewSessionDialog links the work it starts (roadmap M1)', () => {
+  const created = {
+    id: 77, tmux_name: 'abc-123-fix-login', host_alias: 'local', project_id: 1, worktree_id: null,
+    created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null, kind: 'work',
+    reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null,
+    effort_level: null, pr_url: null, current_activity: null, friendly_name: null, safe_kill_state: null,
+    safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null,
+    stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null,
+    started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null,
+    parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null,
+    context_source: null, context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null,
+  } as unknown as sessionsModule.SessionRow;
+
+  async function createNamed(name: string) {
+    const onCreate = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('new-worktree-name'), { target: { value: name } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(onCreate).toHaveBeenCalledOnce());
+    return onCreate;
+  }
+
+  it('a key in the new branch is linked `started` once the session exists', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: created });
+    const linked = { ...created, work: { link_id: 5, item_id: null, key: 'ABC-123', title: '', source: 'started', state: 'confirmed' } };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'link_session_work' ? linked : null,
+    );
+    const onCreate = await createNamed('abc-123-fix-login');
+    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'link_session_work');
+    expect(call?.[1]).toEqual({ args: { session_id: 77, key: 'ABC-123', started: true } });
+    expect(onCreate.mock.calls[0][0].work?.source).toBe('started');
+    spy.mockRestore();
+  });
+
+  it('a failed link never fails the create', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: created });
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'link_session_work') throw { code: 'E_FORBIDDEN', message: 'no' };
+      return null;
+    });
+    const onCreate = await createNamed('abc-123-fix-login');
+    expect(onCreate.mock.calls[0][0].id).toBe(77);
+    spy.mockRestore();
+  });
+
+  it('no key, no link', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: created });
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    await createNamed('feat-test');
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some((c) => c[0] === 'link_session_work')).toBe(false);
+    spy.mockRestore();
+  });
+});

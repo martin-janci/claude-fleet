@@ -368,6 +368,13 @@ Index by area (names only; see the reference for details):
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
   sole branch key in that project link by itself (master or client token;
   refused to a per-host token). Prompts are never stored — only matches.
+  `work_link { action: "name", name, key? }` names a piece of work (roadmap
+  M1, "Name this work…"): a local item with that title, or a retitle of the
+  local item with that key; links naming the key as a bare reference bind to
+  it, so every such session shows the title. A key a tracker already has is
+  refused (`E_INVALID_STATE`), and so is a per-host token (local items are
+  fleet-wide). The desktop's New session dialog links the key its branch
+  names with `source: started` once the session exists.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
   on a paired desktop the Settings → Work section says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,

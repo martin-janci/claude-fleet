@@ -82,16 +82,19 @@ async function decide(cmd: string, args: Record<string, unknown>): Promise<Resul
 }
 
 /** Say the session works on `ref`; it becomes the session's primary work.
- *  `forceCrossOrg`: the person saw the cross-org refusal and meant it. */
+ *  `forceCrossOrg`: the person saw the cross-org refusal and meant it.
+ *  `started`: the session was just created for this work (source
+ *  `started`, the New session dialog). */
 export function linkSessionWork(
   sessionId: number,
   ref: WorkRef,
-  opts: { forceCrossOrg?: boolean } = {},
+  opts: { forceCrossOrg?: boolean; started?: boolean } = {},
 ): Promise<Result<SessionRow>> {
   return decide('link_session_work', {
     session_id: sessionId,
     ...ref,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+    ...(opts.started ? { started: true } : {}),
   });
 }
 
@@ -118,6 +121,22 @@ export function crossOrgSentence(
   const w = orgName(c.workOrgId) ?? `organisation ${c.workOrgId}`;
   const s = orgName(c.sessionOrgId) ?? `organisation ${c.sessionOrgId}`;
   return `${what} belongs to ${w}, and this session to ${s}. Fleet does not link one company's work to another's session by mistake.`;
+}
+
+/** A local work item, as `name_work` answers it. */
+export interface WorkItem {
+  id: number;
+  source: string;
+  key?: string | null;
+  title: string;
+}
+
+/** "Name this work…" (roadmap M1): give `key` a title — a local work item;
+ *  every session whose link names the key shows it at once (row events).
+ *  Without a key, a new keyless item to link by id. A tracker's key is
+ *  refused (`E_INVALID_STATE`): its title is the tracker's. */
+export function nameWork(key: string | null, title: string): Promise<Result<WorkItem>> {
+  return invokeCmd<WorkItem>('name_work', { args: { key, title } });
 }
 
 /** "Not this": the session does not work on `ref`. Sticky. */

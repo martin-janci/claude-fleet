@@ -459,6 +459,57 @@ impl Store {
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after insert"))
     }
 
+    /// Name a piece of work (roadmap M1, "Name this work…"): create the local
+    /// item with `title` (and `key`, when given), or retitle the local item
+    /// that has `key`. Links that name `key` as a bare reference bind to the
+    /// item, and every session linked to it is re-emitted, so each row's work
+    /// shows the title at once. A key a tracker already has is refused
+    /// (`E_INVALID_STATE`): its title is the tracker's.
+    pub fn name_local_work(&self, key: Option<&str>, title: &str) -> Result<WorkItemRow, IpcError> {
+        if title.trim().is_empty() {
+            return Err(IpcError::new(codes::E_INVALID, "naming work needs a title"));
+        }
+        let key = key.map(normalize_work_ref).transpose()?;
+        if let Some(k) = key.as_deref() {
+            if self.tracker_item_for_key(k)?.is_some() {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!("{k} is a tracker's ticket; its title comes from the tracker"),
+                ));
+            }
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let item = self.create_local_work_item(key.as_deref(), title)?;
+        if let Some(k) = item.key.as_deref() {
+            // A participant that already links the item keeps that one link.
+            self.conn.execute(
+                "UPDATE work_links SET item_id = ?1, ref_key = NULL \
+                 WHERE ref_key = ?2 AND item_id IS NULL \
+                   AND NOT (ended_at IS NULL AND participant_id IN \
+                     (SELECT participant_id FROM work_links \
+                      WHERE item_id = ?1 AND ended_at IS NULL))",
+                rusqlite::params![item.id, k],
+            )?;
+        }
+        let sessions: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT p.session_id FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE l.item_id = ?1 AND l.ended_at IS NULL AND p.session_id IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![item.id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for sid in &sessions {
+            self.bump_session_for_work(*sid)?;
+        }
+        tx.commit()?;
+        for sid in sessions {
+            self.emit_session(sid)?;
+        }
+        Ok(item)
+    }
+
     pub fn get_work_item(&self, id: i64) -> Result<Option<WorkItemRow>, IpcError> {
         self.conn
             .query_row(

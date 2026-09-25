@@ -149,6 +149,8 @@ by key, and names stop being "yes". **Tests:**
     title — the store has `create_local_work_item`, no tool or command
     exposes it yet), the New session dialog does not link with
     `source: started` yet, and the phone app does not read `work`.
+    (The first two landed 2026-09-25 as the M1 leftovers; the phone reads
+    `work` since M8.)
 
 ### M2: resume and work memory
 
@@ -707,4 +709,14 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: the two M9 follow-ups on M7 (Today → Tidy up, the operator's
   "Tidy up done tickets"); frontend and the operator's CLAUDE.md only — no
   new action, no budget change.
-
+- 2026-09-25: the M1 leftovers landed on
+  `claude/cloud-fleet-work-graph-m1-leftovers` (from `main`): **"Name this
+  work…"** — `work_link { action: name, name, key? }` (`Store::name_local_work`:
+  create or retitle a local item, bind the bare `ref_key` links that name the
+  key, re-emit every linked row; a tracker's key refused), the Routed
+  `name_work` (174 commands), a *Name…* button on a work group header whose
+  linked key has no title and *Name KEY* in the row's work menu; and the New
+  session dialog links the key its branch names with `source: started`
+  (`link_session_work { started }`, best effort after the create). Per-host
+  tokens are refused (isolation matrix row). Tool surface +76 B inside the
+  headroom; no migration, no contract bump.

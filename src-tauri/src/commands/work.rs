@@ -20,7 +20,7 @@ use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport
 use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{ReopenedWork, SessionRow, Store, WorkLinkRow};
+use fleet_core::store::{ReopenedWork, SessionRow, Store, WorkItemRow, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -37,6 +37,10 @@ pub struct LinkSessionWorkArgs {
     /// refusal and meant it.
     #[serde(default)]
     pub force_cross_org: bool,
+    /// The session was just created for this work (the New session dialog,
+    /// roadmap M1): the link's source is `started`, not `manual`.
+    #[serde(default)]
+    pub started: bool,
 }
 
 /// Say a session does NOT work on a key or item (sticky) — or, with
@@ -206,6 +210,24 @@ pub async fn tidy_apply(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<TidyApplyReport, IpcError> {
     routed::tidy_apply(&backend, args, &store, &ssh).await
+}
+
+/// Name a piece of work: a local item with `title`, and `key` when given
+/// (roadmap M1, "Name this work…").
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NameWorkArgs {
+    #[serde(default)]
+    pub key: Option<String>,
+    pub title: String,
+}
+
+#[tauri::command]
+pub async fn name_work(
+    args: NameWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::name_work(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -479,6 +501,23 @@ pub(crate) mod routed {
         }
     }
 
+    pub async fn name_work(
+        backend: &FleetBackend,
+        args: NameWorkArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "name".into(),
+            key: args.key,
+            name: Some(args.title),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("name_work", &args).await,
+            None => work::name_work(&args, store),
+        }
+    }
+
     pub async fn dismiss_reopened(
         backend: &FleetBackend,
         args: DismissReopenedArgs,
@@ -517,7 +556,7 @@ pub(crate) mod routed {
             key: args.key,
             item_id: args.item_id,
             link_id: None,
-            source: Some("manual".into()),
+            source: Some(if args.started { "started" } else { "manual" }.into()),
             force_cross_org: args.force_cross_org.then_some(true),
             ..Default::default()
         };

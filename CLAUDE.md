@@ -107,7 +107,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 173
+  verdict is written down once, in `backend/verdicts.rs`, for all 174
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table

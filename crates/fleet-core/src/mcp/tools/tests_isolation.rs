@@ -1160,6 +1160,22 @@ async fn run_matrix(isolate: bool) {
     .await;
     m.row(
         "work_link",
+        "name",
+        |_, _| json!({ "action": "name", "key": "LOC-1", "name": "Local work" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            if who.is_host() {
+                is_code(who, a, "E_FORBIDDEN", "local items are fleet-wide");
+            } else {
+                is_ok(who, a, "name");
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
         "resume",
         |_, _| json!({ "action": "resume", "key": "BB-3", "mode": "fresh" }),
         |_, who, a| {
