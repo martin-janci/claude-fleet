@@ -30,6 +30,7 @@ use crate::service::settings;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod tidy;
@@ -417,6 +418,43 @@ pub async fn sweep_with(
     report
 }
 
+/// Single-flight guard mirroring `service::usage`'s: at most one sweep pass
+/// runs at a time. The interval gate in `maybe_sweep` below already makes
+/// two back-to-back calls a no-op in the common case (the second finds
+/// itself not due, since `LAST` is stamped before the sweep runs) — but a
+/// `gc.sweep_interval_secs` of `0` would otherwise let two ticks race into
+/// overlapping sweeps, so this guard is unconditional, not just interval-based.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Held while a sweep runs; clears [`RUNNING`] on drop (also on panic).
+struct Flight;
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn begin_flight() -> Option<Flight> {
+    RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| Flight)
+}
+
+/// Reconcile-tick hook: spawn [`maybe_sweep`] as its own task so a slow GC
+/// sweep (it does SSH work — safe-kill inspections, kills) never stretches
+/// the tick body past its period. Mirrors `service::usage::spawn_collect`
+/// exactly: unconditional spawn, single-flight enforced inside the spawned
+/// call, so a second spawn while one is still running is a no-op. Must be
+/// called from inside the tokio runtime.
+pub fn spawn_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
+    let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
+    tokio::spawn(async move {
+        let _ = maybe_sweep(&store, &ssh).await;
+    });
+}
+
 /// Tick entry point: sweeps once the sweep interval has elapsed since the
 /// last tick, regardless of `gc.enabled` — that flag only gates the
 /// destructive idle-session killer inside `sweep_with`, which the
@@ -426,6 +464,7 @@ pub async fn sweep_with(
 pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Option<GcReport> {
     static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
         std::sync::LazyLock::new(|| Mutex::new(None));
+    let _flight = begin_flight()?;
     let cfg = {
         let s = store.lock().ok()?;
         GcConfig::from_store(&s)
@@ -480,6 +519,18 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Task 1(c): the tick no longer awaits `maybe_sweep` inline — it is
+    /// spawned single-flight (`spawn_sweep`), mirroring
+    /// `service::usage`'s `only_one_collection_pass_is_in_flight`. A second
+    /// spawn while one sweep is still running must do nothing.
+    #[test]
+    fn only_one_sweep_pass_is_in_flight() {
+        let first = begin_flight().expect("no pass running");
+        assert!(begin_flight().is_none(), "a second pass is refused");
+        drop(first);
+        assert!(begin_flight().is_some(), "released on drop");
+    }
 
     pub(super) fn row(
         id: i64,

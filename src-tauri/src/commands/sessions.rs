@@ -481,7 +481,7 @@ pub(crate) mod routed {
     pub async fn list_sessions(
         backend: &FleetBackend,
         force: Option<bool>,
-        store: &Mutex<Store>,
+        store: &Arc<Mutex<Store>>,
         ssh: &Arc<SshClient>,
     ) -> Result<Vec<SessionRow>, IpcError> {
         let force = force.unwrap_or(false);

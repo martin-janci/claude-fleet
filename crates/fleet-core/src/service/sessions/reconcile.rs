@@ -245,8 +245,22 @@ pub(crate) struct ReconcileDeps {
     /// How often `claude agents --json` (a node cold start) is asked per
     /// host. `0` = every pass (tests).
     pub(super) agents_every: std::time::Duration,
-    /// When each host was last asked.
-    pub(super) last_agents: dashmap::DashMap<String, std::time::Instant>,
+    /// When each host was last asked. `ReconcileDeps::real` is built fresh on
+    /// every `list_sessions` / `refresh_sessions` / `reconcile_now` call (see
+    /// each entry point below), so this must be the SAME map across those
+    /// builds — a process-wide static, like `service::outcome::pr_probe_cache()`
+    /// — or `agents_due` never sees a prior ask and `AGENTS_CADENCE` never
+    /// applies. `ReconcileDeps::fake*` build a fresh `Arc` per call instead, so
+    /// tests stay isolated from each other and from production's map.
+    pub(super) last_agents: Arc<dashmap::DashMap<String, std::time::Instant>>,
+}
+
+/// The process-wide `last_agents` map every `ReconcileDeps::real` shares (see
+/// the field doc above). Mirrors `service::outcome::pr_probe_cache()`.
+fn last_agents_map() -> Arc<dashmap::DashMap<String, std::time::Instant>> {
+    static MAP: std::sync::LazyLock<Arc<dashmap::DashMap<String, std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Arc::new(dashmap::DashMap::new()));
+    Arc::clone(&MAP)
 }
 
 /// `host alias → tmux executor` factory used by `ReconcileDeps`.
@@ -267,7 +281,7 @@ impl ReconcileDeps {
             local_home: local_host.then(crate::service::hosts::local_home_dir),
             local_host,
             agents_every: AGENTS_CADENCE,
-            last_agents: dashmap::DashMap::new(),
+            last_agents: last_agents_map(),
         })
     }
 
@@ -299,7 +313,9 @@ impl ReconcileDeps {
             // Tests want the agents probe on every pass unless they build
             // their own `ReconcileDeps` with an explicit cadence.
             agents_every: std::time::Duration::ZERO,
-            last_agents: dashmap::DashMap::new(),
+            // A fresh map per fake deps: tests must stay isolated from each
+            // other (and from production's shared map above).
+            last_agents: Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -429,6 +445,16 @@ impl ReconcileGate {
             .unwrap_or(false)
     }
 
+    /// `true` once at least one full pass has completed in this process,
+    /// regardless of the freshness window. `list_sessions_with` uses this to
+    /// tell a cold start (nothing probed yet — keep the first listing
+    /// synchronous so it is not empty) from ordinary staleness (a pass has
+    /// run before, so a stale caller can be served the stored rows at once
+    /// while a background pass catches up).
+    pub(super) fn has_completed_once(&self) -> bool {
+        self.last_completed.lock().ok().is_some_and(|l| l.is_some())
+    }
+
     /// Completed full passes so far.
     #[cfg(test)]
     pub fn passes(&self) -> u64 {
@@ -436,10 +462,13 @@ impl ReconcileGate {
     }
 }
 
-/// The process-wide gate every production entry point shares.
-pub fn reconcile_gate() -> &'static ReconcileGate {
-    static GATE: std::sync::LazyLock<ReconcileGate> = std::sync::LazyLock::new(ReconcileGate::new);
-    &GATE
+/// The process-wide gate every production entry point shares. An `Arc` (not
+/// a `&'static` reference) so `list_sessions_with` can clone it into a
+/// detached background pass without borrowing beyond the call.
+pub fn reconcile_gate() -> Arc<ReconcileGate> {
+    static GATE: std::sync::LazyLock<Arc<ReconcileGate>> =
+        std::sync::LazyLock::new(|| Arc::new(ReconcileGate::new()));
+    Arc::clone(&GATE)
 }
 
 /// Analyze the pane tail captured for every live session on a host by the
@@ -1517,17 +1546,44 @@ pub(super) fn list_freshness_window(store: &Mutex<Store>) -> std::time::Duration
 
 /// `list_sessions` core with injectable deps/gate/window (tests). See the
 /// public `list_sessions` for the policy.
+///
+/// `force` always awaits a pass inline (an explicit user refresh must show
+/// its own result). Otherwise: a COLD start — no pass has completed in this
+/// process yet (`gate.has_completed_once()` false) — also awaits one inline,
+/// so the very first listing is not empty. Once at least one pass has
+/// completed, a stale gate no longer probes inline: the stored rows are
+/// served at once and a background pass is started through the SAME gate
+/// (so it can never overlap one already running), catching the fleet up for
+/// the next read instead of making this caller pay for it.
 pub(super) async fn list_sessions_with(
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     deps: &Arc<ReconcileDeps>,
-    gate: &ReconcileGate,
+    gate: &Arc<ReconcileGate>,
     window: std::time::Duration,
     force: bool,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    if force || !gate.is_fresh(window) {
-        // `Ok(false)` ⇒ a pass is in flight; fall through to the stored rows
-        // rather than queue a second fleet-wide probe behind it.
+    if force {
         run_full_reconcile(store, deps, gate).await?;
+    } else if !gate.has_completed_once() {
+        // Cold start: keep today's inline pass so the first listing isn't
+        // empty. `Ok(false)` here (another caller won the gate concurrently)
+        // just falls through to the stored rows, same as before.
+        run_full_reconcile(store, deps, gate).await?;
+    } else if !gate.is_fresh(window) {
+        // A pass has completed before and the gate is stale: serve the
+        // stored rows now and catch up detached. `try_begin` inside
+        // `run_full_reconcile` is what actually prevents overlap with a
+        // pass already running (e.g. the background tick, or another
+        // caller's own spawned catch-up) — this spawn is just one more
+        // racer for that single slot.
+        let store = Arc::clone(store);
+        let deps = Arc::clone(deps);
+        let gate = Arc::clone(gate);
+        crate::rt::spawn(async move {
+            if let Err(e) = run_full_reconcile(&store, &deps, &gate).await {
+                tracing::warn!(error = %e, "[reconcile] background catch-up pass failed");
+            }
+        });
     }
     let s = lock(store)?;
     s.list_all_sessions().map_err(IpcError::from)
@@ -1597,14 +1653,14 @@ pub(crate) async fn reconcile_one_host(
 /// N-host probes on top of the background tick. Use `reconcile_now` for an
 /// explicit refresh that ignores freshness.
 pub async fn list_sessions(
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<SessionRow>, IpcError> {
     let window = list_freshness_window(store);
     list_sessions_with(
         store,
         &ReconcileDeps::real(ssh, local_host(store)),
-        reconcile_gate(),
+        &reconcile_gate(),
         window,
         false,
     )
@@ -1615,14 +1671,14 @@ pub async fn list_sessions(
 /// (a pass already in flight is still not duplicated — the stored rows it is
 /// about to write are returned instead).
 pub async fn refresh_sessions(
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<SessionRow>, IpcError> {
     let window = list_freshness_window(store);
     list_sessions_with(
         store,
         &ReconcileDeps::real(ssh, local_host(store)),
-        reconcile_gate(),
+        &reconcile_gate(),
         window,
         true,
     )
@@ -1642,7 +1698,7 @@ pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
     run_full_reconcile(
         store,
         &ReconcileDeps::real(ssh, local_host(store)),
-        reconcile_gate(),
+        &reconcile_gate(),
     )
     .await
 }

@@ -1261,7 +1261,7 @@ fn deps_with_cadence_for_tests() -> ReconcileDeps {
         local_home: None,
         local_host: true,
         agents_every: std::time::Duration::from_secs(60),
-        last_agents: dashmap::DashMap::new(),
+        last_agents: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -2192,8 +2192,8 @@ async fn concurrent_list_sessions_share_one_reconcile_pass() {
     // say) must cause ONE fleet probe; the loser is served the stored
     // rows immediately instead of queueing a second pass.
     use std::time::Duration;
-    let store = Mutex::new(Store::open_in_memory().expect("store"));
-    let gate = ReconcileGate::new();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
     let (deps, probes) = scripted_deps(
         vec![tmux_session("s1")],
         Duration::from_millis(200),
@@ -2229,15 +2229,15 @@ async fn list_sessions_within_freshness_window_causes_zero_probes() {
     // BE-2: a store that was reconciled within the interval is served as
     // is; `force` (the explicit-refresh path) still probes.
     use std::time::Duration;
-    let store = Mutex::new(Store::open_in_memory().expect("store"));
-    let gate = ReconcileGate::new();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
     let (deps, probes) = scripted_deps(
         vec![tmux_session("s1")],
         Duration::from_millis(1),
         Duration::from_secs(5),
     );
     let window = Duration::from_secs(60);
-    // First call: nothing completed yet → one pass.
+    // First call: nothing completed yet (cold start) → one pass, inline.
     list_sessions_with(&store, &deps, &gate, window, false)
         .await
         .unwrap();
@@ -2255,17 +2255,135 @@ async fn list_sessions_within_freshness_window_causes_zero_probes() {
         "fresh store ⇒ no probe"
     );
     assert_eq!(gate.passes(), 1);
-    // Explicit refresh ignores freshness.
+    // Explicit refresh ignores freshness and still runs inline.
     list_sessions_with(&store, &deps, &gate, window, true)
         .await
         .unwrap();
     assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(gate.passes(), 2);
-    // A zero-length window means "always stale".
-    list_sessions_with(&store, &deps, &gate, Duration::ZERO, false)
+    // A zero-length window means "always stale". A pass has already
+    // completed (`gate.passes() == 2` above), so this is no longer a cold
+    // start: Task 1(a) serves the current stored rows AT ONCE instead of
+    // probing inline, and catches the gate up through a detached pass.
+    let before = std::time::Instant::now();
+    let rows = list_sessions_with(&store, &deps, &gate, Duration::ZERO, false)
         .await
         .unwrap();
-    assert_eq!(gate.passes(), 3);
+    assert!(
+        before.elapsed() < Duration::from_secs(1),
+        "must return without awaiting the probe: {:?}",
+        before.elapsed()
+    );
+    assert_eq!(rows.len(), 1, "the current stored rows, served at once");
+    // The detached pass lands shortly after (ScriptedTmux's delay here is
+    // 1ms) — poll instead of asserting synchronously, since it is no longer
+    // awaited by `list_sessions_with` itself.
+    for _ in 0..200 {
+        if gate.passes() == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        gate.passes(),
+        3,
+        "the background catch-up pass completes through the same gate"
+    );
+}
+
+#[tokio::test]
+async fn stale_gate_after_a_completed_pass_returns_without_awaiting_the_probe() {
+    // Task 1(a): once a pass has completed in this process, a stale caller
+    // must not pay for a fresh probe inline — it gets the stored rows at
+    // once while a background pass (through the SAME gate, so it can never
+    // overlap one already running) catches up.
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
+    let window = Duration::from_millis(1);
+
+    // First pass: fast, so the gate records a completed pass (cold start).
+    let (fast_deps, _fast_probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_millis(1),
+        Duration::from_secs(5),
+    );
+    list_sessions_with(&store, &fast_deps, &gate, window, false)
+        .await
+        .unwrap();
+    assert_eq!(gate.passes(), 1, "the cold-start pass completed");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!gate.is_fresh(window), "the window has now lapsed");
+
+    // Second call: every host's exec blocks far past this test's own bound.
+    // If `list_sessions_with` awaited the probe inline, this call would hang
+    // well past the `tokio::time::timeout` below.
+    let (slow_deps, probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_secs(3600),
+        Duration::from_secs(3600),
+    );
+    let start = std::time::Instant::now();
+    let rows = tokio::time::timeout(
+        Duration::from_millis(500),
+        list_sessions_with(&store, &slow_deps, &gate, window, false),
+    )
+    .await
+    .expect("must return promptly, not await the slow probe")
+    .unwrap();
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "returned promptly: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(rows.len(), 1, "the stale but stored row is served at once");
+
+    // A pass is observed to have started through the same gate: it reached
+    // the (now hanging) host probe, and the gate's single slot stays claimed
+    // while it is in flight.
+    for _ in 0..100 {
+        if probes.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        probes.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "a background pass started and reached the host probe"
+    );
+    assert!(
+        gate.try_begin().is_none(),
+        "the gate's single slot is claimed by the in-flight background pass"
+    );
+}
+
+#[test]
+fn real_reconcile_deps_share_the_agents_cadence_across_builds() {
+    // Task 1(b): `ReconcileDeps::real` is built FRESH on every
+    // `list_sessions` / `refresh_sessions` / `reconcile_now` / single-host
+    // refresh call (see each entry point in reconcile.rs). Without a
+    // process-wide `last_agents` map, `agents_due` would find no record of a
+    // prior ask on every single one of those builds, so `AGENTS_CADENCE`
+    // (once a minute) would never actually apply in production — `claude
+    // agents --json` would run on every host on every pass.
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    // A distinctive alias: this test shares the process-wide map with
+    // whatever else in this binary builds `ReconcileDeps::real`.
+    let alias = "task1b-cadence-test-host";
+    let deps1 = ReconcileDeps::real(&ssh, true);
+    let now = std::time::Instant::now();
+    assert!(
+        agents_due(&deps1, alias, now),
+        "first ask for this alias is always due"
+    );
+    // A second, freshly built `real` deps — exactly what every entry point
+    // constructs — must still see the ask `deps1` just recorded.
+    let deps2 = ReconcileDeps::real(&ssh, true);
+    assert!(
+        !agents_due(&deps2, alias, now),
+        "a freshly built ReconcileDeps::real must honour the cadence just recorded, \
+         not start a fresh map"
+    );
 }
 
 #[tokio::test]
