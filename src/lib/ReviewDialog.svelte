@@ -4,6 +4,7 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import Modal from './Modal.svelte';
+  import SpiralLoader from './SpiralLoader.svelte';
 
   let { source, onClose }: { source: SessionRow; onClose: () => void } = $props();
 
@@ -62,13 +63,17 @@
         onclick={start}
         data-testid="review-start"
       >
-        {spawning ? 'Starting…' : 'Start review'}
+        {#if spawning}<SpiralLoader size={12} class="btn-spiral" />Starting…{:else}Start review{/if}
       </button>
     </div>
   </div>
 </Modal>
 
 <style>
+  button :global(.btn-spiral) {
+    margin-right: 0.35em;
+    vertical-align: -1px;
+  }
   .dialog { display: flex; flex-direction: column; gap: 0.7rem; }
   .dialog h3 { margin: 0; font-size: 1rem; }
   .dialog h4 { margin: 0 0 0.3rem 0; font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; }

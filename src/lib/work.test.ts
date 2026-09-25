@@ -12,6 +12,9 @@ import {
   workPurgeImpact,
   workResumePlan,
   RESUME_UNSUPPORTED,
+  describeEvidence,
+  isAutoLink,
+  workWhy,
   type WorkLink,
 } from './work';
 
@@ -82,5 +85,23 @@ describe('resume commands', () => {
       '2 sessions, last 2d ago',
     );
     expect(pastWorkSummary([link(1, 'A-1', null)], now)).toBe('1 session');
+  });
+});
+
+// Work graph M4.6: Claude's answer to the classification nudge is a guess
+// (`agent_inferred`, rule R11), explained as one.
+describe('agent_inferred', () => {
+  it('reads as a suggestion Claude made when asked', () => {
+    expect(workWhy({ source: 'agent_inferred', state: 'suggested', rule: 'R11' })).toBe(
+      'suggested by Claude when asked · rule R11',
+    );
+    expect(
+      describeEvidence({ signal: 'agent_inferred', rule: 'R11', text: 'PAY-7', at: 0 }),
+    ).toMatch(/^Claude named PAY-7 when asked at \d\d:\d\d · R11$/);
+  });
+
+  it('is a detection source, so a guess is never shown as a person\'s link', () => {
+    expect(isAutoLink({ source: 'agent_inferred', state: 'suggested' })).toBe(false);
+    expect(isAutoLink({ source: 'agent_inferred', state: 'confirmed' })).toBe(true);
   });
 });

@@ -17,6 +17,32 @@
   import { RECENCY_VALUES, type Recency } from './session_status';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { trackers } from './trackers';
+  import {
+    activeWorkFilterCount,
+    effectiveWorkFilters,
+    workFilters,
+    DEFAULT_WORK_FILTERS,
+    HAS_SESSION_FILTERS,
+    HAS_SESSION_LABELS,
+    STATUS_FILTERS,
+    STATUS_FILTER_LABELS,
+    type WorkFilters,
+  } from './work_filters';
+
+  // Work filters (work graph M10.4): chips under a "⚑ work" pill, shown in
+  // work mode, once there is work to filter (a tracker, a linked session),
+  // or while a filter is on.
+  const workMode = $derived($sidebarGroupBy === 'work');
+  const workView = $derived(effectiveWorkFilters($workFilters, $trackers, workMode));
+  const workActive = $derived(activeWorkFilterCount(workView));
+  const workChromeShown = $derived(
+    workMode || $trackers.length > 0 || workActive > 0 || $sessions.some((s) => s.work != null),
+  );
+  let workFiltersOpen = $state(false);
+  function setWork(patch: Partial<WorkFilters>) {
+    workFilters.update((f) => ({ ...f, ...patch }));
+  }
 
   // send_prompt / kill_session route, so they only need the live connection
   // to be up.
@@ -187,7 +213,88 @@
     >
       ☑ select
     </button>
+    {#if workChromeShown}
+      <button
+        class="pill"
+        class:active={workActive > 0}
+        data-testid="work-filters-toggle"
+        aria-expanded={workFiltersOpen}
+        title="Filter by tracker, status, assignee, session and archived"
+        onclick={() => (workFiltersOpen = !workFiltersOpen)}
+      >
+        ⚑ work{workActive > 0 ? ` (${workActive})` : ''}
+      </button>
+    {/if}
   </nav>
+  {#if workChromeShown && workFiltersOpen}
+    <div class="work-filters" data-testid="work-filters" role="group" aria-label="work filters">
+      {#if $trackers.length > 1}
+        <nav class="chips" aria-label="tracker filter">
+          <button
+            class="pill"
+            class:active={workView.tracker === 'all'}
+            data-testid="wf-tracker-all"
+            onclick={() => setWork({ tracker: 'all' })}>any tracker</button
+          >
+          {#each $trackers as t (t.id)}
+            <button
+              class="pill"
+              class:active={workView.tracker === t.id}
+              data-testid="wf-tracker-{t.id}"
+              onclick={() => setWork({ tracker: t.id })}>{t.name}</button
+            >
+          {/each}
+        </nav>
+      {/if}
+      <nav class="chips" aria-label="status filter">
+        {#each STATUS_FILTERS as st (st)}
+          <button
+            class="pill"
+            class:active={workView.status === st}
+            data-testid="wf-status-{st}"
+            onclick={() => setWork({ status: st })}>{STATUS_FILTER_LABELS[st]}</button
+          >
+        {/each}
+      </nav>
+      <nav class="chips" aria-label="assignee and archived filters">
+        <button
+          class="pill"
+          class:active={workView.assignee === 'mine'}
+          data-testid="wf-mine"
+          aria-pressed={workView.assignee === 'mine'}
+          title="Only work assigned to you and not done (each tracker's “mine” view)"
+          onclick={() => setWork({ assignee: workView.assignee === 'mine' ? 'all' : 'mine' })}>mine</button
+        >
+        <button
+          class="pill"
+          class:active={!workView.archived}
+          data-testid="wf-hide-archived"
+          aria-pressed={!workView.archived}
+          title="Hide archived sessions and past work"
+          onclick={() => setWork({ archived: !workView.archived })}>hide archived</button
+        >
+        {#if workActive > 0}
+          <button
+            class="pill"
+            data-testid="wf-clear"
+            onclick={() => workFilters.set({ ...DEFAULT_WORK_FILTERS })}>clear</button
+          >
+        {/if}
+      </nav>
+      {#if workMode}
+        <nav class="chips" aria-label="session filter">
+          {#each HAS_SESSION_FILTERS as h (h)}
+            <button
+              class="pill"
+              class:active={workView.hasSession === h}
+              data-testid="wf-session-{h}"
+              onclick={() => setWork({ hasSession: h })}>{HAS_SESSION_LABELS[h]}</button
+            >
+          {/each}
+        </nav>
+      {/if}
+    </div>
+  {/if}
   <Attention />
   <ScopeAttention />
   <LinkReview />
@@ -333,6 +440,15 @@
   .icon-btn:disabled { opacity: 0.6; cursor: progress; }
 
   .recency { display: flex; gap: 0.25rem; }
+  .work-filters {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+  }
+  .work-filters .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .bg-toggle { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .triage { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
   .triage-pill.hot { color: #e64a4a; border-color: rgba(230, 74, 74, 0.5); }

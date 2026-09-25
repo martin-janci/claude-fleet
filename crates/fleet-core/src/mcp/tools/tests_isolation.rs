@@ -101,6 +101,7 @@ struct Fx {
     item_b: i64,
     tracker_a: i64,
     tracker_b: i64,
+    pid_acme: i64,
     pid_beta: i64,
     /// s_b's live link to BB-1, and s_x's forced link to BB-1.
     link_b: i64,
@@ -238,6 +239,7 @@ fn fixture(isolate_b: bool) -> Fx {
         item_b,
         tracker_a: ta.id,
         tracker_b: tb.id,
+        pid_acme,
         pid_beta,
         link_b,
         link_x,
@@ -750,45 +752,162 @@ async fn run_matrix(isolate: bool) {
     )
     .await;
     same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
-    // Multi-repo start (work graph M9.6): each repo is planned under the
-    // caller's scope, so a host that cannot see B's ticket starts nothing.
+    // Multi-repo start (work graph M9.6), per caller. The ticket is
+    // resolved once under the caller's scope, then each repo is planned:
+    // on h-a, acme/api is org A and beta/web org B (the owner rules).
+    //
+    // * master / full client: B's BB-2 is a cross-org refusal in A's repo
+    //   (marked `cross_org`, so the UI offers "Start anyway") and a spawn
+    //   attempt in B's — which fails here for want of a real host.
+    // * host A: B's ticket is not its to read — refused outright; its own
+    //   AA-1 is skipped where it already runs and cross-org in B's repo.
+    // * host B: its own BB-1, but on h-a — the host fence, per repo, before
+    //   the duplicate guard could name a session there.
+    // * readonly: refused by its mode.
     m.row(
         "work_link",
         "start",
-        |_, _| json!({ "action": "start", "key": "BB-2", "project_ids": [1, 2], "host_alias": "h-a" }),
-        |_, who, a| {
+        |fx, who| {
+            let key = if who == Who::HostB { "BB-1" } else { "BB-2" };
+            json!({ "action": "start", "key": key,
+                "project_ids": [fx.pid_acme, fx.pid_beta], "host_alias": "h-a" })
+        },
+        |fx, who, a| {
             if readonly_refused(who, a) {
                 return;
             }
-            let v: Value = serde_json::from_str(text(a)).unwrap();
-            assert_eq!(v["started"], json!([]), "{who:?}: {v}");
             if matches!(who, Who::HostA | Who::HostNone) {
-                assert!(
-                    v["failed"].as_array().unwrap().iter().all(|f| f["code"] == "E_FORBIDDEN"),
-                    "{who:?}: {v}"
-                );
+                return is_code(who, a, "E_FORBIDDEN", "another org's ticket");
+            }
+            is_ok(who, a, "multi-start");
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            let failed = v["failed"].as_array().cloned().unwrap_or_default();
+            let of = |pid: i64| failed.iter().find(|f| f["project_id"] == pid).cloned();
+            if who == Who::HostB {
+                assert_eq!(v["key"], "BB-1", "{v}");
+                assert_eq!(v["started"], json!([]), "{v}");
+                assert!(v.get("skipped").is_none(), "the fence answers first: {v}");
+                for pid in [fx.pid_acme, fx.pid_beta] {
+                    let f = of(pid).unwrap_or_else(|| panic!("{pid}: {v}"));
+                    assert_eq!(f["code"], "E_FORBIDDEN", "{v}");
+                    assert!(f["message"].as_str().unwrap().contains("own host"), "{v}");
+                }
+                return;
+            }
+            assert_eq!(v["key"], "BB-2", "{v}");
+            let acme = of(fx.pid_acme).unwrap_or_else(|| panic!("{v}"));
+            assert_eq!(
+                (&acme["code"], &acme["cross_org"]),
+                (&json!("E_FORBIDDEN"), &json!(true)),
+                "{who:?}: {v}"
+            );
+            // B's repo: planned, then a spawn attempt (no real host here).
+            if let Some(f) = of(fx.pid_beta) {
+                assert_ne!(f["code"], "E_FORBIDDEN", "{who:?}: {v}");
             }
         },
     )
     .await;
-    // Agent-written handover (work graph M9.3): a caller asks only its own
-    // sessions; the send itself fails here for want of a real host.
+    // With force_cross_org the master's start reaches the spawn in both.
+    let forced = call(
+        &fx,
+        Who::Master,
+        "work_link",
+        json!({ "action": "start", "key": "BB-2", "force_cross_org": true,
+            "project_ids": [fx.pid_acme, fx.pid_beta], "host_alias": "h-a" }),
+    )
+    .await;
+    let v: Value = serde_json::from_str(text(&forced)).unwrap();
+    for f in v["failed"].as_array().cloned().unwrap_or_default() {
+        assert_ne!(f["code"], "E_FORBIDDEN", "forced: {v}");
+    }
+    // Host A's own ticket: skipped where it runs (naming its session), a
+    // cross-org refusal in B's repo.
+    let own_a = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "start", "key": "AA-1",
+            "project_ids": [fx.pid_acme, fx.pid_beta] }),
+    )
+    .await;
+    let v: Value = serde_json::from_str(text(&own_a)).unwrap_or_else(|_| panic!("{own_a:?}"));
+    assert_eq!(v["key"], "AA-1", "{v}");
+    assert_eq!(v["skipped"][0]["project_id"], fx.pid_acme, "{v}");
+    assert_eq!(v["skipped"][0]["session_id"], fx.s_a, "{v}");
+    assert_eq!(v["failed"][0]["project_id"], fx.pid_beta, "{v}");
+    assert_eq!(v["failed"][0]["cross_org"], true, "{v}");
+
+    // Agent-written handover (work graph M9.3), per caller. The sessions
+    // are idle REPLs here, so a caller past the fences reaches the send
+    // (which fails for want of a real host, and is recorded as such).
+    //
+    // * master / full client / host A: A's own s_a — a send attempt.
+    // * host B: A's s_a is another host's session — it reads as unknown.
+    // * host in no org: its own s_n (unassigned work) — a send attempt.
+    // * readonly: refused by its mode.
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle' WHERE id IN (?1, ?2, ?3)",
+                [fx.s_a, fx.s_b, fx.s_n],
+            )
+            .unwrap();
+    }
+    let attempted = |fx: &Fx, who: Who, a: &Answer, sid: i64| {
+        assert!(
+            !matches!(
+                code(a),
+                "E_FORBIDDEN" | "E_NOTFOUND" | "E_INVALID" | "E_NOT_ALIVE" | "E_EXISTS"
+            ),
+            "{who:?}: {a:?}"
+        );
+        let s = fx.t.store.lock().unwrap();
+        let ev = s
+            .newest_session_event_of(
+                sid,
+                &[
+                    crate::service::work::agent_handover::EV_REQUESTED,
+                    crate::service::work::agent_handover::EV_SEND_FAILED,
+                ],
+            )
+            .unwrap();
+        assert!(ev.is_some(), "{who:?}: no request recorded");
+    };
     m.row(
         "work_link",
         "handover",
-        |fx, who| json!({ "action": "handover", "session_id": own(fx, who) }),
-        |_, who, a| {
+        |fx, who| {
+            let sid = match who {
+                Who::HostB => fx.s_a,
+                Who::HostNone => fx.s_n,
+                _ => fx.s_a,
+            };
+            json!({ "action": "handover", "session_id": sid })
+        },
+        move |fx, who, a| {
             if readonly_refused(who, a) {
                 return;
             }
-            assert!(
-                !matches!(code(a), "E_FORBIDDEN" | "E_NOTFOUND" | "E_INVALID")
-                    && !text(a).contains("not visible"),
-                "{who:?}: {a:?}"
-            );
+            match who {
+                Who::HostB => is_code(who, a, "E_NOTFOUND", "another host's session"),
+                Who::HostNone => attempted(fx, who, a, fx.s_n),
+                _ => attempted(fx, who, a, fx.s_a),
+            }
         },
     )
     .await;
+    // An isolated org's session (D7): its own host still asks it; to a host
+    // of another org it reads as unknown (below), isolated or not.
+    let own_b = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "handover", "session_id": fx.s_b }),
+    )
+    .await;
+    attempted(&fx, Who::HostB, &own_b, fx.s_b);
     // Host A on s_x (A's session carrying B's ticket): the work is not A's
     // to read, so the session reads as having none.
     let x = call(
@@ -1742,4 +1861,69 @@ fn nobody_but_the_master_administers_orgs() {
     ));
     assert!(!present::visible_to(&Who::HostA.caller(), "work_admin"));
     let _ = OrgScope::All;
+}
+
+/// The classification nudge (work graph M4.6) is read by the Claude on the
+/// session's host, so it offers only what that host may read. B's ticket is
+/// "mine" to the tracker account and even force-linked on h-a — the host
+/// fence alone would let it through — yet h-a's note never names it; h-b's
+/// does.
+#[test]
+fn the_classification_nudge_offers_only_the_hosts_own_tickets() {
+    let fx = fixture(false);
+    let s = fx.t.store.lock().unwrap();
+    let me = crate::store::TrackerConfig {
+        account_id: Some("me".into()),
+        ..Default::default()
+    };
+    for t in [fx.tracker_a, fx.tracker_b] {
+        s.set_tracker_probe(t, None, &me).unwrap();
+    }
+    let mine = |tracker: i64, key: &str, title: &str| {
+        s.upsert_tracker_item(
+            tracker,
+            &TrackerItemWrite {
+                external_id: format!("mine-{key}"),
+                key: Some(key.into()),
+                title: title.into(),
+                status_name: "To Do".into(),
+                status_category: "todo".into(),
+                assignee_id: Some("me".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+    };
+    let aa9 = mine(fx.tracker_a, "AA-9", "Alpha nine");
+    let bb9 = mine(fx.tracker_b, "BB-9", "Bravo nine");
+    s.link_session_work(fx.s_a, WorkTarget::Item(aa9), "manual")
+        .unwrap();
+    s.link_session_work(fx.s_b, WorkTarget::Item(bb9), "manual")
+        .unwrap();
+    s.link_session_work(fx.s_x, WorkTarget::Item(bb9), "manual")
+        .unwrap();
+    crate::service::settings::set(&s, crate::service::settings::WORK_CLASSIFY_NUDGE, "true")
+        .unwrap();
+    let fresh = |host: &str, conv: &str| {
+        let id = s
+            .upsert_session(conv, host, None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, conv).unwrap();
+        s.rebind_conversation(id, conv, crate::store::StartSource::Fleet, None, None)
+            .unwrap();
+        for _ in 0..crate::service::work::nudge::NUDGE_AFTER_TURNS {
+            s.conversation_bump_turns(id, conv).unwrap();
+        }
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        crate::service::work::nudge::classify_nudge(&s, &row, conv, 0).unwrap()
+    };
+    let a = fresh("h-a", "conv-nudge-a").expect("A's own ticket is offered");
+    assert!(a.contains("AA-9"), "{a}");
+    for m in B_MARKERS.iter().chain(["BB-9", "Bravo nine"].iter()) {
+        assert!(!a.contains(m), "LEAK in h-a's nudge: {m:?}: {a}");
+    }
+    let b = fresh("h-b", "conv-nudge-b").expect("B's own ticket is offered on h-b");
+    assert!(b.contains("BB-9"), "{b}");
+    assert!(!b.contains("AA-9"), "{b}");
 }

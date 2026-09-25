@@ -67,7 +67,7 @@ Parameters: `session_id`
 
 Dispatch a unit of work to a worker session and track it as a task. Pass worker_session_id (an existing session) OR new_worker { host_alias, project_id, name? } (spawns one via new_session). The prompt is delivered with an appended instruction to print FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph result; fleet detects the marker on the worker's next Stop and flips the task to done with that paragraph as `result` (also delivered to requester_session_id's inbox as kind=task_result). Returns the task row (id, state=running, worker_session_id, …); follow with wait_for_task. A per-host token must name a requester on its own host. Marked as untrusted unless raw=true (master only).
 
-Parameters: `new_worker`, `prompt`, `raw`, `requester_session_id`, `worker_session_id`
+Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_id`, `worker_session_id`
 
 ### `ensure_operator`
 
@@ -173,7 +173,7 @@ Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `keep_source`, `session_
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be session_transcript { session_id }. The prompt becomes the row's default friendly name and last_prompt. Pass requester_session_id (yours, from whoami) to list it under that session's background work.
 
-Parameters: `host_alias`, `name`, `prompt`, `requester_session_id`
+Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_id`
 
 ### `new_session`
 
@@ -235,7 +235,7 @@ Parameters: `rotate`
 
 Recreate a session: kill its tmux session and rebuild it fresh in the same worktree, resuming the same Claude conversation. Use when the session is frozen, OOM-killed or out of context, or to revive a ghost — the conversation survives, the process does not. Works for running or ghost sessions. Returns the session row as JSON.
 
-Parameters: `force`, `session_id`
+Parameters: `confirm_nonce`, `force`, `session_id`
 
 ### `refresh_projects`
 
@@ -335,13 +335,13 @@ Parameters: `host_alias`
 
 Restart a tmux session (kill and recreate it in the same place). Use when the Claude REPL is wedged but tmux and the worktree are fine — an in-place relaunch, cheaper than recreate_session. Returns the updated session row as JSON. Address the session with session_id OR host_alias + name.
 
-Parameters: `force`, `host_alias`, `name`, `session_id`
+Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
 ### `restore_host_sessions`
 
 Restore sessions a host lost to a reboot or tmux restart: resume each one's Claude conversation in its original worktree under its original name. dry_run=true returns the plan (no ssh, no writes) — call it first, and again after a timeout to see what is still lost. One failing session never fails the others; the result lists every outcome. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet controller is skipped (recreate_session force=true). Paced by restore.batch_size / restore.stagger_ms.
 
-Parameters: `dry_run`, `host_alias`, `session_ids`
+Parameters: `confirm_nonce`, `dry_run`, `host_alias`, `session_ids`
 
 ### `revoke_client`
 
@@ -449,7 +449,7 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns the new review session row as JSON.
 
-Parameters: `prompt`, `source_session_id`
+Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
 ### `usage_report`
 

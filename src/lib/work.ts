@@ -56,7 +56,8 @@ export interface WorkLink {
 /** One evidence line of a link (`service::work::resolve::Evidence`). */
 export interface WorkEvidence {
   /** `branch` | `pr_head` | `pr_closing` | `pr_text` | `trailer` |
-   *  `prompt_url` | `prompt_key` | `prompt_issue` — tolerant of more. */
+   *  `prompt_url` | `prompt_key` | `prompt_issue` | `agent_inferred` —
+   *  tolerant of more. */
   signal: string;
   rule: string;
   text: string;
@@ -155,7 +156,7 @@ export async function setWorkProjectTrust(projectId: number, on: boolean): Promi
 }
 
 /** Link sources detection writes; a confirmed link with one is "auto". */
-export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt'];
+export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred'];
 
 /** A confirmed link detection made without a person (shown with a dot and
  *  offered for Undo). */
@@ -169,6 +170,7 @@ const SOURCE_LABEL: Record<string, string> = {
   trailer: 'commit trailer',
   url: 'ticket URL',
   prompt: 'prompt',
+  agent_inferred: "Claude's guess when asked",
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
@@ -208,6 +210,8 @@ export function describeEvidence(e: WorkEvidence): string {
     case 'prompt_key':
     case 'prompt_issue':
       return `mentioned ${e.text} in a prompt at ${clock(e.at)}${note}${rule}`;
+    case 'agent_inferred':
+      return `Claude named ${e.text} when asked at ${clock(e.at)}${rule}`;
     default:
       return `${e.signal}: ${e.text}${rule}`;
   }
@@ -217,6 +221,8 @@ export function describeEvidence(e: WorkEvidence): string {
 export function workWhy(w: { source: string; state?: string; rule?: string | null }): string {
   const what = w.state === 'suggested' ? 'suggested from the' : 'from the';
   const rule = w.rule ? ` · rule ${w.rule}` : '';
+  // The classification nudge's answer (M4.6) is Claude's, not a signal's.
+  if (w.source === 'agent_inferred') return `${w.state === 'suggested' ? 'suggested' : 'named'} by Claude when asked${rule}`;
   return AUTO_SOURCES.includes(w.source)
     ? `${what} ${sourceLabel(w.source)}${rule}`
     : `${sourceLabel(w.source)}${rule}`;
@@ -424,3 +430,57 @@ export async function requestWorkHandover(sessionId: number): Promise<Result<Ses
   return r;
 }
 
+
+/** Where the latest handover request stands (work graph M9.3). */
+export type HandoverState = 'pending' | 'written' | 'missing' | 'failed';
+
+export interface HandoverOutcome {
+  state: HandoverState;
+  /** unix seconds of the event that says so */
+  at: number;
+}
+
+/** Mirrors `agent_handover::PENDING_TTL_SECS`: an older request is abandoned. */
+export const HANDOVER_PENDING_TTL_SECS = 30 * 60;
+
+const HANDOVER_STATES: Record<string, HandoverState> = {
+  handover_requested: 'pending',
+  handover_written: 'written',
+  handover_missing: 'missing',
+  handover_send_failed: 'failed',
+};
+
+/**
+ * The latest handover outcome from a session's timeline: the newest
+ * `handover_*` event. A request older than the hub's pending window is
+ * abandoned (null), as the hub treats it.
+ */
+export function handoverOutcome(
+  events: readonly { kind: string; at: number; id?: number }[] | null | undefined,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): HandoverOutcome | null {
+  let newest: { kind: string; at: number; id?: number } | null = null;
+  for (const e of events ?? []) {
+    if (!(e.kind in HANDOVER_STATES)) continue;
+    if (!newest || e.at > newest.at || (e.at === newest.at && (e.id ?? 0) > (newest.id ?? 0))) newest = e;
+  }
+  if (!newest) return null;
+  const state = HANDOVER_STATES[newest.kind];
+  if (state === 'pending' && newest.at <= nowSecs - HANDOVER_PENDING_TTL_SECS) return null;
+  return { state, at: newest.at };
+}
+
+/** One line on a handover outcome, for the ticket card. */
+export function handoverOutcomeLine(o: HandoverOutcome, nowMs: number = Date.now()): string {
+  const ago = timeAgo(o.at, nowMs);
+  switch (o.state) {
+    case 'pending':
+      return `Handover asked ${ago}; waiting for the reply`;
+    case 'written':
+      return `Handover written ${ago}; the next session's brief shows it`;
+    case 'missing':
+      return `The reply ${ago} had no handover; ask again`;
+    case 'failed':
+      return `Asking for a handover failed ${ago}`;
+  }
+}

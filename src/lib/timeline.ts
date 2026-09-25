@@ -65,6 +65,8 @@ const TURN_KINDS = new Set([
   // question (`service/hooks.rs` `bookkeep_stop_streak`) — a turn edge, and
   // the only place a held turn is visible at all.
   'stop_blocked_for_message',
+  // The classification nudge rode this prompt (work graph M4.6).
+  'work_classify_nudge',
 ]);
 
 /** Kinds that are a failure in their own right, whatever their wording. */

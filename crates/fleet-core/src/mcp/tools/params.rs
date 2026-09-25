@@ -255,6 +255,51 @@ pub struct RestartSessionParams {
     /// Restart even if this is the registered fleet controller. Default false.
     #[serde(default)]
     pub force: bool,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
+// `recreate_session`'s arguments plus the operator's confirmation (M9.7).
+// Plain comments: a doc comment would be served as the schema's description.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RecreateSessionParams {
+    #[serde(flatten)]
+    pub args: sessions::RecreateSessionArgs,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
+// `spawn_review`'s arguments plus the operator's confirmation (M9.7).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SpawnReviewParams {
+    #[serde(flatten)]
+    pub args: sessions::SpawnReviewArgs,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
+// `restore_host_sessions`'s arguments plus the operator's confirmation
+// (M9.7; a `dry_run` never needs one).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RestoreHostSessionsParams {
+    #[serde(flatten)]
+    pub args: sessions::RestoreHostSessionsArgs,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
+// `new_bg_session`'s arguments plus the operator's confirmation (M9.7).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NewBgSessionParams {
+    #[serde(flatten)]
+    pub args: crate::service::bg_sessions::NewBgSessionArgs,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -671,6 +716,9 @@ pub struct DispatchTaskParams {
     /// only). Default false.
     #[serde(default)]
     pub raw: bool,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
