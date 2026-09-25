@@ -1061,7 +1061,9 @@ mod tests {
 
     /// A removed tracker's rows stay for the links that point at them, but
     /// neither shadow the same site re-added (its fresh id) in a key lookup
-    /// nor show up beside the new rows in the listing.
+    /// — the cache's or `work_item_by_key`'s, which the card, resume,
+    /// handover and the org gate read — nor show up beside the new rows in
+    /// the listing, nor make a key "known" to detection on their own.
     #[test]
     fn a_removed_trackers_rows_do_not_shadow_the_re_added_tracker() {
         let (s, t, _) = with_tracker(&["ABC"]);
@@ -1069,15 +1071,23 @@ mod tests {
             .upsert_tracker_item(t, &write("1", "ABC-1", ("To Do", "todo")))
             .unwrap()
             .id;
+        s.upsert_tracker_item(t, &write("2", "ABC-2", ("To Do", "todo")))
+            .unwrap();
         let sid = session(&s, "dev");
         s.link_session_work(sid, WorkTarget::Item(old), "manual")
             .unwrap();
+        assert!(s.work_key_known("ABC-2").unwrap());
         assert!(s.remove_tracker(t).unwrap());
         assert!(
             s.tracker_item_for_key("ABC-1").unwrap().is_none(),
             "an orphan is not the cache"
         );
         assert!(s.tracker_items(None).unwrap().is_empty());
+        // The orphan still reads by key while nothing else carries it (the
+        // link above needs it), but an unlinked one no longer makes its key
+        // known.
+        assert_eq!(s.work_item_by_key("ABC-1").unwrap().unwrap().id, old);
+        assert!(!s.work_key_known("ABC-2").unwrap());
         // The link still reads its item.
         assert_eq!(
             s.get_session_by_id(sid)
@@ -1099,6 +1109,11 @@ mod tests {
             .id;
         assert_ne!(fresh, old);
         assert_eq!(s.tracker_item_for_key("ABC-1").unwrap().unwrap().id, fresh);
+        assert_eq!(
+            s.work_item_by_key("ABC-1").unwrap().unwrap().id,
+            fresh,
+            "the orphan (lower id) does not shadow the re-added tracker's row"
+        );
         let listed: Vec<i64> = s
             .tracker_items(None)
             .unwrap()
@@ -1106,6 +1121,9 @@ mod tests {
             .map(|(i, _)| i.id)
             .collect();
         assert_eq!(listed, vec![fresh]);
+        s.upsert_tracker_item(t2, &write("2", "ABC-2", ("To Do", "todo")))
+            .unwrap();
+        assert!(s.work_key_known("ABC-2").unwrap());
     }
 
     #[test]

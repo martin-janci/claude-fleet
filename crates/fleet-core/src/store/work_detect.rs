@@ -527,12 +527,15 @@ impl Store {
 
     /// Fleet already knows `key`: an item carries it (or an alias), or some
     /// link names it. With no tracker, only such keys count from a prompt.
+    /// A removed tracker's rows do not count (a link to one still does).
     pub fn work_key_known(&self, key: &str) -> Result<bool, IpcError> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM work_items WHERE key = ?1) \
+            "SELECT EXISTS(SELECT 1 FROM work_items WHERE key = ?1 \
+                           AND (tracker_id IS NULL OR tracker_id IN (SELECT id FROM trackers))) \
                  OR EXISTS(SELECT 1 FROM work_links WHERE ref_key = ?1) \
                  OR EXISTS(SELECT 1 FROM work_items, json_each(COALESCE(aliases, '[]')) j \
-                           WHERE j.value = ?1)",
+                           WHERE j.value = ?1 \
+                             AND (tracker_id IS NULL OR tracker_id IN (SELECT id FROM trackers)))",
             rusqlite::params![key],
             |r| r.get(0),
         )?)

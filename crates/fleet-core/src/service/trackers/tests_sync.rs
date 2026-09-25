@@ -531,6 +531,35 @@ async fn oversized_tracker_fields_are_capped_before_they_are_stored() {
         .all(|a| a.chars().count() == FIELD_MAX_CHARS));
 }
 
+/// A key over `KEY_MAX_CHARS` is dropped, not cut: `owner/repo#123` cut in
+/// its number is issue #12's own key. The row keeps its identity (the id)
+/// and everything else; an over-long alias goes the same way, the rest of
+/// the aliases stay.
+#[test]
+fn an_over_long_key_is_dropped_not_truncated() {
+    let repo = format!("some-org/{}", "r".repeat(57));
+    let key = format!("{repo}#123");
+    assert_eq!(key.chars().count(), 70);
+    let w = to_write(WorkItemSnapshot {
+        external_id: "I_1".into(),
+        key: Some(key.clone()),
+        aliases: vec![format!("{repo}#12"), "ABC-12".into()],
+        url: Some(format!("https://github.com/{repo}/issues/123")),
+        title: "long repo".into(),
+        ..Default::default()
+    });
+    assert_eq!(w.key, None, "no `…#12` minted from #123");
+    assert_eq!(w.aliases, vec!["ABC-12"]);
+    assert_eq!(w.external_id, "I_1");
+    assert!(w.url.is_some());
+    let w = to_write(WorkItemSnapshot {
+        external_id: "1".into(),
+        key: Some("x".repeat(KEY_MAX_CHARS)),
+        ..Default::default()
+    });
+    assert_eq!(w.key.map(|k| k.chars().count()), Some(KEY_MAX_CHARS));
+}
+
 /// The 429 deadline is on the row too: a sync with no memory of it (a
 /// restart) still waits it out, and a pass after it clears the row.
 #[tokio::test]
@@ -579,6 +608,81 @@ async fn a_429_deadline_is_kept_on_the_row_and_cleared_by_a_good_pass() {
             .unwrap(),
         None
     );
+}
+
+/// The row is the one deadline the tick reads: a successful `test_tracker`
+/// clears it, and the SAME sync — whose own memory of the 429 would have
+/// parked the tracker for up to `MAX_RETRY_SECS` — runs on its next pass,
+/// while a lookup was already allowed again.
+#[tokio::test]
+async fn a_good_test_ends_the_wait_for_the_sync_that_saw_the_429() {
+    let fx = Fx::new();
+    fx.fake
+        .once(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::new(429, "").with_header("Retry-After", "3600")),
+        )
+        .always(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
+        );
+    let sync = fx.sync(|| T0);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_some(), "{p:?}");
+    assert_eq!(fx.row().state, "rate_limited");
+    assert!(
+        sync.run_pass(&fx.store).await.unwrap()[0].skipped,
+        "inside the wait"
+    );
+    // The operator presses Test (the quota is back): the probe answers.
+    fx.fake
+        .once(
+            Method::Get,
+            "/myself",
+            Ok(Response::json(200, &fixture("myself.json"))),
+        )
+        .once(
+            Method::Get,
+            "/_edge/tenant_info",
+            Ok(Response::json(200, &fixture("tenant_info.json"))),
+        )
+        .once(
+            Method::Get,
+            "startAt=0",
+            Ok(Response::json(200, &fixture("project_search_p2.json"))),
+        )
+        .once(
+            Method::Get,
+            "/rest/api/3/field",
+            Ok(Response::json(200, &fixture("fields.json"))),
+        )
+        .once(
+            Method::Get,
+            "/filter/favourite",
+            Ok(Response::json(200, &fixture("filter_favourite.json"))),
+        );
+    let r = crate::service::trackers::admin::test_tracker(
+        fx.tracker,
+        &fx.store,
+        &TrackerNet::fake(Arc::new(fx.fake.clone())),
+    )
+    .await
+    .unwrap();
+    assert!(r.ok, "{:?}", r.error);
+    assert_eq!(
+        fx.store
+            .lock()
+            .unwrap()
+            .tracker_not_before(fx.tracker)
+            .unwrap(),
+        None
+    );
+    // Still at T0, an hour inside what this sync remembers: it runs.
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_none(), "{p:?}");
+    assert_eq!(fx.row().state, "ok");
 }
 
 /// An absurd `Retry-After` neither overflows nor parks the tracker past

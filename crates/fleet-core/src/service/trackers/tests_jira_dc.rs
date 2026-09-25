@@ -463,6 +463,59 @@ fn a_key_that_is_not_a_key_is_dropped() {
     assert_eq!(ok.parent_key.as_deref(), Some("PLAT-1"));
 }
 
+/// Data Center lets an admin raise `jira.projectkey.maxlength` past Cloud's
+/// 10: an 11-char project's key is a key, kept by the snapshot (with its
+/// URL and parent) and asked for by the fetch, so the sync's rows and a
+/// lookup name the same key. The shape is still bounded: a prefix past
+/// `KEY_PREFIX_MAX_CHARS` is not one.
+#[tokio::test]
+async fn a_long_project_key_of_a_data_center_site_is_still_a_key() {
+    let f = FakeTransport::new();
+    let mut issue = fixture("jira_dc", "fetch_two.json")["issues"][0].clone();
+    issue["id"] = json!("40012");
+    issue["key"] = json!("PLATFORMOPS-12");
+    issue["fields"]["project"] = json!({"key": "PLATFORMOPS"});
+    issue["fields"]["parent"] = json!({"id": "40011", "key": "PLATFORMOPS-11"});
+    let s = dc(&f).snapshot(&issue).unwrap();
+    assert_eq!(s.key.as_deref(), Some("PLATFORMOPS-12"));
+    assert_eq!(
+        s.url.as_deref(),
+        Some(&*format!("{SITE}/browse/PLATFORMOPS-12"))
+    );
+    assert_eq!(s.parent_key.as_deref(), Some("PLATFORMOPS-11"));
+    f.once(
+        Method::Post,
+        "/rest/api/2/search",
+        Ok(Response::json(
+            200,
+            &json!({"startAt": 0, "maxResults": 100, "total": 1, "issues": [issue]}),
+        )),
+    );
+    let got = dc(&f)
+        .fetch(&[ItemRef::Key("platformops-12".into())])
+        .await
+        .unwrap();
+    assert!(
+        matches!(&got[0], Fetched::Found(s) if s.external_id == "40012" && s.key.as_deref() == Some("PLATFORMOPS-12")),
+        "{got:?}"
+    );
+    let reqs = f.requests();
+    assert_eq!(reqs.len(), 1, "the key is asked for, not refused unasked");
+    assert_eq!(
+        reqs[0].json_body().unwrap()["jql"],
+        "key in (PLATFORMOPS-12)"
+    );
+    // The bound is on the shape, not Cloud's limit.
+    use crate::service::trackers::jira_common::KEY_PREFIX_MAX_CHARS;
+    let too_long = format!("{}-1", "P".repeat(KEY_PREFIX_MAX_CHARS + 1));
+    assert!(!is_key(&too_long));
+    assert!(is_key(&format!("{}-1", "P".repeat(KEY_PREFIX_MAX_CHARS))));
+    let f = FakeTransport::new();
+    let got = dc(&f).fetch(&[ItemRef::Key(too_long)]).await.unwrap();
+    assert!(matches!(&got[0], Fetched::Unavailable { .. }), "{got:?}");
+    assert!(f.requests().is_empty(), "nothing asked for a non-key");
+}
+
 #[test]
 fn the_site_is_https_one_exact_host_no_port_no_credentials() {
     use crate::store::normalize_provider_site as n;

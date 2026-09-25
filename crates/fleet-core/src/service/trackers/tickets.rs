@@ -512,6 +512,29 @@ pub fn start_name(key: &str, title: &str) -> String {
     t.trim().chars().take(80).collect()
 }
 
+/// The `E_EXISTS` for `key` already running in `other`, ending in `then`.
+/// The session is named (and its ids given) only when `scope` sees the
+/// row: still one live session per key, but an isolated org's session is
+/// not named to a host outside it (D7).
+fn already_live(key: &str, other: &SessionRow, scope: &OrgScope, then: &str) -> IpcError {
+    if !scope.sees_row(other) {
+        return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
+    }
+    IpcError::new(
+        codes::E_EXISTS,
+        format!(
+            "{key} already has a live session ({} on {}); {then}",
+            other.friendly_name.as_deref().unwrap_or(&other.tmux_name),
+            other.host_alias
+        ),
+    )
+    .with_details(serde_json::json!({
+        "session_id": other.id,
+        "host_alias": other.host_alias,
+        "tmux_name": other.tmux_name,
+    }))
+}
+
 /// Resolve the item a start names (cache, else live), then plan where it
 /// lands. `E_EXISTS` (with the session) when the key already has a live
 /// session; `E_AMBIGUOUS` (with candidates) when no project can be picked.
@@ -562,27 +585,7 @@ pub async fn plan_start(
         .iter()
         .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
     {
-        if !scope.sees_row(row) {
-            // Still one live session per key, but an isolated org's session
-            // is not named to a host outside it (D7).
-            return Err(IpcError::new(
-                codes::E_EXISTS,
-                format!("{key} already has a live session"),
-            ));
-        }
-        return Err(IpcError::new(
-            codes::E_EXISTS,
-            format!(
-                "{key} already has a live session ({} on {}); jump to it",
-                row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
-                row.host_alias
-            ),
-        )
-        .with_details(serde_json::json!({
-            "session_id": row.id,
-            "host_alias": row.host_alias,
-            "tmux_name": row.tmux_name,
-        })));
+        return Err(already_live(&key, row, scope, "jump to it"));
     }
     // Where this kind of work last ran: a GitHub issue's own repository's
     // project first, else the newest link with the same key prefix.
@@ -820,12 +823,15 @@ pub fn start_prompt(key: &str) -> String {
     )
 }
 
-/// Do the start. `spawn` makes the session (production: `new_session`).
-/// Returns the new row, linked `started`, and whether a brief was queued.
+/// Do the start. `spawn` makes the session (production: `new_session`);
+/// `scope` is the caller's, for the refusal when another start won
+/// meanwhile. Returns the new row, linked `started`, and whether a brief
+/// was queued.
 pub async fn start_with<F, Fut>(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
     brief: Option<String>,
+    scope: &OrgScope,
     spawn: F,
 ) -> Result<(SessionRow, bool), IpcError>
 where
@@ -867,24 +873,17 @@ where
             r.id != row.id && (!plan.per_project || r.project_id == Some(plan.project_id))
         })
     {
-        return Err(orphaned(
-            IpcError::new(
-                codes::E_EXISTS,
-                format!(
-                    "{} already has a live session ({} on {}); the session this start made \
-                     ({}) is not linked to it",
-                    plan.key,
-                    other.friendly_name.as_deref().unwrap_or(&other.tmux_name),
-                    other.host_alias,
-                    row.tmux_name
-                ),
-            )
-            .with_details(serde_json::json!({
-                "session_id": other.id,
-                "host_alias": other.host_alias,
-                "tmux_name": other.tmux_name,
-            })),
-        ));
+        // The same two-branch refusal as `plan_start`'s (D7): a winner the
+        // caller may not see is not named, and only the orphan is given.
+        return Err(orphaned(already_live(
+            &plan.key,
+            &other,
+            scope,
+            &format!(
+                "the session this start made ({}) is not linked to it",
+                row.tmux_name
+            ),
+        )));
     }
     let target = match plan.item_id {
         Some(id) => WorkTarget::Item(id),
@@ -927,7 +926,7 @@ pub async fn start_work(
         (None, true) if brief_visible_on(store, &plan)? => Some(ticket_brief(store, &plan)?),
         (None, _) => None,
     };
-    let (row, queued) = start_with(store, &plan, brief, |a| {
+    let (row, queued) = start_with(store, &plan, brief, scope, |a| {
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
     })
     .await?;
@@ -1078,7 +1077,7 @@ where
             }
             (None, _) => None,
         };
-        match start_with(store, plan, brief, &mut spawn).await {
+        match start_with(store, plan, brief, scope, &mut spawn).await {
             Ok((row, queued)) => {
                 if queued {
                     queued_rows.push(row.clone());
