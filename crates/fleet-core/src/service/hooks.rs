@@ -20,6 +20,12 @@ pub struct HookContext<'a> {
     pub caller: &'a Caller,
     /// `X-Fleet-Pane` (validated `%N`), `None` outside tmux / old CLIs.
     pub pane_id: Option<String>,
+    /// `X-Fleet-Sync: 1`: the request came from the SYNCHRONOUS SessionStart
+    /// command (`hooks_install::SYNC_START_HEADER`), whose answer Claude
+    /// reads. The async form discards the body, so a SessionStart without
+    /// it must not consume anything (a handover brief) that only the
+    /// response would have carried.
+    pub sync_start: bool,
 }
 
 /// Dispatch a hook event to the appropriate handler. `ctx.caller` is the
@@ -607,8 +613,16 @@ pub fn session_start_context(
         text.push('\n');
         text.push_str(&fence_untrusted(&ticket.join("\n"), "the tracker", 1000));
     }
-    // The M2 handover, whole or not at all.
-    let handovers = s.undelivered_handovers(row.id).unwrap_or_default();
+    // The M2 handover, whole or not at all — and only through a hook whose
+    // answer Claude reads. The async curl form (`-o /dev/null`) posts the
+    // same body without `X-Fleet-Sync`; stamping a brief delivered on it
+    // would lose the brief, since the next UserPromptSubmit finds nothing
+    // left to carry. On an async start the brief waits for that prompt.
+    let handovers = if ctx.sync_start {
+        s.undelivered_handovers(row.id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut delivered = Vec::new();
     for h in handovers {
         let Some(body) = h.body.as_deref() else {
@@ -1035,7 +1049,14 @@ fn apply_prompt_submit_hook(
         Binding::Current => remember_transcript_path(&s, row.id, payload, session_id),
         Binding::Rebound => {}
     }
-    s.record_prompt_submit_hook_for_row(row.id)?;
+    // Fleet's own prompts (a peer's wake nudge, the safe-kill instructions,
+    // an inbox delivery, a typed start prompt) come back through this hook
+    // like a person's; the same guard detection uses tells them apart, so
+    // they never count as a touch (work graph M7).
+    let touch = payload.prompt.as_deref().is_none_or(|p| {
+        crate::service::work::detect::loop_guard(p, row.last_prompt.as_deref(), &[]).is_none()
+    });
+    s.record_prompt_submit_hook_for_row_with(row.id, touch)?;
     if let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         let first = s
             .get_conversation(row.id, session_id)?
@@ -1617,11 +1638,18 @@ mod tests {
             s.set_current_branch(id, "abc-1-login").unwrap();
             id
         };
-        let start = |source: &str| {
+        let start_with = |source: &str, sync: bool| {
             let mut p = make_payload("SessionStart", "uuid-s");
             p.source = Some(source.into());
-            session_start_context(&store, &p, &ctx(&Caller::master(), None))
+            let master = Caller::master();
+            let c = if sync {
+                sync_ctx(&master, None)
+            } else {
+                ctx(&master, None)
+            };
+            session_start_context(&store, &p, &c)
         };
+        let start = |source: &str| start_with(source, true);
         assert_eq!(start("startup"), None, "off by default");
         {
             let s = store.lock().unwrap();
@@ -1636,6 +1664,24 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(start("clear"), None, "clear closes the window");
+        // The async command hook (no `X-Fleet-Sync`) discards the answer:
+        // it gets the work-context lines and consumes no brief.
+        let async_text = start_with("startup", false).expect("context");
+        assert!(async_text.starts_with("[claude-fleet: work context] This session works on ABC-1"));
+        assert!(
+            !async_text.contains("brief: carry on"),
+            "no brief on an async start: {async_text}"
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .undelivered_handovers(id)
+                .unwrap()
+                .len(),
+            2,
+            "an async start stamps nothing delivered"
+        );
         let text = start("startup").expect("context");
         assert!(text.starts_with("[claude-fleet: work context] This session works on ABC-1"));
         assert!(text.contains("Branch: abc-1-login"));
@@ -1660,6 +1706,48 @@ mod tests {
         assert_eq!(
             session_start_context(&store, &p, &ctx(&Caller::master(), None)),
             None
+        );
+    }
+
+    #[test]
+    fn a_prompt_fleet_typed_marks_working_but_is_nobodys_touch() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("hostb").unwrap();
+            let id = s
+                .upsert_session("sess", "hostb", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-b").unwrap();
+            s.set_claude_status_by_session_id("uuid-b", "idle").unwrap();
+            // What send_prompt stamps ahead of typing (036d72a).
+            s.set_last_prompt(id, "Continue with ABC-1: fix the login")
+                .unwrap();
+            id
+        };
+        let mut fleet = make_payload("UserPromptSubmit", "uuid-b");
+        fleet.prompt = Some("Continue with ABC-1: fix the login".into());
+        apply_hook(&store, &make_ssh(), &fleet, &ctx(&Caller::master(), None)).unwrap();
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("working"));
+            let t = s.tidy_sessions().unwrap();
+            assert!(
+                t.iter()
+                    .all(|x| x.row.id != id || x.last_touch_at.is_none()),
+                "fleet's own prompt is nobody's touch"
+            );
+        }
+        let mut person = make_payload("UserPromptSubmit", "uuid-b");
+        person.prompt = Some("now the signup page too".into());
+        apply_hook(&store, &make_ssh(), &person, &ctx(&Caller::master(), None)).unwrap();
+        let s = store.lock().unwrap();
+        let t = s.tidy_sessions().unwrap();
+        assert!(
+            t.iter()
+                .any(|x| x.row.id == id && x.last_touch_at.is_some()),
+            "a person's prompt touches"
         );
     }
 
@@ -2420,6 +2508,15 @@ mod tests {
         HookContext {
             caller,
             pane_id: pane.map(String::from),
+            sync_start: false,
+        }
+    }
+
+    /// A [`ctx`] from the synchronous SessionStart command (`X-Fleet-Sync`).
+    fn sync_ctx<'a>(caller: &'a Caller, pane: Option<&str>) -> HookContext<'a> {
+        HookContext {
+            sync_start: true,
+            ..ctx(caller, pane)
         }
     }
 
@@ -3332,6 +3429,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         let text = prompt_submit_context(&store, &payload, &ctx).expect("mail and nudge");
@@ -3365,6 +3463,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         let first = prompt_submit_context(&store, &payload, &ctx).expect("the mail");
@@ -3393,6 +3492,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
         let foreign = HookPayload {
             session_id: Some("conv-nested".into()),
@@ -3433,6 +3533,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         let packed = take_pending_delivery(&store, &payload, &ctx).expect("one message to deliver");
@@ -3485,6 +3586,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         let packed = take_pending_delivery(&store, &payload, &ctx).expect("one message to deliver");
@@ -3529,6 +3631,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
         let packed = take_pending_delivery(&store, &payload, &ctx).expect("brief + mail");
         assert_eq!(packed.handovers.len(), 1);
@@ -3572,6 +3675,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
         assert!(take_pending_delivery(&store, &payload, &ctx).is_none());
     }
@@ -3737,6 +3841,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         assert!(

@@ -290,9 +290,28 @@ async fn a_rate_limited_graphql_answer_backs_off() {
             retry_after_secs: None
         }
     );
-    // A spent quota on a 403 waits until the reset.
+    // The primary limit is a 200 with RATE_LIMITED and the reset in the
+    // headers: waited out, like the 403.
     let f = FakeTransport::new();
     let reset = crate::service::catalog::now_secs() + 120;
+    f.once(
+        Method::Post,
+        "/graphql",
+        Ok(Response::json(
+            200,
+            &json!({"data": null, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}),
+        )
+        .with_header("X-RateLimit-Remaining", "0")
+        .with_header("X-RateLimit-Reset", reset.to_string())),
+    );
+    match github(&f).list(&mine(), None, None).await.unwrap_err() {
+        TrackerError::RateLimited {
+            retry_after_secs: Some(s),
+        } => assert!((110..=121).contains(&s), "{s}"),
+        e => panic!("{e:?}"),
+    }
+    // A spent quota on a 403 waits until the reset.
+    let f = FakeTransport::new();
     f.once(
         Method::Post,
         "/graphql",
@@ -306,6 +325,24 @@ async fn a_rate_limited_graphql_answer_backs_off() {
         } => assert!((110..=121).contains(&s), "{s}"),
         e => panic!("{e:?}"),
     }
+}
+
+/// The item's URL is built from the validated repository and number, never
+/// taken from the answer: `gh` runs on a fleet host, which controls it.
+#[test]
+fn the_issue_url_is_built_not_taken_from_the_answer() {
+    let f = FakeTransport::new();
+    let mut n = fixture("github", "nodes_two.json")["data"]["nodes"][0].clone();
+    n["url"] = json!("https://github.com.login-verify.example/acme/api/issues/42");
+    let s = github(&f).snapshot(&n).unwrap();
+    assert_eq!(
+        s.url.as_deref(),
+        Some("https://github.com/Acme/api/issues/42")
+    );
+    assert_eq!(s.key.as_deref(), Some("acme/api#42"));
+    // A repository name that is not one yields no item at all.
+    n["repository"]["nameWithOwner"] = json!("acme/api?x=1");
+    assert!(github(&f).snapshot(&n).is_none());
 }
 
 /// End to end through `via_cli`: the provider, `TrackerNet`'s transport

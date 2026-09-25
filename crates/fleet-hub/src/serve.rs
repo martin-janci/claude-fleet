@@ -687,6 +687,13 @@ fn write_public_key(path: &std::path::Path, text: &[u8]) -> Result<(), String> {
 }
 
 pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<ExitCode, String> {
+    // The e2e fake-tracker override (work graph M10.2), checked before
+    // anything starts: a hub built without the test-only `e2e` feature, or
+    // any release build, refuses to start with it set rather than ignore it.
+    let tracker_override = env
+        .get(fleet_core::service::trackers::E2E_TRACKER_PORT_ENV)
+        .cloned();
+    fleet_core::service::trackers::e2e_loopback_port(tracker_override.as_deref())?;
     // The one store in the process that publishes: `serve` is where a paired
     // client can be listening on `GET /events`. Every other subcommand is a
     // one-shot with no subscribers and keeps the silent bus.
@@ -839,11 +846,17 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // (`work.sync_interval_secs`, `0` = off). A paired desktop never does.
     // `via_host` / `via_cli` trackers (M6) run `curl` / `gh` on a host over
     // the hub's own SSH.
-    fleet_core::service::trackers::install_default_net(
-        fleet_core::service::trackers::TrackerNet::real(Some(
-            Arc::clone(&ssh) as Arc<dyn fleet_core::ssh::SshExec>
-        )),
-    );
+    let tracker_net = fleet_core::service::trackers::TrackerNet::real(Some(
+        Arc::clone(&ssh) as Arc<dyn fleet_core::ssh::SshExec>
+    ))
+    .with_e2e_override(tracker_override.as_deref())?;
+    if let Some(port) = tracker_override.as_deref() {
+        tracing::warn!(
+            port,
+            "TEST BUILD: Jira Cloud trackers are served by the e2e fake tracker on 127.0.0.1"
+        );
+    }
+    fleet_core::service::trackers::install_default_net(tracker_net);
     let tracker_handle = fleet_core::service::trackers::sync::spawn_tracker_sync(
         Arc::clone(&store),
         fleet_core::service::trackers::default_net(),

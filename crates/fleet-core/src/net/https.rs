@@ -417,21 +417,67 @@ pub fn render_request(req: &Request, at: &Target) -> Result<Vec<u8>, TransportEr
 }
 
 /// Split raw response bytes into a [`Response`], de-chunking when the head
-/// says so.
+/// says so, and checking the framing: `conn::speak` forgives a peer that
+/// closes without `close_notify` (bytes in hand ARE the answer under
+/// `Connection: close`), which is only safe because this is where a body
+/// the network cut mid-way is caught. A `Content-Length` must be met
+/// exactly and a chunked body must reach its last chunk; a shortfall is
+/// [`TransportError::Connect`] (`truncated response`), so the tracker
+/// reads as unreachable rather than as answering unreadable JSON.
 pub fn parse_response(raw: &[u8]) -> Result<Response, TransportError> {
     let split = http1::find(raw, b"\r\n\r\n")
         .ok_or_else(|| TransportError::Protocol("no end of the response head".into()))?;
     let head = String::from_utf8_lossy(&raw[..split]).into_owned();
     let status = http1::parse_status(&head).map_err(TransportError::Protocol)?;
+    let headers = http1::parse_headers(&head);
     let body = &raw[split + 4..];
-    let body = if http1::head_is_chunked(&head) {
-        http1::dechunk(body).map_err(TransportError::Protocol)?
+    // No body by definition (RFC 9112 §6.3), whatever the head declares.
+    let bodiless = status / 100 == 1 || status == 204 || status == 304;
+    let body = if bodiless {
+        Vec::new()
+    } else if http1::head_is_chunked(&head) {
+        let mut rest = body.to_vec();
+        let mut dechunker = http1::Dechunker::new(true);
+        let out = dechunker
+            .take(&mut rest)
+            .map_err(TransportError::Protocol)?;
+        if !dechunker.finished() {
+            return Err(TransportError::Connect(format!(
+                "truncated response: the chunked body stopped after {} byte(s), before its last chunk",
+                out.len()
+            )));
+        }
+        out
     } else {
-        body.to_vec()
+        let declared = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .map(|(_, v)| {
+                v.trim().parse::<usize>().map_err(|_| {
+                    TransportError::Protocol(format!("unreadable Content-Length {v:?}"))
+                })
+            })
+            .transpose()?;
+        match declared {
+            Some(n) if body.len() < n => {
+                return Err(TransportError::Connect(format!(
+                    "truncated response: {} of {n} body bytes arrived",
+                    body.len()
+                )));
+            }
+            Some(n) if body.len() > n => {
+                return Err(TransportError::Protocol(format!(
+                    "{} byte(s) past the declared Content-Length of {n}",
+                    body.len() - n
+                )));
+            }
+            // Framed by the connection closing: what arrived is the body.
+            _ => body.to_vec(),
+        }
     };
     Ok(Response {
         status,
-        headers: http1::parse_headers(&head),
+        headers,
         body,
     })
 }
@@ -649,6 +695,92 @@ mod tests {
         assert_eq!(r.status, 429);
         assert_eq!(r.header("retry-after"), Some("7"));
         assert_eq!(r.text(), "{\"a\":1}");
+    }
+
+    /// `speak` forgives a close without close_notify; the framing check
+    /// here is what makes that safe. A body the network cut is refused as
+    /// unreachable, never handed back with its real status.
+    #[test]
+    fn a_truncated_body_is_refused_not_returned_with_its_status() {
+        let e =
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"a\":1}").unwrap_err();
+        assert!(
+            matches!(&e, TransportError::Connect(m) if m.contains("truncated") && m.contains("7 of 12")),
+            "{e}"
+        );
+        assert!(e.is_unreachable());
+        for cut in [
+            // The last chunk never came.
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n{\"a\r\n4\r\n\":1}\r\n"[..],
+            // Mid-chunk.
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n{\"a\r\n4\r\n\":",
+            // Nothing of the body at all.
+            b"HTTP/1.1 200 OK\r\nContent-Length: 300000\r\n\r\n",
+        ] {
+            let e = parse_response(cut).unwrap_err();
+            assert!(
+                matches!(&e, TransportError::Connect(m) if m.contains("truncated")),
+                "{e}"
+            );
+        }
+        // More than declared is the server's fault, not the network's.
+        let e =
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{\"a\":1}").unwrap_err();
+        assert!(matches!(e, TransportError::Protocol(_)), "{e}");
+        let e = parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\nx").unwrap_err();
+        assert!(matches!(e, TransportError::Protocol(_)), "{e}");
+
+        // Exactly the declared length, a bodiless status whatever its
+        // head declares, and a close-framed body all pass.
+        let r = parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"a\":1}").unwrap();
+        assert_eq!(r.text(), "{\"a\":1}");
+        let r =
+            parse_response(b"HTTP/1.1 304 Not Modified\r\nContent-Length: 500\r\n\r\n").unwrap();
+        assert_eq!((r.status, r.body.len()), (304, 0));
+        assert_eq!(
+            parse_response(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .unwrap()
+                .status,
+            204
+        );
+        let r = parse_response(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc").unwrap();
+        assert_eq!(r.text(), "abc");
+    }
+
+    /// End to end over a socket: the peer drops the connection mid-body.
+    #[tokio::test]
+    async fn a_connection_dropped_mid_body_is_a_truncated_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf).await.unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 300000\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            s.write_all(&[b'{'; 120]).await.unwrap();
+            // Dropped here: the backend went away.
+        });
+        let at = parse_target(&format!("http://127.0.0.1:{port}/x")).unwrap();
+        let req = Request::get(format!("http://127.0.0.1:{port}/x"));
+        let stream = conn::connect(&at.endpoint, CONNECT_TIMEOUT).await.unwrap();
+        let raw = conn::speak(
+            stream,
+            "127.0.0.1",
+            port,
+            &render_request(&req, &at).unwrap(),
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        let e = parse_response(&raw).unwrap_err();
+        assert!(
+            matches!(&e, TransportError::Connect(m) if m.contains("120 of 300000")),
+            "{e}"
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
