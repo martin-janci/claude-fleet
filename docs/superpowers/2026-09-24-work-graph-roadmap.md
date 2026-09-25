@@ -598,6 +598,11 @@ acceptance is still to do.
   **Tidy up done tickets** command fills the operator's composer, and the
   operator's instructions say how to tidy through `work { tidy }` /
   `work_link { tidy_apply }` without ever turning a safe kill into a kill.
+- **On the phone** (fleet-mobile): M9.1 Today, M9.2's criteria and M9.3's
+  handover came with M8.6; M9.6's *Also start in…* (gated on `work_link`'s
+  schema naming `project_ids`) and M9.2's **Insert into composer** on
+  `claude/cloud-fleet-work-graph-m9-phone`. M9.7 is the desktop operator's
+  and has nothing on the phone; Today's *Tidy up* waits for M7 on the phone.
 
 ## Critical path and parallelism
 

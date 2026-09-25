@@ -291,4 +291,18 @@ Commit and push before code.
      instead. The operator's own session is already protected by M7's
      planner. An operator created before this keeps its old CLAUDE.md until
      it is recreated (the file is written when the operator is made).
-
+- **2026-09-25, M9 on the phone** (fleet-mobile). Already there from the M8
+  plan's M8.6: Today (M9.1), the card's criteria (M9.2) and handover
+  (M9.3). Added on fleet-mobile's `claude/cloud-fleet-work-graph-m9-phone`:
+  1. **M9.6.** *Also start in…* in ticket mode, with the desktop's
+     candidates: past links' `snap_project_id` from `work { links, key }`,
+     plus live sessions on the key. It sends one `work_link start
+     { project_ids }`. The picked repository's session opens, and what was
+     skipped or failed is shown on it as a note. It is offered only when
+     `work_link`'s schema names `project_ids`, because an older hub ignores
+     an unknown argument rather than refusing it.
+  2. **M9.2.** *Insert into composer* on the session's work sheet, which
+     reads the card when it opens. It never sends.
+  3. **Not on the phone.** M9.7 is the desktop operator's confirmation, and
+     Today's *Tidy up* needs M7's sheet, which the phone does not have.
+  4. **No hub change.**
