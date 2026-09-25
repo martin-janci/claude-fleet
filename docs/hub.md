@@ -930,7 +930,10 @@ What else to know:
   orgs' hosts (so a branch named after a ticket shows its key); turn
   `isolate_sessions` on for an org whose session names must not be seen.
 - **A host in no org sees only unassigned work.** Assign every host of a
-  company before connecting a second company's tracker.
+  company before connecting a second company's tracker: a bare key linked
+  on an unassigned host's session belongs to no org, so ANY org's tracker
+  may bind it (fetching the key with that org's credentials), which is why
+  hosts are assigned first.
 
 ## Tidy-up and auto-tidy
 
