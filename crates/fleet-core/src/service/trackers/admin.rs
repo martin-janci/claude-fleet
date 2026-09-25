@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker
+    /// list|add|update|set_credential|test|remove|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|status|sweep_now
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +171,10 @@ pub enum AdminAction {
     Remove,
     /// Work graph M5: org administration (`service::orgs::admin`).
     Org(crate::service::orgs::OrgAction),
+    /// Work graph M12.3: retention row counts, dry run, last sweep.
+    Status,
+    /// Work graph M12.3: one retention sweep now.
+    SweepNow,
 }
 
 impl AdminAction {
@@ -192,6 +196,8 @@ impl AdminAction {
         "assign_host",
         "unassign_host",
         "assign_tracker",
+        "status",
+        "sweep_now",
     ];
 
     /// Actions that destroy something and pass the confirmation gate.
@@ -215,6 +221,8 @@ impl AdminAction {
             "set_credential" => AdminAction::SetCredential,
             "test" => AdminAction::Test,
             "remove" | "remove_tracker" => AdminAction::Remove,
+            "status" => AdminAction::Status,
+            "sweep_now" => AdminAction::SweepNow,
             other => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -472,6 +480,11 @@ pub fn admin_sync(
         AdminAction::Test => Err(IpcError::new(
             codes::E_INTERNAL,
             "test is asynchronous; use test_tracker",
+        )),
+        // One short lock per batch or count, never this whole function's.
+        AdminAction::Status | AdminAction::SweepNow => Err(IpcError::new(
+            codes::E_INTERNAL,
+            "retention runs outside the admin lock; use service::work::retention",
         )),
         AdminAction::Org(o) => crate::service::orgs::admin(o, args, &s),
     }

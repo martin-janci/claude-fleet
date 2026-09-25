@@ -833,8 +833,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Trackers and orgs; see action. Never \
-        returns a secret.")]
+    #[tool(description = "Trackers, orgs and retention; see action. \
+        Never returns a secret.")]
     pub(super) async fn work_admin(
         &self,
         Extension(caller): Extension<Caller>,
@@ -847,6 +847,17 @@ impl FleetTools {
         let summary = args.audit_summary();
         audit("work_admin", &summary);
         match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
+            AdminAction::Status => ok_json(
+                &crate::service::work::retention::status(
+                    &self.store,
+                    crate::service::catalog::now_secs(),
+                )
+                .map_err(to_mcp_err)?,
+            ),
+            AdminAction::SweepNow => ok_json(&crate::service::work::retention::sweep(
+                &self.store,
+                crate::service::catalog::now_secs(),
+            )),
             AdminAction::Test => {
                 let id = args
                     .tracker_id

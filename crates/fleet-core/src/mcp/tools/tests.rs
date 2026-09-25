@@ -3326,6 +3326,9 @@ fn the_served_definition_budget_stays_bounded() {
     // a move whose live links would cross the org boundary is refused
     // unless forced), one flag with a one-line doc plus a clause on the
     // errors list. Measured at 54,927 on 2026-09-25 (+227); plus 100.
+    // Work graph M12.3: `work_admin` gains `status` and `sweep_now` (retention)
+    // in its action list and description. Measured at 54,955 on 2026-09-25
+    // (+28), inside the headroom, not raised.
     const BUDGET_BYTES: usize = 55_027;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
