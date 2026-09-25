@@ -11,6 +11,8 @@
   //   branch key, a sole ticket URL) gets a toast "Linked NAME → KEY
   //   (branch) · Undo"; Undo is "Not this" for that link.
   // Rows present when the app opened are the baseline and are not toasted.
+  // - Clicking a row narrows the sidebar to that session and opens it, to
+  //   look at it in detail before deciding; closing the sheet lifts that.
   import { onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions, sessionsLoaded, showFriendlyNames, type SessionRow } from './sessions';
@@ -26,6 +28,7 @@
   import { push, pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { clearSessionFocus, focusSession } from './session_focus';
 
   const pending = $derived(rowsWithSuggestions($sessions));
   const blocked = $derived(hubActionBlocked('confirm_session_work', $hubStatus, $hubConnection));
@@ -33,6 +36,9 @@
   let cursor = $state(0);
   let busy = $state(false);
   let sheet = $state<HTMLDivElement | null>(null);
+  // Whether a click here set the sidebar focus: only then does closing the
+  // sheet clear it (the tidy-up sheet may own it).
+  let focused = false;
 
   function rowName(r: SessionRow): string {
     return get(showFriendlyNames) && r.friendly_name ? r.friendly_name : r.tmux_name;
@@ -43,6 +49,20 @@
     cursor = 0;
     await tick();
     sheet?.focus();
+  }
+
+  function closeSheet() {
+    open = false;
+    if (focused) clearSessionFocus();
+    focused = false;
+  }
+
+  function focusAt(i: number) {
+    cursor = i;
+    const r = pending[i];
+    if (!r) return;
+    focused = true;
+    focusSession(r.id, rowName(r));
   }
 
   async function decideAt(i: number, yes: boolean) {
@@ -76,7 +96,7 @@
         void decideAt(cursor, false);
         break;
       case 'Escape':
-        open = false;
+        closeSheet();
         break;
       default:
         return;
@@ -88,7 +108,7 @@
   $effect(() => {
     // The list shrinks as rows are decided: keep the cursor on a row.
     if (cursor > 0 && cursor >= pending.length) cursor = Math.max(0, pending.length - 1);
-    if (open && pending.length === 0) open = false;
+    if (open && pending.length === 0) closeSheet();
   });
 
   onMount(() => {
@@ -143,7 +163,7 @@
     <div class="review-head">
       <span>Link suggestions</span>
       <span class="hint">j/k move · y confirm · n not this · esc close</span>
-      <button class="pill" data-testid="link-review-close" onclick={() => (open = false)}>close</button>
+      <button class="pill" data-testid="link-review-close" onclick={closeSheet}>close</button>
     </div>
     {#if blocked}<p class="hint" role="note">{blocked}</p>{/if}
     {#each pending as r, i (r.id)}
@@ -157,7 +177,8 @@
           role="option"
           aria-selected={i === cursor}
           tabindex="-1"
-          onclick={() => (cursor = i)}
+          title="Show only this session in the sidebar"
+          onclick={() => focusAt(i)}
           onkeydown={() => {}}
         >
           <span class="name">{rowName(r)}</span>

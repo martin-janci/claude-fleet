@@ -13,6 +13,7 @@
   const scopeTitle = `Organisation scope (${scopeChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator))})`;
   import LinkReview from './LinkReview.svelte';
   import TidyReview from './TidyReview.svelte';
+  import { sessionFocus, clearSessionFocus } from './session_focus';
   import { RECENCY_VALUES, type Recency } from './session_status';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -191,6 +192,18 @@
   <ScopeAttention />
   <LinkReview />
   <TidyReview />
+  {#if $sessionFocus}
+    <!-- A clicked suggestion: the tree shows only this session. -->
+    <div class="focus-bar" data-testid="session-focus-bar" role="status">
+      <span class="focus-label">Showing only <strong>{$sessionFocus.label}</strong></span>
+      <button
+        class="pill"
+        data-testid="session-focus-clear"
+        title="Show all sessions again"
+        onclick={clearSessionFocus}
+      >✕ show all</button>
+    </div>
+  {/if}
 
   {#if selectedCount > 0}
     <div class="bulk-bar" data-testid="bulk-bar" role="toolbar" aria-label="bulk actions">
@@ -337,6 +350,24 @@
     font-size: 0.75rem;
   }
   .bulk-count { flex: 1; color: var(--fg); }
+  .focus-bar {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+    margin: 0.2rem 0.5rem;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    font-size: 0.75rem;
+  }
+  .focus-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .pill {
     font-size: 0.7rem;
     padding: 0.15rem 0.55rem;

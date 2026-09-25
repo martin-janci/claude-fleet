@@ -17,6 +17,7 @@
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
   import { sessionMatchesSearch } from './search';
+  import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { forgetSessionUi } from './session_ui';
@@ -183,7 +184,19 @@
   const scopeSel = $derived(
     $effectiveScope === 'all' ? null : { id: $effectiveScope, of: $scopeOf },
   );
+  // A clicked suggestion narrows the tree to its one session (see
+  // session_focus.ts): past every other filter, so the row can't be hidden
+  // by the host, bg-agent, scope, recency or search filters it arrived under.
+  const focus = $derived($sessionFocus);
+  const viewHost = $derived(focus ? 'all' : $hostFilter);
+  const viewBg = $derived(focus ? true : $showBgAgents);
+  const viewScope = $derived(focus ? null : scopeSel);
+  const viewSearch = $derived(focus ? '' : searchQuery);
   const rowPredicate = $derived.by((): SessionPredicate => {
+    if (focus) {
+      const id = focus.id;
+      return (s) => s.id === id;
+    }
     if (!needsYouOnly) return null;
     const opts = attentionOpts;
     return (s) => needsYou(s, opts);
@@ -379,8 +392,8 @@
     sortProjectsBySeverity(
       $projects.filter(
         (p) =>
-          matchesRecency(p, recency) &&
-          matchesSearch(p, searchQuery) &&
+          (focus !== null || matchesRecency(p, recency)) &&
+          matchesSearch(p, viewSearch) &&
           sessionsForProject(p.project.id).length > 0,
       ),
       severityByProject,
@@ -407,11 +420,11 @@
     $sidebarGroupBy === 'work'
       ? buildSessionsByWork(
           $sessions,
-          $hostFilter,
-          $showBgAgents,
+          viewHost,
+          viewBg,
           rowPredicate,
           (s) => workKeyFor(s, branchById),
-          scopeSel,
+          viewScope,
         )
       : null,
   );
@@ -425,7 +438,7 @@
   const workGroups = $derived(
     workIndex
       ? sortWorkGroups(
-          workIndex.groups.filter((g) => workGroupMatchesSearch(g, searchQuery)),
+          workIndex.groups.filter((g) => workGroupMatchesSearch(g, viewSearch)),
           severity,
         )
       : [],
@@ -455,7 +468,7 @@
     untrack(() => void loadPastWork(keys ? keys.split('\n') : []));
   });
   const pastOnlyGroups = $derived.by((): { key: string; links: WorkLink[] }[] => {
-    if ($sidebarGroupBy !== 'work') return [];
+    if ($sidebarGroupBy !== 'work' || focus) return [];
     const live = new Set(workGroups.map((g) => g.key));
     const q = searchQuery.toLowerCase();
     const out: { key: string; links: WorkLink[] }[] = [];
@@ -519,7 +532,7 @@
   // value is read directly in the template so Svelte tracks it reactively —
   // using a plain function via {@const} doesn't establish the dependency.
   const filteredSessionsByProject = $derived(
-    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, treePredicate, scopeSel),
+    buildSessionsByProject($sessions, viewHost, viewBg, treePredicate, viewScope),
   );
 
 
@@ -542,14 +555,14 @@
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
-        sessionVisible(s, $hostFilter, $showBgAgents, treePredicate, scopeSel),
+        sessionVisible(s, viewHost, viewBg, treePredicate, viewScope),
     ),
   );
 
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
-  const outsideFleet = $derived(buildOutsideFleet($sessions, $hostFilter, scopeSel));
+  const outsideFleet = $derived(focus ? [] : buildOutsideFleet($sessions, $hostFilter, scopeSel));
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
