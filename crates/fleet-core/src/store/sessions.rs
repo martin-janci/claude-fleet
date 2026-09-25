@@ -201,6 +201,10 @@ impl Store {
     /// [`Store::ghost_and_clean`], shared with the tmux-keyed reconcile pass;
     /// this wrapper only owns the transaction and the post-commit emit.
     ///
+    /// The transaction is a SAVEPOINT ([`Store::in_savepoint`]), so this
+    /// also runs inside reconcile's per-host `Store::atomically`
+    /// transaction; nested, its events are held until that commits.
+    ///
     /// The one-cycle grace matters because a failed
     /// `claude agents` probe is indistinguishable from "no agents" (both come
     /// back as an empty list): a transient miss only ghosts, and
@@ -215,20 +219,22 @@ impl Store {
         now: i64,
         lost_ttl_cutoff: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let mut changes: Vec<RowChange> = Vec::new();
-        Self::ghost_and_clean(
-            &tx,
-            host_alias,
-            keep_names,
-            now,
-            KIND_PANE_LESS,
-            None,
-            lost_ttl_cutoff,
-            &mut changes,
-        )?;
-        tx.commit()?;
-        // Emit only after the commit so no event fires for a rolled-back write.
+        let changes = self.in_savepoint("ghost_and_clean_bg_sessions", |tx| {
+            let mut changes: Vec<RowChange> = Vec::new();
+            Self::ghost_and_clean(
+                tx,
+                host_alias,
+                keep_names,
+                now,
+                KIND_PANE_LESS,
+                None,
+                lost_ttl_cutoff,
+                &mut changes,
+            )?;
+            Ok::<_, rusqlite::Error>(changes)
+        })?;
+        // Emit only after the release so no event fires for a rolled-back
+        // write (nested, `atomically` holds them until its own commit).
         for change in &changes {
             self.bus.emit_change(change);
         }
@@ -270,7 +276,8 @@ impl Store {
     /// the distinct lifecycle kind `"reclassified"`.
     ///
     /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
-    /// `unchecked_transaction`, collect the affected rows, commit, and only
+    /// SAVEPOINT ([`Store::in_savepoint`], so it nests inside reconcile's
+    /// per-host transaction), collect the affected rows, release, and only
     /// THEN emit one `SessionUpdated` per newly marked row.
     ///
     /// `probe_started_at` is the BE-3 guard, identical to
@@ -302,49 +309,49 @@ impl Store {
             format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
         };
         let cutoff = super::reconcile::ghost_cutoff(probe_started_at);
-        let tx = self.conn.unchecked_transaction()?;
-        let fetch_all = |ids: &[i64]| -> Result<Vec<SessionRow>, rusqlite::Error> {
-            let mut rows = Vec::new();
-            for id in ids {
-                if let Some(row) = fetch_session_by_id(&tx, *id)? {
-                    rows.push(row);
+        let out = self.in_savepoint("mark_host_sessions_lost", |tx| {
+            let fetch_all = |ids: &[i64]| -> Result<Vec<SessionRow>, rusqlite::Error> {
+                let mut rows = Vec::new();
+                for id in ids {
+                    if let Some(row) = fetch_session_by_id(tx, *id)? {
+                        rows.push(row);
+                    }
                 }
-            }
-            Ok(rows)
-        };
-        // Reclassify FIRST, while the rows the main mark is about to ghost
-        // are still live: those get `reason` directly and must not be
-        // counted twice. `lost_at` is deliberately left untouched.
-        let reclassify_sql = format!(
-            "UPDATE sessions SET lost_reason=?1
-             WHERE host_alias=?2 AND status='ghost'
-               AND COALESCE(lost_reason, 'missing')='missing' AND {kind_filter}
-               AND COALESCE(last_reconciled_at, 0) < ?3{not_in}
-             RETURNING id"
-        );
-        let head: Vec<&dyn rusqlite::ToSql> = vec![&reason, &host_alias, &cutoff];
-        let params = params_then(&head, keep_names);
-        let reclassified_ids: Vec<i64> = tx
-            .prepare(&reclassify_sql)?
-            .query_map(params.as_slice(), |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let sql = format!(
-            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
-             WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
-               AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
-             RETURNING id"
-        );
-        let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias, &cutoff];
-        let params = params_then(&head, keep_names);
-        let ids: Vec<i64> = tx
-            .prepare(&sql)?
-            .query_map(params.as_slice(), |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let out = MarkedLost {
-            marked: fetch_all(&ids)?,
-            reclassified: fetch_all(&reclassified_ids)?,
-        };
-        tx.commit()?;
+                Ok(rows)
+            };
+            // Reclassify FIRST, while the rows the main mark is about to ghost
+            // are still live: those get `reason` directly and must not be
+            // counted twice. `lost_at` is deliberately left untouched.
+            let reclassify_sql = format!(
+                "UPDATE sessions SET lost_reason=?1
+                 WHERE host_alias=?2 AND status='ghost'
+                   AND COALESCE(lost_reason, 'missing')='missing' AND {kind_filter}
+                   AND COALESCE(last_reconciled_at, 0) < ?3{not_in}
+                 RETURNING id"
+            );
+            let head: Vec<&dyn rusqlite::ToSql> = vec![&reason, &host_alias, &cutoff];
+            let params = params_then(&head, keep_names);
+            let reclassified_ids: Vec<i64> = tx
+                .prepare(&reclassify_sql)?
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let sql = format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
+                 WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
+                   AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
+                 RETURNING id"
+            );
+            let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias, &cutoff];
+            let params = params_then(&head, keep_names);
+            let ids: Vec<i64> = tx
+                .prepare(&sql)?
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(MarkedLost {
+                marked: fetch_all(&ids)?,
+                reclassified: fetch_all(&reclassified_ids)?,
+            })
+        })?;
         for row in &out.reclassified {
             // `lost_reason` is on the wire now, so this IS a change the
             // frontend sees — emit it, re-reading the committed row the same

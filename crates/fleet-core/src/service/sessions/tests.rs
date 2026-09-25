@@ -5781,3 +5781,225 @@ fn scrollback_lines_are_clamped() {
     );
     assert_eq!(clamp_scrollback(None), None);
 }
+
+// ── Task 4: one transaction per host, no unconditional writes ──
+
+/// A reconcile probe of `vps` that saw `live`, with the given identity,
+/// agents and PR results.
+fn vps_probe(
+    s: &Store,
+    live: Vec<crate::tmux::TmuxSession>,
+    identity: Option<crate::tmux::HostIdentity>,
+    agents: Vec<crate::claude_agents::ClaudeAgentRow>,
+    pr_info: PrInfoMap,
+) -> HostProbe {
+    let host = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "vps")
+        .unwrap();
+    HostProbe {
+        host,
+        result: Ok(live),
+        agent_rows: Some(agents),
+        agent_mtimes: Some(std::collections::HashMap::new()),
+        intel: PaneIntelMap::new(),
+        account: None,
+        pr_info,
+        identity,
+        started_at: now_unix(),
+    }
+}
+
+fn row_version_of(s: &Store, name: &str) -> i64 {
+    s.get_session(name, "vps").unwrap().unwrap().row_version
+}
+
+/// A pass whose probe equals the stored identity must not write the
+/// `hosts` identity columns at all — an UPDATE that sets the same values is
+/// still a write under the store lock every pass.
+#[test]
+fn an_unchanged_identity_is_not_written_again() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    s.set_host_identity("vps", Some("boot-a"), Some(7)).unwrap();
+    // Count every UPDATE that names an identity column, whatever it sets.
+    s.conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TABLE identity_writes (n INTEGER);
+             CREATE TEMP TRIGGER count_identity_writes
+             AFTER UPDATE OF boot_id, tmux_server_pid ON main.hosts
+             BEGIN INSERT INTO identity_writes VALUES (1); END;",
+        )
+        .unwrap();
+    let writes = |s: &Store| -> i64 {
+        s.conn_for_test()
+            .query_row("SELECT COUNT(*) FROM temp.identity_writes", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let same = crate::tmux::HostIdentity {
+        boot_id: Some("boot-a".into()),
+        tmux_server_pid: Some(7),
+    };
+    let projects = s.list_projects().unwrap();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        Some(same),
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(
+        writes(&s),
+        0,
+        "a probe that saw the stored identity must not write it again"
+    );
+    // A changed identity is still written (and the counter does see writes).
+    s.set_host_identity("vps", Some("boot-a"), Some(8)).unwrap();
+    assert_eq!(writes(&s), 1, "a changed identity is written");
+    assert_eq!(s.get_host_identity("vps").unwrap().tmux_server_pid, Some(8));
+}
+
+/// Requirement 3 (ruling: fold `last_reconciled_at` into the upsert): a pass
+/// that observes exactly what the store holds bumps each live row's
+/// `row_version` once — the upsert's physical UPDATE — not a second time
+/// for a separate freshness stamp. The stamp itself still moves.
+#[test]
+fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let live = || vec![tmux_session("dev-a"), tmux_session("dev-b")];
+    let probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    // Backdate the freshness stamp so the next pass provably re-stamps it.
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET last_reconciled_at = 1 WHERE host_alias = 'vps'",
+            [],
+        )
+        .unwrap();
+    let before = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    let probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    assert_eq!(
+        [after[0] - before[0], after[1] - before[1]],
+        [1, 1],
+        "an unchanged pass bumps each row_version exactly once"
+    );
+    let stamp: i64 = s
+        .conn_for_test()
+        .query_row(
+            "SELECT MIN(last_reconciled_at) FROM sessions WHERE host_alias = 'vps'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        stamp >= probe.started_at,
+        "the pass still stamps last_reconciled_at ({stamp} < {})",
+        probe.started_at
+    );
+}
+
+/// Requirement 1: everything one host's reconcile writes commits in ONE
+/// transaction. An error after the upsert (injected once every write of the
+/// branch has run) must roll back that host's PR signals, its timeline
+/// events, its conversation rebind and its bg rows too — and announce none
+/// of them.
+#[test]
+fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    // Pass 1: the session exists, no status, no PR, no agents.
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let id = s.get_session("dev-a", "vps").unwrap().unwrap().id;
+    let events_before = s.list_session_events(id, 100).unwrap().len();
+    let before = s.get_session("dev-a", "vps").unwrap().unwrap();
+    bus.take();
+
+    // Pass 2 changes the status (agent by name), binds a conversation,
+    // stores PR signals and surfaces a bg agent — then fails late.
+    let mut pr_info = PrInfoMap::new();
+    pr_info.insert(
+        "dev-a".into(),
+        crate::service::outcome::PrInfo {
+            pr_url: Some("https://github.com/o/r/pull/1".into()),
+            ci_status: Some("passing".into()),
+            signals: Some(crate::service::work::detect::PrSignals {
+                head: Some("feat/x".into()),
+                ..Default::default()
+            }),
+        },
+    );
+    let agents = vec![
+        agent("sid-a", Some("dev-a"), Some("/tmp")),
+        agent("bg-1", None, Some("/elsewhere")),
+    ];
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        agents.clone(),
+        pr_info.clone(),
+    );
+    FAIL_HOST_WRITE_AFTER_WRITES.with(|f| *f.borrow_mut() = Some("vps".into()));
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    FAIL_HOST_WRITE_AFTER_WRITES.with(|f| *f.borrow_mut() = None);
+    assert!(res.is_err(), "the injected fault fails the host write");
+
+    let signals: Option<String> = s
+        .conn_for_test()
+        .query_row("SELECT pr_signals FROM sessions WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(signals, None, "PR signals roll back with the host write");
+    let after = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert!(
+        after.eq_ignoring_row_version(&before),
+        "the row itself rolls back: {before:?} -> {after:?}"
+    );
+    assert_eq!(
+        s.list_session_events(id, 100).unwrap().len(),
+        events_before,
+        "timeline events roll back with the host write"
+    );
+    assert!(
+        s.get_session("bg:bg-1", "vps").unwrap().is_none(),
+        "the bg row rolls back with the host write"
+    );
+    let announced = bus.take();
+    assert!(
+        announced.is_empty(),
+        "a rolled-back host write announces nothing; got {announced:?}"
+    );
+
+    // Positive control: the same pass without the fault lands all of it.
+    let probe = vps_probe(&s, vec![tmux_session("dev-a")], None, agents, pr_info);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let signals: Option<String> = s
+        .conn_for_test()
+        .query_row("SELECT pr_signals FROM sessions WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(signals.is_some(), "without the fault the PR signals land");
+    assert!(s.get_session("bg:bg-1", "vps").unwrap().is_some());
+    assert!(s.list_session_events(id, 100).unwrap().len() > events_before);
+}

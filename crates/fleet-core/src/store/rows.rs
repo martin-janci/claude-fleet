@@ -1029,6 +1029,13 @@ pub struct HostReconcile<'a> {
     /// stamped with their specific `lost_reason`. `false` (the default) is
     /// today's behaviour — every reachable pass prunes.
     pub skip_prune: bool,
+    /// Stamp `last_reconciled_at` with this value on every session the
+    /// upsert writes (the live set this pass observed): the Task H freshness
+    /// marker and the BE-3 ghost guard's evidence. Folded into the upsert
+    /// rather than written by a second UPDATE, so a pass bumps a row's
+    /// `row_version` once, not twice. `None` (the default, store-level
+    /// tests) leaves the stored stamp alone.
+    pub reconciled_at: Option<i64>,
 }
 
 /// Max `session_events` rows kept per session. Enforced on every

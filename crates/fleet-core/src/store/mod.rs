@@ -326,9 +326,48 @@ impl Store {
         self.message_notify.clone()
     }
 
-    /// Run `f` inside a single `conn.transaction()`. Used by reconcile paths
-    /// that batch many upserts/deletes after a fan-out of off-lock probes —
-    /// one fsync per batch instead of one per row.
+    /// Run `f` under `SAVEPOINT <name>`: released when it returns `Ok`,
+    /// rolled back to (then released) when it returns `Err`. Works both
+    /// standalone — the savepoint is then the transaction and its RELEASE
+    /// commits — and nested inside [`Store::atomically`] or another
+    /// savepoint, where it never issues a second `BEGIN`. A write helper that
+    /// reconcile runs inside its per-host transaction uses this instead of
+    /// `unchecked_transaction()`, which cannot nest. `name` must be a plain
+    /// SQL identifier (it is spliced into the statement).
+    pub(super) fn in_savepoint<R, E>(
+        &self,
+        name: &'static str,
+        f: impl FnOnce(&Connection) -> std::result::Result<R, E>,
+    ) -> std::result::Result<R, E>
+    where
+        E: From<rusqlite::Error>,
+    {
+        self.conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+        let undo = |conn: &Connection| {
+            // Best-effort: the caller already carries the real error.
+            let _ = conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+        };
+        match f(&self.conn) {
+            Ok(r) => match self.conn.execute_batch(&format!("RELEASE {name}")) {
+                Ok(()) => Ok(r),
+                Err(e) => {
+                    // A RELEASE that fails would otherwise leave the
+                    // savepoint open on the connection.
+                    undo(&self.conn);
+                    Err(e.into())
+                }
+            },
+            Err(e) => {
+                undo(&self.conn);
+                Err(e)
+            }
+        }
+    }
+
+    /// Run `f` inside a single `conn.transaction()`. Test-only since the
+    /// reconcile write burst moved onto [`Store::in_savepoint`] (it now runs
+    /// inside the per-host transaction and so cannot open its own).
+    #[cfg(test)]
     fn with_transaction<F, R>(&mut self, f: F) -> rusqlite::Result<R>
     where
         F: FnOnce(&rusqlite::Transaction) -> rusqlite::Result<R>,

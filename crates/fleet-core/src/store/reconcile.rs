@@ -182,7 +182,7 @@ impl Store {
     }
 
     fn update_host_probe_in_tx(
-        tx: &rusqlite::Transaction,
+        tx: &rusqlite::Connection,
         alias: &str,
         reachable: bool,
         claude_version: Option<&str>,
@@ -230,7 +230,7 @@ impl Store {
 
     #[allow(clippy::too_many_arguments)]
     fn upsert_session_in_tx(
-        tx: &rusqlite::Transaction,
+        tx: &rusqlite::Connection,
         tmux_name: &str,
         host_alias: &str,
         project_id: Option<i64>,
@@ -253,6 +253,7 @@ impl Store {
         tmux_pane_id: Option<&str>,
         pending_input: Option<&str>,
         killed_at: Option<i64>,
+        reconciled_at: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -378,7 +379,8 @@ impl Store {
                                    worktree_key, lost_at,
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
                                    context_pct, stuck_kind, ci_status, idle_since, stuck_since,
-                                   tmux_pane_id, context_source, context_at, pending_input)
+                                   tmux_pane_id, context_source, context_at, pending_input,
+                                   last_reconciled_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, {guarded_id}, ?10, ?11, ?12, ?13,
                      ?14, ?15, ?17,
                      CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
@@ -386,7 +388,8 @@ impl Store {
                      ?21,
                      CASE WHEN ?14 IS NULL THEN NULL ELSE 'pane' END,
                      CASE WHEN ?14 IS NULL THEN NULL ELSE ?19 END,
-                     ?22)
+                     ?22,
+                     ?23)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -440,7 +443,13 @@ impl Store {
                                 WHEN ({new_stuck}) IS stuck_kind THEN COALESCE(stuck_since, ?19)
                                 ELSE ?19 END,
                idle_since={idle},
-               pending_input={new_pending}
+               pending_input={new_pending},
+               -- The freshness stamp (Task H / the BE-3 guard's evidence),
+               -- folded in here so a pass is ONE physical UPDATE per row —
+               -- one `row_version` bump — instead of this upsert plus a
+               -- second stamping UPDATE. `last_reconciled_at` is not a
+               -- `SessionRow` field, so it never makes a no-op pass emit.
+               last_reconciled_at=COALESCE(?23, last_reconciled_at)
              WHERE {not_stale}",
             new_stuck = NEW_STUCK,
             new_pending = NEW_PENDING,
@@ -476,7 +485,8 @@ impl Store {
                 now_unix(),
                 probe_started_at,
                 tmux_pane_id,
-                pending_input
+                pending_input,
+                reconciled_at
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -494,7 +504,7 @@ impl Store {
     }
 
     fn touch_project_last_session_at_in_tx(
-        tx: &rusqlite::Transaction,
+        tx: &rusqlite::Connection,
         project_id: i64,
         ts: i64,
         out: &mut Vec<RowChange>,
@@ -556,7 +566,7 @@ impl Store {
     /// SQL and bindings.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn ghost_and_clean(
-        tx: &rusqlite::Transaction,
+        tx: &rusqlite::Connection,
         host_alias: &str,
         keep_names: &[String],
         now: i64,
@@ -674,16 +684,34 @@ impl Store {
     /// its `(project_id, account_uuid)` ALREADY resolved by the caller (those
     /// are reads — `find_project_id_for_path` / `get_session_account` — and
     /// must happen before the transaction opens).
+    ///
+    /// Standalone: the burst is its own transaction, committed before any
+    /// event is emitted. Inside an open transaction use
+    /// [`Self::apply_host_reconcile_in_tx`].
     pub fn apply_host_reconcile(&mut self, spec: HostReconcile<'_>) -> Result<(), rusqlite::Error> {
-        // What this host's names were killed at (#171), read here because
-        // `with_transaction` borrows `self` mutably for the closure. Not a
-        // check-then-insert window: `apply_host_reconcile` needs `&mut Store`,
-        // so its caller holds the one `Mutex<Store>` for this whole call, and
-        // `mark_session_killed` — the only writer of this map — needs that
-        // same lock. No kill can slip in between the read and the inserts.
+        self.apply_host_reconcile_in_tx(spec)
+    }
+
+    /// [`Self::apply_host_reconcile`] for a caller already inside
+    /// `Store::atomically`: the reconcile service runs it in the per-host
+    /// transaction that also carries the host's identity, PR signals,
+    /// timeline events and bg rows (Task 4). Runs under a SAVEPOINT
+    /// ([`Store::in_savepoint`]), which is why it works both ways: nested,
+    /// the outer `atomically` holds the events until ITS commit and drops
+    /// them on rollback; standalone (the `&mut self` wrapper) the savepoint
+    /// is the transaction and the events follow the RELEASE that commits.
+    pub fn apply_host_reconcile_in_tx(
+        &self,
+        spec: HostReconcile<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        // What this host's names were killed at (#171). Not a
+        // check-then-insert window: the caller holds the one `Mutex<Store>`
+        // for this whole call, and `mark_session_killed` — the only writer of
+        // this map — needs that same lock. No kill can slip in between the
+        // read and the inserts.
         let kills = self.recent_kills(spec.alias);
-        // Phase 1: run all SQL inside one transaction, collecting RowChanges.
-        let changes = self.with_transaction(|tx| {
+        // Phase 1: run all SQL inside one savepoint, collecting RowChanges.
+        let changes = self.in_savepoint("apply_host_reconcile", |tx| {
             let mut out: Vec<RowChange> = Vec::new();
             Self::update_host_probe_in_tx(
                 tx,
@@ -728,6 +756,7 @@ impl Store {
                         sess.tmux_pane_id.as_deref(),
                         pending_input_json.as_deref(),
                         kills.get(sess.tmux_name).copied(),
+                        spec.reconciled_at,
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -756,10 +785,11 @@ impl Store {
                     )?;
                 }
             }
-            Ok(out)
+            Ok::<_, rusqlite::Error>(out)
         })?;
 
-        // Phase 2: transaction committed — now it is safe to emit.
+        // Phase 2: savepoint released — now it is safe to emit (directly when
+        // it was the transaction, held by `atomically` when nested).
         for change in &changes {
             // Task 7 (R5): one INFO line per session lifecycle transition —
             // a host reboot used to leave nothing in the log to forensically
@@ -798,6 +828,11 @@ impl Store {
     /// frontend can gray out rows whose host has gone quiet. Best-effort and
     /// emit-free: it does not change any user-visible row field, so it neither
     /// fires row events nor aborts reconcile on failure.
+    ///
+    /// Reconcile itself no longer calls this: the stamp rides the upsert
+    /// (`HostReconcile::reconciled_at`), so a pass costs each row one
+    /// physical UPDATE — one `row_version` bump — not two. Kept for tests
+    /// that need to place a row's stamp at a chosen instant.
     pub fn mark_sessions_reconciled(
         &self,
         host_alias: &str,
@@ -1088,6 +1123,7 @@ mod tests {
                         None,
                         false,
                         0,
+                        None,
                         None,
                         None,
                         None,
@@ -2485,6 +2521,7 @@ mod tests {
                     None,
                     false,
                     probe_started_at,
+                    None,
                     None,
                     None,
                     None,

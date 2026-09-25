@@ -636,6 +636,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: false,
+            reconciled_at: None,
         })
         .unwrap();
 
@@ -807,6 +808,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: false,
+            reconciled_at: None,
         })
         .unwrap();
         let pid = s.upsert_project("o", "r", "/base/r").unwrap();
@@ -934,6 +936,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: false,
+            reconciled_at: None,
         })
         .unwrap();
         let a = s
@@ -1037,6 +1040,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: false,
+            reconciled_at: None,
         })
         .unwrap();
         let store = Mutex::new(s);
@@ -1081,6 +1085,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: false,
+            reconciled_at: None,
         })
         .unwrap();
         let ids: Vec<i64> = names
@@ -1207,6 +1212,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: true,
+            reconciled_at: None,
         })
         .unwrap();
         let store = Mutex::new(s);
@@ -1376,6 +1382,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: false,
+            reconciled_at: None,
         })
         .unwrap();
         let mut ids = Vec::new();
@@ -1446,6 +1453,7 @@ mod tests {
             keep: &[],
             lost_ttl_cutoff: None,
             skip_prune: false,
+            reconciled_at: None,
         })
         .unwrap();
         let mut ids = Vec::new();
