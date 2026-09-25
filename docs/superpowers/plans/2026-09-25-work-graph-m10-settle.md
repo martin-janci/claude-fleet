@@ -214,3 +214,52 @@ M10.6 (independent; reuses M10.2's fake tracker)
   - **M4.6.** Landed on `main` separately (#273, OFF behind
     `work.classify_nudge`); D14 therefore reads *built, off by default*.
     D14–D16 are in the roadmap's decisions table.
+- 2026-09-25: **M10.2 done** on `claude/cloud-fleet-work-graph-m10-ring`
+  (no new tool, action, migration or contract bump).
+  - **The override (decision 2).** A new `e2e` cargo feature (fleet-core,
+    forwarded by fleet-hub) makes a hub with `FLEET_E2E_TRACKER_URL=
+    http://127.0.0.1:<port>` send every tracker request, in plain HTTP, to
+    that loopback fake (`net/e2e_tracker.rs`, `TrackerNet::from_env`). A
+    tracker keeps its real `https://…atlassian.net` site; the site rides in
+    `X-Fleet-E2E-Site`. The module refuses to compile without
+    `debug_assertions`, and a build without the feature refuses to start a
+    hub with the variable set, before its store is opened
+    (`serve_refuses_the_e2e_tracker_override_without_the_feature`).
+  - **The doubles.** `scripts/e2e/fake_jira.py` (two sites, `ABC` and
+    `XYZ`, with control endpoints to move a ticket), and
+    `scripts/e2e/fake_claude.py`, installed as `cl` first on hub W's PATH
+    (the pane command prefers `cl` to `claude`). The script posts the hooks
+    Claude Code would post, so every step is deterministic.
+  - **The leg.** `scripts/e2e/work.sh`, sourced by `hub-e2e.sh` after the
+    federation hubs stop: 38 checks over scenarios 1–7. A default build
+    skips the leg loudly (never fails it). Full script locally: 159 passed,
+    0 failed, 48 s.
+  - **Deviations.**
+    - *Changelog shapes:* the Jira adapter calls no changelog or single-issue
+      endpoint, so the fake answers what it does call (probe, favourite
+      filters, `search/jql`, `issue/bulkfetch`).
+    - *Sync:* there is no "sync now" action; the tick's first pass runs as a
+      hub starts, so the script restarts hub W to sync.
+    - *Detection (3):* a weak suggestion stops showing in `work_suggested`
+      once the session has confirmed work (by design, `rows.rs`), so the
+      scenario rejects the first key, then confirms a second, and checks the
+      rejected key is not proposed again.
+    - *Tidy (6):* "idle for hours, done for days" is backdated in hub W's
+      `state.db` instead of waited for — the only place the leg reaches
+      under the API. The clean session is safe-removed through the fake's
+      `SAFE_REMOVE_READY` answer and a Stop hook; the dirty one is refused.
+    - *Org boundary (7):* session rows stay visible across orgs (D7 is off);
+      the check is that host B's rows and `/events` frames carry no work,
+      and that `/events` drops the `work` kind.
+    - *CI:* the plan said "CI stays opt-in, as today", but `ci.yml`'s
+      `hub-headless` job already runs `hub-e2e.sh` on every push and PR; it
+      now builds the e2e binary for it (step timeout 5 → 8 min).
+      `ci-local.sh --hub-e2e` stays opt-in and builds it too.
+  - **A bug the e2e found, fixed.** Only a workspace repair ever set a
+    session's `worktree_id` (reconcile sets only `worktree_key`;
+    `new_session` never wrote the FK, even when given a worktree), so
+    tidy-up and GC answered "no tracked worktree: archive it instead" for
+    every started session and could never safe-remove its tree.
+    `new_session` now links a session to the worktree it created (registered
+    at once) or was given, never the main checkout
+    (`link_new_session_worktree`).
