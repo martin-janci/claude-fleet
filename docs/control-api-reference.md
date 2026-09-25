@@ -83,6 +83,10 @@ Read a host's current system clipboard (whatever a human would get from Ctrl+V o
 
 Parameters: `host_alias`
 
+### `get_settings`
+
+Read the operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph): each key's effective value, the default when unset. Master token only. Returns a JSON object of key to string.
+
 ### `hide_host`
 
 Hide or show a host. Hidden hosts are skipped during reconcile. Returns the updated host row as JSON.
@@ -444,6 +448,12 @@ Parameters: `host_alias`, `name`, `value`
 Replace a session's tags (short labels such as `review`, `infra`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]; an empty list clears). Tags show in list_sessions rows and list_sessions { tag } filters on them. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
 
 Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
+
+### `set_setting`
+
+Change one operator setting, a key get_settings returns, validated against its shape. E_INVALID for an unknown or derived key or a bad value; mcp.*, hub.* and controller.* are not settable. Read on the next tick. Master token only. Returns the settings, as get_settings.
+
+Parameters: `key`, `value`
 
 ### `spawn_review`
 

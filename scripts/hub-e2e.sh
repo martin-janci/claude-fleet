@@ -305,6 +305,16 @@ pv_c=$(tool "$PA" "$PUB" "$CTOK" provision_hosts '{}')
 check "a client is refused provision_hosts even in full mode" 'echo "$pv_c" | grep -q E_FORBIDDEN' "${pv_c:0:400}"
 pr_c=$(tool "$PA" "$PUB" "$CTOK" pair_client '{"name":"a second phone"}')
 check "a client cannot pair another client" 'echo "$pr_c" | grep -q E_FORBIDDEN' "${pr_c:0:400}"
+# Operator settings: the master sets the ones with no flag; a client, even
+# full, may neither change nor read them.
+ss_m=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"work.journal_days","value":30}')
+gs_m=$(tool "$PA" "$PUB" "$TOKA" get_settings '{}')
+check "set_setting changes a setting the hub has no flag for, and get_settings reads it back" 'echo "$ss_m" | grep -q "\"isError\":false" && echo "$gs_m" | grep -qE "work\.journal_days[^0-9a-z]+30[^0-9]"' "${ss_m:0:300} / ${gs_m:0:300}"
+ss_x=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"mcp.confirm_destructive","value":false}')
+check "set_setting refuses a key another subsystem owns" 'echo "$ss_x" | grep -q E_INVALID' "${ss_x:0:400}"
+ss_c=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"gc.enabled","value":true}')
+gs_c=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
+check "a client is refused set_setting and get_settings" 'echo "$ss_c" | grep -q E_FORBIDDEN && echo "$gs_c" | grep -q E_FORBIDDEN' "${ss_c:0:300} / ${gs_c:0:300}"
 
 # --- GET /events -------------------------------------------------------------
 check "/events needs a token like /mcp" '[ "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")" = 401 ]' "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")"

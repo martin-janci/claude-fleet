@@ -947,6 +947,15 @@ pub struct SetClientTrustParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetSettingParams {
+    /// e.g. "work.journal_days".
+    pub key: String,
+    /// A string as given; a number or boolean as its text; an object or
+    /// array as its JSON.
+    pub value: serde_json::Value,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ListClientsParams {
     /// Also return clients whose token has been revoked (kept for the audit
     /// trail). Default false — live clients only.
