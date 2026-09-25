@@ -7,8 +7,10 @@ import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('./clipboard', () => ({ copyText: vi.fn(async () => true) }));
+vi.mock('./open_external', () => ({ openExternal: vi.fn(async () => true) }));
 import { invoke } from '@tauri-apps/api/core';
 import { copyText } from './clipboard';
+import { openExternal } from './open_external';
 import TodayView from './TodayView.svelte';
 import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
@@ -42,6 +44,7 @@ describe('TodayView', () => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_today' ? digest : null));
     vi.mocked(copyText).mockClear();
+    vi.mocked(openExternal).mockClear();
   });
 
   it('asks the hub for today since local midnight and draws the sections', async () => {
@@ -183,5 +186,62 @@ describe('TodayView', () => {
     await flush();
     expect(screen.getByTestId('today-stale')).toBeTruthy();
     expect(screen.queryByTestId('today-tidy')).toBeNull();
+  });
+  it('Refresh asks the hub again; Close closes the view, and is offered only over a selected session', async () => {
+    const onclose = vi.fn();
+    const { unmount } = render(TodayView, { onclose });
+    await flush();
+    const asked = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_today').length;
+    expect(asked()).toBe(1);
+    await fireEvent.click(screen.getByTestId('today-refresh'));
+    await flush();
+    expect(asked()).toBe(2);
+    const since = (c: unknown[]) => (c[1] as { args: { since: number } }).args.since;
+    const calls = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_today');
+    expect(since(calls[1])).toBe(since(calls[0]));
+    expect(screen.getByTestId('today-waiting')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('today-close'));
+    expect(onclose).toHaveBeenCalledTimes(1);
+    expect(get(selectedSession)).toBeNull();
+    unmount();
+    // As the empty state of Details there is nothing to close into.
+    render(TodayView);
+    await flush();
+    expect(screen.queryByTestId('today-close')).toBeNull();
+  });
+
+  it('Open ticket and PR open the row’s own url and nothing else', async () => {
+    const linked: Today = {
+      ...digest,
+      groups: [
+        { ...digest.groups[0], url: 'https://x.atlassian.net/browse/PAY-7' },
+        { bucket: 'in_progress', key: 'PAY-9', sessions: [{ id: 42, name: 'old', host_alias: 'mefistos', last_activity_at: 1 }] },
+      ],
+      shipped: [
+        { how: 'pr', key: 'PAY-3', title: 'Receipts', at: 150, url: 'https://x.atlassian.net/browse/PAY-3', pr_url: 'https://github.com/acme/app/pull/1' },
+        { how: 'done', key: 'PAY-4', title: 'Totals', at: 160, url: 'https://x.atlassian.net/browse/PAY-4' },
+        { how: 'done', title: 'No link', at: 170 },
+      ],
+    };
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_today' ? linked : null));
+    render(TodayView);
+    await flush();
+    // One Open ticket per group with a url (PAY-9 has none), one per shipped
+    // row without a PR; a PR outranks the ticket link.
+    const tickets = screen.getAllByText('Open ticket');
+    expect(tickets).toHaveLength(2);
+    await fireEvent.click(tickets[0]);
+    expect(openExternal).toHaveBeenLastCalledWith('https://x.atlassian.net/browse/PAY-7');
+    await fireEvent.click(tickets[1]);
+    expect(openExternal).toHaveBeenLastCalledWith('https://x.atlassian.net/browse/PAY-4');
+    // The shipped row's status also reads "PR"; the link is the button.
+    const prs = screen.getAllByRole('button', { name: 'PR' });
+    expect(prs).toHaveLength(1);
+    await fireEvent.click(prs[0]);
+    expect(openExternal).toHaveBeenLastCalledWith('https://github.com/acme/app/pull/1');
+    expect(openExternal).toHaveBeenCalledTimes(3);
+    // A link never selects a session or sends anything.
+    expect(get(selectedSession)).toBeNull();
+    expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).not.toContain('send_prompt');
   });
 });

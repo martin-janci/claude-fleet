@@ -117,4 +117,43 @@ describe('TicketCard', () => {
       other.unmount();
     }
   });
+  it('reloads when the selected session’s key changes, and a late answer for the old key is dropped', async () => {
+    const pending = new Map<string, (c: Card) => void>();
+    vi.mocked(invoke).mockImplementation((cmd: string, a?: unknown) => {
+      if (cmd !== 'work_ticket_card') return Promise.resolve(null);
+      const key = (a as { args: { key: string } }).args.key;
+      return new Promise<Card>((res) => pending.set(key, res));
+    });
+    const { rerender } = render(TicketCard, { session: row() });
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('work_ticket_card', { args: { key: 'PAY-7' } });
+    // Another session, linked to another ticket: the card is asked again.
+    const other = row({
+      id: 32,
+      work: { link_id: 2, item_id: 4, key: 'PAY-8', title: 'CB', source: 'manual' },
+    });
+    await rerender({ session: other });
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('work_ticket_card', { args: { key: 'PAY-8' } });
+    expect(screen.getByText('PAY-8')).toBeTruthy();
+    // The old key's answer comes in late: it is not shown under the new key.
+    pending.get('PAY-7')!(card());
+    await flush();
+    expect(screen.queryByText('Refund <script>alert(1)</script>')).toBeNull();
+    expect(screen.queryByTestId('ticket-card-criteria')).toBeNull();
+    pending.get('PAY-8')!(card({ key: 'PAY-8', title: 'Chargeback dispute', acceptance: ['Money back'] }));
+    await flush();
+    expect(screen.getByText('Chargeback dispute')).toBeTruthy();
+    expect(screen.getByText('Money back')).toBeTruthy();
+    // A row update that keeps the key (a status change) does not ask again.
+    await rerender({ session: { ...other, claude_status: 'idle' } });
+    await flush();
+    const asks = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_ticket_card');
+    expect(asks).toHaveLength(2);
+    // Unlinked: the card goes, and nothing is asked for no key.
+    await rerender({ session: { ...other, work: null } });
+    await flush();
+    expect(screen.queryByTestId('ticket-card')).toBeNull();
+    expect(vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_ticket_card')).toHaveLength(2);
+  });
 });

@@ -176,4 +176,69 @@ describe('ResumeDialog', () => {
     expect(screen.getByTestId('resume-error')).toHaveTextContent(RESUME_UNSUPPORTED);
     expect((screen.getByTestId('resume-start') as HTMLButtonElement).disabled).toBe(true);
   });
+  it('Continue last conversation starts with mode last, no brief built or sent', async () => {
+    const row = session('h', 'dev-last', { id: 44 });
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_resume_plan')
+        return plan({
+          modes: [
+            { mode: 'last', ok: true },
+            { mode: 'brief', ok: true },
+            { mode: 'fresh', ok: true },
+          ],
+        });
+      if (cmd === 'resume_work') return row;
+      return null;
+    });
+    const onclose = vi.fn();
+    const onresumed = vi.fn();
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose, onresumed } });
+    await settle();
+    expect((screen.getByTestId('resume-mode-last') as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByTestId('resume-brief')).toBeNull();
+    const start = screen.getByTestId('resume-start') as HTMLButtonElement;
+    expect(start.disabled).toBe(false);
+    expect(start).toHaveTextContent('Continue last conversation');
+    await fireEvent.click(start);
+    await settle();
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === 'resume_work')!;
+    expect(call[1]).toEqual({
+      args: { key: 'ABC-1', mode: 'last', link_id: 5, host_alias: null, brief: null },
+    });
+    // The brief is never built for this mode.
+    const plans = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_resume_plan');
+    expect(plans.map((c) => (c[1] as { args: { with_brief: boolean } }).args.with_brief)).toEqual([false]);
+    expect(get(selectedSession)?.id).toBe(44);
+    expect(onresumed).toHaveBeenCalledTimes(1);
+    expect(onclose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a switch from brief back to last sends no brief, edited or not', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      const args = (a as { args: { with_brief?: boolean } }).args;
+      if (cmd === 'work_resume_plan')
+        return plan({
+          modes: [
+            { mode: 'last', ok: true },
+            { mode: 'brief', ok: true },
+            { mode: 'fresh', ok: true },
+          ],
+          ...(args.with_brief ? { brief: 'built brief' } : {}),
+        });
+      if (cmd === 'resume_work') return session('h', 'dev-x', { id: 45 });
+      return null;
+    });
+    render(ResumeDialog, { props: { workKey: 'ABC-1', initialMode: 'brief', onclose: () => {} } });
+    await settle();
+    await fireEvent.input(screen.getByTestId('resume-brief'), { target: { value: 'my own words' } });
+    await fireEvent.click(screen.getByTestId('resume-mode-last'));
+    await settle();
+    expect(screen.queryByTestId('resume-brief')).toBeNull();
+    await fireEvent.click(screen.getByTestId('resume-start'));
+    await settle();
+    const call = vi.mocked(invoke).mock.calls.find((c) => c[0] === 'resume_work')!;
+    expect(call[1]).toEqual({
+      args: { key: 'ABC-1', mode: 'last', link_id: 5, host_alias: null, brief: null },
+    });
+  });
 });
