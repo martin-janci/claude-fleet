@@ -558,7 +558,8 @@ impl FleetTools {
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
-        {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}.")]
+        {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
+        tidy; reopened.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -640,6 +641,17 @@ impl FleetTools {
             WorkAction::Today => ok_json_compact(
                 &w::today::today(&self.store, args.since, &scope).map_err(to_mcp_err)?,
             ),
+            WorkAction::Tidy => ok_json_compact(
+                &crate::service::work::tidy::work_tidy(
+                    &self.store,
+                    &scope,
+                    crate::service::catalog::now_secs(),
+                )
+                .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Reopened => ok_json_compact(
+                &crate::service::work::tidy::reopened(&self.store, &scope).map_err(to_mcp_err)?,
+            ),
         }
     }
 
@@ -648,7 +660,10 @@ impl FleetTools {
         suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
-        ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off.")]
+        ticket (project_ids: one per repo). handover {session_id}: ask it to \
+        write its hand-off. archive|unarchive (UI only), snooze {days}|never \
+        (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
+        kill when dirty).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -680,8 +695,10 @@ impl FleetTools {
             ));
         }
         let scope = self.org_scope(&caller)?;
-        if matches!(args.action.as_str(), "resume" | "start") {
+        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
             // Only ever gates the operator (D12): a session is about to exist.
+            // (`work_link` is `confirm: true` for M7's tidy kills; a person's
+            // start or resume is never gated.)
             self.confirm_gate(
                 "work_link",
                 args.confirm_nonce.as_deref(),
@@ -738,6 +755,56 @@ impl FleetTools {
             return ok_json(
                 &crate::service::work::trust_project(&args, &self.store).map_err(to_mcp_err)?,
             );
+        }
+        if args.action == "dismiss" {
+            // Reopened work is fleet-wide, not one host's to dismiss.
+            if caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "dismiss is not available to a per-host token",
+                    None,
+                ));
+            }
+            return ok_json(
+                &crate::service::work::dismiss_reopened(&args, &self.store).map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "tidy_apply" {
+            let items = args.items.clone().unwrap_or_default();
+            let summary = format!(
+                "tidy_apply {}",
+                items
+                    .iter()
+                    .map(|i| format!("{}:{}", i.session_id, i.action))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            // Kills: gated like kill_session when mcp.confirm_destructive is on.
+            if items
+                .iter()
+                .any(|i| matches!(i.action.as_str(), "kill" | "safe_kill"))
+            {
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    &summary,
+                    &caller,
+                )?;
+            }
+            let exec = crate::service::gc::RealGcExec {
+                store: std::sync::Arc::clone(&self.store),
+                ssh: std::sync::Arc::clone(&self.ssh),
+            };
+            let report = crate::service::work::tidy::tidy_apply(
+                &self.store,
+                &exec,
+                &items,
+                &scope,
+                crate::service::catalog::now_secs(),
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&report);
         }
         if args.action == "start" {
             if let Some(ids) = args.project_ids.as_ref().filter(|v| !v.is_empty()) {

@@ -1498,6 +1498,139 @@ async fn run_matrix(isolate: bool) {
     }
     let _ = (fx.item_a, fx.s_n);
 
+    // ── lifecycle (work graph M7, on M5) ───────────────────────────────
+    // Make s_b (B's, on h-b) and s_x (A's session carrying B's ticket, on
+    // h-a) tidy candidates: idle, their tickets done long ago. Earlier rows
+    // changed their links, so they are linked again here.
+    let x_link = {
+        let s = fx.t.store.lock().unwrap();
+        s.link_session_work(fx.s_b, WorkTarget::Item(fx.item_b), "manual")
+            .unwrap();
+        let x_link = s
+            .link_session_work(fx.s_x, WorkTarget::Item(fx.item_b), "manual")
+            .unwrap()
+            .id;
+        s.conn_for_test()
+            .execute_batch(&format!(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = 0 \
+                   WHERE id IN ({}, {}); \
+                 UPDATE work_items SET status_category = 'done', status_changed_at = 0 \
+                   WHERE id = {}; \
+                 UPDATE hosts SET reachable = 1;",
+                fx.s_b, fx.s_x, fx.item_b
+            ))
+            .unwrap();
+        x_link
+    };
+    m.row(
+        "work",
+        "tidy",
+        |_, _| json!({ "action": "tidy" }),
+        |fx, who, a| {
+            is_ok(who, a, "tidy");
+            let t = text(a);
+            let has = |id: i64| t.contains(&format!("\"session_id\":{id}"));
+            match who {
+                // Its own host's and org's candidates only; B's ticket on its
+                // own session is not named (the leak check covers the text).
+                Who::HostA => assert!(has(fx.s_x) && !has(fx.s_b), "{t}"),
+                Who::HostB => assert!(has(fx.s_b) && !has(fx.s_x), "{t}"),
+                Who::HostNone => assert!(!has(fx.s_b) && !has(fx.s_x), "{t}"),
+                _ => assert!(has(fx.s_b) && has(fx.s_x), "{who:?}: {t}"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "reopened",
+        |_, _| json!({ "action": "reopened" }),
+        |_, who, a| is_ok(who, a, "reopened"),
+    )
+    .await;
+    // Another host's session through tidy_apply: an unknown one, per item.
+    m.row(
+        "work_link",
+        "tidy_apply",
+        |fx, _| {
+            json!({ "action": "tidy_apply",
+                        "items": [{ "session_id": fx.s_b, "action": "snooze" }] })
+        },
+        |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_ok(who, a, "a batch always answers");
+            let refused = text(a).contains(&format!("session {} not found", fx.s_b));
+            assert_eq!(
+                refused,
+                matches!(who, Who::HostA | Who::HostNone),
+                "{who:?}: {a:?}"
+            );
+        },
+    )
+    .await;
+    for action in ["archive", "unarchive", "never"] {
+        m.row(
+            "work_link",
+            action,
+            |fx, who| json!({ "action": action, "session_id": own(fx, who) }),
+            |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                is_ok(who, a, "own session");
+            },
+        )
+        .await;
+    }
+    // B's link on host A's own session cannot be snoozed by host A: it
+    // reads as a link that does not exist.
+    m.row(
+        "work_link",
+        "snooze",
+        move |fx, _| json!({ "action": "snooze", "session_id": fx.s_x, "link_id": x_link }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA => is_code(who, a, "E_NOTFOUND", "another org's link"),
+                Who::HostB | Who::HostNone => is_code(who, a, "E_FORBIDDEN", "other host"),
+                _ => is_ok(who, a, "snooze"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "dismiss",
+        |fx, _| json!({ "action": "dismiss", "item_id": fx.item_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            if who.is_host() {
+                is_code(who, a, "E_FORBIDDEN", "fleet-wide");
+            } else {
+                is_ok(who, a, "dismiss");
+            }
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute_batch(&format!(
+                "UPDATE sessions SET claude_status = NULL, idle_since = NULL \
+                   WHERE id IN ({}, {}); \
+                 UPDATE work_links SET archived_at = NULL, tidy_snoozed_until = NULL, \
+                   tidy_never = 0;",
+                fx.s_b, fx.s_x
+            ))
+            .unwrap();
+    }
+
     // Coverage: every action of the three tools has a row.
     let want: BTreeSet<(String, String)> = WORK_ACTIONS
         .iter()

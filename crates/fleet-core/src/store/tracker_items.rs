@@ -338,6 +338,28 @@ impl Store {
                         rusqlite::params![now, id],
                     )?;
                 }
+                // Work graph M7: a transition OUT of done is a reopen (an
+                // event, recorded once); done again settles it.
+                let reopened = changed
+                    && old.status_category == "done"
+                    && matches!(after.status_category.as_str(), "todo" | "in_progress");
+                if changed && after.status_category == "done" {
+                    self.conn.execute(
+                        "UPDATE work_items SET reopened_at = NULL WHERE id = ?1",
+                        rusqlite::params![id],
+                    )?;
+                }
+                if reopened {
+                    self.record_reopened(
+                        id,
+                        after.key.as_deref(),
+                        old.status_name.as_deref().unwrap_or("done"),
+                        after
+                            .status_name
+                            .as_deref()
+                            .unwrap_or(&after.status_category),
+                    )?;
+                }
                 let status_change = (changed && status_moved).then(|| {
                     (
                         old.status_name.unwrap_or_default(),

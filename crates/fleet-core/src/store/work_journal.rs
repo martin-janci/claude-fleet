@@ -28,6 +28,11 @@ pub const JOURNAL_KINDS: &[&str] = &[
     // A tracker item's status moved (work graph M3), on the conversation of
     // each live session working on it.
     "status_change",
+    // The item moved out of `done` (work graph M7): on the live sessions'
+    // conversations, else the newest past session's last one.
+    "reopened",
+    // Tidy-up acted on the session (work graph M7): archive, kill, safe kill.
+    "tidy",
 ];
 
 /// `source` values.

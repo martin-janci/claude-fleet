@@ -444,6 +444,22 @@ impl OrgAction {
     }
 }
 
+/// `auto_tidy` of `add_org` / `update_org` (work graph M7): `on` / `off`
+/// override `work.auto_tidy` for the org, `inherit` clears the override.
+/// `None` (absent) leaves it as it is.
+fn parse_auto_tidy(v: Option<&str>) -> Result<Option<Option<bool>>, IpcError> {
+    match v.map(str::trim) {
+        None => Ok(None),
+        Some("on") => Ok(Some(Some(true))),
+        Some("off") => Ok(Some(Some(false))),
+        Some("inherit") => Ok(Some(None)),
+        Some(other) => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("auto_tidy is on, off or inherit, not {other:?}"),
+        )),
+    }
+}
+
 fn need<T: Clone>(v: &Option<T>, action: &str, field: &str) -> Result<T, IpcError> {
     v.clone()
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("{action} needs {field}")))
@@ -467,17 +483,32 @@ pub fn admin(
         OrgAction::ListOrgs => {
             return to_json(&org_details_locked(s, &OrgScope::All)?);
         }
-        OrgAction::AddOrg => to_json(&s.add_org(
-            &need(&args.name, name, "name")?,
-            args.color.as_deref(),
-            args.isolate_sessions.unwrap_or(false),
-        )?)?,
-        OrgAction::UpdateOrg => to_json(&s.update_org(
-            need(&args.org_id, name, "org_id")?,
-            args.name.as_deref(),
-            args.color.as_deref(),
-            args.isolate_sessions,
-        )?)?,
+        OrgAction::AddOrg => {
+            let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
+            let org = s.add_org(
+                &need(&args.name, name, "name")?,
+                args.color.as_deref(),
+                args.isolate_sessions.unwrap_or(false),
+            )?;
+            to_json(&match auto {
+                Some(a) => s.set_org_auto_tidy(org.id, a)?,
+                None => org,
+            })?
+        }
+        OrgAction::UpdateOrg => {
+            let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
+            let id = need(&args.org_id, name, "org_id")?;
+            let org = s.update_org(
+                id,
+                args.name.as_deref(),
+                args.color.as_deref(),
+                args.isolate_sessions,
+            )?;
+            to_json(&match auto {
+                Some(a) => s.set_org_auto_tidy(id, a)?,
+                None => org,
+            })?
+        }
         OrgAction::RemoveOrg => {
             let id = need(&args.org_id, name, "org_id")?;
             let org = s.get_org(id)?.ok_or_else(|| not_found("org", id))?;

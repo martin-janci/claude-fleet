@@ -530,12 +530,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // `resume` starts a session: the lifecycle deadline.
+    // `resume` starts a session: the lifecycle deadline. Confirm-gated for
+    // `tidy_apply`'s kills (work graph M7), like `kill_session`; every other
+    // action passes through the gate untouched, as `work_admin`'s do.
     ToolPolicy {
         name: "work_link",
         access: Access::Client,
         readonly: false,
-        confirm: false,
+        confirm: true,
         deadline: Deadline::Lifecycle,
     },
     // Trackers and their credentials (work graph M3): fleet admin, so the
@@ -1455,10 +1457,11 @@ mod tests {
             "resolve_move",
             "apply_sync",
             "work_admin",
+            "work_link",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 10);
+        assert_eq!(CONFIRM_TOOLS.len(), 11);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }

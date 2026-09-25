@@ -67,6 +67,7 @@ fn summary(org: Option<i64>) -> WorkSummary {
         preselected: false,
         suggestions: 0,
         org_id: org,
+        archived_at: None,
     }
 }
 

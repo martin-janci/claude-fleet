@@ -825,6 +825,37 @@ What else to know:
 - **A host in no org sees only unassigned work.** Assign every host of a
   company before connecting a second company's tracker.
 
+## Tidy-up and auto-tidy
+
+The hub (or a standalone desktop) plans tidy-up on every GC sweep
+(`gc.sweep_interval_secs`) and on request (`work { action: "tidy" }`, the
+desktop's "Tidy up · n"). Suggestions only, by default. The settings, all
+under Settings → Work → Lifecycle or `set_fleet_setting`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `work.tidy_done_days` | `2` | a linked ticket must have been done this many days (from the tracker transition) |
+| `work.tidy_idle_hours` | `4` | a session must have been idle this long before any reason suggests it |
+| `work.auto_tidy` | `false` | the sweep acts on the allowed reasons by itself |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | comma list of `done_idle`, `pr_merged_idle`, `not_planned` |
+
+With `work.auto_tidy` on, the sweep **safe-kills** (or, for a session with
+no worktree fleet can inspect, archives) the candidates whose primary reason
+is allowed — never a plain kill, so a duplicate worktree and a lost session
+stay suggestions. Every action is written to the session's timeline
+(`gc_tidied`, or `gc_failed`) and to its work journal (`tidy`). The
+protections apply to auto-tidy exactly as to a person's confirm: working,
+blocked, stuck or dialog-waiting sessions, sessions linked to in-progress
+work, the controller and the operator, anything prompted or attached to in
+the last hour, and background agents with open tasks are never touched. The
+idle killer (`gc.enabled`, `gc.*_idle_secs`) is separate and unchanged.
+
+**Per organisation.** An org can override `work.auto_tidy` for its own
+sessions: `fleet-hub org set 1 --auto-tidy on|off|inherit` (or `work_admin
+{ update_org, org_id, auto_tidy }`); `inherit` (the default) follows the
+fleet-wide setting. The allowed reasons and thresholds stay fleet-wide. A
+per-host token sees and applies only its own host's candidates of its org.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
@@ -1491,7 +1522,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 165 commands, 62 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

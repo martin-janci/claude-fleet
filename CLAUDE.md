@@ -107,7 +107,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 165
+  verdict is written down once, in `backend/verdicts.rs`, for all 173
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -209,10 +209,19 @@ credential only ever on stdin), migration 051 (`tracker_views.sync_mark`,
 `trackers.settings`). A new provider must pass the conformance suite
 (`service/trackers/conformance.rs`, `conformance_suite!`) and
 `tests_isolation_providers.rs`.
+Work graph M7 (self-cleaning lifecycle) is landed: the pure planner
+`service/gc/tidy.rs` (reasons, hard-coded protections), migrations 052
+(UI-only archive, snooze / never per link, `sessions.last_touch_at`,
+`work_items.reopened_at`) and 053 (`orgs.auto_tidy`), `work { tidy | reopened }` and
+`work_link { archive | unarchive | snooze | never | dismiss | tidy_apply }`,
+and auto-tidy in the GC sweep behind `work.auto_tidy` (OFF; safe kill only),
+overridable per org. Tidy-up suggests; it never kills a dirty tree except
+through safe kill, and a per-host token sees only its host's and org's
+candidates.
 Work graph M9.1 / M9.2 are landed: the Today view (`work { action: today }`,
 Details' empty state and ⌘⇧T, a plain-text Copy standup) and the ticket
 context card (`work { action: card }`, acceptance criteria from the cache,
-Insert into composer with the hub-fenced `composer_text` — never sent). The
+Insert into composer with the hub-fenced `composer_text` — never sent).
 M9.7 (the operator's starts and kills always confirmed; refused on a hub),
 M9.3 (agent-written handover on demand, `work_link { action: handover }`)
 and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed

@@ -168,6 +168,9 @@ export interface SessionWork {
   suggestions?: number;
   /** The link's org (work graph M5): its tracker's, else the session's. */
   org_id?: number | null;
+  /** Work graph M7: archived from the UI at this unix second — the session
+   *  collapses into its group's Done while tmux keeps running. */
+  archived_at?: number | null;
 }
 
 type UsageFields = Partial<

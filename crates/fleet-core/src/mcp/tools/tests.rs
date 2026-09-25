@@ -2975,6 +2975,12 @@ fn the_served_definition_budget_stays_bounded() {
     // 2026-09-24 (+627); plus 100.
     // Work graph M5.3: `work_link` gains `force_cross_org` (the cross-org
     // integrity override). Measured at 69,099 on 2026-09-24 (+87); plus 100.
+    // Work graph M7.2 (merged onto M5): `work` gains tidy / reopened,
+    // `work_link` gains archive / unarchive / snooze / never / dismiss /
+    // tidy_apply (three new parameters: days, items, confirm_nonce), and is
+    // now confirm-gated for tidy_apply's kills; no new tool. M7 alone
+    // measured +639; with M5's `work_admin` gaining `auto_tidy` (the per-org
+    // override), measured at 69,759 on 2026-09-24 (+660).
     // Work graph M6.1: `work_admin` gains `transport` (direct | via_host |
     // via_cli, so GitHub is read through `gh` on a host) and `settings`
     // (the provider's admin settings object); `provider` lists the five
@@ -2986,9 +2992,16 @@ fn the_served_definition_budget_stays_bounded() {
     // (`WORK_ACTIONS`, `WORK_LINK_ACTIONS`), so the phone draws a button only
     // for an action the hub serves; the two doc lines that listed them by
     // hand were cut to "Default links." / "The decision.". Measured at 69,171
-    // on 2026-09-24 (+72); plus 100.
-    // M6.1 and M8.0 merged: measured at 69,360 on 2026-09-24 (M5's 69,099
-    // + 189 for M6.1 + 72 for M8.0); plus 100.
+    // on 2026-09-24 on top of M5 alone (+72).
+    // M7 merged with M8.0 (M7's actions now in the enums): measured at
+    // 70,020 on 2026-09-24 (+261 over M7-on-M5; the enums list M7's eight
+    // actions too).
+    // M6.1 and M8.0 merged (main): measured at 69,360 on 2026-09-24 (M5's
+    // 69,099 + 189 for M6.1 + 72 for M8.0).
+    // M6 (main, #266) merged into M7: `work_admin` carries both M6's
+    // `transport` / `settings` and M7's `auto_tidy`, the enums M7's actions.
+    // Measured at 70,209 on 2026-09-25 (M7-on-M8.0 70,020 + 189 for M6.1);
+    // plus 100.
     // Work graph M9.1: `work` gains `today` (the Today view's digest) and
     // one parameter, `since`. No new tool. Measured at 69,265 on 2026-09-25
     // (+94); plus 100.
@@ -3006,7 +3019,10 @@ fn the_served_definition_budget_stays_bounded() {
     // the headroom, not raised.
     // Work graph M9.6: `work_link` start gains `project_ids` (a multi-repo
     // start). Measured at 69,998 on 2026-09-25 (+133); plus 100.
-    const BUDGET_BYTES: usize = 70_098;
+    // M7 (main, #267) merged into M9: measured at 70,765 on 2026-09-25
+    // (M7-on-M6's 70,209 + 556 for M9.1-M9.7; M7 had already added
+    // `confirm_nonce` to `work_link`); plus 100.
+    const BUDGET_BYTES: usize = 70_865;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

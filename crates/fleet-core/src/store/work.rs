@@ -220,6 +220,11 @@ pub struct WorkSummary {
     /// `None` = unassigned. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    // --- lifecycle (work graph M7); absent from an older hub.
+    /// The live session was archived from the UI (collapsed into its
+    /// group's Done; tmux keeps running) at this unix second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
 }
 
 fn is_zero(n: &u32) -> bool {

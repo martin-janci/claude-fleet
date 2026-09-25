@@ -316,6 +316,12 @@ export const ROUTED_ACTIONS = [
   'start_work',
   'start_work_multi',
   'request_work_handover',
+  'tidy_apply',
+  'archive_session_work',
+  'unarchive_session_work',
+  'snooze_tidy',
+  'never_tidy',
+  'dismiss_reopened',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];
