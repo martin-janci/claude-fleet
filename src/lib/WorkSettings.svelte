@@ -79,6 +79,14 @@
     if (initialUrl) connecting = true;
   });
 
+  /** The credential leaves this component's state: on Cancel and on every
+   *  way out of connect() that is not success, so nothing is pre-filled the
+   *  next time the form opens (the token went to the backend once, or never). */
+  function forgetCredential() {
+    token = '';
+    email = '';
+  }
+
   async function connect() {
     if (!canConnect || !provider || !info || busy) return;
     busy = true;
@@ -95,6 +103,7 @@
       if (!a.ok) {
         busy = false;
         error = a.error.message;
+        forgetCredential();
         return;
       }
       row = a.value;
@@ -110,6 +119,7 @@
       if (!u.ok) {
         busy = false;
         error = u.error.message;
+        forgetCredential();
         return;
       }
       row = u.value;
@@ -125,6 +135,7 @@
       if (!c.ok) {
         busy = false;
         error = c.error.message;
+        forgetCredential();
         return;
       }
     }
@@ -133,15 +144,17 @@
     await loadTrackers();
     if (!t.ok) {
       error = t.error.message;
+      forgetCredential();
       return;
     }
     if (!t.value.ok) {
       error = t.value.error ?? 'the test failed';
+      forgetCredential();
       return;
     }
     connecting = false;
     url = '';
-    email = '';
+    forgetCredential();
     picked = '';
     extraCa = '';
     allowPrivate = false;
@@ -354,7 +367,15 @@
         <button class="btn primary" type="submit" data-testid="connect-submit" disabled={!canConnect || busy}
           >{busy ? 'Connecting…' : 'Connect'}</button
         >
-        <button class="btn" type="button" onclick={() => (connecting = false)}>Cancel</button>
+        <button
+          class="btn"
+          type="button"
+          data-testid="connect-cancel"
+          onclick={() => {
+            connecting = false;
+            forgetCredential();
+          }}>Cancel</button
+        >
       </div>
     </form>
   {/if}

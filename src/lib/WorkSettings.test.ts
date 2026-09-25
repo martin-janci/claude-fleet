@@ -116,6 +116,35 @@ describe('Settings → Work, standalone', () => {
     ).toEqual(['list_trackers']);
   });
 
+  it('forgets the token and email on Cancel and on a failed add, so nothing is pre-filled next time', async () => {
+    const inv = route([]);
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), { target: { value: 'https://acme.atlassian.net' } });
+    await fireEvent.input(screen.getByTestId('connect-email'), { target: { value: 'me@acme.com' } });
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('connect-cancel'));
+    await tick();
+    expect(screen.queryByTestId('connect-form')).toBeNull();
+    await fireEvent.click(screen.getByTestId('connect-jira'));
+    await tick();
+    expect((screen.getByTestId('connect-token') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-email') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-submit') as HTMLButtonElement).disabled).toBe(true);
+    // A failed add_tracker keeps the form open with the error, but not the secret.
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'add_tracker') throw { code: 'E_INVALID', message: 'not a tracker site' };
+      if (cmd === 'list_trackers') return [];
+      return null;
+    });
+    await fireEvent.input(screen.getByTestId('connect-email'), { target: { value: 'me@acme.com' } });
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(screen.getByTestId('connect-error').textContent).toMatch(/not a tracker site/));
+    expect((screen.getByTestId('connect-token') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-email') as HTMLInputElement).value).toBe('');
+  });
+
   it('shows a failed test in the form', async () => {
     route([], {
       add_tracker: row({ state: 'unconfigured' }),
