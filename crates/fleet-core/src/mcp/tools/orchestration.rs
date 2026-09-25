@@ -680,6 +680,24 @@ impl FleetTools {
             ));
         }
         let scope = self.org_scope(&caller)?;
+        if matches!(args.action.as_str(), "resume" | "start") {
+            // Only ever gates the operator (D12): a session is about to exist.
+            self.confirm_gate(
+                "work_link",
+                args.confirm_nonce.as_deref(),
+                &format!(
+                    "{} key={:?} url={:?} item_id={:?} host={:?} project_id={:?} mode={:?}",
+                    args.action,
+                    args.key,
+                    args.url,
+                    args.item_id,
+                    args.host_alias,
+                    args.project_id,
+                    args.mode
+                ),
+                &caller,
+            )?;
+        }
         if args.action == "resume" {
             // The host fence (a per-host token resumes only onto its own
             // host) and the org fence are inside `resume_work`'s scope.

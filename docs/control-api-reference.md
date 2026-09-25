@@ -175,13 +175,13 @@ Parameters: `host_alias`, `name`, `prompt`, `requester_session_id`
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts. Optional kind="shell" runs a plain interactive shell instead (see new_shell_session for the same thing with start_command); optional friendly_name sets the sidebar label (omit / empty to derive one from the branch).
 
-Parameters: `base_branch`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `base_branch`, `confirm_nonce`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
 Create a plain-shell tmux session on a host (no Claude Code in the pane — an interactive login shell). Same project/worktree plumbing as new_session, plus an optional start_command that runs once before the shell drops to an interactive prompt; the pane stays alive after it exits so you can attach or send-keys to it. Steer it with send_prompt (typed text + Enter) and read it with capture_session.
 
-Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
+Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
 
 ### `operator_status`
 
@@ -349,7 +349,7 @@ Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
 
 Ask a running Claude session to safely persist its work (commit + push), then arm deletion of its worktree + tmux session. Use when retiring a session whose worktree may hold unpushed work and you can wait for it to finish. Returns the row with safe_kill_state=requested; the actual delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', 'failed') arrive via row events. Address the session with session_id OR host_alias + tmux_name.
 
-Parameters: `host_alias`, `session_id`, `tmux_name`
+Parameters: `confirm_nonce`, `host_alias`, `session_id`, `tmux_name`
 
 ### `scan_assets`
 
@@ -487,7 +487,7 @@ Parameters: `action`, `auth_kind`, `color`, `confirm_nonce`, `credential_ref`, `
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket.
 
-Parameters: `action`, `brief`, `force_cross_org`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `force_cross_org`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 

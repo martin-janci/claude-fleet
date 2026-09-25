@@ -1762,6 +1762,13 @@ deliberately.
   and the hub logs a warning naming the tool and nonce. A `state.db` copied
   from a desktop can carry it switched on; `fleet-hub serve` logs a warning
   at startup when it is.
+- **The operator's starts and kills.** The UX agent's operator session
+  must have its session starts (`new_session`, `new_shell_session`,
+  `work_link` `start` / `resume`) and kills approved by a person, whatever
+  `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
+  no approver, so an operator homed on a hub-served fleet is refused those
+  calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from
+  the sidebar.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions

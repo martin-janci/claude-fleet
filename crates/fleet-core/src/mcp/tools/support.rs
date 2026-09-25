@@ -974,11 +974,25 @@ impl FleetTools {
         caller: &Caller,
     ) -> Result<(), McpError> {
         debug_assert!(
-            guard::needs_confirmation(tool),
+            guard::needs_confirmation(tool) || guard::OPERATOR_CONFIRMS.contains(&tool),
             "{tool} is not in guard::CONFIRM_TOOLS"
         );
-        if !self.confirm_enabled()? {
+        // The operator's starts and kills are always confirmed (D12); for
+        // everyone else only the `confirm: true` tools, and only with the
+        // toggle on.
+        let forced = guard::operator_must_confirm(caller.is_operator(), tool);
+        if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
             return Ok(());
+        }
+        if forced && !self.guards.approver {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "{tool} from the operator needs a person to approve it, and this hub has \
+                     no approver; ask the person to do it from the sidebar"
+                ),
+                None,
+            ));
         }
         let confirms = &self.guards.confirms;
         if let Some(n) = nonce {
@@ -1008,8 +1022,13 @@ impl FleetTools {
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
             format!(
-                "{tool} needs approval on the claude-fleet desktop (mcp.confirm_destructive is on); \
+                "{tool} needs approval on the claude-fleet desktop ({}); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
+                if forced {
+                    "the operator's starts and kills always do"
+                } else {
+                    "mcp.confirm_destructive is on"
+                },
                 req.nonce
             ),
             Some(serde_json::json!({ "confirm_nonce": req.nonce })),

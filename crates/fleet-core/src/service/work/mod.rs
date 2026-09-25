@@ -117,6 +117,9 @@ pub struct WorkLinkArgs {
     /// Link across orgs anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_cross_org: Option<bool>,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 /// `work_link { action: trust_project }`: the projects whose branch keys

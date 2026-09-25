@@ -113,6 +113,11 @@ pub struct McpGuards {
     /// one write path. Like the confirmations it outlives a server restart,
     /// so a code minted before a port change is still good.
     pub pairings: Arc<PendingPairings>,
+    /// Someone can answer a confirmation here (the desktop's dialog). A hub
+    /// has no approver: a call that MUST be confirmed there — the
+    /// operator's starts and kills (work graph M9.7) — is refused outright
+    /// rather than handed a nonce nobody can approve.
+    pub approver: bool,
 }
 
 impl McpGuards {
@@ -123,7 +128,14 @@ impl McpGuards {
             confirms: Arc::new(PendingConfirms::new()),
             notify,
             pairings: Arc::new(PendingPairings::new()),
+            approver: true,
         }
+    }
+
+    /// The same guards for a server with no one to approve a confirmation.
+    pub fn without_approver(mut self) -> Self {
+        self.approver = false;
+        self
     }
 }
 

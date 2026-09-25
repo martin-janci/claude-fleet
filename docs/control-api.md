@@ -966,7 +966,12 @@ automatically on app start.
   approve the request in the desktop dialog, then retry the call with that
   nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
   `broadcast_prompt` including a digest of the content / prompt — so an
-  approval cannot be replayed with different text.
+  approval cannot be replayed with different text. **The operator** (the UX
+  agent's own client token, `ux-agent`) is gated whatever the toggle says
+  (work graph M9.7, decision D12): its `new_session`, `new_shell_session`,
+  `safe_kill_session`, `work_link` `start` / `resume` and every tool above
+  return `E_CONFIRM_REQUIRED` until a person approves them on the desktop;
+  on a hub, which has no approver, they are refused with `E_FORBIDDEN`.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

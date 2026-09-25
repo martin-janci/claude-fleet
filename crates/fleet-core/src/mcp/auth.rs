@@ -96,6 +96,20 @@ impl Caller {
         self.client.is_some()
     }
 
+    /// True for the UX agent's operator session: the paired client token
+    /// `ensure_operator` mints under [`OPERATOR_CLIENT_NAME`]. Its session
+    /// starts and kills always need a person's approval (work graph M9.7,
+    /// decision D12).
+    ///
+    /// [`OPERATOR_CLIENT_NAME`]: crate::service::operator::OPERATOR_CLIENT_NAME
+    pub fn is_operator(&self) -> bool {
+        self.host_alias.is_none()
+            && self
+                .client
+                .as_ref()
+                .is_some_and(|c| c.name == crate::service::operator::OPERATOR_CLIENT_NAME)
+    }
+
     /// True for a paired client the operator has vouched for
     /// (`client_tokens.trusted_at` set): its text is the operator's own, so
     /// the untrusted-content marker is left off. Never true for the master

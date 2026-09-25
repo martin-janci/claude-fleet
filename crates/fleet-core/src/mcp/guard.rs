@@ -784,6 +784,25 @@ pub fn needs_confirmation(name: &str) -> bool {
     policy(name).is_some_and(|p| p.confirm)
 }
 
+/// Tools that start or retire sessions without being `confirm: true`. For
+/// the operator (`Caller::is_operator`) these — and every `confirm: true`
+/// tool — need a person's approval whatever `mcp.confirm_destructive` says
+/// (work graph M9.7, decision D12). For anyone else they are ungated.
+/// `work_link` is gated only for `start` / `resume`, the actions that
+/// create a session.
+pub const OPERATOR_CONFIRMS: &[&str] = &[
+    "new_session",
+    "new_shell_session",
+    "safe_kill_session",
+    "work_link",
+];
+
+/// Whether a call by this caller must be approved on the desktop even with
+/// `mcp.confirm_destructive` off.
+pub fn operator_must_confirm(is_operator: bool, name: &str) -> bool {
+    is_operator && (needs_confirmation(name) || OPERATOR_CONFIRMS.contains(&name))
+}
+
 /// Fleet-administration tools: reachable with the master token only — see
 /// [`Access::Master`].
 pub fn is_admin_tool(name: &str) -> bool {
