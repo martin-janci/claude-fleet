@@ -377,6 +377,29 @@ impl Store {
             .optional()?)
     }
 
+    /// The transcript path a conversation on `host` recorded for
+    /// `claude_session_id`, newest first — as the hook stored it (validated
+    /// on write; readers validate again). `None` once every session that
+    /// held it is gone (conversations cascade with their session).
+    pub fn conversation_transcript_path_on_host(
+        &self,
+        host: &str,
+        claude_session_id: &str,
+    ) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT c.transcript_path FROM conversations c \
+                 JOIN sessions s ON s.id = c.session_id \
+                 WHERE s.host_alias = ?1 AND c.claude_session_id = ?2 \
+                   AND c.transcript_path IS NOT NULL \
+                 ORDER BY c.started_at DESC, c.id DESC LIMIT 1",
+                rusqlite::params![host, claude_session_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Count one turn of the conversation.
     pub fn conversation_bump_turns(
         &self,
