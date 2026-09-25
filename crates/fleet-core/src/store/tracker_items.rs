@@ -108,6 +108,63 @@ struct Visible {
     meta: Option<String>,
 }
 
+impl Visible {
+    /// What a session row's `work_suggested` summary reads of the item
+    /// (`SESSION_COLUMNS` in `rows.rs`): key, title, status and url. The
+    /// tracker (for `org_id`) never changes on an update.
+    fn suggested_view(
+        &self,
+    ) -> (
+        &Option<String>,
+        &str,
+        &Option<String>,
+        &str,
+        &Option<String>,
+    ) {
+        (
+            &self.key,
+            &self.title,
+            &self.status_name,
+            &self.status_category,
+            &self.url,
+        )
+    }
+
+    /// Which parts of a session row a change from `self` to `after` moves.
+    fn session_change(&self, after: &Visible) -> SessionChange {
+        let suggested = self.suggested_view() != after.suggested_view();
+        SessionChange {
+            // `work` reads the same plus whether the item is unavailable.
+            primary: suggested || self.unavailable != after.unavailable,
+            suggested,
+            // `work_rejected` lists keys only.
+            rejected: self.key != after.key,
+        }
+    }
+}
+
+/// The parts of a session row a tracker item change moves (see
+/// `SESSION_COLUMNS` in `rows.rs`): `work` (the primary link), `work_suggested`
+/// (the top suggestion) and `work_rejected` (keys).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionChange {
+    primary: bool,
+    suggested: bool,
+    rejected: bool,
+}
+
+impl SessionChange {
+    const ALL: SessionChange = SessionChange {
+        primary: true,
+        suggested: true,
+        rejected: true,
+    };
+
+    fn any(self) -> bool {
+        self.primary || self.suggested || self.rejected
+    }
+}
+
 /// The trackers that may answer `key` (M6): a GitHub `owner/repo#n` the
 /// GitHub trackers whose scope covers the repository; an `asana:<gid>` every
 /// Asana tracker (the gid is global, the tracker that has it answers); a
@@ -295,11 +352,16 @@ impl Store {
             meta: meta_json.clone(),
         };
 
-        let (id, changed, status_change) = match (existing, before) {
+        let (id, changed, status_change, session_change) = match (existing, before) {
             (Some(id), Some((old, _))) => {
                 // `meta` holds the description too, which a reader of a
                 // lookup sees; it counts.
                 let changed = old != after;
+                let session_change = if changed {
+                    old.session_change(&after)
+                } else {
+                    SessionChange::default()
+                };
                 let status_moved = old.status_category != after.status_category
                     || old.status_name != after.status_name;
                 if changed {
@@ -366,7 +428,7 @@ impl Store {
                         after.status_name.clone().unwrap_or_default(),
                     )
                 });
-                (id, changed, status_change)
+                (id, changed, status_change, session_change)
             }
             _ => {
                 self.conn.execute(
@@ -397,11 +459,16 @@ impl Store {
                         now
                     ],
                 )?;
-                (self.conn.last_insert_rowid(), true, None)
+                (
+                    self.conn.last_insert_rowid(),
+                    true,
+                    None,
+                    SessionChange::ALL,
+                )
             }
         };
         if changed {
-            self.emit_work_item(id)?;
+            self.emit_work_item(id, session_change)?;
         }
         Ok(UpsertOutcome {
             id,
@@ -411,24 +478,48 @@ impl Store {
     }
 
     /// Emit `work:item`, then `session:updated` for every live session
-    /// whose primary work is this item (its `work` summary carries the
-    /// item's title and status).
-    fn emit_work_item(&self, id: i64) -> Result<(), IpcError> {
+    /// whose row shows this item where `change` says it moved: as its
+    /// primary work (`work`: key, title, status, url, availability), as its
+    /// top suggestion (`work_suggested`: the same minus availability), or
+    /// as a rejected key (`work_rejected`).
+    ///
+    /// Nothing for the sessions when only what no session row shows moved
+    /// (description, assignee, `updated`: a comment bumps it): that frame
+    /// would repeat the row with only `row_version` changed, and it was most
+    /// of the session frames a sync sent (work graph M10.6, measured in
+    /// `docs/superpowers/reviews/2026-09-25-replay-ring-pressure.md`).
+    fn emit_work_item(&self, id: i64, change: SessionChange) -> Result<(), IpcError> {
         if let Some(row) = self.get_work_item(id)? {
             self.bus
                 .emit(&crate::events::RowChange::WorkItemUpdated(row));
         }
-        let sessions: Vec<i64> = {
+        if !change.any() {
+            return Ok(());
+        }
+        // Every live session with any live link to the item, and whether
+        // one of those links is a rejection.
+        let candidates: Vec<(i64, bool)> = {
             let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT p.session_id FROM work_links l \
+                "SELECT p.session_id, MAX(l.state = 'rejected') FROM work_links l \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-                 WHERE l.item_id = ?1 AND l.ended_at IS NULL AND l.is_primary = 1 \
-                   AND p.session_id IS NOT NULL",
+                 WHERE l.item_id = ?1 AND l.ended_at IS NULL AND p.session_id IS NOT NULL \
+                 GROUP BY p.session_id ORDER BY p.session_id",
             )?;
-            let rows = stmt.query_map(rusqlite::params![id], |r| r.get(0))?;
+            let rows = stmt.query_map(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for sid in sessions {
+        for (sid, rejected) in candidates {
+            let Some(row) = self.get_session_by_id(sid)? else {
+                continue;
+            };
+            let on =
+                |w: &Option<super::WorkSummary>| w.as_ref().and_then(|w| w.item_id) == Some(id);
+            let shows = (change.primary && on(&row.work))
+                || (change.suggested && on(&row.work_suggested))
+                || (change.rejected && rejected);
+            if !shows {
+                continue;
+            }
             self.conn.execute(
                 "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
                 rusqlite::params![sid],
@@ -446,6 +537,18 @@ impl Store {
         external_id: &str,
         reason: &str,
     ) -> Result<bool, IpcError> {
+        // Only the stamp shows on a session row (its primary work), not the
+        // reason; a suggestion does not show it at all.
+        let was_available: bool = self
+            .conn
+            .query_row(
+                "SELECT unavailable_at IS NULL FROM work_items \
+                 WHERE tracker_id = ?1 AND external_id = ?2",
+                rusqlite::params![tracker_id, external_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
         let n = self.conn.execute(
             "UPDATE work_items SET unavailable_at = ?1, unavailable_reason = ?2, updated_at = ?1 \
              WHERE tracker_id = ?3 AND external_id = ?4 \
@@ -454,7 +557,11 @@ impl Store {
         )?;
         if n > 0 {
             if let Some(id) = self.tracker_item_id(tracker_id, external_id)? {
-                self.emit_work_item(id)?;
+                let change = SessionChange {
+                    primary: was_available,
+                    ..SessionChange::default()
+                };
+                self.emit_work_item(id, change)?;
             }
         }
         Ok(n > 0)
@@ -992,6 +1099,137 @@ mod tests {
         s.upsert_tracker_item(t, &write("70", "ABC-7", ("Done", "done")))
             .unwrap();
         assert_eq!(bus.names(), vec!["work:item", "session:updated"]);
+        // What the session row does not show (description, assignee, a
+        // comment's `updated`) moves the item only: no session frame, no
+        // `row_version` bump (M10.6).
+        let version = s.get_session_by_id(sid).unwrap().unwrap().row_version;
+        bus.take();
+        let mut quiet = write("70", "ABC-7", ("Done", "done"));
+        quiet.description = Some("New acceptance criteria".into());
+        quiet.assignees = vec!["Dev B".into()];
+        quiet.updated_ext = Some(200);
+        assert!(s.upsert_tracker_item(t, &quiet).unwrap().changed);
+        assert_eq!(bus.names(), vec!["work:item"]);
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.row_version, version);
+        // Unavailable shows on the row once; a new reason does not.
+        bus.take();
+        assert!(s.mark_tracker_item_unavailable(t, "70", "gone").unwrap());
+        assert_eq!(bus.names(), vec!["work:item", "session:updated"]);
+        assert!(
+            s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work
+                .unwrap()
+                .unavailable
+        );
+        bus.take();
+        assert!(s.mark_tracker_item_unavailable(t, "70", "other").unwrap());
+        assert_eq!(bus.names(), vec!["work:item"]);
+        // Seen again: available, and the row follows.
+        bus.take();
+        s.upsert_tracker_item(t, &quiet).unwrap();
+        assert_eq!(bus.names(), vec!["work:item", "session:updated"]);
+        assert!(
+            !s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work
+                .unwrap()
+                .unavailable
+        );
+    }
+
+    #[test]
+    fn a_suggested_or_rejected_item_reaches_the_rows_that_show_it() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        let item = s
+            .upsert_tracker_item(t, &write("80", "ABC-8", ("To Do", "todo")))
+            .unwrap()
+            .id;
+        // `sug`: ABC-8 is its top suggestion. `rej`: it rejected ABC-8.
+        // `other`: its primary work is another item.
+        let sug = session(&s, "sug");
+        let link = s
+            .link_session_work(sug, WorkTarget::Item(item), "manual")
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE work_links SET state = 'suggested', is_primary = 0 WHERE id = ?1",
+                [link.id],
+            )
+            .unwrap();
+        let rej = session(&s, "rej");
+        s.reject_session_work(rej, WorkTarget::Item(item)).unwrap();
+        let other = session(&s, "other");
+        s.upsert_tracker_item(t, &write("90", "ABC-9", ("To Do", "todo")))
+            .unwrap();
+        s.link_session_work(other, WorkTarget::Key("ABC-9"), "manual")
+            .unwrap();
+        let suggested = |s: &Store| {
+            s.get_session_by_id(sug)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+                .unwrap()
+        };
+        assert_eq!(suggested(&s).item_id, Some(item));
+
+        // A title and status move reaches the suggestion; a rejection shows
+        // only the key, so it stays quiet.
+        bus.take();
+        let mut next = write("80", "ABC-8", ("In Progress", "in_progress"));
+        next.title = "Renamed".into();
+        s.upsert_tracker_item(t, &next).unwrap();
+        assert_eq!(
+            bus.take(),
+            vec![
+                format!("work:item:{item}"),
+                format!("session:updated:{sug}")
+            ]
+        );
+        let w = suggested(&s);
+        assert_eq!(
+            (w.title.as_str(), w.status_category.as_deref()),
+            ("Renamed", Some("in_progress"))
+        );
+
+        // What no row shows: nothing but the item.
+        let version = s.get_session_by_id(sug).unwrap().unwrap().row_version;
+        let mut quiet = next.clone();
+        quiet.description = Some("More".into());
+        quiet.updated_ext = Some(300);
+        s.upsert_tracker_item(t, &quiet).unwrap();
+        assert_eq!(bus.names(), vec!["work:item"]);
+        assert_eq!(
+            s.get_session_by_id(sug).unwrap().unwrap().row_version,
+            version
+        );
+
+        // Unavailable is not on a suggestion.
+        bus.take();
+        assert!(s.mark_tracker_item_unavailable(t, "80", "gone").unwrap());
+        assert_eq!(bus.names(), vec!["work:item"]);
+
+        // A moved key reaches both the suggestion and the rejection.
+        bus.take();
+        let mut moved = quiet.clone();
+        moved.key = Some("ABC-80".into());
+        s.upsert_tracker_item(t, &moved).unwrap();
+        assert_eq!(
+            bus.take(),
+            vec![
+                format!("work:item:{item}"),
+                format!("session:updated:{sug}"),
+                format!("session:updated:{rej}"),
+            ]
+        );
+        assert_eq!(suggested(&s).key.as_deref(), Some("ABC-80"));
+        assert_eq!(
+            s.get_session_by_id(rej).unwrap().unwrap().work_rejected,
+            vec!["ABC-80".to_string()]
+        );
     }
 
     #[test]
