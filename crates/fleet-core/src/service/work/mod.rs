@@ -25,8 +25,9 @@ pub struct WorkArgs {
     /// Or: ended (past) links to this key.
     #[serde(default)]
     pub key: Option<String>,
-    /// links|context|resume_plan|purge_impact|tickets|lookup|trackers|scopes|orgs|org_suggestions
+    /// Default links.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "work_action_schema")]
     pub action: Option<String>,
     /// Ended link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,7 +67,8 @@ pub struct WorkLinkArgs {
     /// Fleet session id.
     #[serde(default)]
     pub session_id: Option<i64>,
-    /// link|reject|unlink|confirm|trust_project|resume|start
+    /// The decision.
+    #[schemars(schema_with = "work_link_action_schema")]
     pub action: String,
     /// Work key, e.g. ABC-123, or a free-form name.
     #[serde(default)]
@@ -223,6 +225,23 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
 ];
+
+/// The `action` schemas are generated from the tables above (work graph
+/// M8.0), so a client that reads the `enum` — the phone, which draws a
+/// button only for an action the hub serves — is offered exactly what the
+/// parser and the dispatch accept.
+fn action_schema<'a>(names: impl Iterator<Item = &'a str>) -> rmcp::schemars::Schema {
+    let names: Vec<&str> = names.collect();
+    rmcp::schemars::json_schema!({ "type": "string", "enum": names })
+}
+
+fn work_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    action_schema(WORK_ACTIONS.iter().map(|(n, _)| *n))
+}
+
+fn work_link_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    action_schema(WORK_LINK_ACTIONS.iter().copied())
+}
 
 impl WorkArgs {
     pub fn parsed_action(&self) -> Result<WorkAction, IpcError> {
@@ -573,6 +592,21 @@ mod tests {
             .upsert_session("dev", "h", None, None, 1, 1, "running", None)
             .unwrap();
         (Mutex::new(s), id)
+    }
+
+    /// The served schema's `enum` is the table, in order — what the phone
+    /// reads to decide which buttons to draw (work graph M8.0).
+    #[test]
+    fn the_action_schemas_enumerate_the_tables() {
+        let w = serde_json::to_value(rmcp::schemars::schema_for!(WorkArgs)).unwrap();
+        let work: Vec<&str> = WORK_ACTIONS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(w["properties"]["action"]["enum"], serde_json::json!(work));
+        let l = serde_json::to_value(rmcp::schemars::schema_for!(WorkLinkArgs)).unwrap();
+        assert_eq!(
+            l["properties"]["action"]["enum"],
+            serde_json::json!(WORK_LINK_ACTIONS)
+        );
+        assert_eq!(l["required"], serde_json::json!(["action"]));
     }
 
     fn link(sid: i64, action: &str) -> WorkLinkArgs {

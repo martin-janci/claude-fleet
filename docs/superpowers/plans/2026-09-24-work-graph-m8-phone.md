@@ -201,3 +201,120 @@ Each task is one reviewable PR. Hub tasks run in the **Worker** environment (car
 | new | Make `work` / `work_link` `action` a schema enum (≈ +300 B budget)? | Yes; the phone falls back to `E_INVALID` probing without it |
 | new | Tickets as a sheet or a fourth tab? | Sheet; the phone stays a pager |
 | new | Edit the brief on the phone? | No; the hub's default brief (desktop keeps editing) |
+
+## Revisions
+
+- **2026-09-24, M8.0 landed** on `claude/cloud-fleet-work-graph-m8`
+  (stacked on M4). Verified with `cargo fmt`, `clippy -D warnings`
+  (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub; only the
+  four chmod tests that fail as root on `main` fail) and `pnpm check` /
+  `pnpm test`.
+  1. **`work_suggested`** is in `PHONE_SESSION_FIELDS`, its doc bullet
+     naming the reader (the suggested chip's Confirm / *Not this*). The
+     pinning test's fixture now carries a suggestion: the field is skipped
+     when there is none, so without one the test could not tell it from a
+     misspelling.
+  2. **The action enum landed**, cheaper than the ≈ +300 B estimate:
+     **+66 B** (68,385 → 68,451; `BUDGET_BYTES` 68,551), because the two
+     doc lines that listed the actions by hand were cut to "Default links."
+     / "The decision." rather than kept beside the enum (every parameter
+     must keep a description). The source is one table per tool in
+     `service/work/mod.rs` (`WORK_ACTIONS`, `WORK_LINK_ACTIONS`): the
+     parsers (`WorkArgs::parsed_action`, the new
+     `WorkLinkArgs::parsed_action` / `WorkLinkAction`) look names up in it,
+     the schema's `enum` is generated from it (`schemars(schema_with)`),
+     and the MCP `work_link` dispatch and `service::work::work_link` now
+     match on the enum instead of strings. Tests: every table entry parses
+     to its variant and every variant is in the table (an exhaustive match
+     makes a new action fail to compile until it is named), the schema's
+     enum equals the table, and the refusal still names every action.
+     An unknown action still answers `E_INVALID` "unknown … action" (the
+     hub does not validate against the schema), so decision 1's fallback
+     for an older hub is unchanged. `control-api-reference.md` did not
+     change (it does not render parameters).
+  3. **The gate test** (`a_client_token_is_served_work_and_work_link_by_mode_and_never_work_admin`):
+     a readonly client token is served `work` and not `work_link`, a full
+     one both, neither ever `work_admin`; and the served `action` enums
+     equal the tables.
+  4. **Correction to decision 3 (for M8.1).** An absent `work` /
+     `work_suggested` on a row MEANS none, on both paths: `list_sessions`
+     answers null-stripped, `/events` strips nulls before broadcasting
+     (`events.rs`), and `work_suggested` is `skip_serializing_if` besides.
+     So a `session:updated` without them is a session whose link was
+     cleared or whose suggestion was decided — the phone must replace the
+     row whole for these two fields and must NOT keep the old value the way
+     it keeps `isController` (which is absent because events never carry
+     it). `FleetSnapshotTest` should pin "an update without `work` clears
+     the chip", the opposite of the task text above.
+  5. No `CONTRACT_REVISION` bump, no new tool, no verdict change.
+- **2026-09-24, M8.1 landed** in fleet-mobile on
+  `claude/cloud-fleet-work-graph-m8` (45f140a), stacked on `main` 5752abf.
+  Verified with `./gradlew :shared:jvmTest` (all green) and the iOS main and
+  test compiles (`compileKotlinIosArm64`, `compileTestKotlinIosSimulatorArm64`,
+  no `e:` lines); `./gradlew build` was not run (no Android SDK in the
+  container). Deviations from the task text, and why:
+  1. **Decision 3 as corrected above**: an update without `work` /
+     `work_suggested` clears them; `FleetSnapshotTest` pins that against
+     a row captured from the hub's serializer, and pins the opposite for
+     `work:item`'s non-columns (`live_session_ids`, `views`), which ARE
+     carried over, as `isController` is.
+  2. **`HubCapabilities`** also records actions the hub refused as unknown
+     (`forgetAction`, `HubError.isUnknownAction`), so M8.3's fallback is a
+     one-liner; `known` stays false for a hub that cannot answer
+     `tools/list`, which never fails the connection (a 401 still routes to
+     Pair). `tools/list` runs alongside the re-list and on a resumed stream.
+  3. **Wrappers beyond the table**: `workTrackers` (M8.2's "My work" chip
+     hides without a tracker), `unlinkWork` and `linkWork` (M8.3's Clear
+     and Set work…). All `work_link` calls ride the lifecycle mount.
+  4. **`HubError.Tool.details`** carries the refusal's structured details:
+     `existingSessionId` for `E_EXISTS` (M8.4's Jump), candidates for
+     `E_AMBIGUOUS`. A details object that would repeat the token is dropped.
+  5. **The ticket cache** lives in `FleetSnapshot.tickets`, seeded by a
+     screen (`FleetState.remember`) and kept current by `work:item`; a
+     re-list keeps it (there is no all-tickets call worth making on every
+     reconnect).
+- **2026-09-24, merged over M5 (#264).** M5 had grown its own action tables
+  in `service/work/mod.rs` — `WORK_ACTIONS` with `scopes` / `orgs` /
+  `org_suggestions`, `WORK_LINK_ACTIONS` as plain names that the org
+  isolation matrix and the desktop's routed commands check — and threaded
+  the org scope through every `work_link` branch. The merge keeps all of
+  that as M5 wrote it and generates M8.0's schema enums from those tables;
+  M8.0's `WorkLinkAction` enum and its string-to-enum dispatch refactor were
+  dropped rather than re-threaded through M5's fences (no behaviour depended
+  on them). The enums cost +72 B over M5 (69,171; `BUDGET_BYTES` 69,271).
+- **2026-09-24, M8.2 landed** in fleet-mobile on the same branch (42c2868),
+  stacked on M8.1. Verified with the full `./gradlew build` (0 `e:` lines;
+  with an Android SDK installed in the container, so M8.1 is now
+  build-verified too) and `:androidApp:compileDebugAndroidTestKotlin`; the
+  extended `SessionsFilterLayoutTest` itself runs only in CI's emulator job.
+  Deviations and choices:
+  1. **Work groups are per host**, inside each host group and before its
+     projects, as this plan says — unlike the desktop, whose work groups
+     span hosts. The table tests are named after `buildSessionsByWork`'s
+     cases, with "filters rows but still reports every keyed session"
+     becoming "filters rows and groups per host".
+  2. **Order:** groups with someone waiting first (the phone's one
+     severity), then the most recently active (the desktop's tie order),
+     then the key.
+  3. **The heading** takes status and title from the ticket cache when it
+     has the item, since a `work:item` frame does not restamp session rows.
+  4. **"My work"** loads through a new `WorkActions` seam (trackers, then
+     `tickets(mine)`) when the hub serves `work`, and again on a pull to
+     refresh; the answer seeds the ticket cache for M8.4. A failure keeps
+     what was known. The chip appears only once "mine" has answered.
+  5. **The row chip** follows design §0.3.1: solid when a person or agent
+     linked it (or `strength: explicit`), a ring when the hub linked it by
+     itself, dashed with `?` for a suggestion (only on a row without a
+     link), struck through when unavailable; hidden under a work group's
+     own heading.
+- **2026-09-24, M8.1–M8.5 merged** into fleet-mobile `main` as
+  martin-janci/fleet-mobile#32 (merge `9b9212e`; CI green on JVM, the
+  Android emulator and the iOS simulator). It was built in parallel with the
+  M8.1 / M8.2 entries above, which describe fleet-mobile's
+  `claude/cloud-fleet-work-graph-m8` branch; that branch is superseded and was
+  not merged. #32 follows the corrected decision 3 (an update without `work` /
+  `work_suggested` clears them). Its own departures from the task text are in
+  the fleet-mobile design appendix: the session screen's work lives in a
+  `SessionWorkViewModel`; Start here leaves the project to the hub unless one
+  is picked (`E_AMBIGUOUS` narrows to the candidates); the resume plan is read
+  when a ticket is tapped; *My work* is read once per connection.

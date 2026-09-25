@@ -75,6 +75,12 @@ use serde_json::Value;
 ///   and model;
 /// * `work` — the session's primary work link (key, title): the row's key
 ///   chip and the grouping by work. Small, and null for most rows.
+/// * `work_suggested` — the top guessed link awaiting a decision (M4): the
+///   session screen's suggested chip with its **Confirm** / **Not this**
+///   buttons (`work_link confirm | reject` by `link_id`). Kept apart from
+///   `work` so a phone can never group a session by a guess. Absent for
+///   most rows, so a row replaced whole without it has no suggestion.
+///   Added for fleet-mobile's work milestone (M8).
 ///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
@@ -110,6 +116,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "usage_cost_micros",
     "usage_model",
     "work",
+    "work_suggested",
 ];
 
 /// A named projection a caller may ask `list_sessions` for.
