@@ -764,7 +764,8 @@ pub(super) async fn new_session_inner(
             )
         })?;
 
-    let derived_friendly = derive_friendly_name(&s, &args, row.worktree_id)?;
+    let worktree_id = link_new_session_worktree(&s, &args, row.id, &path.to_string_lossy())?;
+    let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
     finalize_new_session(
         &s,
         row.id,
@@ -774,6 +775,34 @@ pub(super) async fn new_session_inner(
         claude_id.as_deref(),
         is_shell,
     )
+}
+
+/// Link a new session to the worktree it runs in: the one it was given, or
+/// the one it just created (registered here, so it need not wait for a
+/// project scan). Never the main checkout: nothing may remove that tree, and
+/// tidy-up and GC read "no worktree" as exactly that. Without this link a
+/// work session's tree could never be safe-removed (reconcile only ever sets
+/// `worktree_key`) — found end to end by the work-graph e2e (M10.2).
+pub(super) fn link_new_session_worktree(
+    s: &Store,
+    args: &NewSessionArgs,
+    session_id: i64,
+    cwd: &str,
+) -> Result<Option<i64>, IpcError> {
+    let wid = match (args.worktree_id, args.new_worktree.as_deref()) {
+        (Some(wid), _) => wid,
+        (None, Some(name)) if name != "main" => {
+            s.upsert_worktree_on(&args.host_alias, args.project_id, name, cwd, Some(name))?
+        }
+        _ => return Ok(None),
+    };
+    match s.get_worktree_row(wid)? {
+        Some(w) if w.name != "main" => {
+            s.set_session_worktree_id(session_id, wid)?;
+            Ok(Some(wid))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// The writes `new_session` makes after the session exists, then ONE re-read

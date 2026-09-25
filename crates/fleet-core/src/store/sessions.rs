@@ -653,6 +653,22 @@ impl Store {
 
     /// Set a session's portable worktree key (derived from its cwd by reconcile).
     /// Emits `session_updated` so the frontend patches in place.
+    /// Point a session at its worktree row (the FK tidy-up, GC and safe
+    /// remove read). Reconcile only ever sets `worktree_key`, never this, so
+    /// the writers are `new_session` and repair. No-op (and no event) when it
+    /// already points there; the caller's next write announces the row.
+    pub fn set_session_worktree_id(
+        &self,
+        id: i64,
+        worktree_id: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET worktree_id = ?1 WHERE id = ?2 AND worktree_id IS NOT ?1",
+            rusqlite::params![worktree_id, id],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn set_worktree_key(&self, id: i64, key: Option<&str>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET worktree_key = ?1 WHERE id = ?2",

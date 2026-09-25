@@ -776,3 +776,88 @@ async fn an_unheld_resume_id_gets_past_the_guards() {
         .unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
 }
+
+/// A new session is linked to its worktree row (work graph M10.2: without
+/// the FK, tidy-up and GC could never safe-remove a started session's tree).
+#[test]
+fn a_new_session_is_linked_to_the_worktree_it_runs_in() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let pid = s.upsert_project("acme", "repo", "/base/repo").unwrap();
+    let main = s
+        .upsert_worktree(pid, "main", "/base/repo", Some("main"))
+        .unwrap();
+    let old = s
+        .upsert_worktree(
+            pid,
+            "old-branch",
+            "/base/repo/.worktrees/old-branch",
+            Some("old-branch"),
+        )
+        .unwrap();
+    let session = |name: &str| {
+        s.upsert_session(name, "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let args = |worktree_id: Option<i64>, new_worktree: Option<&str>| NewSessionArgs {
+        host_alias: "local".into(),
+        project_id: pid,
+        worktree_id,
+        name: "n".into(),
+        call_id: None,
+        new_worktree: new_worktree.map(str::to_string),
+        base_branch: None,
+        kind: None,
+        start_command: None,
+        friendly_name: None,
+        resume_claude_session_id: None,
+    };
+    let wt_of = |sid: i64| s.get_session_by_id(sid).unwrap().unwrap().worktree_id;
+
+    // A worktree the session just created: registered, and linked.
+    let a = session("a");
+    let wid = link_new_session_worktree(
+        &s,
+        &args(None, Some("abc-1-fix")),
+        a,
+        "/base/repo/.worktrees/abc-1-fix",
+    )
+    .unwrap()
+    .expect("linked");
+    let row = s.get_worktree_row(wid).unwrap().unwrap();
+    assert_eq!(
+        (
+            row.name.as_str(),
+            row.path.as_str(),
+            row.branch.as_deref(),
+            row.host_alias.as_str()
+        ),
+        (
+            "abc-1-fix",
+            "/base/repo/.worktrees/abc-1-fix",
+            Some("abc-1-fix"),
+            "local"
+        )
+    );
+    assert_eq!(wt_of(a), Some(wid));
+
+    // An existing worktree it was given: linked.
+    let b = session("b");
+    assert_eq!(
+        link_new_session_worktree(&s, &args(Some(old), None), b, "/ignored").unwrap(),
+        Some(old)
+    );
+    assert_eq!(wt_of(b), Some(old));
+
+    // The main checkout, or no worktree at all: never linked.
+    let c = session("c");
+    assert_eq!(
+        link_new_session_worktree(&s, &args(Some(main), None), c, "/base/repo").unwrap(),
+        None
+    );
+    assert_eq!(
+        link_new_session_worktree(&s, &args(None, None), c, "/base/repo").unwrap(),
+        None
+    );
+    assert_eq!(wt_of(c), None);
+}
