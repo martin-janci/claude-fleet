@@ -697,27 +697,42 @@ impl Store {
     /// After an org change: every session whose org moved gets its
     /// `row_version` bumped (the frontend's merge guard orders by it) and a
     /// `session:updated`, so the sidebar regroups without a re-list.
+    ///
+    /// One transaction around the bumps (a host with hundreds of retained
+    /// rows would otherwise autocommit — and fsync — once per row on the
+    /// caller's thread); the rows are emitted after it commits. Ghost rows
+    /// count too: the sidebar shows them under their org (restore).
     pub fn announce_org_moves(
         &self,
         before: &std::collections::HashMap<i64, Option<i64>>,
     ) -> Result<usize, IpcError> {
         let after = self.session_orgs()?;
-        let mut moved = 0;
-        for (id, org) in after {
-            if before.get(&id).copied().flatten() == org {
-                continue;
-            }
+        let mut moved: Vec<i64> = after
+            .into_iter()
+            .filter(|(id, org)| before.get(id).copied().flatten() != *org)
+            .map(|(id, _)| id)
+            .collect();
+        moved.sort_unstable();
+        if moved.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
             // A no-op UPDATE: migration 042's trigger bumps `row_version`.
-            self.conn.execute(
-                "UPDATE sessions SET status = status WHERE id = ?1",
-                rusqlite::params![id],
-            )?;
-            if let Some(row) = self.get_session_by_id(id)? {
-                self.bus.session_updated(&row);
-                moved += 1;
+            let mut bump = tx.prepare("UPDATE sessions SET status = status WHERE id = ?1")?;
+            for id in &moved {
+                bump.execute(rusqlite::params![id])?;
             }
         }
-        Ok(moved)
+        tx.commit()?;
+        let mut announced = 0;
+        for id in moved {
+            if let Some(row) = self.get_session_by_id(id)? {
+                self.bus.session_updated(&row);
+                announced += 1;
+            }
+        }
+        Ok(announced)
     }
 
     /// Resolve every link's `org_id` in place ([`Store::link_org`]).
