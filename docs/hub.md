@@ -812,11 +812,15 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
 A tracker only one machine can reach (a VPN, an internal network), or one
 whose requests should leave from a particular host, is read with `curl` on
 that host: `fleet-hub tracker add <url> --via-host <host>`. The token goes to
-the host **on stdin** into a private temp file (`umask 077`, removed on
-exit) that `curl -q` reads with `-H @file`: it is in no argv on the host
-(`ps` shows only file names), no environment variable and no log. Requests
-are https only, never follow a redirect, and still go only to that
-tracker's own host. `curl` 7.55 or newer is needed on the host.
+the host **on stdin** into a private temp directory (`umask 077`, on
+`$XDG_RUNTIME_DIR` when there is one); the header file is unlinked as soon
+as the script holds it open, before `curl -q` reads it through
+`-H @/dev/fd/3`, so it is a file only for a moment, in no argv on the host
+(`ps` shows `/dev/fd/3` and file names), no environment variable and no
+log. The directory goes on exit, and one a killed shell left behind is
+swept by the next request after ten minutes. Requests are https only,
+never follow a redirect, and still go only to that tracker's own host.
+`curl` 7.55 or newer is needed on the host.
 
 ### Jira Data Center
 

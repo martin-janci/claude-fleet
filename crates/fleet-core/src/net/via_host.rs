@@ -9,8 +9,13 @@
 //!   tracker only that host can reach (a VPN, an internal network) or when
 //!   the operator wants requests to leave from there. The request's headers
 //!   — the credential among them — and its body are piped on **stdin** into
-//!   private temp files (`umask 077`, removed on exit), never in argv or
-//!   the environment; curl reads them with `-H @file` / `--data-binary @file`.
+//!   a private temp directory (`umask 077`, on `$XDG_RUNTIME_DIR` when there
+//!   is one), never in argv or the environment. The header file is unlinked
+//!   as soon as the script holds it open and curl reads it through
+//!   `-H @/dev/fd/3`, so the credential is on disk only for the moment
+//!   between `dd` and `rm`; the directory goes with an EXIT trap, and one a
+//!   killed shell (SIGKILL, OOM, a crash) left behind is swept by the next
+//!   request after ten minutes.
 //!
 //! Both halves of the SSRF fence hold here as they do for
 //! [`super::https::DirectTransport`]: https only, and only the hosts the
@@ -229,7 +234,7 @@ const P_URL: &str = "@@URL@@";
 /// The script `via_host` runs. Read the notes on [`CurlTransport`] before
 /// changing a line.
 const CURL_SCRIPT: &str = r#"builtin unalias -a 2>/dev/null
-builtin unset -f unset unalias builtin command set trap umask exit printf test [ curl rm mktemp cat head dd wc grep sed 2>/dev/null
+builtin unset -f unset unalias builtin command set trap umask exit exec printf test [ curl rm mktemp find cat head dd wc grep sed 2>/dev/null
 set +x
 umask 077
 trap '' PIPE
@@ -245,12 +250,21 @@ case "$cmaj" in ''|*[!0-9]*) cmaj=0 ;; esac
 case "$cmin" in ''|*[!0-9]*) cmin=0 ;; esac
 if [ "$cmaj" -lt 7 ] || { [ "$cmaj" -eq 7 ] && [ "$cmin" -lt 55 ]; }; then printf '%s
 ' __fleet_old_curl__; exit 0; fi
-d=$(mktemp -d "${TMPDIR:-/tmp}/fleet-tracker.XXXXXX") || { printf '%s
+d=
+for base in "$XDG_RUNTIME_DIR" "$TMPDIR" /tmp; do
+  [ -n "$base" ] && [ -d "$base" ] || continue
+  find "$base" -maxdepth 1 -name 'fleet-tracker.*' -type d -mmin +10 -exec rm -rf {} + 2>/dev/null
+  d=$(mktemp -d "$base/fleet-tracker.XXXXXX" 2>/dev/null) && break
+  d=
+done
+[ -n "$d" ] || { printf '%s
 ' __fleet_no_tmp__; exit 0; }
 trap 'rm -rf "$d"' EXIT HUP INT TERM
 dd bs=1 count=@@HLEN@@ of="$d/h" 2>/dev/null
+exec 3<"$d/h"
+rm -f "$d/h"
 cat > "$d/b"
-code=$(curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time @@TIME@@ --max-filesize @@CAP@@ -X @@METHOD@@ -H @"$d/h" @@DATA@@ -D "$d/rh" -o "$d/rb" -w '%{http_code}' @@URL@@ 2>"$d/err")
+code=$(curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time @@TIME@@ --max-filesize @@CAP@@ -X @@METHOD@@ -H @/dev/fd/3 @@DATA@@ -D "$d/rh" -o "$d/rb" -w '%{http_code}' @@URL@@ 2>"$d/err")
 rc=$?
 printf '__fleet_status__=%s
 ' "$code"
@@ -272,12 +286,20 @@ head -c $((@@CAP@@ + 1)) "$d/rb"
 /// - It is one of the request's headers, which fleet writes to **stdin**
 ///   ahead of the body; the script copies exactly that many bytes (`dd
 ///   bs=1`, which never reads past its count) into `$d/h` and the rest into
-///   `$d/b`, both in a `mktemp -d` directory under `umask 077`, removed by
-///   an EXIT trap whatever happens.
+///   `$d/b`, both in a `mktemp -d` directory under `umask 077` — on
+///   `$XDG_RUNTIME_DIR` (a tmpfs cleared at logout / reboot on most Linux
+///   hosts) when it is there, else `$TMPDIR`, else `/tmp`.
+/// - `$d/h` is opened on fd 3 and unlinked at once, BEFORE curl runs: the
+///   credential is a file for the moment between `dd` and `rm` only. The
+///   directory (body, answer) goes with an EXIT/HUP/INT/TERM trap; a trap
+///   does not run on SIGKILL, an OOM kill or a crash, so every request
+///   first sweeps `fleet-tracker.*` directories older than ten minutes
+///   from the same base, and a dir such a death leaves holds no credential.
 /// - `curl -q` (first, so `~/.curlrc` cannot add `--verbose` / `--trace`)
-///   reads them with `-H @"$d/h"` / `--data-binary @"$d/b"`: the token is in
-///   no argv (`ps` shows only the file names), no variable and no
-///   environment.
+///   reads them with `-H @/dev/fd/3` (a fresh open of the unlinked inode:
+///   verified against curl 8.5 — the header arrives) / `--data-binary
+///   @"$d/b"`: the token is in no argv (`ps` shows only `/dev/fd/3` and a
+///   file name), no variable and no environment.
 /// - Nothing prints headers that were SENT; the script prints the answer's
 ///   status and curl's exit code, then either the headers and one byte past the
 ///   cap of its body (exit 0) or at most two `curl: (N) …` lines (any other
@@ -779,7 +801,7 @@ mod curl_tests {
             head.len() + "Expect:\n".len()
         )));
         assert!(script.contains("curl -q -sS --proto =https --proto-redir =https --max-redirs 0"));
-        assert!(script.contains("-X POST -H @\"$d/h\" --data-binary @\"$d/b\""));
+        assert!(script.contains("-X POST -H @/dev/fd/3 --data-binary @\"$d/b\""));
         assert!(script.contains("'https://jira.corp.example/rest/api/2/search?x=1'"));
         assert!(!script.contains(TOKEN));
     }
@@ -1033,6 +1055,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 cp "$hdr" {log}/headers
+if [ -e "$(dirname "$out")/h" ]; then echo present; else echo absent; fi > {log}/h_state
 [ -n "$body" ] && cp "$body" {log}/body
 printf 'HTTP/1.1 201 Created\r\nX-Seen: yes\r\n\r\n' > "$dump"
 printf '{{"id":7}}' > "$out"
@@ -1044,6 +1067,20 @@ printf '201'
         std::fs::write(&curl, fake).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // What a shell killed mid-request (SIGKILL, OOM) leaves behind: a
+        // stale directory is swept at the next request, a fresh one (a
+        // request in flight) is left alone.
+        let stale = tmp.join("fleet-tracker.stale00");
+        let fresh = tmp.join("fleet-tracker.fresh00");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("h"), "Authorization: Bearer leftover\n").unwrap();
+        std::fs::create_dir(&fresh).unwrap();
+        let twenty_minutes_ago = std::time::SystemTime::now() - Duration::from_secs(20 * 60);
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(twenty_minutes_ago))
+            .unwrap();
 
         let token = "tok-stdin-only-0123456789abcdef";
         let req = Request::post_json(
@@ -1065,6 +1102,8 @@ printf '201'
                 ),
             )
             .env("TMPDIR", &tmp)
+            // Unset, so `$TMPDIR` is the base under test (it would win).
+            .env_remove("XDG_RUNTIME_DIR")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1098,10 +1137,28 @@ printf '201'
             std::fs::read_to_string(log.join("body")).unwrap(),
             "{\"a\":1}"
         );
+        assert!(
+            argv.contains("-H\n@/dev/fd/3\n"),
+            "the header is read through the held-open fd: {argv}"
+        );
         assert_eq!(
-            std::fs::read_dir(&tmp).unwrap().count(),
-            0,
-            "the private temp directory is removed on exit"
+            std::fs::read_to_string(log.join("h_state")).unwrap().trim(),
+            "absent",
+            "the header file is unlinked before curl runs"
+        );
+        assert!(!stale.exists(), "a stale directory is swept");
+        assert!(
+            fresh.exists(),
+            "a fresh directory (a request in flight) is kept"
+        );
+        let left: Vec<_> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            left,
+            vec!["fleet-tracker.fresh00".to_string()],
+            "the request's own directory is removed on exit"
         );
         assert!(!String::from_utf8_lossy(&out.stdout).contains(token));
     }
