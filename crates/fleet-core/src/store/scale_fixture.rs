@@ -67,7 +67,7 @@ pub(crate) fn host_alias(i: usize) -> String {
 /// A host's org: every fourth host is unassigned, the rest spread over
 /// orgs 1..=3 (host `h01` is org 1).
 pub(crate) fn host_org(i: usize) -> Option<i64> {
-    (i % 4 != 0).then_some((i % 4) as i64)
+    (!i.is_multiple_of(4)).then_some((i % 4) as i64)
 }
 
 /// What the benchmarks need to find their way in the fixture.
