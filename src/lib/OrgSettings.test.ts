@@ -11,6 +11,8 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { orgs, type OrgDetail } from './orgs';
 import { hosts } from './hosts';
 import { trackers } from './trackers';
+import { toasts } from './toasts';
+import { get } from 'svelte/store';
 
 const acme: OrgDetail = {
   id: 1,
@@ -56,6 +58,7 @@ beforeEach(() => {
   orgs.set([]);
   hosts.set([]);
   trackers.set([]);
+  toasts.set([]);
 });
 
 describe('Settings → Organisations', () => {
@@ -101,6 +104,63 @@ describe('Settings → Organisations', () => {
     await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_org')).toBe(true));
     const upd = inv.mock.calls.find((c) => c[0] === 'update_org')![1] as { args: unknown };
     expect(upd.args).toEqual({ org_id: 1, auto_tidy: 'on' });
+  });
+
+  it('standalone: adds an org by name, adds an owner/repo rule, removes a rule and the org', async () => {
+    const inv = route({ add_org: { id: 9, name: 'Company B', created_at: 1 } });
+    render(OrgSettings);
+    await waitFor(() => expect(screen.getAllByTestId('org-row')).toHaveLength(1));
+    const add = screen.getByTestId('org-add') as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('org-add-name'), { target: { value: ' Company B ' } });
+    expect(add.disabled).toBe(false);
+    await fireEvent.click(add);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('add_org', {
+        args: { name: 'Company B', color: '#3b82f6', isolate_sessions: false },
+      }),
+    );
+    // The list is re-read and the name box cleared for the next one.
+    await waitFor(() => expect((screen.getByTestId('org-add-name') as HTMLInputElement).value).toBe(''));
+    const listed = inv.mock.calls.filter((c) => c[0] === 'list_orgs').length;
+    expect(listed).toBeGreaterThanOrEqual(2);
+
+    await fireEvent.input(screen.getByTestId('org-rule-input'), { target: { value: 'acme/api' } });
+    await fireEvent.click(screen.getByTestId('org-rule-add'));
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('add_org_rule', { args: { org_id: 1, owner: 'acme', repo: 'api' } }),
+    );
+    await waitFor(() => expect((screen.getByTestId('org-rule-input') as HTMLInputElement).value).toBe(''));
+
+    await fireEvent.click(screen.getByLabelText('Remove rule acme/*'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('remove_org_rule', { args: { rule_id: 3 } }));
+    await fireEvent.click(screen.getByLabelText('Take hetzner-a out of Company A'));
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('assign_host_org', { args: { host_alias: 'hetzner-a', org_id: null } }),
+    );
+    await fireEvent.click(screen.getByTestId('org-remove'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('remove_org', { args: { org_id: 1 } }));
+  });
+
+  it('standalone: a failed admin command is a toast and the list is still re-read', async () => {
+    const inv = route();
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'remove_org') throw { code: 'E_INVALID', message: 'org 1 still has hosts' };
+      if (cmd === 'list_orgs') return [acme];
+      if (cmd === 'org_suggestions') return [];
+      return null;
+    });
+    render(OrgSettings);
+    await waitFor(() => expect(screen.getAllByTestId('org-row')).toHaveLength(1));
+    const before = inv.mock.calls.filter((c) => c[0] === 'list_orgs').length;
+    await fireEvent.click(screen.getByTestId('org-remove'));
+    await waitFor(() =>
+      expect(get(toasts).map((t) => t.message)).toEqual([
+        expect.stringMatching(/^Remove org failed: org 1 still has hosts/),
+      ]),
+    );
+    await waitFor(() => expect(inv.mock.calls.filter((c) => c[0] === 'list_orgs').length).toBe(before + 1));
+    expect(screen.getAllByTestId('org-row')).toHaveLength(1);
   });
 
   it('on a paired desktop it is read-only and names the hub CLI', async () => {
