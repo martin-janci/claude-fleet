@@ -183,6 +183,13 @@ h=$(tool "$PA" "$PUB" "$TOKA" fleet_health '{}')
 check "fleet_health reports the app version, not 0.1.0" 'echo "$h" | grep -qE "\\\\\"version\\\\\": ?\\\\\"0.2" ' "${h:0:300}"
 hosts=$(tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}')
 check "list_sessions (forced reconcile of local) succeeds" 'echo "$hosts" | grep -q "\"isError\":false"' "${hosts:0:400}"
+# The store is in WAL: while the daemon runs, every recent commit (tokens
+# included) sits in state.db-wal, and SQLite gives the sidecars the main
+# file's mode at creation. The `init` check above ran after that process had
+# exited, when the sidecars were already gone, so only a live daemon can show
+# them. The reconcile just above wrote rows, so both exist here.
+check "state.db-wal is 0600 while the daemon runs" '[ "$(filemode "$ROOT/a/state.db-wal")" = 600 ]' "$(filemode "$ROOT/a/state.db-wal")"
+check "state.db-shm is 0600 while the daemon runs" '[ "$(filemode "$ROOT/a/state.db-shm")" = 600 ]' "$(filemode "$ROOT/a/state.db-shm")"
 NAME="hube2e$RANDOM"
 refr=$(tool "$PA" "$PUB" "$TOKA" refresh_projects '{}')
 check "refresh_projects scans this machine" 'echo "$refr" | grep -q "\"isError\":false"' "${refr:0:300}"

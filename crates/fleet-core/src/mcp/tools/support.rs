@@ -902,6 +902,14 @@ pub(super) struct InboxSummary {
     pub(super) from_addr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) to_addr: Option<String>,
+    /// `true` for a row from another hub over a link (`from_addr` set): the
+    /// preview is that peer's text with the untrusted-content marker
+    /// stripped for room, so the flag carries what the marker would (D8:
+    /// every rendering of peer text says it is untrusted). Absent for a
+    /// local row. Unforgeable: a peer's own marker lines are neutralised in
+    /// `apply.rs`, and this field comes from the row, never the body.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) untrusted: bool,
 }
 
 pub(super) const INBOX_PREVIEW_CHARS: usize = 80;
@@ -915,8 +923,10 @@ impl From<crate::store::SessionMessage> for InboxSummary {
         // can run well past `INBOX_PREVIEW_CHARS`, so an unstripped preview
         // is all marker and no message. `from_addr` is set only for a
         // remote row, and the row is still flagged foreign via that same
-        // field either way, so stripping the marker here loses no signal.
-        let preview_source: &str = if m.from_addr.is_some() {
+        // field AND the `untrusted` flag below, so stripping the marker
+        // here loses no signal.
+        let untrusted = m.from_addr.is_some();
+        let preview_source: &str = if untrusted {
             guard::strip_marker(&m.body)
         } else {
             &m.body
@@ -934,6 +944,7 @@ impl From<crate::store::SessionMessage> for InboxSummary {
             body_preview,
             from_addr: m.from_addr,
             to_addr: m.to_addr,
+            untrusted,
         }
     }
 }
@@ -1350,6 +1361,37 @@ impl FleetTools {
 }
 
 // ---- smart caching (`fresh_for`) --------------------------------------------
+
+/// The reader a `fresh_for` names is bound to the caller like a target
+/// session: the cursor it advances is that session's OWN view of a stream
+/// (migration 044, `docs/control-api.md`: "your own session id"), so a
+/// foreign caller writing it would blind the reader to deltas — the silent
+/// skip the design forbids. A per-host token may only name a session on its
+/// own host (`E_FORBIDDEN` otherwise, like every other write it makes) and
+/// inside its org scope; the master and a paired client are unbound.
+/// `Ok(false)` — no such session — keeps the `reader_unknown` answer, under
+/// which no cursor is ever written. The ONE helper every `fresh_for` tool
+/// calls, so the five cannot drift.
+pub(super) fn resolve_reader(s: &Store, caller: &Caller, reader: i64) -> Result<bool, McpError> {
+    let Some(row) = s
+        .get_session_by_id(reader)
+        .map_err(|e| to_mcp_err(IpcError::from(e)))?
+    else {
+        return Ok(false);
+    };
+    require_host(caller, &row.host_alias, "fresh_for's session")?;
+    if caller.host_alias.is_some() {
+        let scope = caller.org_scope(s).map_err(to_mcp_err)?;
+        if !scope.sees_row(&row) {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!("fresh_for's session {reader} is outside this token's org"),
+                None,
+            ));
+        }
+    }
+    Ok(true)
+}
 
 /// The gate every `fresh_for`-aware tool applies before
 /// [`fresh::decide_stream`] even sees the stored cursor: a `fresh_for` that

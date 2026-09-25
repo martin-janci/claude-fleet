@@ -649,10 +649,19 @@ hub), keep the old link — its waiting messages are what a re-pair keeps:
 1. On the listening hub: `fleet-hub client revoke <old peer client>`, then
    `fleet-hub pair --mode peer --name <label>` for a new code. (Without the
    revoke, the new code's first exchange is refused: `fleet <id> is already
-   linked to another peer token; revoke that client first`.)
+   linked to another peer token; revoke that client first (…), then mint a
+   new pairing code`.)
 2. On the dialing hub: `fleet-hub peer add https://<other-hub> <new code>`.
    Do **not** `peer remove` the old link: that fails its waiting messages
    back to their senders.
+
+The order matters. That refusal is final for the token it was given: the
+dialing hub's new link stops as `refused` and is never retried, so revoking
+the old client afterwards revives nothing. After a re-pair in the wrong
+order, revoke the old client, then mint a **new** pairing code and `peer add`
+it again; the refused row on the dialing hub can be `peer remove`d by its ID
+(it holds no messages), and the client the refused code minted on the
+listening hub is revoked like any other (`fleet-hub client revoke <label>`).
 
 The new link's first exchange reaches the other hub, but the old link may not
 have noticed its revoked token yet (it can be parked in a long-poll for up to
@@ -1880,8 +1889,10 @@ deliberately.
 - **A peer's own words cannot forge the marker that quotes them.** If a
   message body from another fleet happens to contain a line matching
   fleet's own untrusted-content marker, that line is neutralised (prefixed
-  `> `) before it is ever stored — a peer cannot close the marked block
-  early and have the rest of its text read back as fleet's own.
+  `> `, and every `[claude-fleet` in the body defused to `(claude-fleet`,
+  whatever invisible character sits in front of it) before it is ever
+  stored — a peer cannot close the marked block early and have the rest of
+  its text read back as fleet's own.
 - **Trust in a link is decided once, at pairing, by identity — not by a
   fleet-id allowlist.** The pairing code itself is the credential: only
   someone who can already run commands on the other hub can mint one, and
@@ -1919,7 +1930,10 @@ deliberately.
   action for master, clients and hosts in two orgs and in none. See
   *Organisations and isolation*.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
-  the desktop.
+  the desktop — the file is created owner-only before SQLite opens it, so
+  the WAL sidecars `state.db-wal` and `state.db-shm` (which hold every
+  recent commit, tokens included, while the daemon runs) inherit `0600`
+  too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
   UI confirmation dialog. A hub has no UI to show that dialog to — leave the
