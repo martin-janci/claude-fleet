@@ -231,9 +231,9 @@ code=$(curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time
 rc=$?
 printf '__fleet_status__=%s
 ' "$code"
-if [ "$code" = 000 ]; then
-  printf '__fleet_curl_exit__=%s
+printf '__fleet_curl_exit__=%s
 ' "$rc"
+if [ "$code" = 000 ] || [ "$rc" -ne 0 ]; then
   grep -a '^curl: (' "$d/err" 2>/dev/null | head -n 2
   exit 0
 fi
@@ -256,8 +256,10 @@ head -c @@CAP@@ "$d/rb"
 ///   no argv (`ps` shows only the file names), no variable and no
 ///   environment.
 /// - Nothing prints headers that were SENT; the script prints the answer's
-///   status, headers and at most the cap of its body, or curl's exit code
-///   and at most two `curl: (N) …` lines.
+///   status and curl's exit code, then either the headers and at most the
+///   cap of its body (exit 0) or at most two `curl: (N) …` lines (any other
+///   exit — a status is known as soon as the head arrived, so it never
+///   vouches for the body on its own).
 /// - https only, no redirect followed, bounded by `--max-time`, and the
 ///   host fence was checked before anything ran.
 pub struct CurlTransport {
@@ -333,8 +335,9 @@ impl CurlTransport {
     }
 }
 
-/// Split the script's output into a [`Response`].
-fn parse_curl(host: &str, raw: &[u8]) -> Result<Response, TransportError> {
+/// Split the script's output into a [`Response`]; `max_body` names the cap
+/// in the [`TransportError::TooLarge`] a size-aborted answer becomes.
+fn parse_curl(host: &str, raw: &[u8], max_body: u64) -> Result<Response, TransportError> {
     if raw.starts_with(b"__fleet_no_curl__") {
         return Err(TransportError::Connect(format!(
             "curl is not installed on {host}"
@@ -358,12 +361,21 @@ fn parse_curl(host: &str, raw: &[u8]) -> Result<Response, TransportError> {
         .ok_or_else(|| TransportError::Protocol(format!("unexpected output from {host}")))?
         .trim()
         .to_string();
-    if code == "000" {
-        let exit = String::from_utf8_lossy(raw)
-            .lines()
-            .find_map(|l| l.strip_prefix("__fleet_curl_exit__=").map(str::to_string))
-            .unwrap_or_default();
-        let why: String = String::from_utf8_lossy(raw)
+    // curl's exit code is the second line, always: `%{http_code}` reports
+    // the status as soon as the head arrived, so a body cut by `--max-time`
+    // (28), refused by `--max-filesize` (63) or lost to a recv error (56) /
+    // partial transfer (18) still comes with the real status. Only exit 0
+    // vouches for the body.
+    let rest = &raw[status_line_end + 1..];
+    let exit_line_end = super::http1::find(rest, b"\n")
+        .ok_or_else(|| TransportError::Protocol(format!("a truncated answer from {host}")))?;
+    let exit: i32 = String::from_utf8_lossy(&rest[..exit_line_end])
+        .strip_prefix("__fleet_curl_exit__=")
+        .and_then(|n| n.trim().parse().ok())
+        .ok_or_else(|| TransportError::Protocol(format!("a truncated answer from {host}")))?;
+    let rest = &rest[exit_line_end + 1..];
+    if code == "000" || exit != 0 {
+        let why: String = String::from_utf8_lossy(rest)
             .lines()
             .filter(|l| l.starts_with("curl: ("))
             .map(|l| crate::logging::redact(l).into_owned())
@@ -372,13 +384,20 @@ fn parse_curl(host: &str, raw: &[u8]) -> Result<Response, TransportError> {
             .chars()
             .take(300)
             .collect();
-        return Err(if exit.trim() == "28" {
-            TransportError::Timeout
-        } else {
-            TransportError::Connect(format!("curl on {host} (exit {}): {why}", exit.trim()))
+        return Err(match exit {
+            28 => TransportError::Timeout,
+            63 => TransportError::TooLarge(format!(
+                "curl on {host} refused a body over {} MiB (status {code}): {why}",
+                max_body / (1024 * 1024)
+            )),
+            _ if code == "000" => {
+                TransportError::Connect(format!("curl on {host} (exit {exit}): {why}"))
+            }
+            _ => TransportError::Protocol(format!(
+                "curl on {host} cut the answer short (exit {exit}, status {code}): {why}"
+            )),
         });
     }
-    let rest = &raw[status_line_end + 1..];
     let head_line_end = super::http1::find(rest, b"\n")
         .ok_or_else(|| TransportError::Protocol(format!("a truncated answer from {host}")))?;
     let head_len: usize = String::from_utf8_lossy(&rest[..head_line_end])
@@ -459,7 +478,7 @@ impl HttpTransport for CurlTransport {
                 self.max_body / (1024 * 1024)
             )));
         }
-        parse_curl(&self.host, &out.stdout)
+        parse_curl(&self.host, &out.stdout, self.max_body)
     }
 }
 
@@ -609,7 +628,7 @@ mod curl_tests {
 
     fn answer(status: &str, head: &str, body: &str) -> Reply {
         Reply::ok(&format!(
-            "__fleet_status__={status}\n__fleet_head__={}\n{head}{body}",
+            "__fleet_status__={status}\n__fleet_curl_exit__=0\n__fleet_head__={}\n{head}{body}",
             head.len()
         ))
     }
@@ -740,6 +759,69 @@ mod curl_tests {
         assert!(e.is_unreachable() && e.to_string().contains("curl is not installed"));
     }
 
+    /// `%{http_code}` is known as soon as the head arrived; only exit 0
+    /// vouches for the body. A status with a non-zero exit is the failure
+    /// the exit names, never a 2xx with a cut body.
+    #[tokio::test]
+    async fn a_non_zero_curl_exit_is_never_a_response_even_with_a_status() {
+        // 63: `--max-filesize` refused the body before writing it.
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=200\n__fleet_curl_exit__=63\ncurl: (63) Maximum file size exceeded\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TransportError::TooLarge(m) if m.contains("Maximum file size")),
+            "{e}"
+        );
+
+        // 28: `--max-time` fired mid-body; half a document is on disk.
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=200\n__fleet_curl_exit__=28\ncurl: (28) Operation timed out after 20000 milliseconds with 120000 bytes received\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert_eq!(e, TransportError::Timeout);
+
+        // 18: a partial transfer (the peer closed early).
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=200\n__fleet_curl_exit__=18\ncurl: (18) transfer closed with 3000 bytes remaining to read\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TransportError::Protocol(m) if m.contains("exit 18") && m.contains("bytes remaining")),
+            "{e}"
+        );
+
+        // An answer that stops before the exit line is truncated, not a 200.
+        let f = FakeSsh::new();
+        f.on(Match::Any, Reply::ok("__fleet_status__=200\n"));
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, TransportError::Protocol(_)), "{e}");
+    }
+
     #[tokio::test]
     async fn an_http_error_is_a_response_for_the_provider_to_map() {
         let f = FakeSsh::new();
@@ -841,7 +923,7 @@ printf '201'
             pipe.write_all(&stdin).await.unwrap();
         }
         let out = child.wait_with_output().await.unwrap();
-        let resp = parse_curl("local", &out.stdout)
+        let resp = parse_curl("local", &out.stdout, 4096)
             .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
         assert_eq!(resp.status, 201);
         assert_eq!(resp.header("x-seen"), Some("yes"));
