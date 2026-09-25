@@ -139,8 +139,9 @@ a tier the most recent decision. Nothing is learned.
 | R7 | a state signal's value changes | the confirmed auto link it made ENDS (`end_reason` `branch_changed` / `pr_changed`, snapshotted as past work); a suggestion it made is withdrawn; manual / started / agent links stay |
 | R8 | a key whose prefix two trackers claim (a URL's host settles it) | never automatic: a suggestion |
 | R9 | a rejected (participant, target) pair | never proposed again, from any signal |
-| decay | an EVENT suggestion (prompt, URL, trailer) from an earlier conversation, not seen in this one | removed at the boundary |
-| primary | live confirmed links ranked by (decided in the current conversation, explicit > strong > weak, most recent decision) | it moves only when a run loses its primary or confirms a link — never re-ranks decisions |
+| R11 | Claude's answer to the classification nudge (`work_link { source: agent_inferred }`, M4.6; strength `inferred`, between `strong` and `weak`) | a pre-selected suggestion, never confirmed — not even as a sole candidate in a trusted project |
+| decay | an EVENT suggestion (prompt, URL, trailer, agent inference) from an earlier conversation, not seen in this one | removed at the boundary |
+| primary | live confirmed links ranked by (decided in the current conversation, explicit > strong > inferred > weak, most recent decision) | it moves only when a run loses its primary or confirms a link — never re-ranks decisions |
 
 Guards: a prompt carrying a `[claude-fleet` marker, equal (first 200 chars)
 to the prompt fleet itself sent, or contained in a handover brief is not
@@ -149,6 +150,17 @@ makes them all weak, none pre-selected, noted `reference` (dump guard).
 With any tracker, keys must carry a tracker's prefix; with none, a prompt
 key counts only when fleet already knows it (a local item or a link) —
 unknown keys come from branch names only.
+
+Classification nudge (M4.6, opt-in `work.classify_nudge`, off): when a
+conversation has had three turns and the session has no link or
+suggestion, and the person has 1–5 candidates in the host's scope (*My
+work* tickets, keyed local items changed in the last 14 days, less any the
+session rejected), ONE prompt of that conversation carries a ≤ 400-char
+note after any mail — fleet's instruction and the keys, the titles inside
+an untrusted fence — asking Claude to call `work_link { action: link,
+source: agent_inferred }` or ignore it. Never a Stop block, never typed
+into the pane; stamped on the conversation (migration 056) so it fires
+once.
 
 Chip vocabulary (sidebar row): **solid** = a confirmed link; a small **ring**
 beside the key = linked automatically (R3 / R5; the tooltip names the source
