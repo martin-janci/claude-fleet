@@ -447,3 +447,77 @@ fn deleting_an_upgraded_session_journals_its_conversations() {
     );
     integrity_ok(&store);
 }
+
+/// The downgrade guard: an older build (this one, facing a database a newer
+/// build recorded a higher version in) refuses to open it, says why and what
+/// to do, and writes nothing.
+#[test]
+fn an_older_build_refuses_a_newer_database() {
+    let newer = LATEST_SCHEMA_VERSION + 1;
+    let store = store_over(Connection::open_in_memory().unwrap());
+    store.migrate().unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            rusqlite::params![newer],
+        )
+        .unwrap();
+    let changes = store.conn.total_changes();
+    let err = store.migrate().unwrap_err().to_string();
+    assert!(
+        err.contains(&format!("schema version {newer}"))
+            && err.contains(&format!("only knows up to {LATEST_SCHEMA_VERSION}"))
+            && err.contains("newer release")
+            && err.contains("do not delete it"),
+        "unclear refusal: {err}"
+    );
+    assert_eq!(store.conn.total_changes(), changes, "the refusal wrote");
+
+    // Through the real open path, on a file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    {
+        let s = Store::open_with_bus(&path, Arc::new(NoopEventBus)).unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                rusqlite::params![newer],
+            )
+            .unwrap();
+    }
+    let err = match Store::open_with_bus(&path, Arc::new(NoopEventBus)) {
+        Ok(_) => panic!("a newer database opened"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("newer release"), "{err}");
+    // The read-only open (a CLI beside a newer daemon) never migrates, so it
+    // is not refused.
+    let ro = Store::open_read_only(&path).unwrap();
+    assert_eq!(ro.schema_version().unwrap(), newer);
+}
+
+/// The guard lets through what it must: a fresh file, a database at exactly
+/// the known version, and one at an older version (which it then upgrades).
+#[test]
+fn the_downgrade_guard_admits_fresh_current_and_older_databases() {
+    let fresh = store_over(Connection::open_in_memory().unwrap());
+    fresh.migrate().unwrap();
+    fresh.migrate().unwrap();
+    assert_eq!(fresh.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+    let (conn, _) = testgen::pre_work_graph_db(
+        SEED,
+        Shape {
+            hosts: 2,
+            projects: 2,
+            worktrees: 2,
+            sessions: 5,
+            conversations: 10,
+            events: 10,
+        },
+    );
+    let older = store_over(conn);
+    older.migrate().unwrap();
+    assert_eq!(older.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+}
