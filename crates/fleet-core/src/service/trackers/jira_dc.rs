@@ -80,6 +80,37 @@ impl JiraDc {
         rest.split('/').next().unwrap_or(rest)
     }
 
+    /// The site's context path (`jira` for `https://host/jira`), or "".
+    fn context(&self) -> &str {
+        let rest = self.site.trim_start_matches("https://");
+        rest.split_once('/').map(|(_, c)| c).unwrap_or("")
+    }
+
+    /// The key a URL on this site names: the exact host, then the context
+    /// path as a whole segment (followed by `/`, `?`, `#` or the end) when
+    /// the site has one, then `browse/<key>` or `?selectedIssue=`. A URL
+    /// on another host, or whose path merely starts with the context path,
+    /// names nothing.
+    fn key_of_site_url(&self, url: &str) -> Option<String> {
+        let rest = url.strip_prefix("https://")?;
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        if !host.eq_ignore_ascii_case(self.host()) {
+            return None;
+        }
+        let ctx = self.context().to_ascii_lowercase();
+        let path = if ctx.is_empty() {
+            path
+        } else {
+            let after = path.to_ascii_lowercase();
+            let after = after.strip_prefix(&ctx)?;
+            if !(after.is_empty() || after.starts_with(['/', '?', '#'])) {
+                return None;
+            }
+            &path[ctx.len()..]
+        };
+        key_in_path(path.trim_start_matches('/'))
+    }
+
     fn fields(&self) -> Vec<String> {
         let mut f: Vec<String> = [
             "summary",
@@ -479,20 +510,7 @@ impl TrackerProvider for JiraDc {
                 ItemRef::Key(k) if super::jira_common::is_key(k) => {
                     Some(ItemRef::Key(k.to_ascii_uppercase()))
                 }
-                ItemRef::Key(u) | ItemRef::Url(u) => u
-                    .strip_prefix("https://")
-                    .and_then(|rest| rest.split_once('/'))
-                    .filter(|(h, _)| h.eq_ignore_ascii_case(&host))
-                    .and_then(|(_, path)| {
-                        let site_path = self.site.trim_start_matches("https://");
-                        let ctx = site_path.split_once('/').map(|(_, c)| c).unwrap_or("");
-                        let path = path
-                            .strip_prefix(ctx)
-                            .unwrap_or(path)
-                            .trim_start_matches('/');
-                        key_in_path(path)
-                    })
-                    .map(ItemRef::Key),
+                ItemRef::Key(u) | ItemRef::Url(u) => self.key_of_site_url(u).map(ItemRef::Key),
                 _ => None,
             })
             .collect();
@@ -573,25 +591,13 @@ impl TrackerProvider for JiraDc {
 
     fn recognize(&self, text: &str, _ctx: RefCtx<'_>) -> Vec<ItemRef> {
         let mut out: Vec<ItemRef> = Vec::new();
-        let site = self
-            .site
-            .trim_start_matches("https://")
-            .to_ascii_lowercase();
         for word in
             text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '(' | ')'))
         {
-            if let Some(rest) = word.strip_prefix("https://") {
-                if let Some(path) = rest
-                    .to_ascii_lowercase()
-                    .strip_prefix(&site)
-                    .map(|_| &rest[site.len()..])
-                {
-                    if let Some(k) = key_in_path(path.trim_start_matches('/')) {
-                        let r = ItemRef::Key(k);
-                        if !out.contains(&r) {
-                            out.push(r);
-                        }
-                    }
+            if let Some(k) = self.key_of_site_url(word) {
+                let r = ItemRef::Key(k);
+                if !out.contains(&r) {
+                    out.push(r);
                 }
             }
         }

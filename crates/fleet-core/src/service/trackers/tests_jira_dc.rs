@@ -369,6 +369,60 @@ async fn a_moved_key_is_found_next_to_other_references() {
     assert_eq!(reqs[2].json_body().unwrap()["jql"], "key in (OLD-8)");
 }
 
+/// A URL is this site's only with the exact host and the context path as a
+/// whole segment: a lookalike host, or a path that merely starts with the
+/// context path, names nothing here (recognition and fetch agree).
+#[tokio::test]
+async fn a_url_is_this_sites_only_with_the_exact_host_and_context_path() {
+    let f = FakeTransport::new();
+    let d = dc(&f);
+    let keys = |t: &str| d.recognize(t, RefCtx::default());
+    assert_eq!(
+        keys("https://jira.corp.example/jira/browse/PLAT-2"),
+        vec![ItemRef::Key("PLAT-2".into())]
+    );
+    assert_eq!(
+        keys("https://JIRA.corp.example/Jira?selectedIssue=plat-3"),
+        vec![ItemRef::Key("PLAT-3".into())]
+    );
+    for foreign in [
+        "https://jira.corp.example.evil.com/x?selectedIssue=PLAT-1",
+        "https://jira.corp.example.evil.com/jira/browse/PLAT-1",
+        "https://jira.corp.example/jirax/browse/PLAT-1",
+        "https://jira.corp.example/jira-old?selectedIssue=PLAT-1",
+        "https://jira.corp.example/browse/PLAT-1",
+        "https://x.jira.corp.example/jira/browse/PLAT-1",
+    ] {
+        assert!(keys(foreign).is_empty(), "{foreign}");
+    }
+    // A fetch by such a URL asks nothing.
+    let got = d
+        .fetch(&[ItemRef::Url(
+            "https://jira.corp.example.evil.com/jira/browse/PLAT-1".into(),
+        )])
+        .await
+        .unwrap();
+    assert!(matches!(&got[0], Fetched::Unavailable { .. }), "{got:?}");
+    assert!(f.requests().is_empty());
+    // A site without a context path takes any path on its host.
+    let bare = JiraDc::new(
+        "https://jira.corp.example",
+        config(),
+        Some(cred()),
+        Arc::new(f.clone()),
+    );
+    assert_eq!(
+        bare.recognize("https://jira.corp.example/browse/OPS-4", RefCtx::default()),
+        vec![ItemRef::Key("OPS-4".into())]
+    );
+    assert!(bare
+        .recognize(
+            "https://jira.corp.example.evil.com/browse/OPS-4",
+            RefCtx::default()
+        )
+        .is_empty());
+}
+
 #[tokio::test]
 async fn a_captcha_lockout_is_its_own_state() {
     let f = FakeTransport::new();
