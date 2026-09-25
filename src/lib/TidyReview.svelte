@@ -26,6 +26,7 @@
     preselected,
     refreshTidy,
     reopenedLoads,
+    requestedOnly,
     requestedTicks,
     tidyRequest,
     tidyRequestLive,
@@ -52,7 +53,11 @@
   const candidates = $derived(
     inScope($tidyReport.candidates, $sessions, $effectiveScope, $scopeOf),
   );
-  const groups = $derived(groupByReason(candidates));
+  // A request from the Today view's Stale section (M10.4) narrows the sheet
+  // to those sessions until "Show all"; the pill's own opening shows all.
+  let only = $state<Set<number> | null>(null);
+  const shown = $derived(only ? candidates.filter((c) => only!.has(c.session_id)) : candidates);
+  const groups = $derived(groupByReason(shown));
   /** Sheet order, flattened: what j/k walk. */
   const ordered = $derived(groups.flatMap((g) => g.items));
   const blocked = $derived(hubActionBlocked('tidy_apply', $hubStatus, $hubConnection));
@@ -75,6 +80,7 @@
   }
 
   async function openSheet(requested: number[] = []) {
+    only = requestedOnly(candidates, requested);
     ticked =
       requested.length > 0
         ? requestedTicks(candidates, { sessionIds: requested, at: 0 })
@@ -92,6 +98,7 @@
 
   function closeSheet() {
     open = false;
+    only = null;
     if (focused) clearSessionFocus();
     focused = false;
   }
@@ -297,6 +304,12 @@
       <span>Tidy up</span>
       <span class="hint">j/k move · space toggle · ↵ apply · esc close</span>
     </div>
+    {#if only && shown.length < candidates.length}
+      <p class="hint only" data-testid="tidy-only">
+        From Today's Stale · {shown.length} of {candidates.length}
+        <button class="pill" data-testid="tidy-show-all" onclick={() => (only = null)}>Show all</button>
+      </p>
+    {/if}
     {#if blocked}<p class="hint" role="note">{blocked}</p>{/if}
     {#each groups as g (g.reason)}
       <div class="group-head" data-testid="tidy-group">{tidyReasonLabel(g.reason)} · {g.items.length}</div>
@@ -413,6 +426,12 @@
     color: var(--fg-muted);
     font-size: 0.65rem;
     flex: 1;
+  }
+  .only {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 2px 0;
   }
   .tidy-row {
     display: flex;

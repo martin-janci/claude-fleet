@@ -306,8 +306,9 @@ export function inScope(
 
 /**
  * A request to open the Tidy-up sheet from elsewhere (the Today view's Stale
- * section, work graph M9): `sessionIds` are ticked and the cursor starts on
- * the first of them; an empty list keeps the sheet's own preselection. The
+ * section, work graph M9): `sessionIds` are ticked, the sheet shows only
+ * them until "Show all" (M10.4), and the cursor starts on the first of them;
+ * an empty list keeps the sheet's own preselection. The
  * sheet lives in the sidebar, so App expands a collapsed sidebar on a
  * request, and the sheet takes it once it has candidates. A request older
  * than {@link TIDY_REQUEST_TTL_MS} is dropped rather than opening the sheet
@@ -339,6 +340,18 @@ export function requestedTicks(cands: readonly TidyCandidate[], r: TidyRequest):
   return new Set(
     cands.filter((c) => want.has(c.session_id) && choicesFor(c).length > 0).map((c) => c.session_id),
   );
+}
+
+/**
+ * What a sheet opened by a request shows (work graph M10.4): just the
+ * requested candidates, so the Today view's Stale action opens a sheet about
+ * those links and nothing else. `null` — the sheet's own opening, or a
+ * request none of whose sessions is still a candidate — shows everything.
+ */
+export function requestedOnly(cands: readonly TidyCandidate[], sessionIds: readonly number[]): Set<number> | null {
+  if (sessionIds.length === 0) return null;
+  const hit = candidatesFor(cands, sessionIds);
+  return hit.length > 0 ? new Set(hit.map((c) => c.session_id)) : null;
 }
 
 /** The candidates behind the given sessions (the Today view's Stale rows). */

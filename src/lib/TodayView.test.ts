@@ -113,4 +113,37 @@ describe('TodayView', () => {
     expect(onclose).toHaveBeenCalled();
     expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).not.toContain('tidy_apply');
   });
+
+  it('a Stale row still jumps to its session next to Tidy up (M10.4)', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_today') return digest;
+      if (cmd === 'work_tidy')
+        return {
+          ...EMPTY_REPORT,
+          candidates: [{ session_id: 42, host_alias: 'mefistos', tmux_name: 'old', reason: 'done_idle', action: 'safe_kill', since: 0 }],
+        };
+      return null;
+    });
+    tidyRequest.set(null);
+    const onclose = vi.fn();
+    render(TodayView, { onclose });
+    await flush();
+    await screen.findByTestId('today-tidy');
+    await fireEvent.click(screen.getByText(/^old/));
+    expect(get(selectedSession)?.id).toBe(42);
+    expect(get(tidyRequest)).toBeNull();
+    expect(onclose).toHaveBeenCalled();
+  });
+
+  it('no Tidy up action when no Stale session is a tidy candidate (M10.4)', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_today') return digest;
+      if (cmd === 'work_tidy') return { ...EMPTY_REPORT, candidates: [] };
+      return null;
+    });
+    render(TodayView);
+    await flush();
+    expect(screen.getByTestId('today-stale')).toBeTruthy();
+    expect(screen.queryByTestId('today-tidy')).toBeNull();
+  });
 });
