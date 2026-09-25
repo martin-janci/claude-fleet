@@ -269,6 +269,52 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     );
 }
 
+/// Inside a 429's Retry-After (the deadline the sync put on the row) a
+/// lookup the cache misses is refused without a request; once it is past,
+/// the fetch happens.
+#[tokio::test]
+async fn a_lookup_inside_the_retry_after_window_sends_nothing() {
+    let fx = Fx::new();
+    let t = fx_tracker(&fx);
+    let now = crate::service::catalog::now_secs();
+    fx.store
+        .lock()
+        .unwrap()
+        .set_tracker_not_before(t, Some(now + 600))
+        .unwrap();
+    let e = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_TRACKER);
+    assert!(e.message.contains("cannot be asked now"), "{}", e.message);
+    let left = e.details.unwrap()["retry_after_secs"].as_i64().unwrap();
+    assert!((590..=600).contains(&left), "{left}");
+    assert!(fx.fake.requests().is_empty(), "no request inside the window");
+    // The cache still answers.
+    assert!(lookup(&fx.store, "ABC-1", &OrgScope::All, &fx.net())
+        .await
+        .is_ok());
+    // Past the window: the fetch happens.
+    fx.store
+        .lock()
+        .unwrap()
+        .set_tracker_not_before(t, Some(now - 1))
+        .unwrap();
+    fx.fake.once(
+        Method::Post,
+        "/issue/bulkfetch",
+        Ok(Response::json(200, &json!({"issues": []}))),
+    );
+    assert_eq!(
+        lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
+            .await
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(fx.fake.count("/issue/bulkfetch"), 1);
+}
+
 /// Two Jira sites sharing a project key: a URL names its site, so it is
 /// answered from that site's cache (or fetched from that site), never from
 /// the other site's row under the same key.

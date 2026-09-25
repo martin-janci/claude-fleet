@@ -483,6 +483,8 @@ pub async fn test_tracker(
             // A view the sync disabled on a 403 runs again after a person
             // tests the tracker: nothing else ever re-enables it.
             changed |= s.enable_tracker_views(id)?;
+            // The tracker answered: a 429 back-off still on the row is over.
+            s.set_tracker_not_before(id, None)?;
             changed |= s.set_tracker_state(id, "ok", None)?;
             if changed {
                 s.emit_tracker(id)?;

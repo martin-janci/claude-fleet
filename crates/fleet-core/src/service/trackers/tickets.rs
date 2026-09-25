@@ -337,6 +337,27 @@ pub async fn lookup(
                 )
                 .with_details(serde_json::json!({ "state": t.state })));
             }
+            // Inside a 429's Retry-After the sync recorded: no request, the
+            // same refusal, and how long is left — a lookup must not extend
+            // the outage the sync is waiting out.
+            let now = crate::service::catalog::now_secs();
+            if let Some(nb) = lock(store)?
+                .tracker_not_before(t.id)?
+                .filter(|nb| *nb > now)
+            {
+                let left = nb - now;
+                return Err(IpcError::new(
+                    codes::E_TRACKER,
+                    format!(
+                        "{key} is not cached and {} cannot be asked now (rate-limited for \
+                         another {left}s)",
+                        t.name
+                    ),
+                )
+                .with_details(
+                    serde_json::json!({ "state": t.state, "retry_after_secs": left }),
+                ));
+            }
             fetch_one(&t, ItemRef::parse(&key), store, net)
                 .await
                 .map_err(|e| e.to_ipc())?

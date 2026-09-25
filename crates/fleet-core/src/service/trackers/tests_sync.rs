@@ -492,6 +492,47 @@ async fn oversized_tracker_fields_are_capped_before_they_are_stored() {
     assert!(w.assignees.iter().all(|a| a.chars().count() == FIELD_MAX_CHARS));
 }
 
+/// The 429 deadline is on the row too: a sync with no memory of it (a
+/// restart) still waits it out, and a pass after it clears the row.
+#[tokio::test]
+async fn a_429_deadline_is_kept_on_the_row_and_cleared_by_a_good_pass() {
+    let fx = Fx::new();
+    fx.fake
+        .once(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::new(429, "").with_header("Retry-After", "30")),
+        )
+        .always(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
+        );
+    fx.sync(|| T0).run_pass(&fx.store).await.unwrap();
+    let nb = fx
+        .store
+        .lock()
+        .unwrap()
+        .tracker_not_before(fx.tracker)
+        .unwrap()
+        .expect("the deadline is on the row");
+    assert!(nb >= T0 + 30 && nb <= T0 + 30 + 10, "{nb}");
+    // A fresh sync (nothing in memory), still inside the window: skipped.
+    assert!(fx.sync(|| T0 + 10).run_pass(&fx.store).await.unwrap()[0].skipped);
+    assert_eq!(fx.fake.count("/search/jql"), 1, "no request inside the window");
+    // Past it: runs, and the row's deadline is gone.
+    let p = fx.sync(|| T0 + 3600).run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_none(), "{p:?}");
+    assert_eq!(
+        fx.store
+            .lock()
+            .unwrap()
+            .tracker_not_before(fx.tracker)
+            .unwrap(),
+        None
+    );
+}
+
 /// An absurd `Retry-After` neither overflows nor parks the tracker past
 /// `MAX_RETRY_SECS` (plus jitter).
 #[tokio::test]

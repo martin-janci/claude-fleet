@@ -150,12 +150,18 @@ impl TrackerSync {
             ..Default::default()
         };
         let now = (self.clock)();
-        let waiting = self
+        // The deadline is kept here and on the row (`set_tracker_not_before`):
+        // the row's copy is what a `lookup` honours and what survives a
+        // restart.
+        let in_memory = self
             .not_before
             .lock()
             .ok()
-            .and_then(|m| m.get(&t.id).copied())
-            .is_some_and(|nb| nb > now);
+            .and_then(|m| m.get(&t.id).copied());
+        let on_row = lock(store)
+            .ok()
+            .and_then(|s| s.tracker_not_before(t.id).ok().flatten());
+        let waiting = in_memory.is_some_and(|nb| nb > now) || on_row.is_some_and(|nb| nb > now);
         if !runnable(&t.state) || waiting {
             pass.skipped = true;
             return pass;
@@ -166,6 +172,7 @@ impl TrackerSync {
                     m.remove(&t.id);
                 }
                 if let Ok(s) = lock(store) {
+                    let _ = s.set_tracker_not_before(t.id, None);
                     let changed = s.set_tracker_state(t.id, "ok", None).unwrap_or(false);
                     let first = s.set_tracker_synced(t.id, now).unwrap_or(false);
                     if changed || first {
@@ -175,17 +182,25 @@ impl TrackerSync {
             }
             Err(e) => {
                 pass.error = Some(e.explain());
-                if let TrackerError::RateLimited { retry_after_secs } = &e {
-                    let wait = retry_after_secs
-                        .unwrap_or(DEFAULT_RETRY_SECS)
-                        .min(MAX_RETRY_SECS);
-                    let deadline = now.saturating_add(wait.saturating_add(jitter(wait)) as i64);
+                let deadline = match &e {
+                    TrackerError::RateLimited { retry_after_secs } => {
+                        let wait = retry_after_secs
+                            .unwrap_or(DEFAULT_RETRY_SECS)
+                            .min(MAX_RETRY_SECS);
+                        Some(now.saturating_add(wait.saturating_add(jitter(wait)) as i64))
+                    }
+                    _ => None,
+                };
+                if let Some(d) = deadline {
                     if let Ok(mut m) = self.not_before.lock() {
-                        m.insert(t.id, deadline);
+                        m.insert(t.id, d);
                     }
                 }
                 tracing::warn!(tracker_id = t.id, result = ?e.state(), "tracker sync failed");
                 if let Ok(s) = lock(store) {
+                    if let Some(d) = deadline {
+                        let _ = s.set_tracker_not_before(t.id, Some(d));
+                    }
                     let _ = super::admin::record_failure(&s, t.id, &e);
                 }
             }
