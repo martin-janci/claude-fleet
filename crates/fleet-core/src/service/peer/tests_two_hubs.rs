@@ -33,6 +33,9 @@ enum Fault {
     /// Hold the next call started until the test releases it, then answer
     /// it with this listener error code: a call in flight across a re-pair.
     HoldThenRefuse(&'static str),
+    /// Append a message with this id to the answer of the next call started,
+    /// as a hostile peer would: an id that is not one of the listener's rows.
+    Plant(i64),
 }
 
 #[derive(Default)]
@@ -87,7 +90,9 @@ impl Loopback {
         match f {
             Fault::DropWhenSending => a.drop_when_sending = true,
             Fault::DropWhenCarrying => a.drop_when_carrying = true,
-            Fault::Transport | Fault::Refuse(_) | Fault::HoldThenRefuse(_) => a.next = Some(f),
+            Fault::Transport | Fault::Refuse(_) | Fault::HoldThenRefuse(_) | Fault::Plant(_) => {
+                a.next = Some(f)
+            }
         }
     }
     fn fired(&self) -> Vec<Fault> {
@@ -111,7 +116,9 @@ impl PeerCall for Loopback {
             self.down_hits.fetch_add(1, Ordering::SeqCst);
             return Err(CallError::Transport("peer is down".into()));
         }
+        let mut plant = None;
         match next {
+            Some(f @ Fault::Plant(id)) => plant = Some((f, id)),
             Some(f @ Fault::HoldThenRefuse(code)) => {
                 self.held.store(true, Ordering::SeqCst);
                 self.release.notified().await;
@@ -146,9 +153,22 @@ impl PeerCall for Loopback {
         .await;
         guard.done = true;
         drop(guard);
-        let got = got
+        let mut got = got
             .map_err(|_| CallError::Transport("timeout".into()))?
             .map_err(|e| classify(&e.code, e.message))?;
+        if let Some((f, id)) = plant {
+            got.messages.push(WireMessage {
+                id,
+                from_addr: "fleet-b/session/local/b1".into(),
+                to_addr: "fleet-a/session/local/a1".into(),
+                body: "planted".into(),
+                kind: "message".into(),
+                reply_to: None,
+                sent_at: 1,
+                wake: false,
+            });
+            self.fire(f);
+        }
         {
             let mut a = self.armed.lock().unwrap();
             if a.drop_when_sending && !req.send.is_empty() {
@@ -810,6 +830,72 @@ async fn a_re_pair_rebinds_onto_the_older_row_and_its_pending_rows_go_out() {
     assert_eq!(kept.state, "retrying");
     let h = p.start_link(old);
     p.until("B has it", || p.b_inbox().len() == 1).await;
+    p.cancel.cancel();
+    assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+}
+
+/// A hostile peer can plant any watermark: the ids in its answer are its
+/// own rows, so the dialer cannot tell `i64::MAX` from a real one and
+/// `after` takes it (results for ids the dialer never sent are dropped
+/// already). What the plant must not do is outlive that peer: after a
+/// re-pair — the merge onto this row that `peer add` takes for a fleet
+/// already linked — the honest peer's queued row still goes out, because
+/// the merge starts the watermark from 0. Kept at `i64::MAX`, B would mark
+/// that row accepted on the first exchange without ever handing it over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planted_watermark_does_not_survive_a_re_pair() {
+    let p = pair();
+    let h = p.start();
+    p.handshake().await;
+    p.parked().await;
+    p.call.arm(Fault::Plant(i64::MAX));
+    p.send_a_to_b("hi").await; // drops the parked poll; the next answer is planted
+    p.until("the plant took", || p.row().after == i64::MAX)
+        .await;
+    assert_eq!(p.call.fired(), vec![Fault::Plant(i64::MAX)]);
+    // The link then stops on a refusal (the token revoked on B, say)...
+    p.parked().await;
+    p.call.arm(Fault::Refuse("E_UNAUTHORIZED"));
+    p.send_a_to_b("y").await;
+    let exit = tokio::time::timeout(Duration::from_secs(5), h)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit, LinkExit::Refused);
+    assert_eq!(p.row().after, i64::MAX, "a refusal keeps the watermark");
+    // ...and the honest peer queues a row while the link is down.
+    p.send_b_to_a("honest").await;
+    let b_link = p.b_listener().id;
+    assert_eq!(p.b_pending(b_link), 1);
+    // A re-pair: `peer add` with a new token merges onto the old row.
+    let tmp =
+        p.a.lock()
+            .unwrap()
+            .insert_dialer_link("https://b.example", "t2")
+            .unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(5), p.start_link(tmp))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit, LinkExit::Rebound(p.link));
+    let kept = p.row();
+    assert_eq!(kept.token.as_deref(), Some("t2"));
+    assert_eq!(kept.after, 0, "the merge sheds the planted watermark");
+    assert_eq!(
+        p.b_pending(b_link),
+        1,
+        "the handshake alone accepts nothing"
+    );
+    // The supervisor starts the kept row: B's row is delivered, then accepted.
+    let h = p.start_link(p.link);
+    p.until("B's row reaches A", || {
+        p.a_inbox().iter().any(|m| m.body.ends_with("honest"))
+    })
+    .await;
+    p.until("B marks it accepted by the real watermark", || {
+        p.b_pending(b_link) == 0
+    })
+    .await;
     p.cancel.cancel();
     assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
 }
