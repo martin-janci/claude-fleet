@@ -803,30 +803,37 @@ else
   until_ok 75 'events_of "$SST" | grep -q handover_started'
   check "the typed start prompt was acknowledged by the prompt hook" 'events_of "$SST" | grep -q handover_started' "$(events_of "$SST")"
 
-  # --- 3. detection: a prompt naming a second key ---------------------------
+  # --- 3. detection: a prompt naming a key -----------------------------------
   echo "-- 3. detection"
   # Typed into the pane the way a person does: detection reads what a person
-  # types, and skips a prompt fleet sent (the loop guard).
+  # types, and skips a prompt fleet sent (the loop guard). A session with no
+  # work yet (a plain new_session in wg-web's main checkout), because a weak
+  # mention surfaces as work_suggested only until a session has confirmed
+  # work (M4.6); after that it is kept as a link, and still decidable.
   type_w() { wtmux send-keys -t "$1" -l "$2"; wtmux send-keys -t "$1" Enter; }
-  type_w "$TST" "While you are there, E2E-2 has the same redirect bug"
-  until_ok 75 '[ "$(wrow "$SST" | jq -r .work_suggested.key)" = E2E-2 ]'
-  r3=$(wrow "$SST")
-  check "a prompt naming E2E-2 yields work_suggested, the primary unchanged" '[ "$(echo "$r3" | jq -r .work_suggested.key)" = E2E-2 ] && [ "$(echo "$r3" | jq -r .work_suggested.state)" = suggested ] && [ "$(echo "$r3" | jq -r .work.key)" = E2E-1 ]' "${r3:0:800}"
+  # links_of SESSION FILTER -> jq over its live links.
+  links_of() { jt "$(wcall "$TOKW" work "{\"session_id\":$1}")" "$2"; }
+  nd=$(wcall "$TOKW" new_session "{\"host_alias\":\"local\",\"project_id\":${PWEB:-0},\"name\":\"e2e-detect\"}")
+  SDT=$(jt "$nd" .id); TDT=$(jt "$nd" .tmux_name); CDT=$(jt "$nd" .claude_session_id)
+  until_ok 75 'grep -q "^--- SessionStart" "$WLOG/$CDT/hooks.log" 2>/dev/null && wtmux capture-pane -p -t "$TDT" 2>/dev/null | grep -q "for shortcuts"'
+  check "a plain Claude session with no work starts (the fake Claude up)" '[ -n "$SDT" ] && [ "$(wrow "$SDT" | jq -r .work)" = null ] && grep -q "^--- SessionStart" "$WLOG/$CDT/hooks.log"' "${nd:0:400}"
+  type_w "$TDT" "While you are there, E2E-2 has the same redirect bug"
+  until_ok 75 '[ "$(wrow "$SDT" | jq -r .work_suggested.key)" = E2E-2 ]'
+  r3=$(wrow "$SDT")
+  check "a typed prompt naming E2E-2 yields work_suggested, never work" '[ "$(echo "$r3" | jq -r .work_suggested.key)" = E2E-2 ] && [ "$(echo "$r3" | jq -r .work_suggested.state)" = suggested ] && [ "$(echo "$r3" | jq -r .work_suggested.source)" = prompt ] && [ "$(echo "$r3" | jq -r .work)" = null ]' "$(echo "$r3" | jq -c "{work, work_suggested}")"
   L2=$(echo "$r3" | jq -r .work_suggested.link_id)
-  cf=$(wcall "$TOKW" work_link "{\"action\":\"confirm\",\"session_id\":${SST:-0},\"link_id\":${L2:-0}}")
-  lk=$(wcall "$TOKW" work "{\"session_id\":${SST:-0}}")
-  # A person's confirm is the newest decision: it becomes the primary, and
-  # the started link stays, confirmed.
-  check "confirm links it (now the primary), keeps E2E-1 and clears the suggestion" '[ "$(jt "$cf" .work.key)" = E2E-2 ] && [ "$(jt "$cf" .work.state)" = confirmed ] && [ "$(jt "$cf" .work_suggested)" = null ] && [ "$(jt "$lk" "[.[] | select(.state == \"confirmed\" and .ended_at == null)] | length")" = 2 ]' "${cf:0:400} / ${lk:0:600}"
-  type_w "$TST" "Unrelated: E2E-3 came up at standup"
-  until_ok 75 '[ "$(wrow "$SST" | jq -r .work_suggested.key)" = E2E-3 ]'
-  L3=$(wrow "$SST" | jq -r .work_suggested.link_id)
-  rj=$(wcall "$TOKW" work_link "{\"action\":\"reject\",\"session_id\":${SST:-0},\"link_id\":${L3:-0}}")
-  check "reject clears it and records it as rejected" '[ "$(jt "$rj" .work_suggested)" = null ] && jt "$rj" ".work_rejected[]" | grep -qx E2E-3' "${rj:0:600}"
-  n0=$(grep -c "^--- Stop" "$WLOG/$CST/hooks.log")
-  type_w "$TST" "And E2E-3 again, still the ledger"
-  until_ok 75 '[ "$(grep -c "^--- Stop" "$WLOG/$CST/hooks.log")" -gt "$n0" ]'
-  check "a rejected key is never suggested again (R9)" '[ "$(wrow "$SST" | jq -r .work_suggested)" = null ]' "$(wrow "$SST" | head -c 600)"
+  cf=$(wcall "$TOKW" work_link "{\"action\":\"confirm\",\"session_id\":${SDT:-0},\"link_id\":${L2:-0}}")
+  check "confirm makes it the session's work and clears the suggestion" '[ "$(jt "$cf" .work.key)" = E2E-2 ] && [ "$(jt "$cf" .work.state)" = confirmed ] && [ "$(jt "$cf" .work_suggested)" = null ]' "${cf:0:600}"
+  type_w "$TDT" "Unrelated: E2E-3 came up at standup"
+  until_ok 75 '[ -n "$(links_of "$SDT" ".[] | select(.ref_key == \"E2E-3\" and .state == \"suggested\") | .id")" ]'
+  L3=$(links_of "$SDT" '.[] | select(.ref_key == "E2E-3" and .state == "suggested") | .id' | head -1)
+  check "with confirmed work, a mention is kept as a suggested link, not surfaced (M4.6)" '[ -n "$L3" ] && [ "$(wrow "$SDT" | jq -r .work_suggested)" = null ] && [ "$(wrow "$SDT" | jq -r .work.key)" = E2E-2 ]' "$(links_of "$SDT" "[.[] | {id, ref_key, state}]" | tr -d "\n ") / $(wrow "$SDT" | jq -c "{work: .work.key, work_suggested}")"
+  rj=$(wcall "$TOKW" work_link "{\"action\":\"reject\",\"session_id\":${SDT:-0},\"link_id\":${L3:-0}}")
+  check "reject records it as rejected" 'jt "$rj" ".work_rejected[]" | grep -qx E2E-3 && [ -z "$(links_of "$SDT" ".[] | select(.ref_key == \"E2E-3\" and .state == \"suggested\") | .id")" ]' "${rj:0:600}"
+  n0=$(grep -c "^--- Stop" "$WLOG/$CDT/hooks.log")
+  type_w "$TDT" "And E2E-3 again, still the ledger"
+  until_ok 75 '[ "$(grep -c "^--- Stop" "$WLOG/$CDT/hooks.log")" -gt "$n0" ]'
+  check "a rejected key is never proposed again (R9)" '[ -z "$(links_of "$SDT" ".[] | select(.ref_key == \"E2E-3\" and .state == \"suggested\") | .id")" ]' "$(links_of "$SDT" "[.[] | {id, ref_key, state}]" | tr -d "\n ")"
 
   # --- 4. multi-start with two projects (M10.1 semantics) -------------------
   echo "-- 4. multi-start"
