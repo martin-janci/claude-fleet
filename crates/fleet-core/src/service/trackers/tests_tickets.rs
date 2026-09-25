@@ -659,3 +659,212 @@ fn host_scope(alias: &str) -> OrgScope {
         isolated: Default::default(),
     }
 }
+
+// --- multi-repo start (work graph M9.6) --------------------------------------
+
+/// What each spawn was asked: (project, new worktree).
+type Asked = Arc<Mutex<Vec<(i64, Option<String>)>>>;
+
+/// A spawn that records what it was asked and makes a row in that project;
+/// `fail` names a project whose spawn fails.
+fn spawn_rec(
+    store: &Arc<Mutex<Store>>,
+    asked: Asked,
+    fail: Option<i64>,
+) -> impl FnMut(
+    crate::service::sessions::NewSessionArgs,
+) -> std::future::Ready<Result<SessionRow, IpcError>>
+       + '_ {
+    move |a| {
+        asked
+            .lock()
+            .unwrap()
+            .push((a.project_id, a.new_worktree.clone()));
+        if Some(a.project_id) == fail {
+            return std::future::ready(Err(IpcError::new(codes::E_SSH, "host down")));
+        }
+        let s = store.lock().unwrap();
+        let n = asked.lock().unwrap().len();
+        let id = s
+            .upsert_session(
+                &format!("sib-{n}"),
+                &a.host_alias,
+                Some(a.project_id),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    }
+}
+
+#[tokio::test]
+async fn a_multi_repo_start_makes_one_sibling_per_repo_on_one_branch() {
+    let fx = Fx::new();
+    let pid2 = fx
+        .store
+        .lock()
+        .unwrap()
+        .upsert_project("acme", "web", "/p/acme/web")
+        .unwrap();
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        host_alias: Some("hosta".into()),
+        with_brief: true,
+        ..Default::default()
+    };
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (out, queued) = start_many(
+        &fx.store,
+        &args,
+        &[fx.pid, pid2, fx.pid],
+        &OrgScope::All,
+        &fx.net(),
+        spawn_rec(&fx.store, Arc::clone(&asked), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.key, "ABC-3");
+    assert_eq!(out.started.len(), 2, "{out:?}");
+    assert!(out.skipped.is_empty() && out.failed.is_empty());
+    assert_eq!(queued.len(), 2);
+    // One branch name in every repository (D11).
+    let branches: Vec<Option<String>> = asked.lock().unwrap().iter().map(|a| a.1.clone()).collect();
+    assert_eq!(
+        branches,
+        vec![
+            Some("abc-3-abc-3-title".into()),
+            Some("abc-3-abc-3-title".into())
+        ]
+    );
+    for row in &out.started {
+        assert_eq!(row.work.as_ref().unwrap().source, "started");
+        let brief = fx
+            .store
+            .lock()
+            .unwrap()
+            .undelivered_handovers(row.id)
+            .unwrap()[0]
+            .body
+            .clone()
+            .unwrap();
+        assert!(
+            brief.contains("one of 2 sessions starting ABC-3"),
+            "{brief}"
+        );
+        let other = if row.project_id == Some(fx.pid) {
+            "acme/web"
+        } else {
+            "acme/app"
+        };
+        assert!(
+            brief.contains(&format!("the others in {other} on hosta")),
+            "{brief}"
+        );
+        assert!(
+            brief.trim_end().ends_with(crate::mcp::guard::UNTRUSTED_END),
+            "{brief}"
+        );
+    }
+
+    // Again: the key runs in both repos now, so both are skipped by name.
+    let (again, _) = start_many(
+        &fx.store,
+        &args,
+        &[fx.pid, pid2],
+        &OrgScope::All,
+        &fx.net(),
+        spawn_rec(&fx.store, Arc::new(Mutex::new(Vec::new())), None),
+    )
+    .await
+    .unwrap();
+    assert!(again.started.is_empty());
+    let skipped: Vec<Option<i64>> = again.skipped.iter().map(|x| x.session_id).collect();
+    let started: Vec<Option<i64>> = out.started.iter().map(|r| Some(r.id)).collect();
+    assert_eq!(skipped, started);
+}
+
+#[tokio::test]
+async fn a_multi_repo_start_skips_a_repo_already_running_and_reports_a_failure() {
+    let fx = Fx::new();
+    let (pid2, pid3) = {
+        let s = fx.store.lock().unwrap();
+        (
+            s.upsert_project("acme", "web", "/p/acme/web").unwrap(),
+            s.upsert_project("acme", "api", "/p/acme/api").unwrap(),
+        )
+    };
+    // ABC-1 already runs in the first repo.
+    let live = fx.session_on("hosta", "live");
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(live, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    let (out, _) = start_many(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &[fx.pid, pid2, pid3],
+        &OrgScope::All,
+        &fx.net(),
+        spawn_rec(&fx.store, Arc::new(Mutex::new(Vec::new())), Some(pid3)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.skipped.len(), 1);
+    assert_eq!(
+        (out.skipped[0].project_id, out.skipped[0].session_id),
+        (fx.pid, Some(live))
+    );
+    assert_eq!(out.started.len(), 1);
+    assert_eq!(out.started[0].project_id, Some(pid2));
+    assert_eq!(out.failed.len(), 1);
+    assert_eq!(
+        (out.failed[0].project_id, out.failed[0].code.as_str()),
+        (pid3, codes::E_SSH)
+    );
+
+    // A single start still refuses a second live session anywhere.
+    let e = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(pid3),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+}
+
+#[tokio::test]
+async fn a_multi_repo_start_takes_one_to_eight_projects() {
+    let fx = Fx::new();
+    for ids in [vec![], (1..=9).collect::<Vec<i64>>()] {
+        let e = start_many(
+            &fx.store,
+            &StartArgs {
+                reference: Some("ABC-1".into()),
+                ..Default::default()
+            },
+            &ids,
+            &OrgScope::All,
+            &fx.net(),
+            spawn_rec(&fx.store, Arc::new(Mutex::new(Vec::new())), None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+    }
+}

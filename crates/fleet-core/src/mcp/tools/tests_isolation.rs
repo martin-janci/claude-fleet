@@ -750,6 +750,27 @@ async fn run_matrix(isolate: bool) {
     )
     .await;
     same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
+    // Multi-repo start (work graph M9.6): each repo is planned under the
+    // caller's scope, so a host that cannot see B's ticket starts nothing.
+    m.row(
+        "work_link",
+        "start",
+        |_, _| json!({ "action": "start", "key": "BB-2", "project_ids": [1, 2], "host_alias": "h-a" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            assert_eq!(v["started"], json!([]), "{who:?}: {v}");
+            if matches!(who, Who::HostA | Who::HostNone) {
+                assert!(
+                    v["failed"].as_array().unwrap().iter().all(|f| f["code"] == "E_FORBIDDEN"),
+                    "{who:?}: {v}"
+                );
+            }
+        },
+    )
+    .await;
     // Agent-written handover (work graph M9.3): a caller asks only its own
     // sessions; the send itself fails here for want of a real host.
     m.row(

@@ -103,6 +103,9 @@ pub struct WorkLinkArgs {
     /// Start: the project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
+    /// Start: several repos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<i64>>,
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
@@ -243,6 +246,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
     ("request_work_handover", "work_link", "handover"),
+    ("start_work_multi", "work_link", "start"),
+    ("start_work_multi", "work_link", "start"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -386,6 +391,7 @@ pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::Sta
         name: args.name.clone(),
         worktree: args.worktree.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
+        per_project: false,
     }
 }
 

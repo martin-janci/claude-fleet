@@ -485,9 +485,9 @@ Parameters: `action`, `auth_kind`, `color`, `confirm_nonce`, `credential_ref`, `
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket. handover {session_id}: ask it to write its hand-off.
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off.
 
-Parameters: `action`, `brief`, `confirm_nonce`, `force_cross_org`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `session_id`, `source`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `force_cross_org`, `host_alias`, `item_id`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `project_ids`, `session_id`, `source`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -533,6 +533,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
 - `commands::trackers::work_lookup`
+- `commands::trackers::start_work_multi`
 - `commands::trackers::start_work`
 - `commands::orgs::add_org`
 - `commands::orgs::update_org`

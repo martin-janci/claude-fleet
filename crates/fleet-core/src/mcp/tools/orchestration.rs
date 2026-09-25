@@ -648,7 +648,7 @@ impl FleetTools {
         suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
-        ticket. handover {session_id}: ask it to write its hand-off.")]
+        ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off.")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -686,13 +686,14 @@ impl FleetTools {
                 "work_link",
                 args.confirm_nonce.as_deref(),
                 &format!(
-                    "{} key={:?} url={:?} item_id={:?} host={:?} project_id={:?} mode={:?}",
+                    "{} key={:?} url={:?} item_id={:?} host={:?} project_id={:?} project_ids={:?} mode={:?}",
                     args.action,
                     args.key,
                     args.url,
                     args.item_id,
                     args.host_alias,
                     args.project_id,
+                    args.project_ids,
                     args.mode
                 ),
                 &caller,
@@ -739,6 +740,28 @@ impl FleetTools {
             );
         }
         if args.action == "start" {
+            if let Some(ids) = args.project_ids.as_ref().filter(|v| !v.is_empty()) {
+                // Work graph M9.6: one sibling per repository, same branch.
+                if args.project_id.is_some() {
+                    return Err(mcp_err(
+                        "E_INVALID",
+                        "pass project_id or project_ids, not both",
+                        None,
+                    ));
+                }
+                let out = crate::service::trackers::tickets::start_work_many(
+                    &self.store,
+                    &self.ssh,
+                    &self.reg,
+                    &crate::service::work::start_args(&args),
+                    ids,
+                    &scope,
+                    &crate::service::trackers::default_net(),
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                return ok_json(&out);
+            }
             // The host fence (a per-host token starts only its own host's
             // tickets, on its own host) is inside `start_work`'s scope.
             let row = crate::service::trackers::tickets::start_work(

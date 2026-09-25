@@ -136,6 +136,7 @@
     "set_work_project_trust",
     "spawn_review",
     "start_work",
+    "start_work_multi",
     "unlink_session_work",
     "work_lookup",
     "work_purge_impact",

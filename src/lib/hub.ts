@@ -314,6 +314,8 @@ export const ROUTED_ACTIONS = [
   'confirm_session_work',
   'set_work_project_trust',
   'start_work',
+  'start_work_multi',
+  'request_work_handover',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

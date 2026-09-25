@@ -310,6 +310,7 @@ pub fn run() {
             commands::trackers::list_trackers,
             commands::trackers::work_tickets,
             commands::trackers::work_lookup,
+            commands::trackers::start_work_multi,
             commands::trackers::start_work,
             commands::orgs::add_org,
             commands::orgs::update_org,

@@ -3004,7 +3004,9 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M9.3: `work_link` gains `handover` (one enum value and a
     // clause of description). Measured at 69,865 on 2026-09-25 (+64): inside
     // the headroom, not raised.
-    const BUDGET_BYTES: usize = 69_901;
+    // Work graph M9.6: `work_link` start gains `project_ids` (a multi-repo
+    // start). Measured at 69,998 on 2026-09-25 (+133); plus 100.
+    const BUDGET_BYTES: usize = 70_098;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

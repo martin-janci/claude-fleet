@@ -10,6 +10,8 @@
   import { loadTicketCard, canInsertInto, type TicketCard } from './ticket_card';
   import { requestWorkHandover } from './work';
   import { push, pushError } from './toasts';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -42,8 +44,10 @@
   // Work graph M9.3: ask the session to write its hand-off (on demand only).
   // Only an idle REPL is asked; the hub refuses the rest and says why.
   let asking = $state(false);
+  const askBlocked = $derived(hubActionBlocked('request_work_handover', $hubStatus, $hubConnection));
   const canAsk = $derived(
-    canInsertInto(session) &&
+    askBlocked === null &&
+      canInsertInto(session) &&
       session.claude_status !== 'working' &&
       session.claude_status !== 'blocked' &&
       !session.stuck_kind,
@@ -116,9 +120,10 @@
       type="button"
       data-testid="ticket-card-handover"
       disabled={!canAsk || asking}
-      title={canAsk
-        ? 'Ask this session to write a handover for the next session on this work (it uses one turn)'
-        : 'Only an idle Claude session can be asked for a handover'}
+      title={askBlocked ??
+        (canAsk
+          ? 'Ask this session to write a handover for the next session on this work (it uses one turn)'
+          : 'Only an idle Claude session can be asked for a handover')}
       onclick={() => void askHandover()}>Ask for a handover</button
     >
   </section>

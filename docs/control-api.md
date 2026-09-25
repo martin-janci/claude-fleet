@@ -468,6 +468,13 @@ Index by area (names only; see the reference for details):
   stuck, without work, when a request is already pending (30 min), and for
   the operator's own session. Timeline: `handover_requested`,
   `handover_written`, `handover_missing`, `handover_send_failed`.
+  `work_link { action: "start", …, project_ids: [..] }` (M9.6) starts one
+  ticket in several repositories at once — up to 8 — one sibling session
+  per project, all on the same branch name (`slug(key + title)`, or the
+  `worktree` given), each linked `started`, each brief naming the others.
+  A repository where the key already runs is skipped (naming the session)
+  rather than refusing the whole start; the reply is `{ key, started,
+  skipped, failed }`. `project_id` and `project_ids` are exclusive.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

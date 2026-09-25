@@ -1065,6 +1065,32 @@ fn routed_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "start_work_multi",
+            "work_link",
+            json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": null, "project_ids": [3, 4], "host_alias": "h",
+                    "with_brief": true }),
+            r#"{"key":"ABC-1","started":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::start_work_multi(
+                    b,
+                    commands::trackers::StartWorkMultiArgs {
+                        start: commands::trackers::StartWorkArgs {
+                            reference: Some("ABC-1".into()),
+                            host_alias: Some("h".into()),
+                            with_brief: true,
+                            ..Default::default()
+                        },
+                        project_ids: vec![3, 4],
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "request_work_handover",
             "work_link",
             json!({ "session_id": 5, "action": "handover", "key": null, "item_id": null,

@@ -1567,6 +1567,38 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some((c) => c[0] === 'new_session')).toBe(false);
   });
 
+  it('offers the repos the ticket ran in and starts one sibling in each (work graph M9.6)', async () => {
+    const { projects } = await import('./projects');
+    projects.set([
+      project as never,
+      { project: { ...project.project, id: 2, repo: 'web', base_path: '/r/web' }, worktrees: [] } as never,
+    ]);
+    const onCreate = vi.fn();
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_work_links')
+        return [{ id: 1, state: 'confirmed', source: 'manual', created_at: 1, ended_at: 5, snap_project_id: 2 }];
+      if (cmd === 'start_work_multi') return { key: 'ABC-7', started: [started, { ...started, id: 78 }] };
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate, onCancel: () => {} },
+    });
+    const also = await screen.findByTestId('ticket-also-in-2');
+    expect(screen.getByTestId('ticket-also-in').textContent).toContain('martin-janci/web');
+    await fireEvent.click(also);
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    await vi.waitFor(() => expect(onCreate).toHaveBeenCalledWith(started));
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    const call = calls.find((c) => c[0] === 'start_work_multi')!;
+    expect((call[1] as { args: { project_ids: number[]; worktree: string } }).args).toMatchObject({
+      item_id: 42,
+      project_ids: [1, 2],
+      worktree: 'abc-7-fix-login',
+    });
+    expect(calls.some((c) => c[0] === 'start_work')).toBe(false);
+    projects.set([]);
+  });
+
   it('sends an edited brief, or none when unticked', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
       cmd === 'start_work' ? started : null,
