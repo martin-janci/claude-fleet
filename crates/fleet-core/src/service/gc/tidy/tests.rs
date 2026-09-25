@@ -22,6 +22,8 @@ fn session(id: i64, idle: i64) -> TidySession {
         row,
         link: None,
         in_progress: false,
+        snoozed_until: None,
+        never: false,
         pr_merged: false,
         last_touch_at: None,
         open_tasks: false,
@@ -351,6 +353,29 @@ fn snooze_and_never_are_idempotent() {
         }),
         pr_merged: true,
         ..session(1, 30 * DAY)
+    };
+    assert!(run(&[never], &cfg()).is_empty());
+}
+
+/// A snooze or never accepted on a secondary confirmed link (the session's
+/// own flags, gathered over every live link) holds the session back exactly
+/// as one on its primary.
+#[test]
+fn a_flag_on_any_live_link_is_honoured() {
+    let snoozed = TidySession {
+        snoozed_until: Some(NOW + DAY),
+        ..done_session(1)
+    };
+    assert!(run(&[snoozed], &cfg()).is_empty());
+    let expired = TidySession {
+        snoozed_until: Some(NOW - 1),
+        ..done_session(1)
+    };
+    assert_eq!(run(&[expired], &cfg()).len(), 1);
+    let never = TidySession {
+        never: true,
+        pr_merged: true,
+        ..done_session(1)
     };
     assert!(run(&[never], &cfg()).is_empty());
 }

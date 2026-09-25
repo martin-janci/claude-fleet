@@ -96,6 +96,29 @@ impl Store {
             let it = stmt.query_map([], |r| r.get::<_, i64>(0))?;
             it.collect::<rusqlite::Result<_>>()?
         };
+        // A snooze / never on ANY live confirmed link (the flags are per
+        // link, and `work_link { snooze | never, link_id }` takes a
+        // secondary one): the planner honours the latest snooze and any never.
+        let mut flags: HashMap<i64, (Option<i64>, bool)> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT p.session_id, MAX(l.tidy_snoozed_until), MAX(l.tidy_never) \
+                 FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE l.ended_at IS NULL AND l.state = 'confirmed' AND p.session_id IS NOT NULL \
+                 GROUP BY p.session_id",
+            )?;
+            let it = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    (r.get(1)?, r.get::<_, Option<i64>>(2)?.unwrap_or(0) != 0),
+                ))
+            })?;
+            for row in it {
+                let (sid, f) = row?;
+                flags.insert(sid, f);
+            }
+        }
         let mut extra: HashMap<i64, SessionExtra> = HashMap::new();
         {
             let mut stmt = self
@@ -128,9 +151,12 @@ impl Store {
                         serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok()
                     })
                     .is_some_and(|s| s.is_merged());
+                let (snoozed_until, never) = flags.remove(&row.id).unwrap_or_default();
                 TidySession {
                     link: links.remove(&row.id),
                     in_progress: in_progress.contains(&row.id),
+                    snoozed_until,
+                    never,
                     pr_merged,
                     last_touch_at: touch,
                     open_tasks: tasks.contains(&row.id),

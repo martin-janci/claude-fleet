@@ -196,6 +196,11 @@ pub struct TidySession {
     pub link: Option<TidyLink>,
     /// Any live confirmed link of the session is to an `in_progress` item.
     pub in_progress: bool,
+    /// The latest snooze across ALL the session's live confirmed links (a
+    /// flag written to a secondary link counts as much as the primary's).
+    pub snoozed_until: Option<i64>,
+    /// Some live confirmed link of the session is marked never.
+    pub never: bool,
     /// The PR probe saw the branch's PR merged.
     pub pr_merged: bool,
     /// Last prompt or attach (`sessions.last_touch_at`).
@@ -378,8 +383,15 @@ pub fn plan_tidy(
         if protection(s, ctx).is_some() {
             continue;
         }
+        // A snooze or never on ANY live confirmed link of the session, not
+        // only its primary: `work_link { snooze | never, link_id }` accepts
+        // a secondary link, and a flag accepted must be honoured.
+        let snoozed = |t: Option<i64>| t.is_some_and(|t| t > now);
+        if s.never || snoozed(s.snoozed_until) {
+            continue;
+        }
         if let Some(l) = &s.link {
-            if l.never || l.snoozed_until.is_some_and(|t| t > now) {
+            if l.never || snoozed(l.snoozed_until) {
                 continue;
             }
         }
