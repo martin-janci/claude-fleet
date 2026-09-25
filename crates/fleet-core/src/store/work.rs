@@ -413,9 +413,6 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
 }
 
 impl Store {
-    /// Create a local work item, or return the local item that already has
-    /// `key` (updating its title when a non-empty one is given). A local item
-    /// with no key is always new.
     /// Keyed local work items changed since `since` (unix seconds), newest
     /// first — the classification nudge's (work graph M4.6) local
     /// candidates. A keyless item cannot be named back by key, so it is not
@@ -434,6 +431,9 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Create a local work item, or return the local item that already has
+    /// `key` (updating its title when a non-empty one is given). A local item
+    /// with no key is always new.
     pub fn create_local_work_item(
         &self,
         key: Option<&str>,
@@ -488,7 +488,8 @@ impl Store {
             .map_err(IpcError::from)
     }
 
-    fn local_work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
+    /// The local item that carries `key` (normalised), if any.
+    pub fn local_work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
         self.conn
             .query_row(
                 &format!(
@@ -543,7 +544,7 @@ impl Store {
     /// The live participant of `session_id`, minting one if it has none
     /// (rows from before migration 045). `E_NOTFOUND` for a session row that
     /// does not exist — an identity is never minted for a dead id.
-    fn work_participant(&self, session_id: i64) -> Result<i64, IpcError> {
+    pub(super) fn work_participant(&self, session_id: i64) -> Result<i64, IpcError> {
         let exists: bool = self
             .conn
             .query_row(
@@ -690,7 +691,7 @@ impl Store {
     /// A link write changes the row's `work` without touching `sessions`, so
     /// bump `row_version` by hand: the frontend's merge guard then orders the
     /// `session_updated` this emits after any older payload of the row.
-    fn bump_session_for_work(&self, session_id: i64) -> Result<(), IpcError> {
+    pub(super) fn bump_session_for_work(&self, session_id: i64) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
             rusqlite::params![session_id],

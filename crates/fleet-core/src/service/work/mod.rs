@@ -8,6 +8,7 @@ pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
+pub mod local;
 pub mod nudge;
 pub mod recognize;
 pub mod resolve;
@@ -132,6 +133,9 @@ pub struct WorkLinkArgs {
     /// Approved nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
+    /// Name: the work's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -218,6 +222,8 @@ pub enum WorkAction {
     Tidy,
     /// Work open again that has past sessions (work graph M7).
     Reopened,
+    /// Local work items: named work with no ticket (work graph M11.1).
+    LocalItems,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -238,6 +244,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("card", WorkAction::Card),
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
+    ("local_items", WorkAction::LocalItems),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -258,6 +265,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "never",
     "dismiss",
     "tidy_apply",
+    "name",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -292,6 +300,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("never_tidy", "work_link", "never"),
     ("tidy_apply", "work_link", "tidy_apply"),
     ("dismiss_reopened", "work_link", "dismiss"),
+    ("list_local_work_items", "work", "local_items"),
+    ("name_session_work", "work_link", "name"),
+    ("rename_work_item", "work_link", "name"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -513,7 +524,7 @@ pub fn work_link<'a>(
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply"
+        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply" | "name"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,

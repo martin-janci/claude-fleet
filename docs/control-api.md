@@ -507,6 +507,29 @@ Index by area (names only; see the reference for details):
   A repository where the key already runs is skipped (naming the session)
   rather than refusing the whole start; the reply is `{ key, started,
   skipped, failed }`. `project_id` and `project_ids` are exclusive.
+  Local work (M11.1, "Name this work…"): `work_link { action: "name",
+  session_id, title, key? }` creates a **new** local work item — work with a
+  title and no ticket — and links the session to it (manual, confirmed; it
+  becomes the session's primary work only when the session has none). The
+  title is trimmed, 1–120 characters, no control characters; the key goes
+  through the usual canonical spelling. A key a tracker item the caller can
+  see already carries (by key or alias) is `E_EXISTS` (details `item_id`,
+  `tracker: true`): that work has a ticket — link it with `{ action:
+  "link", key }`. A ticket of an org the caller cannot see is no collision:
+  the key names new work, exactly as an unknown key does. A key a local item
+  already carries is `E_EXISTS` for every caller (local keys are one
+  fleet-wide namespace; details `item_id` only for a caller that sees that
+  item). `work_link { action: "name", item_id, title }` renames a local
+  item (a ticket is `E_INVALID`) and returns the item; both emit
+  `session:updated` for the rows that show it and `work:item`.
+  `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
+  `created_at`, `updated_at`, `live_sessions`), newest change first.
+  Readonly tokens cannot name or rename. A per-host token names work only on
+  its own host's sessions inside its org — any other session answers as an
+  unknown one — and sees (lists, renames) a local item only through a live
+  link on its host's sessions or a past one whose session ran there, inside
+  its org; the count is of its host's sessions. The phone does not name
+  work (D20).
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

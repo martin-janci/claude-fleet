@@ -3270,7 +3270,10 @@ fn the_served_definition_budget_stays_bounded() {
     // restore_host_sessions, recreate_session and restart_session (no new
     // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
     // plus 100.
-    const BUDGET_BYTES: usize = 71_658;
+    // Work graph M11.1 ("Name this work…"): `work` gains `local_items`,
+    // `work_link` gains `name` and one parameter, `title` (no description
+    // change). Measured at 71,686 on 2026-09-25 (+128); plus 100.
+    const BUDGET_BYTES: usize = 71_786;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
