@@ -866,6 +866,21 @@ impl Store {
         self.emit_session(id)
     }
 
+    /// Put `last_prompt` back to an earlier value (possibly none): the send
+    /// it was stamped ahead of failed, so the prompt never reached the pane.
+    /// Emits `session_updated`.
+    pub fn restore_last_prompt(
+        &self,
+        id: i64,
+        prompt: Option<&str>,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET last_prompt=?1 WHERE id=?2",
+            rusqlite::params![prompt, id],
+        )?;
+        self.emit_session(id)
+    }
+
     /// Stamp when fleet created this session (migration 019). Only sets the
     /// value once — a re-create keeps the original start. Emits
     /// `session_updated` so the sidebar's elapsed label does not wait for a
