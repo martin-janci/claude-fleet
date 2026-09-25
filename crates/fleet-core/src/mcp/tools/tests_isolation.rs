@@ -344,6 +344,27 @@ fn own(fx: &Fx, who: Who) -> i64 {
     }
 }
 
+/// `session_id`'s live link to `item`, made through the store (which takes
+/// a cross-org link, as the fixture's forced link was) when an earlier row
+/// removed it; the id of the live link either way.
+fn relink(fx: &Fx, session_id: i64, item: i64) -> i64 {
+    fx.t.store
+        .lock()
+        .unwrap()
+        .link_session_work(session_id, WorkTarget::Item(item), "manual")
+        .unwrap()
+        .id
+}
+
+fn link_is_live(fx: &Fx, link_id: i64) -> bool {
+    fx.t.store
+        .lock()
+        .unwrap()
+        .get_work_link(link_id)
+        .unwrap()
+        .is_some_and(|l| l.ended_at.is_none())
+}
+
 /// Run one matrix row for every caller: the leak check, then `expect`.
 struct Matrix<'a> {
     fx: &'a Fx,
@@ -1097,51 +1118,85 @@ async fn run_matrix(isolate: bool) {
     )
     .await;
     // Link id guessing: s_x's forced link (host A's own session) and s_b's.
+    // The oracle comparison comes FIRST, while link_x is live: a live link
+    // the org fence hides must answer exactly as an id that does not exist
+    // (compared against a missing id, both sides would read as missing and
+    // the fence's own sentence would never be compared), and a refusal
+    // deletes nothing.
+    for action in ["confirm", "unlink"] {
+        let guessed = call(
+            &fx,
+            Who::HostA,
+            "work_link",
+            json!({ "action": action, "session_id": fx.s_x, "link_id": fx.link_x }),
+        )
+        .await;
+        let unknown = call(
+            &fx,
+            Who::HostA,
+            "work_link",
+            json!({ "action": action, "session_id": fx.s_x, "link_id": 999_999 }),
+        )
+        .await;
+        is_code(Who::HostA, &guessed, "E_NOTFOUND", action);
+        same_as_unknown(&guessed, &unknown, &fx.link_x.to_string(), "999999");
+        assert!(
+            link_is_live(&fx, fx.link_x),
+            "{action}: a refusal deletes nothing"
+        );
+    }
+    // The rows. An `unlink` a caller is allowed deletes the link, and the
+    // callers run master first, so the link is re-made for every caller
+    // (`cur` is its id for this call): each host is refused a LIVE link,
+    // and every deletion is asserted rather than left to happen.
     for pick in [0, 1] {
         for action in ["confirm", "unlink"] {
+            let cur = std::cell::Cell::new(0_i64);
+            let cur = &cur;
             m.row(
                 "work_link",
                 action,
                 move |fx, who| {
                     let (sid, link) = if pick == 0 {
-                        (fx.s_x, fx.link_x)
+                        let link = relink(fx, fx.s_x, fx.item_b);
+                        let sid = if who.is_host() && who != Who::HostA {
+                            own(fx, who)
+                        } else {
+                            fx.s_x
+                        };
+                        (sid, link)
                     } else {
-                        (own(fx, who), fx.link_b)
+                        (own(fx, who), relink(fx, fx.s_b, fx.item_b))
                     };
-                    let sid = if who.is_host() && pick == 0 && who != Who::HostA {
-                        own(fx, who)
-                    } else {
-                        sid
-                    };
+                    cur.set(link);
                     json!({ "action": action, "session_id": sid, "link_id": link })
                 },
-                move |_, who, a| {
+                move |fx, who, a| {
                     if readonly_refused(who, a) {
                         return;
                     }
+                    let link = cur.get();
                     if who.is_host() && !(who == Who::HostB && pick == 1) {
                         is_code(who, a, "E_NOTFOUND", "another org's link id");
+                        assert!(link_is_live(fx, link), "{who:?}: a refusal deletes nothing");
+                    } else if action == "unlink" {
+                        // The link's own session: s_x for the master and the
+                        // full client (pick 0), s_b for host B (pick 1). The
+                        // master's and the client's pick 1 is s_a, whose
+                        // links do not include link_b.
+                        if pick == 0 || who == Who::HostB {
+                            is_ok(who, a, "unlink");
+                            assert!(!link_is_live(fx, link), "{who:?}: unlinked");
+                        } else {
+                            is_code(who, a, "E_NOTFOUND", "not this session's link");
+                            assert!(link_is_live(fx, link), "{who:?}: not deleted");
+                        }
                     }
                 },
             )
             .await;
         }
     }
-    let guessed = call(
-        &fx,
-        Who::HostA,
-        "work_link",
-        json!({ "action": "confirm", "session_id": fx.s_x, "link_id": fx.link_x }),
-    )
-    .await;
-    let unknown = call(
-        &fx,
-        Who::HostA,
-        "work_link",
-        json!({ "action": "confirm", "session_id": fx.s_x, "link_id": 999_999 }),
-    )
-    .await;
-    same_as_unknown(&guessed, &unknown, &fx.link_x.to_string(), "999999");
     m.row(
         "work_link",
         "trust_project",
