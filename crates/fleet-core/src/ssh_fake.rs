@@ -31,7 +31,8 @@ use tokio_util::sync::CancellationToken;
 
 /// One recorded call. `args` is the argv exactly as the service passed it
 /// (for an upload: the single `cat > '<path>'` word); `stdin` is the uploaded
-/// file's bytes for `upload_file`, `None` otherwise.
+/// file's bytes for `upload_file`, the piped bytes for `run_with_stdin`,
+/// `None` otherwise.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
     pub host: String,
@@ -66,10 +67,11 @@ impl Call {
         }
     }
 
-    /// Whether this call was an `upload_file` (the only call shape that ever
-    /// carries `stdin`): `run` / `run_bounded` / `run_cancellable` never do.
+    /// Whether this call was an `upload_file` (a `cat > '<path>'` fed on
+    /// stdin): `run` / `run_bounded` / `run_cancellable` never carry stdin,
+    /// and `run_with_stdin` runs something other than `cat >`.
     pub fn is_upload(&self) -> bool {
-        self.stdin.is_some()
+        self.stdin.is_some() && self.args.len() == 1 && self.args[0].starts_with("cat > ")
     }
 
     /// The uploaded bytes as text (`upload_file` calls only).
@@ -491,6 +493,30 @@ impl SshExec for FakeSsh {
             "E_SSH",
         )
         .await
+    }
+
+    async fn run_with_stdin(
+        &self,
+        host: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        let mut out = self
+            .execute(
+                host,
+                args,
+                Some(stdin),
+                self.wall_clock_or(wall_clock),
+                None,
+                "E_SSH",
+            )
+            .await?;
+        out.stdout.truncate(max_output);
+        out.stderr.truncate(max_output);
+        Ok(out)
     }
 
     async fn upload_file(

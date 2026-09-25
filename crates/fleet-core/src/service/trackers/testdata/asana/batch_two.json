@@ -1,0 +1,89 @@
+{
+  "data": [
+    {
+      "status_code": 200,
+      "headers": {},
+      "body": {
+        "data": {
+          "gid": "1207000000000001",
+          "name": "Migrate login to SSO",
+          "completed": false,
+          "modified_at": "2026-09-21T10:15:30.000Z",
+          "notes": "Move every client to the SSO flow.\nOwner: Dana",
+          "permalink_url": "https://app.asana.com/0/1200000000001001/1207000000000001",
+          "resource_subtype": "default_task",
+          "assignee": {
+            "gid": "1200000000000100",
+            "name": "Dana Dev"
+          },
+          "parent": null,
+          "memberships": [
+            {
+              "project": {
+                "gid": "1200000000001001",
+                "name": "Company B \u00b7 Platform"
+              },
+              "section": {
+                "gid": "1200000000001501",
+                "name": "In progress"
+              }
+            },
+            {
+              "project": {
+                "gid": "1200000000001002",
+                "name": "Company B \u00b7 Mobile"
+              },
+              "section": {
+                "gid": "1200000000001502",
+                "name": "Backlog"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "status_code": 200,
+      "headers": {},
+      "body": {
+        "data": {
+          "gid": "1207000000000004",
+          "name": "Rotate the signing keys",
+          "completed": true,
+          "modified_at": "2026-09-19T16:00:00.000Z",
+          "notes": "",
+          "permalink_url": "https://app.asana.com/0/1200000000001001/1207000000000004",
+          "resource_subtype": "default_task",
+          "assignee": {
+            "gid": "1200000000000100",
+            "name": "Dana Dev"
+          },
+          "parent": null,
+          "memberships": [
+            {
+              "project": {
+                "gid": "1200000000001001",
+                "name": "Company B \u00b7 Platform"
+              },
+              "section": {
+                "gid": "1200000000001501",
+                "name": "Done"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "status_code": 404,
+      "headers": {},
+      "body": {
+        "errors": [
+          {
+            "message": "task: Unknown object: 1207000000009999"
+          }
+        ]
+      }
+    }
+  ]
+}

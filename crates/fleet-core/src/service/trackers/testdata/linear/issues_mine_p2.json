@@ -1,0 +1,77 @@
+{
+  "data": {
+    "issues": {
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      },
+      "nodes": [
+        {
+          "id": "iss-0004",
+          "identifier": "OPS-7",
+          "title": "Rotate certificates",
+          "url": "https://linear.app/acme/issue/OPS-7/rotate-certificates",
+          "updatedAt": "2026-09-19T16:00:00.000Z",
+          "description": null,
+          "previousIdentifiers": [],
+          "state": {
+            "name": "Done",
+            "type": "completed"
+          },
+          "team": {
+            "key": "OPS"
+          },
+          "assignee": {
+            "id": "user-0001",
+            "name": "Dana Dev"
+          },
+          "parent": null,
+          "cycle": null
+        },
+        {
+          "id": "iss-0005",
+          "identifier": "OPS-8",
+          "title": "Migrate to v1 runners",
+          "url": "https://linear.app/acme/issue/OPS-8/migrate-to-v1-runners",
+          "updatedAt": "2026-09-18T10:00:00.000Z",
+          "description": null,
+          "previousIdentifiers": [],
+          "state": {
+            "name": "Canceled",
+            "type": "canceled"
+          },
+          "team": {
+            "key": "OPS"
+          },
+          "assignee": null,
+          "parent": null,
+          "cycle": null
+        },
+        {
+          "id": "iss-0006",
+          "identifier": "ENG-110",
+          "title": "Flaky login test",
+          "url": "https://linear.app/acme/issue/ENG-110/flaky-login-test",
+          "updatedAt": "2026-09-18T09:00:00.000Z",
+          "description": null,
+          "previousIdentifiers": [
+            "OPS-3"
+          ],
+          "state": {
+            "name": "Triage",
+            "type": "triage"
+          },
+          "team": {
+            "key": "ENG"
+          },
+          "assignee": {
+            "id": "user-0001",
+            "name": "Dana Dev"
+          },
+          "parent": null,
+          "cycle": null
+        }
+      ]
+    }
+  }
+}

@@ -165,6 +165,17 @@ fn work_links_has_snap_org(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 051: `trackers` already has its
+/// `settings` column (the last of the two it adds).
+fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('trackers') WHERE name = 'settings'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -463,6 +474,15 @@ const MIGRATIONS: &[Migration] = &[
         version: 50,
         sql: include_str!("../../migrations/050_orgs.sql"),
         already_applied: Some(work_links_has_snap_org),
+    },
+    // Work graph M6: `tracker_views.sync_mark` (sync tokens) and
+    // `trackers.settings` (admin-owned provider settings) — ADD COLUMNs, so
+    // the same guard. (Written as 050 on the M6 branch; renumbered when M5,
+    // which took 050, was merged.)
+    Migration {
+        version: 51,
+        sql: include_str!("../../migrations/051_tracker_providers.sql"),
+        already_applied: Some(trackers_has_settings),
     },
 ];
 
@@ -2225,5 +2245,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(branch.as_deref(), Some("abc-2-x"));
+    }
+    /// Migration 051 (work graph M6): a tracker with views keeps them and
+    /// its watermark, gains an empty sync mark and settings, and a re-run
+    /// (the guard) keeps what was written since.
+    #[test]
+    fn migration_051_adds_sync_marks_and_settings_and_reruns_safely() {
+        let old = store_at_version(50);
+        old.conn
+            .execute_batch(
+                "INSERT INTO trackers (id, provider, name, site_url, created_at) \
+                 VALUES (3, 'jira', 'Acme', 'https://acme.atlassian.net', 1); \
+                 INSERT INTO tracker_views (tracker_id, view_id, label, query, watermark) \
+                 VALUES (3, 'mine', 'My work', 'q', 1700000000);",
+            )
+            .unwrap();
+        old.migrate().expect("051 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let views = old.list_tracker_views(3).unwrap();
+        assert_eq!(views[0].watermark, Some(1_700_000_000));
+        assert_eq!(views[0].sync_mark, None);
+        assert_eq!(
+            old.get_tracker(3).unwrap().unwrap().settings,
+            Default::default()
+        );
+        old.set_tracker_view_mark(3, "mine", Some("tok-1")).unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 51;")
+            .unwrap();
+        old.migrate().expect("re-running 051 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),
+            Some("tok-1")
+        );
     }
 }

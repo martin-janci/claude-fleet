@@ -1,0 +1,28 @@
+{
+  "data": {
+    "viewer": {
+      "id": "user-0001",
+      "name": "Dana Dev"
+    },
+    "organization": {
+      "id": "org-0001",
+      "urlKey": "acme"
+    },
+    "teams": {
+      "nodes": [
+        {
+          "key": "ENG",
+          "cyclesEnabled": true,
+          "activeCycle": {
+            "id": "cyc-12"
+          }
+        },
+        {
+          "key": "ops",
+          "cyclesEnabled": false,
+          "activeCycle": null
+        }
+      ]
+    }
+  }
+}

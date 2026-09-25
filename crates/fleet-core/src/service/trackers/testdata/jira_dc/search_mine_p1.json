@@ -1,0 +1,107 @@
+{
+  "expand": "schema,names",
+  "startAt": 0,
+  "maxResults": 3,
+  "total": 6,
+  "issues": [
+    {
+      "id": "40001",
+      "key": "PLAT-1",
+      "self": "https://jira.corp.example/jira/rest/api/2/issue/40001",
+      "fields": {
+        "summary": "Billing platform",
+        "status": {
+          "name": "In Progress",
+          "statusCategory": {
+            "key": "indeterminate"
+          }
+        },
+        "resolution": null,
+        "issuetype": {
+          "name": "Epic",
+          "subtask": false
+        },
+        "assignee": {
+          "name": "ddev",
+          "key": "JIRAUSER10100",
+          "displayName": "Dana Dev"
+        },
+        "updated": "2026-09-21T10:00:00.000+0200",
+        "project": {
+          "key": "PLAT"
+        },
+        "description": null,
+        "customfield_10100": null,
+        "customfield_10101": null
+      }
+    },
+    {
+      "id": "40002",
+      "key": "PLAT-2",
+      "self": "https://jira.corp.example/jira/rest/api/2/issue/40002",
+      "fields": {
+        "summary": "Invoice export",
+        "status": {
+          "name": "In Review",
+          "statusCategory": {
+            "key": "indeterminate"
+          }
+        },
+        "resolution": null,
+        "issuetype": {
+          "name": "Story",
+          "subtask": false
+        },
+        "assignee": {
+          "name": "ddev",
+          "key": "JIRAUSER10100",
+          "displayName": "Dana Dev"
+        },
+        "updated": "2026-09-21T10:15:30.000+0200",
+        "project": {
+          "key": "PLAT"
+        },
+        "description": "Export invoices as CSV.\r\nPlain text on Data Center.",
+        "customfield_10100": [
+          "com.atlassian.greenhopper.service.sprint.Sprint@3c4d[id=5,rapidViewId=1,state=ACTIVE,name=PLAT Sprint 3,startDate=2026-09-15T09:00:00.000+02:00,endDate=2026-09-29T09:00:00.000+02:00,completeDate=<null>,sequence=5,goal=]"
+        ],
+        "customfield_10101": "PLAT-1"
+      }
+    },
+    {
+      "id": "40003",
+      "key": "PLAT-3",
+      "self": "https://jira.corp.example/jira/rest/api/2/issue/40003",
+      "fields": {
+        "summary": "Export: date format",
+        "status": {
+          "name": "Open",
+          "statusCategory": {
+            "key": "new"
+          }
+        },
+        "resolution": null,
+        "issuetype": {
+          "name": "Sub-task",
+          "subtask": true
+        },
+        "assignee": {
+          "name": "ddev",
+          "key": "JIRAUSER10100",
+          "displayName": "Dana Dev"
+        },
+        "updated": "2026-09-20T12:00:00.000+0200",
+        "project": {
+          "key": "PLAT"
+        },
+        "description": null,
+        "customfield_10100": null,
+        "customfield_10101": null,
+        "parent": {
+          "id": "40002",
+          "key": "PLAT-2"
+        }
+      }
+    }
+  ]
+}

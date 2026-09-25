@@ -1,0 +1,45 @@
+{
+  "data": [
+    {
+      "gid": "1207000000000001",
+      "memberships": [
+        {
+          "project": {
+            "gid": "1200000000001001",
+            "name": "Company B \u00b7 Platform"
+          },
+          "section": {
+            "gid": "1200000000001501",
+            "name": "In progress"
+          }
+        },
+        {
+          "project": {
+            "gid": "1200000000001002",
+            "name": "Company B \u00b7 Mobile"
+          },
+          "section": {
+            "gid": "1200000000001502",
+            "name": "Backlog"
+          }
+        }
+      ]
+    },
+    {
+      "gid": "1207000000000005",
+      "memberships": [
+        {
+          "project": {
+            "gid": "1200000000001002",
+            "name": "Company B \u00b7 Mobile"
+          },
+          "section": {
+            "gid": "1200000000001502",
+            "name": "Shipped"
+          }
+        }
+      ]
+    }
+  ],
+  "next_page": null
+}

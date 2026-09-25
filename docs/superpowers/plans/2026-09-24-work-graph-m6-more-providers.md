@@ -275,3 +275,131 @@ projects. If it fits the model, anything will.
 | D6 | Jira DC needed? | No; M6.5 is skipped unless requested |
 | new | Asana status source | `completed` plus the inferred section map, confirmed once by the user |
 | new | GitHub scope | Repos of the user's live and recent sessions plus `assignee:@me` across them; no org-wide crawl |
+
+## Revisions
+
+- **2026-09-24, M6 landed** on `claude/cloud-fleet-work-graph-m6` (from M4,
+  with M5 merged in): M6.0 (008de56), M6.1 + M6.2 (2694653), M6.3
+  (456f517), M6.4 (5017bab), M6.5 (33ff03e), the M5 merge (a478a51), M6.6
+  (ea01b01). Verified per task with `cargo fmt`, `clippy -D warnings`
+  (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub; only the
+  four chmod tests that fail as root fail), `cargo deny check`,
+  `scripts/hub-e2e.sh` (102/102) for every transport change, and `pnpm check`
+  / `pnpm test`. No test reaches a real tracker. Deviations from the tasks
+  above, and why:
+  1. **Order and scope.** D1's order was followed. **M6.5 was built**: the
+     M6 brief asked for it, which overrides D6's "skip unless requested".
+     `acli` (the Jira `via_cli` variant) was not built: `gh` is the one
+     trusted CLI; a Jira only a VPN host reaches uses `via_host` (curl).
+  2. **One seam for every provider.** GitHub, Asana, Linear and Data Center
+     are all HTTP providers behind `HttpTransport`; `gh` and host-side `curl`
+     are *transports* (`net/via_host.rs`: `GhCliTransport` for
+     `via_cli:<alias>`, `CurlTransport` for `via_host:<alias>`) over a new
+     `SshExec::run_with_stdin` (the request body — and for curl the header
+     file with the credential — is piped on stdin, never in argv). So the
+     conformance suite drives every provider over `FakeTransport`, and
+     `TrackerNet` (fake / direct / via a host) replaces the bare transport
+     argument; the hub and a standalone desktop install theirs once.
+     A fleet-agent host cannot pipe stdin (`E_UNSUPPORTED`): `via_host` /
+     `via_cli` need an SSH-reachable host.
+  3. **GitHub reads GraphQL through `gh api`**, not `gh issue list --json`:
+     one shape for listings and by-id / by-number reads, values as GraphQL
+     variables (never in the query text or a flag), `stateReason`, `parent`
+     and node ids from the server whatever the `gh` version (so no version
+     probe). `in_progress` comes from GitHub's own `linkedBranches` /
+     `closedByPullRequestsReferences` (a fact, not a guess) rather than from
+     M4's PR probe, so an issue no fleet session works on still shows it.
+     GitHub is `via_cli` only: `work_admin` refuses `direct` / `via_host` for
+     it and `set_credential` refuses a `via_cli` tracker (setting that
+     transport drops any stored secret). The site is `https://github.com` or
+     `https://github.com/<owner>`, `settings.repos` narrows it. M4's closing
+     refs, trailers and bare `#n` needed nothing new: a GitHub tracker lifts
+     R3u, and `tracker_claims` binds `owner/repo#n` refs to the tracker whose
+     scope covers the repository.
+  4. **Conformance suite** (`service/trackers/conformance.rs`): a `Harness`
+     trait plus `conformance_suite!`, ten tests per adapter, and a golden of
+     each adapter's normalised listing (`REGEN_TRACKER_GOLDENS=1`). Two
+     relaxations, stated in the suite: the *moved* scenario may be `None`
+     only for a provider without keys or repos (Asana's `asana:<gid>` never
+     changes), and status coverage requires todo / in_progress / done-
+     completed, with `not_planned` wherever the provider has it (Asana has
+     only `completed`).
+  5. **Trait refinements** as planned, plus: `Caps.incremental` is an enum
+     (`watermark` | `sync_token` | `none`); `recognize(text, RefCtx { repo })`;
+     `TrackerProvider::changes` (default: no token); the opaque mark is
+     `tracker_views.sync_mark`. Migration **051** (written as 050, renumbered
+     when M5, which took 050, was merged) adds it and `trackers.settings` —
+     what the ADMIN sets (GitHub repos, Asana's confirmed section map, Data
+     Center's CA and private-network opt-in), kept apart from `config`,
+     which every probe replaces.
+  6. **Asana's key is `asana:<gid>`** (the recogniser's canonical form of an
+     Asana URL, M4) instead of none: every key-centric path — grouping,
+     lookup, start, "already running", resume — works unchanged, and nothing
+     types it or matches it in prose. The UI shows `Asana …123456`. Views:
+     `mine`, one per project the user's open tasks sit in (at most 10, found
+     by the probe, not configured), and `recent` only where search works
+     (the probe tries it; 402 → Premium missing). Project views read the
+     events API by sync token; `mine` is listed whole each pass (it has no
+     event stream); more than 20 changed tasks, or `has_more`, lists the
+     project whole. By-id reads use `/batch` (10 per call). The inferred
+     section map lives in `config.section_map`, the confirmed one in
+     `settings.section_map` (which wins, and stops inference); a "Done"
+     section is done without a resolution — only `completed` says completed.
+  7. **Linear** lists root `issues` filtered to `isMe` (plan:
+     `viewer.assignedIssues`), all filters as GraphQL variables; the cycle
+     view's id is `sprint` (label *Current cycle*) so the local view
+     evaluation serves it; aliases come from `previousIdentifiers`; the API
+     key goes in `Authorization` bare, as Linear expects. Complexity and
+     request limits (`RATELIMITED`, often on a 400) back off until
+     `X-RateLimit-Requests-Reset`.
+  8. **Jira Data Center.** No port in the site (a port could aim the hub at
+     another service on the host; use 443 or `via_host`). RFC 1918 private
+     addresses are allowed — a corporate server lives there — while
+     loopback, link-local (incl. 169.254.169.254), unspecified, broadcast and
+     multicast are refused after resolution unless `allow_private_network`;
+     the connect goes to the checked address (no DNS rebinding). DC has no
+     bulk fetch: by-reference reads are one `/search` with
+     `validateQuery: warn`. The Epic Link becomes `parent_key`, and the
+     parent id only when the epic is in the same page; `hierarchy_level`
+     only where the site says (no type-name guess, C28); the legacy
+     `Sprint@…[state=…,name=…]` strings are parsed; `extra_ca` applies to
+     `direct` only (`via_host` uses the host's trust store). What Cloud and
+     DC share moved to `jira_common.rs`; Jira Cloud is unchanged and still
+     passes.
+  9. **SSRF, per provider.** Each tracker's transport allows exactly its API
+     host (`*.atlassian.net`, `api.github.com` through `gh`, `app.asana.com`,
+     `api.linear.app`, the one DC host) — `host_policy(row)` — for `direct`
+     and `via_host` alike; https only, no redirects, a body cap and a
+     timeout everywhere.
+  10. **Secrets.** Redaction gained GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`,
+      `ghr_`, `github_pat_`), Linear (`lin_api_`, `lin_oauth_`) and Asana
+      PAT shapes. Test tokens are assembled at run time: literal token
+      shapes in the source tripped GitHub push protection although every one
+      is invented.
+  11. **API.** No new tool, no contract bump: `work_admin` gained
+      `transport` and `settings` (+168 B on the M4 base; measured 69,288 over
+      M5, `BUDGET_BYTES` 69,388) and its description lost the provider list
+      (M5 then made it "Trackers and orgs; see action"). The Tauri
+      `add_tracker` / `update_tracker` / `set_tracker_credential` commands
+      take the new fields (`#[serde(default)]`), no new command, verdicts
+      unchanged. `fleet-hub tracker add` gained `--provider`, `--via-cli`,
+      `--via-host`, `--repo`; `set-credential --email` is optional (bearer
+      without it).
+  12. **M5 merged** (a478a51): `TrackerRow` carries `org_id` and `settings`;
+      the bare-reference binding combines `tracker_claims` with M5's org
+      rule; tickets / lookup / start take `OrgScope` and `TrackerNet`.
+      Acceptance 6 is proved by `tests_isolation_providers.rs`: M5's rules
+      run once per new provider (a Company A host sees none of Company B's
+      GitHub, Asana, Linear or DC items or trackers by key, URL or tracker
+      id, never makes B's tracker fetch, and B's tracker never binds a
+      reference an A session made), rather than by parameterising M5's MCP
+      matrix, which stays Jira-shaped.
+  13. **UI.** Provider badges show only once trackers of two or more
+      providers exist (a Jira-only fleet looks as before). The GitHub host
+      picker lists every host; whether its `gh` is logged in is what the
+      Connect test reports. The Asana section map is asked inline under the
+      tracker until confirmed.
+  14. **Not done:** `acli`; GitHub Enterprise Server; a per-provider
+      `/metrics` series; the phone (M8); the manual acceptance on real
+      GitHub, Asana, Linear and Data Center accounts.
+

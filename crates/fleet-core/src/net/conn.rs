@@ -60,6 +60,38 @@ pub async fn connect(at: &Endpoint, timeout: Duration) -> Result<Stream, String>
     Ok(Box::new(stream))
 }
 
+/// Connect to one of `addrs` (already resolved and checked by the caller,
+/// so a second DNS answer cannot swap the address — no rebinding), in
+/// order, each TCP attempt bounded by `timeout`; then TLS with `connector`,
+/// the certificate checked against `host`.
+pub async fn connect_pinned(
+    addrs: &[std::net::SocketAddr],
+    host: &str,
+    connector: &tokio_rustls::TlsConnector,
+    timeout: Duration,
+) -> Result<Stream, String> {
+    let mut last = format!("connect {host}: no address");
+    let mut tcp = None;
+    for a in addrs {
+        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(a)).await {
+            Ok(Ok(s)) => {
+                tcp = Some(s);
+                break;
+            }
+            Ok(Err(e)) => last = format!("connect {host} ({a}): {e}"),
+            Err(_) => last = format!("connect {host} ({a}): timed out after {timeout:?}"),
+        }
+    }
+    let tcp = tcp.ok_or(last)?;
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("{host} is not a valid certificate name: {e}"))?;
+    let stream = tokio::time::timeout(timeout, connector.connect(server_name, tcp))
+        .await
+        .map_err(|_| format!("TLS handshake with {host} timed out after {timeout:?}"))?
+        .map_err(|e| format!("TLS handshake with {host} failed: {e}"))?;
+    Ok(Box::new(stream))
+}
+
 /// Write `request` and read until the peer closes, at most `max` bytes.
 /// Generic over the stream so the plain and TLS paths share one
 /// implementation and cannot drift.

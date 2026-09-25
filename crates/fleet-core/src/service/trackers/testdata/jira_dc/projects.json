@@ -1,0 +1,12 @@
+[
+  {
+    "id": "10000",
+    "key": "PLAT",
+    "name": "Platform"
+  },
+  {
+    "id": "10001",
+    "key": "ops",
+    "name": "Operations"
+  }
+]
