@@ -231,6 +231,7 @@
       "modes",
       "project_id",
       "title",
+      "warnings",
       "worktree",
       "worktree_present"
     ],
