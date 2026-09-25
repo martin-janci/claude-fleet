@@ -28,7 +28,7 @@ use super::ItemRef;
 use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
-use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkTarget};
+use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -79,13 +79,38 @@ pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>
     Ok(Some(out))
 }
 
-/// The live sessions working on `key` that the scope may see (D7: an
+/// The live sessions working on `key` as far as the item of `item_org` is
+/// concerned. A link whose session is in one org while the item is in
+/// another — a bare `ref_key` that `work_link` deliberately kept bare
+/// because the key was outside the caller's orgs (work graph M5) — is not
+/// live work on that item: a host of org A must not be able to block org
+/// B's `start` or be named as working on B's ticket by typing its key. The
+/// rule is [`Store::bind_tracker_refs`]'s: an unassigned side never
+/// conflicts, and a forced item link keeps its item's org.
+fn live_work_on(
+    s: &Store,
+    key: &str,
+    item_org: Option<i64>,
+) -> Result<Vec<(WorkLinkRow, SessionRow)>, IpcError> {
+    let mut out = Vec::new();
+    for (l, row) in s.live_work_sessions_for_key(key)? {
+        if let (Some(io), Some(lo)) = (item_org, s.link_org(&l)?) {
+            if io != lo {
+                continue;
+            }
+        }
+        out.push((l, row));
+    }
+    Ok(out)
+}
+
+/// The live sessions working on `item` that the scope may see (D7: an
 /// isolated org's session is not named to a host outside it).
-fn live_ids(s: &Store, scope: &OrgScope, key: Option<&str>) -> Result<Vec<i64>, IpcError> {
-    let Some(k) = key else {
+fn live_ids(s: &Store, scope: &OrgScope, item: &WorkItemRow) -> Result<Vec<i64>, IpcError> {
+    let Some(k) = item.key.as_deref() else {
         return Ok(Vec::new());
     };
-    Ok(s.live_work_sessions_for_key(k)?
+    Ok(live_work_on(s, k, s.item_org(item.id)?)?
         .into_iter()
         .filter(|(_, r)| scope.sees_row(r))
         .map(|(_, r)| r.id)
@@ -174,7 +199,7 @@ pub(crate) fn tickets_in(
                 continue;
             }
         }
-        let live = live_ids(s, scope, item.key.as_deref())?;
+        let live = live_ids(s, scope, &item)?;
         out.push(Ticket {
             item,
             live_session_ids: live,
@@ -340,7 +365,7 @@ pub async fn lookup(
         t.as_ref(),
         crate::service::catalog::now_secs(),
     );
-    let live = live_ids(&s, scope, item.key.as_deref())?;
+    let live = live_ids(&s, scope, &item)?;
     // An agent reads it: fenced on both sides, markers defused (M3 review).
     let description = meta.description.map(|d| match scope {
         OrgScope::Host { .. } => {
@@ -502,7 +527,8 @@ pub async fn plan_start(
         }
     };
     let s = lock(store)?;
-    let live = s.live_work_sessions_for_key(&key)?;
+    let item_org = item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+    let live = live_work_on(&s, &key, item_org)?;
     if let Some((_, row)) = live
         .iter()
         .find(|(_, r)| !args.per_project || r.project_id == args.project_id)

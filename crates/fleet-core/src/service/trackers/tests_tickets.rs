@@ -483,6 +483,91 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
     assert_eq!(e.unwrap_err().code, codes::E_EXISTS);
 }
 
+/// Work graph M5: a host of org A typing org B's key gets a bare link
+/// (`work_link` downgrades it to `WorkTarget::Ref` so the answer says
+/// nothing). That bare link is not live work on B's ticket: it neither
+/// blocks B's (or the master's) `start` nor names the A session as working
+/// on it. A forced item link and a bare link inside B still count.
+#[tokio::test]
+async fn another_orgs_bare_link_neither_blocks_a_start_nor_counts_as_live() {
+    let fx = Fx::new();
+    let tracker = fx_tracker(&fx);
+    {
+        let s = fx.store.lock().unwrap();
+        let a = s.add_org("Company A", None, false).unwrap().id;
+        let b = s.add_org("Company B", None, false).unwrap().id;
+        s.set_host_org("hosta", Some(a)).unwrap();
+        s.set_host_org("hostb", Some(b)).unwrap();
+        s.set_tracker_org(tracker, Some(b)).unwrap();
+    }
+    let bare_a = fx.session_on("hosta", "s-a");
+    let bare_b = fx.session_on("hostb", "s-b");
+    let forced_a = fx.session_on("hosta", "s-x");
+    let args = StartArgs {
+        reference: Some("ABC-2".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hostb".into()),
+        ..Default::default()
+    };
+    let abc2 = fx
+        .store
+        .lock()
+        .unwrap()
+        .tracker_item_for_key("ABC-2")
+        .unwrap()
+        .unwrap()
+        .id;
+    let live_on_abc2 = |fx: &Fx| -> Vec<i64> {
+        tickets(&fx.store, None, None, Some("abc-2"), None, &OrgScope::All)
+            .unwrap()
+            .remove(0)
+            .live_session_ids
+    };
+
+    // The A host's bare link: exactly what the store keeps for it.
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(bare_a, WorkTarget::Ref("ABC-2"), "manual")
+        .unwrap();
+    let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    assert_eq!((plan.key.as_str(), plan.host_alias.as_str()), ("ABC-2", "hostb"));
+    assert!(live_on_abc2(&fx).is_empty(), "s-a is not working on B's ABC-2");
+
+    // A bare link inside org B is live work on it.
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(bare_b, WorkTarget::Ref("ABC-2"), "manual")
+        .unwrap();
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    assert_eq!(e.details.unwrap()["session_id"], bare_b);
+    assert_eq!(live_on_abc2(&fx), vec![bare_b]);
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute("DELETE FROM work_links WHERE ref_key = 'ABC-2'", [])
+        .unwrap();
+
+    // A person force-linked B's item on an A session: it keeps B's org.
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(forced_a, WorkTarget::Item(abc2), "manual")
+        .unwrap();
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    assert_eq!(live_on_abc2(&fx), vec![forced_a]);
+}
+
 #[tokio::test]
 async fn a_person_can_rename_the_session_and_worktree_a_start_makes() {
     let fx = Fx::new();
