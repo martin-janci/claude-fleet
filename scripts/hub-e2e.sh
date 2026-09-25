@@ -961,6 +961,23 @@ else
   check "Beta's stream gets the session frames, with no work in them and no work frame" 'grep -q "^event: session:updated" "$SSEB" && ! grep -q "^event: work" "$SSEB" && ! grep "^data:" "$SSEB" | grep -qE "\"work(_suggested)?\":\{|\"key\":\"E2E-|e2e-secret"' "$(grep "^event:" "$SSEB" | sort | uniq -c)"
   kill $EVM $EVB 2>/dev/null; wait $EVM $EVB 2>/dev/null; WEV_PIDS=""
 
+  # --- 8. name work with no ticket (M11.1) ---------------------------------
+  echo "-- 8. name this work"
+  nm=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"E2E local cleanup\",\"key\":\"e2e-local\"}")
+  check "work_link name links new local work to the session (its E2E-2 stays primary)" '[ "$(jt "$nm" .id)" = "${SWEB:-x}" ] && [ "$(jt "$nm" .work.key)" = E2E-2 ]' "${nm:0:600}"
+  li=$(wcall "$TOKW" work '{"action":"local_items"}')
+  LID=$(jt "$li" '.[] | select(.key == "e2e-local") | .id')
+  check "work { local_items } lists it with its one live session" '[ -n "$LID" ] && [ "$(jt "$li" ".[] | select(.id == ${LID:-0}) | .live_sessions")" = 1 ]' "${li:0:600}"
+  dup=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"dup\",\"key\":\"E2E-1\"}")
+  check "a ticket's key is not new work: E_EXISTS" 'echo "$dup" | grep -q E_EXISTS' "${dup:0:400}"
+  rn=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"item_id\":${LID:-0},\"title\":\"E2E local cleanup, renamed\"}")
+  check "work_link name { item_id } renames the local item" '[ "$(jt "$rn" .title)" = "E2E local cleanup, renamed" ]' "${rn:0:400}"
+  bn=$(wcall "$HTOKB" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"beta\"}")
+  bu=$(wcall "$HTOKB" work_link '{"action":"name","session_id":987654321,"title":"beta"}')
+  check "Beta's host token cannot name work on local's session: it reads as unknown" 'echo "$bn" | grep -q E_NOTFOUND && [ "$(echo "$bn" | grep -o "session [0-9]* not found" | sed "s/[0-9]*//g")" = "$(echo "$bu" | grep -o "session [0-9]* not found" | sed "s/[0-9]*//g")" ]' "${bn:0:300} | ${bu:0:300}"
+  bli=$(wcall "$HTOKB" work '{"action":"local_items"}')
+  check "nor list local's local work" '! echo "$bli" | grep -q "E2E local cleanup"' "${bli:0:400}"
+
   # --- operator confirm (M9.7): no approver on a hub -------------------------
   echo "-- operator"
   opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')
