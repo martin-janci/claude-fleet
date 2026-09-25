@@ -1392,13 +1392,32 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
 | — | — | `reports.max_rows` | `5000` |
 | — | — | `reports.max_age_secs` | `604800` |
-| — | — | `work.journal_days` | `90` |
+| — | — | `work.retention.journal_days` | `365` |
+| — | — | `work.retention.tracker_items_days` | `180` |
+| — | — | `work.retention.timeline_work_events_days` | `180` |
 | — | — | `work.recent_days` | `14` |
 
 The `reports.*` and `work.*` settings have no flag: set them over the API
-with `set_setting`. `work.journal_days` is how long work memory (the
-journal behind resume and the handover brief) is kept for conversations no
-confirmed work link references; `0` keeps it forever.
+with `set_setting`.
+
+**Work retention** (work graph M12.3). The GC tick deletes a row only when
+it is ended or done, older than its window, and nothing live points at it.
+`0` keeps a table forever.
+
+- `journal_days`: work memory (the journal behind resume and the handover
+  brief). Kept regardless of age: an open conversation's rows, a live-linked
+  session's, and those of work that is not done or still has a live link.
+  Also kept: an undelivered handover, and one addressed to a live session.
+  Replaces `work.journal_days`. While this key is unset, an old `0` still
+  keeps forever and an old window longer than 365 still stands.
+- `tracker_items_days`: cached tickets in `done`. Kept while any link, live
+  or ended, names one, and while it is the parent of a kept ticket.
+- `timeline_work_events_days`: handover, nudge and tidy events. The newest
+  of each kind per session stays.
+
+At most 2,000 rows per table per tick, 200 per store lock.
+`work_admin { action: status }` (master) shows row counts, a dry-run count
+and the last sweep; `work_admin { action: sweep_now }` runs one sweep.
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all
@@ -1661,7 +1680,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 175 commands, 70 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1747,6 +1766,8 @@ Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument sh
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
 | `update_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `work_retention_status` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
+| `work_retention_sweep` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew

@@ -80,7 +80,9 @@
     "test_tracker",
     "tunnel_status",
     "update_org",
-    "update_tracker"
+    "update_tracker",
+    "work_retention_status",
+    "work_retention_sweep"
   ],
   "routed": [
     "archive_session_work",
