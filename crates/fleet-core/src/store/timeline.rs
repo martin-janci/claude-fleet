@@ -89,6 +89,17 @@ impl Store {
         self.write_session_event(session_id, claude_session_id, kind, detail, Announce::No)
     }
 
+    /// Whether the session's timeline needs pruning after an insert — i.e.
+    /// whether it now holds MORE than `SESSION_EVENTS_CAP` rows. Extracted
+    /// as a pure function so the exact threshold is unit-testable without
+    /// touching SQLite (see `timeline_needs_prune_only_strictly_over_the_cap`):
+    /// the prune `DELETE…NOT IN(…LIMIT cap)` is itself a no-op whenever the
+    /// session is already at or under the cap, so this is the one place
+    /// that decision is made.
+    fn timeline_needs_prune(count_after_insert: i64) -> bool {
+        count_after_insert > SESSION_EVENTS_CAP
+    }
+
     fn write_session_event(
         &self,
         session_id: i64,
@@ -98,18 +109,56 @@ impl Store {
         announce: Announce,
     ) -> Result<(), crate::ipc_error::IpcError> {
         let at = now_unix();
-        self.conn.execute(
-            "INSERT INTO session_events (session_id, at, kind, detail, claude_session_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![session_id, at, kind, detail, claude_session_id],
-        )?;
-        let id = self.conn.last_insert_rowid();
-        self.conn.execute(
-            "DELETE FROM session_events WHERE session_id=?1 AND id NOT IN (\
-                   SELECT id FROM session_events WHERE session_id=?1 \
-                   ORDER BY at DESC, id DESC LIMIT ?2)",
-            rusqlite::params![session_id, SESSION_EVENTS_CAP],
-        )?;
+        // SAVEPOINT, not a second `BEGIN`: `Store::atomically` cannot nest,
+        // and Task 3 calls `insert_session_event` from inside one. A
+        // SAVEPOINT works both standalone (autocommit — it starts an
+        // implicit transaction) and already inside an open transaction, so
+        // this is the INSERT and the (conditional) prune as one commit
+        // instead of two separate autocommits under the store mutex.
+        self.conn.execute_batch("SAVEPOINT insert_session_event")?;
+        let outcome: rusqlite::Result<i64> = (|| {
+            self.conn.execute(
+                "INSERT INTO session_events (session_id, at, kind, detail, claude_session_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![session_id, at, kind, detail, claude_session_id],
+            )?;
+            let id = self.conn.last_insert_rowid();
+            // Prune only when actually over the cap: a cheap indexed
+            // COUNT(*) (idx_session_events_session covers session_id)
+            // instead of unconditionally running the DELETE…NOT IN subquery
+            // on every insert — a no-op scan for the overwhelming majority
+            // of sessions that never get near SESSION_EVENTS_CAP.
+            let count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id = ?1",
+                rusqlite::params![session_id],
+                |row| row.get(0),
+            )?;
+            if Self::timeline_needs_prune(count) {
+                self.conn.execute(
+                    "DELETE FROM session_events WHERE session_id=?1 AND id NOT IN (\
+                           SELECT id FROM session_events WHERE session_id=?1 \
+                           ORDER BY at DESC, id DESC LIMIT ?2)",
+                    rusqlite::params![session_id, SESSION_EVENTS_CAP],
+                )?;
+            }
+            Ok(id)
+        })();
+        let id = match outcome {
+            Ok(id) => {
+                self.conn.execute_batch("RELEASE insert_session_event")?;
+                id
+            }
+            Err(e) => {
+                // Best-effort: undo just this SAVEPOINT's work and surface
+                // the original error. If the ROLLBACK/RELEASE itself fails
+                // there is nothing more to do from here — the caller's `?`
+                // below already carries the real error.
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO insert_session_event; RELEASE insert_session_event",
+                );
+                return Err(e.into());
+            }
+        };
         if announce == Announce::Yes {
             self.bus.session_event_added(&SessionEvent {
                 id,
@@ -776,6 +825,45 @@ mod tests {
                 .any(|r| r.detail.as_deref() == Some("list_sessions by client:phone")),
             "the quiet one is still audited: {rows:?}"
         );
+    }
+
+    /// Task 3 calls `insert_session_event` from inside `Store::atomically`
+    /// blocks; the SAVEPOINT the INSERT+prune now runs under must nest
+    /// cleanly inside that outer transaction, and a row it wrote must roll
+    /// back with everything else when the outer closure returns `Err`.
+    #[test]
+    fn insert_session_event_rolls_back_with_an_outer_atomically_transaction() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let result: Result<(), crate::ipc_error::IpcError> = s.atomically(|tx| {
+            tx.insert_session_event(a, "status_change", Some("inside a tx"))?;
+            Err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_VALIDATE,
+                "force rollback",
+            ))
+        });
+        assert!(result.is_err());
+        assert!(
+            s.list_session_events(a, 10).unwrap().is_empty(),
+            "the SAVEPOINT'd insert must roll back with the outer atomically transaction"
+        );
+    }
+
+    /// Task 2: the prune `DELETE` must run only when the session is actually
+    /// over `SESSION_EVENTS_CAP` (`timeline_needs_prune`'s whole job) — not
+    /// unconditionally on every insert. Unit-tested as a pure function
+    /// rather than through row counts: an under-cap prune is a no-op DELETE
+    /// either way (it matches and deletes nothing), so black-box assertions
+    /// on `session_events` rows cannot tell "the DELETE ran and matched
+    /// nothing" apart from "the DELETE never ran" — this is the one place
+    /// that decision is actually made, so it is the one place worth pinning
+    /// down directly. `insert_session_event_caps_timeline_per_session` below
+    /// covers the row-visible half: the cap is still enforced once crossed.
+    #[test]
+    fn timeline_needs_prune_only_strictly_over_the_cap() {
+        assert!(!Store::timeline_needs_prune(SESSION_EVENTS_CAP - 1));
+        assert!(!Store::timeline_needs_prune(SESSION_EVENTS_CAP));
+        assert!(Store::timeline_needs_prune(SESSION_EVENTS_CAP + 1));
     }
 
     #[test]
