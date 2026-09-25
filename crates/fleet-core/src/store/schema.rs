@@ -601,6 +601,17 @@ impl Migration {
 #[cfg(test)]
 pub(crate) const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
+/// `(version, sql)` of every migration up to and including `version`, in
+/// order: the historical files, for a test that builds an older database
+/// (`store::testgen`).
+#[cfg(test)]
+pub(super) fn migrations_through(version: i64) -> impl Iterator<Item = (i64, &'static str)> {
+    MIGRATIONS
+        .iter()
+        .filter(move |m| m.version <= version)
+        .map(|m| (m.version, m.sql))
+}
+
 impl Store {
     pub(super) fn migrate(&self) -> Result<()> {
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -2728,3 +2739,6 @@ mod tests {
         assert_eq!(rows, 2, "the re-run touched no rows");
     }
 }
+
+#[cfg(test)]
+mod tests_upgrade;
