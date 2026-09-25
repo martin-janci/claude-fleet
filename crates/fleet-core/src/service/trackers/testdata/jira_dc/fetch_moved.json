@@ -1,0 +1,38 @@
+{
+  "startAt": 0,
+  "maxResults": 100,
+  "total": 1,
+  "issues": [
+    {
+      "id": "40007",
+      "key": "PLAT-7",
+      "self": "https://jira.corp.example/jira/rest/api/2/issue/40007",
+      "fields": {
+        "summary": "Moved from the old project",
+        "status": {
+          "name": "To Do",
+          "statusCategory": {
+            "key": "new"
+          }
+        },
+        "resolution": null,
+        "issuetype": {
+          "name": "Task",
+          "subtask": false
+        },
+        "assignee": {
+          "name": "ddev",
+          "key": "JIRAUSER10100",
+          "displayName": "Dana Dev"
+        },
+        "updated": "2026-09-21T09:00:00.000+0200",
+        "project": {
+          "key": "PLAT"
+        },
+        "description": null,
+        "customfield_10100": null,
+        "customfield_10101": null
+      }
+    }
+  ]
+}

@@ -168,3 +168,110 @@ describe('ticketBriefPreview fence (M3 review)', () => {
   });
 });
 
+
+// --- work graph M6: providers --------------------------------------------------
+
+import {
+  inferProvider,
+  displayKey,
+  trackerClaims,
+  showProviderBadges,
+  sectionMapRows,
+} from './trackers';
+
+describe('inferProvider (paste any ticket or issue URL)', () => {
+  it('names the provider, the site and the key', () => {
+    expect(inferProvider('https://acme.atlassian.net/browse/abc-12')).toEqual({
+      provider: 'jira',
+      site: 'https://acme.atlassian.net',
+      key: 'ABC-12',
+    });
+    expect(inferProvider('https://github.com/Acme/API/issues/42')).toEqual({
+      provider: 'github',
+      site: 'https://github.com/acme',
+      key: 'acme/api#42',
+    });
+    expect(inferProvider('https://app.asana.com/0/1200000000001001/1207000000000001')).toEqual({
+      provider: 'asana',
+      site: 'https://app.asana.com',
+      key: 'asana:1207000000000001',
+    });
+    expect(
+      inferProvider(
+        'https://app.asana.com/1/1200000000000001/project/1200000000001002/task/1207000000000002',
+      ),
+    ).toEqual({
+      provider: 'asana',
+      site: 'https://app.asana.com/1200000000000001',
+      key: 'asana:1207000000000002',
+    });
+    expect(inferProvider('https://linear.app/Acme/issue/eng-101/ship-sso')).toEqual({
+      provider: 'linear',
+      site: 'https://linear.app/acme',
+      key: 'ENG-101',
+    });
+  });
+
+  it('refuses lookalikes and plaintext, and cannot guess Data Center', () => {
+    for (const bad of [
+      'http://github.com/acme',
+      'https://github.com.evil.com/acme/api/issues/1',
+      'https://user:pw@app.asana.com/0/1/2',
+      'https://linear.app:8443/acme',
+      'https://jira.corp.example/browse/PLAT-2',
+      'not a url',
+    ]) {
+      expect(inferProvider(bad), bad).toBeNull();
+    }
+  });
+});
+
+describe('keys across providers', () => {
+  const gh = tracker({
+    id: 2,
+    provider: 'github',
+    name: 'acme',
+    site_url: 'https://github.com/acme',
+    config: {},
+  });
+  const asana = tracker({ id: 3, provider: 'asana', name: 'B', site_url: 'https://app.asana.com', config: {} });
+  const lin = tracker({ id: 4, provider: 'linear', name: 'L', site_url: 'https://linear.app/acme', config: { key_prefixes: ['ENG'] } });
+
+  it('claims mirror the backend', () => {
+    const list = [tracker(), gh, asana, lin];
+    expect(trackerClaims('acme/api#42', list).map((t) => t.id)).toEqual([2]);
+    expect(trackerClaims('other/x#1', list)).toEqual([]);
+    expect(trackerClaims('asana:1207', list).map((t) => t.id)).toEqual([3]);
+    expect(trackerClaims('ENG-1', list).map((t) => t.id)).toEqual([4]);
+    expect(trackerForKey('ABC-1', list)?.id).toBe(1);
+    const narrowed = { ...gh, settings: { repos: ['acme/web'] } };
+    expect(trackerClaims('acme/api#42', [narrowed])).toEqual([]);
+  });
+
+  it('an Asana key shows short; badges appear with a second provider', () => {
+    expect(displayKey('asana:1207000000000001')).toBe('Asana …000001');
+    expect(displayKey('ABC-12')).toBe('ABC-12');
+    expect(showProviderBadges([tracker(), tracker({ id: 9 })])).toBe(false);
+    expect(showProviderBadges([tracker(), gh])).toBe(true);
+  });
+
+  it('the Asana section map: a person wins, inference only until confirmed', () => {
+    const t = tracker({
+      provider: 'asana',
+      config: { section_map: { 'in progress': 'in_progress', done: 'done' } },
+    });
+    expect(sectionMapRows(t)).toEqual([
+      { section: 'done', category: 'done', confirmed: false },
+      { section: 'in progress', category: 'in_progress', confirmed: false },
+    ]);
+    const confirmed = {
+      ...t,
+      settings: { section_map: { backlog: 'todo', done: 'done' }, section_map_confirmed: true },
+    };
+    expect(sectionMapRows(confirmed)).toEqual([
+      { section: 'backlog', category: 'todo', confirmed: true },
+      { section: 'done', category: 'done', confirmed: true },
+      { section: 'in progress', category: 'todo', confirmed: false },
+    ]);
+  });
+});

@@ -165,7 +165,18 @@ fn work_links_has_snap_org(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 051: `work_links` already has its
+/// `already_applied` guard of migration 051: `trackers` already has its
+/// `settings` column (the last of the two it adds).
+fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('trackers') WHERE name = 'settings'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 052: `work_links` already has its
 /// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
 /// See [`Migration`].
 fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -177,7 +188,7 @@ fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 052: `orgs` already has its
+/// `already_applied` guard of migration 053: `orgs` already has its
 /// `auto_tidy` column.
 fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -487,18 +498,28 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/050_orgs.sql"),
         already_applied: Some(work_links_has_snap_org),
     },
-    // Work graph M7: archive / snooze / never on `work_links`, the last
-    // touch on `sessions`, `work_items.reopened_at` — ADD COLUMNs, so the
-    // same guard.
+    // Work graph M6: `tracker_views.sync_mark` (sync tokens) and
+    // `trackers.settings` (admin-owned provider settings) — ADD COLUMNs, so
+    // the same guard. (Written as 050 on the M6 branch; renumbered when M5,
+    // which took 050, was merged.)
     Migration {
         version: 51,
-        sql: include_str!("../../migrations/051_work_lifecycle.sql"),
+        sql: include_str!("../../migrations/051_tracker_providers.sql"),
+        already_applied: Some(trackers_has_settings),
+    },
+    // Work graph M7: archive / snooze / never on `work_links`, the last
+    // touch on `sessions`, `work_items.reopened_at` — ADD COLUMNs, so the
+    // same guard. (Written as 051 and 052 on the M7 branch; renumbered when
+    // M6, which took 051, was merged.)
+    Migration {
+        version: 52,
+        sql: include_str!("../../migrations/052_work_lifecycle.sql"),
         already_applied: Some(work_links_has_archived_at),
     },
     // Work graph M7 on M5: `orgs.auto_tidy` — one ADD COLUMN, its own guard.
     Migration {
-        version: 52,
-        sql: include_str!("../../migrations/052_org_auto_tidy.sql"),
+        version: 53,
+        sql: include_str!("../../migrations/053_org_auto_tidy.sql"),
         already_applied: Some(orgs_has_auto_tidy),
     },
 ];
@@ -2264,13 +2285,50 @@ mod tests {
         assert_eq!(branch.as_deref(), Some("abc-2-x"));
     }
 
-    /// Migration 051 (work graph M7): the lifecycle columns land on a
-    /// database with a live link and a done item, nothing is archived,
-    /// snoozed or reopened by the migration itself, and a re-run (the guard)
-    /// keeps what was written since.
+    /// Migration 051 (work graph M6): a tracker with views keeps them and
+    /// its watermark, gains an empty sync mark and settings, and a re-run
+    /// (the guard) keeps what was written since.
     #[test]
-    fn migration_051_adds_lifecycle_columns_and_reruns_safely() {
+    fn migration_051_adds_sync_marks_and_settings_and_reruns_safely() {
         let old = store_at_version(50);
+        old.conn
+            .execute_batch(
+                "INSERT INTO trackers (id, provider, name, site_url, created_at) \
+                 VALUES (3, 'jira', 'Acme', 'https://acme.atlassian.net', 1); \
+                 INSERT INTO tracker_views (tracker_id, view_id, label, query, watermark) \
+                 VALUES (3, 'mine', 'My work', 'q', 1700000000);",
+            )
+            .unwrap();
+        old.migrate().expect("051 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let views = old.list_tracker_views(3).unwrap();
+        assert_eq!(views[0].watermark, Some(1_700_000_000));
+        assert_eq!(views[0].sync_mark, None);
+        assert_eq!(
+            old.get_tracker(3).unwrap().unwrap().settings,
+            Default::default()
+        );
+        old.set_tracker_view_mark(3, "mine", Some("tok-1")).unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 51;")
+            .unwrap();
+        old.migrate().expect("re-running 051 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),
+            Some("tok-1")
+        );
+    }
+
+    /// Migrations 052 and 053 (work graph M7) on a database that already ran
+    /// M6's 051: the lifecycle columns land on a database with a live link, a
+    /// done item and a tracker with M6's sync mark and settings; nothing is
+    /// archived, snoozed or reopened by the migration itself, M6's columns
+    /// are untouched, and a re-run (the guards) keeps what was written since.
+    #[test]
+    fn migrations_052_053_add_lifecycle_columns_after_051_and_rerun_safely() {
+        let old = store_at_version(51);
+        assert_eq!(old.schema_version().unwrap(), 51);
         old.conn
             .execute_batch(
                 "INSERT INTO hosts (alias) VALUES ('h'); \
@@ -2279,15 +2337,23 @@ mod tests {
                  INSERT INTO work_items (source, key, title, status_category, created_at, updated_at) \
                  VALUES ('local', 'ABC-1', 't', 'done', 1, 1); \
                  INSERT INTO work_links (item_id, participant_id, state, source, is_primary, created_at) \
-                 SELECT 1, id, 'confirmed', 'manual', 1, 1 FROM participants;",
+                 SELECT 1, id, 'confirmed', 'manual', 1, 1 FROM participants; \
+                 INSERT INTO trackers (id, provider, name, site_url, created_at) \
+                 VALUES (3, 'jira', 'Acme', 'https://acme.atlassian.net', 1); \
+                 INSERT INTO tracker_views (tracker_id, view_id, label, query, sync_mark) \
+                 VALUES (3, 'mine', 'My work', 'q', 'tok-0');",
             )
             .unwrap();
         let sid: i64 = old
             .conn
             .query_row("SELECT id FROM sessions", [], |r| r.get(0))
             .unwrap();
-        old.migrate().expect("051 on an existing DB");
+        old.migrate().expect("052 and 053 on a database at 051");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),
+            Some("tok-0")
+        );
         let (archived, snoozed, never): (Option<i64>, Option<i64>, i64) = old
             .conn
             .query_row(
@@ -2305,9 +2371,9 @@ mod tests {
             )
             .unwrap();
         old.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 51;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 52;")
             .unwrap();
-        old.migrate().expect("re-running 051 is safe");
+        old.migrate().expect("re-running 052 is safe");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let row = old.get_session_by_id(sid).unwrap().unwrap();
         assert_eq!(row.work.unwrap().archived_at, Some(7));
@@ -2316,14 +2382,14 @@ mod tests {
             .query_row("SELECT reopened_at FROM work_items", [], |r| r.get(0))
             .unwrap();
         assert_eq!(reopened, None);
-        // 052: an org's override, NULL (inherit) on existing orgs.
+        // 053: an org's override, NULL (inherit) on existing orgs.
         old.conn
             .execute_batch(
                 "INSERT INTO orgs (name, created_at) VALUES ('A', 1); \
-                 DELETE FROM schema_version WHERE version >= 52;",
+                 DELETE FROM schema_version WHERE version >= 53;",
             )
             .unwrap();
-        old.migrate().expect("re-running 052 is safe");
+        old.migrate().expect("re-running 053 is safe");
         assert_eq!(old.list_orgs().unwrap()[0].auto_tidy, None);
     }
 }

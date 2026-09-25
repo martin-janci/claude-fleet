@@ -384,3 +384,32 @@ describe('quick switcher tickets', () => {
     expect(_placeForTicket('QQ-1', [s(1, 1, 'ABC-1', 5)], [p1] as never, keyOf as never)).toBeNull();
   });
 });
+
+describe('ticket rows across providers (work graph M6)', () => {
+  const t = (over: Partial<_TicketRow>): _TicketRow => ({
+    id: 1,
+    source: 'asana',
+    key: 'asana:1207000000000001',
+    title: 'Migrate login to SSO',
+    status_category: 'in_progress',
+    created_at: 1,
+    updated_at: 1,
+    tracker_id: 3,
+    ...over,
+  });
+
+  it('shows an Asana key short and carries the tracker badge', () => {
+    const rows = _ticketEntries([{ ticket: t({}), section: 'My work' }], new Map([[3, { icon: 'A', title: 'Asana' }]]));
+    expect(rows[0].label).toBe('Asana …000001 Migrate login to SSO');
+    expect(rows[0].badge).toEqual({ icon: 'A', title: 'Asana' });
+    expect(rows[0].key).toBe('ticket:asana:1207000000000001');
+    // No badges given (one provider): none shown.
+    expect(_ticketEntries([{ ticket: t({}), section: 'My work' }])[0].badge).toBeUndefined();
+  });
+
+  it('a typed owner/repo#n is looked up as typed', () => {
+    const e = _lookupEntry('acme/api#42', new Set());
+    expect(e?.label).toBe('Look up acme/api#42');
+    expect(e?.lookup).toBe('acme/api#42');
+  });
+});

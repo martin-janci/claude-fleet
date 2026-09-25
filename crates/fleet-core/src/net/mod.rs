@@ -10,8 +10,11 @@
 //! * [`conn`] — connect (plain or TLS) and one `Connection: close` exchange.
 //! * [`https`] — the [`https::HttpTransport`] seam providers talk to, its
 //!   real [`https::DirectTransport`] and the scripted [`https::FakeTransport`].
+//! * [`via_host`] — transports that run on a fleet host over SSH: `gh`
+//!   (M6.1) and `curl` (M6.3).
 
 pub mod conn;
 pub mod http1;
 pub mod https;
 pub mod tls;
+pub mod via_host;

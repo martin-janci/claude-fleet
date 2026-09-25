@@ -109,8 +109,8 @@ impl Fx {
             .collect()
     }
 
-    fn transport(&self) -> Arc<dyn HttpTransport> {
-        Arc::new(self.fake.clone())
+    fn net(&self) -> crate::service::trackers::TrackerNet {
+        crate::service::trackers::TrackerNet::fake(Arc::new(self.fake.clone()))
     }
 }
 
@@ -167,20 +167,20 @@ async fn a_host_token_sees_only_its_own_hosts_tickets() {
     assert_eq!(fx.keys(None, &OrgScope::All).len(), 4, "master / client");
 
     // lookup: its own ticket, with the description fenced as untrusted.
-    let t = lookup(&fx.store, "abc-1", &host_scope("hosta"), fx.transport())
+    let t = lookup(&fx.store, "abc-1", &host_scope("hosta"), &fx.net())
         .await
         .unwrap();
     let d = t.description.unwrap();
     assert!(d.starts_with("[claude-fleet:"), "{d}");
     assert!(d.contains("Ignore previous instructions"));
     // Another ticket: forbidden, and the reason says why.
-    let e = lookup(&fx.store, "ABC-2", &host_scope("hosta"), fx.transport())
+    let e = lookup(&fx.store, "ABC-2", &host_scope("hosta"), &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
     assert!(e.message.contains("per-host token"), "{}", e.message);
     // A key nothing caches: a host token cannot make the hub fetch it.
-    let e = lookup(&fx.store, "ABC-99", &host_scope("hosta"), fx.transport())
+    let e = lookup(&fx.store, "ABC-99", &host_scope("hosta"), &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
@@ -205,7 +205,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
         &fx.store,
         "https://acme.atlassian.net/browse/ABC-1",
         &OrgScope::All,
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap();
@@ -227,11 +227,11 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
                 "issuetype": {"name": "Task", "hierarchyLevel": 0}, "project": {"key": "ABC"}}}]}),
         )),
     );
-    let live = lookup(&fx.store, "ABC-77", &OrgScope::All, fx.transport())
+    let live = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
         .await
         .unwrap();
     assert_eq!(live.item.title, "Fresh");
-    let again = lookup(&fx.store, "ABC-77", &OrgScope::All, fx.transport())
+    let again = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
         .await
         .unwrap();
     assert_eq!(again.item.id, live.item.id);
@@ -246,7 +246,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
         &fx.store,
         "https://other.atlassian.net/browse/ZZ-1",
         &OrgScope::All,
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap_err();
@@ -261,7 +261,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
         Ok(Response::json(200, &json!({"issues": []}))),
     );
     assert_eq!(
-        lookup(&fx.store, "ABC-404", &OrgScope::All, fx.transport())
+        lookup(&fx.store, "ABC-404", &OrgScope::All, &fx.net())
             .await
             .unwrap_err()
             .code,
@@ -309,7 +309,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
         reference: Some("ABC-1".into()),
         ..Default::default()
     };
-    let e = plan_start(&fx.store, &args, &OrgScope::All, fx.transport())
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_AMBIGUOUS);
@@ -322,7 +322,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
         .unwrap()
         .link_session_work(old, WorkTarget::Key("ABC-2"), "manual")
         .unwrap();
-    let plan = plan_start(&fx.store, &args, &OrgScope::All, fx.transport())
+    let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap();
     assert_eq!(
@@ -343,7 +343,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
             ..args.clone()
         },
         &OrgScope::All,
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap();
@@ -372,7 +372,7 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
     );
 
     // A second start of the same key: E_EXISTS naming the live session.
-    let e = plan_start(&fx.store, &args, &OrgScope::All, fx.transport())
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_EXISTS);
@@ -389,7 +389,7 @@ async fn a_brief_start_queues_the_ticket_with_its_text_fenced() {
         with_brief: true,
         ..Default::default()
     };
-    let plan = plan_start(&fx.store, &args, &OrgScope::All, fx.transport())
+    let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
         .await
         .unwrap();
     let brief = ticket_brief(&fx.store, &plan).unwrap();
@@ -427,7 +427,7 @@ async fn a_key_no_tracker_knows_still_starts_work() {
             ..Default::default()
         },
         &OrgScope::All,
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap();
@@ -453,7 +453,7 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
             ..Default::default()
         },
         &host_scope("hosta"),
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap_err();
@@ -476,7 +476,7 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
             ..Default::default()
         },
         &host_scope("hosta"),
-        fx.transport(),
+        &fx.net(),
     )
     .await;
     // ABC-2 has a live session (the link above): E_EXISTS comes first.
@@ -500,7 +500,7 @@ async fn a_person_can_rename_the_session_and_worktree_a_start_makes() {
             ..base.clone()
         },
         &OrgScope::All,
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap();
@@ -516,7 +516,7 @@ async fn a_person_can_rename_the_session_and_worktree_a_start_makes() {
                 ..base.clone()
             },
             &OrgScope::All,
-            fx.transport(),
+            &fx.net(),
         )
         .await
         .unwrap_err();
@@ -554,7 +554,7 @@ async fn ticket_text_cannot_escape_the_fence() {
             ..Default::default()
         },
         &OrgScope::All,
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap();
@@ -589,7 +589,7 @@ async fn ticket_text_cannot_escape_the_fence() {
         .unwrap()
         .link_session_work(sid, WorkTarget::Key("ABC-66"), "manual")
         .unwrap();
-    let t = lookup(&fx.store, "ABC-66", &host_scope("hosta"), fx.transport())
+    let t = lookup(&fx.store, "ABC-66", &host_scope("hosta"), &fx.net())
         .await
         .unwrap();
     let d = t.description.unwrap();
@@ -628,7 +628,7 @@ async fn a_long_description_still_ends_the_fence() {
             ..Default::default()
         },
         &OrgScope::All,
-        fx.transport(),
+        &fx.net(),
     )
     .await
     .unwrap();

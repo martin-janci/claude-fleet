@@ -2978,6 +2978,12 @@ fn the_served_definition_budget_stays_bounded() {
     // now confirm-gated for tidy_apply's kills; no new tool. M7 alone
     // measured +639; with M5's `work_admin` gaining `auto_tidy` (the per-org
     // override), measured at 69,759 on 2026-09-24 (+660).
+    // Work graph M6.1: `work_admin` gains `transport` (direct | via_host |
+    // via_cli, so GitHub is read through `gh` on a host) and `settings`
+    // (the provider's admin settings object); `provider` lists the five
+    // providers. No new tool. Measured at 68,553 on the M4 base (+168);
+    // merged over M5, 69,288 on 2026-09-24 (+189 over M5's 69,099); plus
+    // 100.
     // Work graph M8.0: `work` / `work_link` `action` became a schema `enum`
     // generated from the tables the parser and the dispatch read
     // (`WORK_ACTIONS`, `WORK_LINK_ACTIONS`), so the phone draws a button only
@@ -2986,8 +2992,14 @@ fn the_served_definition_budget_stays_bounded() {
     // on 2026-09-24 on top of M5 alone (+72).
     // M7 merged with M8.0 (M7's actions now in the enums): measured at
     // 70,020 on 2026-09-24 (+261 over M7-on-M5; the enums list M7's eight
-    // actions too); plus 100.
-    const BUDGET_BYTES: usize = 70_120;
+    // actions too).
+    // M6.1 and M8.0 merged (main): measured at 69,360 on 2026-09-24 (M5's
+    // 69,099 + 189 for M6.1 + 72 for M8.0).
+    // M6 (main, #266) merged into M7: `work_admin` carries both M6's
+    // `transport` / `settings` and M7's `auto_tidy`, the enums M7's actions.
+    // Measured at 70,209 on 2026-09-25 (M7-on-M8.0 70,020 + 189 for M6.1);
+    // plus 100.
+    const BUDGET_BYTES: usize = 70_309;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

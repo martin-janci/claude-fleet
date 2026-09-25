@@ -22,4 +22,4 @@ ALTER TABLE work_links ADD COLUMN tidy_never INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN last_touch_at INTEGER;
 ALTER TABLE work_items ADD COLUMN reopened_at INTEGER;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (51);
+INSERT OR IGNORE INTO schema_version (version) VALUES (52);

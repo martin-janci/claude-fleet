@@ -146,3 +146,89 @@ describe('Settings → Work, paired with a hub', () => {
     expect(note).toContain('Do it on the hub (https://fleet.example.com)');
   });
 });
+
+describe('Settings → Work, other providers (work graph M6)', () => {
+  it('connects GitHub through a host with gh, and never sends a credential', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([{ alias: 'devbox', ssh_alias: null, reachable: true } as never]);
+    const gh = row({
+      id: 7,
+      provider: 'github',
+      name: 'acme (GitHub)',
+      site_url: 'https://github.com/acme',
+      transport: 'via_cli:devbox',
+      has_credential: false,
+      state: 'unconfigured',
+    });
+    const inv = route([], {
+      add_tracker: gh,
+      test_tracker: { tracker: { ...gh, state: 'ok' }, ok: true, views: ['My issues'] },
+    });
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://github.com/acme/api/issues/42' },
+    });
+    await tick();
+    expect(screen.getByTestId('connect-site').textContent).toContain('https://github.com/acme');
+    expect(screen.queryByTestId('connect-token')).toBeNull();
+    await fireEvent.change(screen.getByTestId('connect-gh-host'), { target: { value: 'devbox' } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'test_tracker')).toBe(true));
+    const add = inv.mock.calls.find((c) => c[0] === 'add_tracker')!;
+    expect((add[1] as { args: Record<string, unknown> }).args).toMatchObject({
+      provider: 'github',
+      transport: 'via_cli:devbox',
+    });
+    expect(inv.mock.calls.some((c) => c[0] === 'set_tracker_credential')).toBe(false);
+  });
+
+  it('connects Asana with a token and no email', async () => {
+    const asana = row({ id: 8, provider: 'asana', name: 'Asana', site_url: 'https://app.asana.com', state: 'unconfigured' });
+    const inv = route([], {
+      add_tracker: asana,
+      set_tracker_credential: asana,
+      test_tracker: { tracker: { ...asana, state: 'ok' }, ok: true, views: ['My tasks'] },
+    });
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://app.asana.com/0/1200000000001001/1207000000000001' },
+    });
+    await tick();
+    expect(screen.queryByTestId('connect-email')).toBeNull();
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'test_tracker')).toBe(true));
+    const cred = inv.mock.calls.find((c) => c[0] === 'set_tracker_credential')!;
+    const args = (cred[1] as { args: Record<string, unknown> }).args;
+    expect(args.username).toBeUndefined();
+    expect(args.secret).toBe(TOKEN);
+  });
+
+  it('asks which Asana sections mean in progress, and saves the answer as confirmed', async () => {
+    const asana = row({
+      id: 8,
+      provider: 'asana',
+      name: 'Company B',
+      site_url: 'https://app.asana.com',
+      config: { section_map: { 'in progress': 'in_progress', shipped: 'done' } },
+    });
+    const inv = route([asana], { update_tracker: asana });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('asana-sections')).toBeInTheDocument());
+    await fireEvent.change(screen.getByTestId('asana-section-shipped'), {
+      target: { value: 'in_progress' },
+    });
+    await fireEvent.click(screen.getByTestId('asana-sections-confirm'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_tracker')).toBe(true));
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toMatchObject({
+      tracker_id: 8,
+      settings: {
+        section_map: { 'in progress': 'in_progress', shipped: 'in_progress' },
+        section_map_confirmed: true,
+      },
+    });
+  });
+});

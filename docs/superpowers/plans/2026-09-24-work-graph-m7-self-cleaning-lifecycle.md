@@ -354,3 +354,11 @@ checks.
   test` (fleet-core, claude-fleet, fleet-hub; only the four root chmod
   tests fail), `pnpm check` / `pnpm test` (2779), `scripts/hub-e2e.sh`
   (102/102).
+- **2026-09-25, M6 (main, #266) merged into M7** (a merge, no rebase). M6's
+  `051_tracker_providers.sql` stays 051; M7's migrations are renumbered to
+  `052_work_lifecycle.sql` and `053_org_auto_tidy.sql` (same content and
+  guards, their `schema_version` rows 52 and 53). A store at 51 with M6's
+  schema migrates up to 53
+  (`migrations_052_053_add_lifecycle_columns_after_051_and_rerun_safely`).
+  `work_admin`'s audit line carries both M6's `transport` / `settings` and
+  M7's `auto_tidy`; the tool budget was re-measured.

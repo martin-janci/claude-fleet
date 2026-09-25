@@ -1,0 +1,136 @@
+[
+  {
+    "aliases": [],
+    "assignee_id": "1200000000000100",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "1200000000001001",
+      "1200000000001002"
+    ],
+    "description": "Move every client to the SSO flow.\nOwner: Dana",
+    "external_id": "1207000000000001",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "asana:1207000000000001",
+    "kind": "Task",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "in_progress",
+      "name": "In progress",
+      "resolution": null
+    },
+    "title": "Migrate login to SSO",
+    "updated": 1789985730,
+    "url": "https://app.asana.com/0/1200000000001001/1207000000000001"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "1200000000000100",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "1200000000001001"
+    ],
+    "description": null,
+    "external_id": "1207000000000002",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "asana:1207000000000002",
+    "kind": "Task",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "todo",
+      "name": "Backlog",
+      "resolution": null
+    },
+    "title": "Write release notes",
+    "updated": 1789977600,
+    "url": "https://app.asana.com/0/1200000000001001/1207000000000002"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "1200000000000100",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [],
+    "description": null,
+    "external_id": "1207000000000003",
+    "hierarchy_level": -1,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "asana:1207000000000003",
+    "kind": "Subtask",
+    "parent_external_id": "1207000000000001",
+    "parent_key": "asana:1207000000000001",
+    "status": {
+      "category": "todo",
+      "name": "Open",
+      "resolution": null
+    },
+    "title": "SSO: map groups",
+    "updated": 1789905600,
+    "url": "https://app.asana.com/0/0/1207000000000003"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "1200000000000100",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "1200000000001001"
+    ],
+    "description": null,
+    "external_id": "1207000000000004",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "asana:1207000000000004",
+    "kind": "Task",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Completed",
+      "resolution": "completed"
+    },
+    "title": "Rotate the signing keys",
+    "updated": 1789833600,
+    "url": "https://app.asana.com/0/1200000000001001/1207000000000004"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "1200000000000100",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "1200000000001002"
+    ],
+    "description": null,
+    "external_id": "1207000000000005",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "asana:1207000000000005",
+    "kind": "Milestone",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Shipped",
+      "resolution": null
+    },
+    "title": "Publish the Android build",
+    "updated": 1789812000,
+    "url": "https://app.asana.com/0/1200000000001002/1207000000000005"
+  }
+]

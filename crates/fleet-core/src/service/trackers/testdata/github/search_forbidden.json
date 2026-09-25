@@ -1,0 +1,14 @@
+{
+  "data": {
+    "search": null
+  },
+  "errors": [
+    {
+      "type": "FORBIDDEN",
+      "path": [
+        "search"
+      ],
+      "message": "Resource not accessible by integration"
+    }
+  ]
+}

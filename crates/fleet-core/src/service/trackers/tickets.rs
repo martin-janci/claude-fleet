@@ -25,8 +25,8 @@
 use super::jira::parse_ticket_url;
 use super::sync::fetch_one;
 use super::ItemRef;
+use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::net::https::HttpTransport;
 use crate::service::orgs::{self, OrgScope};
 use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkTarget};
 use serde::{Deserialize, Serialize};
@@ -192,39 +192,60 @@ pub fn trackers(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<TrackerRow
     Ok(all.into_iter().filter(|t| ids.contains(&t.id)).collect())
 }
 
-/// What a `lookup` reference names: a tracker and a key, when a URL says
-/// which tracker; a bare key otherwise.
+/// What a `lookup` reference names: a tracker and a key, when a URL (or a
+/// reference only one tracker can answer) says which tracker; a bare key
+/// otherwise.
 fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String), IpcError> {
     let r = reference.trim();
+    let trackers = s.list_trackers()?;
     if r.starts_with("https://") || r.starts_with("http://") {
-        let (site, key) = parse_ticket_url(r).ok_or_else(|| {
+        if let Some((site, key)) = parse_ticket_url(r) {
+            let t = trackers.into_iter().find(|t| t.site_url == site);
+            if t.is_none() {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("no tracker is connected for {site}; add it first (work_admin add)"),
+                )
+                .with_details(serde_json::json!({ "site_url": site, "key": key })));
+            }
+            return Ok((t, key));
+        }
+        // Any other tracker URL the recogniser knows (GitHub, Asana,
+        // Linear): its reference, answered by the trackers that claim it.
+        let m = crate::service::work::recognize::recognize(
+            r,
+            &crate::service::work::recognize::RecognizeCtx::default(),
+        )
+        .into_iter()
+        .find(|m| m.kind == crate::service::work::recognize::MatchKind::Url)
+        .ok_or_else(|| {
             IpcError::new(
                 codes::E_INVALID,
-                "not a ticket URL fleet recognises (https://<site>.atlassian.net/browse/KEY-1)",
+                "not a ticket URL fleet recognises (Jira, GitHub, Asana or Linear)",
             )
         })?;
-        let t = s.list_trackers()?.into_iter().find(|t| t.site_url == site);
-        if t.is_none() {
+        let key = crate::store::canonical_key(&m.key);
+        let owners = crate::store::tracker_claims(&trackers, &key);
+        if owners.is_empty() {
+            let provider = m.provider.unwrap_or_default();
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
-                format!("no tracker is connected for {site}; add it first (work_admin add)"),
+                format!("no {provider} tracker is connected that covers {key}; add it first (work_admin add)"),
             )
-            .with_details(serde_json::json!({ "site_url": site, "key": key })));
+            .with_details(serde_json::json!({ "provider": provider, "key": key, "url": r })));
         }
+        let t = (owners.len() == 1)
+            .then(|| trackers.iter().find(|t| t.id == owners[0]).cloned())
+            .flatten();
         return Ok((t, key));
     }
     let key = crate::store::normalize_work_ref(r)?;
-    // The tracker that owns the prefix, when exactly one does.
-    let prefix = key
-        .split_once('-')
-        .map(|(p, _)| p.to_string())
-        .unwrap_or_default();
-    let owners: Vec<TrackerRow> = s
-        .list_trackers()?
-        .into_iter()
-        .filter(|t| t.config.key_prefixes.contains(&prefix))
-        .collect();
-    Ok(((owners.len() == 1).then(|| owners[0].clone()), key))
+    // The tracker that may answer it, when exactly one does.
+    let owners = crate::store::tracker_claims(&trackers, &key);
+    let t = (owners.len() == 1)
+        .then(|| trackers.iter().find(|t| t.id == owners[0]).cloned())
+        .flatten();
+    Ok((t, key))
 }
 
 /// `work { action: lookup, key | url }`: the cache, else one live fetch.
@@ -232,7 +253,7 @@ pub async fn lookup(
     store: &Mutex<Store>,
     reference: &str,
     scope: &OrgScope,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<Ticket, IpcError> {
     let (tracker, key) = {
         let s = lock(store)?;
@@ -272,7 +293,7 @@ pub async fn lookup(
                 )
                 .with_details(serde_json::json!({ "state": t.state })));
             }
-            fetch_one(&t, ItemRef::Key(key.clone()), store, transport)
+            fetch_one(&t, ItemRef::parse(&key), store, net)
                 .await
                 .map_err(|e| e.to_ipc())?
                 .ok_or_else(|| {
@@ -369,7 +390,7 @@ pub struct StartPlan {
 /// most 60 characters, never `main`/`master`. The frontend's
 /// `finalizeBranchSlug` does the same for what a person types.
 pub fn branch_slug(key: &str, title: &str) -> String {
-    let raw = format!("{key} {title}").to_lowercase();
+    let raw = format!("{} {title}", slug_key(key)).to_lowercase();
     let mut out = String::new();
     for c in raw.chars() {
         if c.is_ascii_alphanumeric() {
@@ -388,9 +409,35 @@ pub fn branch_slug(key: &str, title: &str) -> String {
     out
 }
 
-/// The friendly name `KEY title`, cut to the 80-character limit.
+/// The part of a key a branch name carries: a GitHub issue its number (the
+/// repository is the project's), an Asana task the tail of its gid, a
+/// ticket key itself.
+fn slug_key(key: &str) -> String {
+    if let Some((_, n)) = crate::store::github_ref(key) {
+        return n.to_string();
+    }
+    if let Some(gid) = key.strip_prefix("asana:") {
+        let tail: String = gid
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        return tail;
+    }
+    key.to_string()
+}
+
+/// The friendly name `KEY title`, cut to the 80-character limit. An Asana
+/// task has no human key: its title alone.
 pub fn start_name(key: &str, title: &str) -> String {
-    let t = format!("{key} {title}");
+    let t = if key.starts_with("asana:") && !title.trim().is_empty() {
+        title.to_string()
+    } else {
+        format!("{key} {title}")
+    };
     let t: String = t.chars().filter(|c| !c.is_control()).collect();
     t.trim().chars().take(80).collect()
 }
@@ -402,7 +449,7 @@ pub async fn plan_start(
     store: &Mutex<Store>,
     args: &StartArgs,
     scope: &OrgScope,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<StartPlan, IpcError> {
     let (key, title, item_id) = match (args.item_id, args.reference.as_deref()) {
         (Some(id), None) => {
@@ -419,7 +466,7 @@ pub async fn plan_start(
             })?;
             (key, item.title, Some(id))
         }
-        (None, Some(r)) => match lookup(store, r, scope, transport).await {
+        (None, Some(r)) => match lookup(store, r, scope, net).await {
             Ok(t) => (
                 t.item.key.clone().unwrap_or_else(|| r.to_string()),
                 t.item.title,
@@ -462,11 +509,29 @@ pub async fn plan_start(
             "tmux_name": row.tmux_name,
         })));
     }
-    let prefix = key
-        .split_once('-')
-        .map(|(p, _)| p.to_string())
-        .unwrap_or_default();
-    let seen = s.last_place_for_prefix(&prefix)?;
+    // Where this kind of work last ran: a GitHub issue's own repository's
+    // project first, else the newest link with the same key prefix.
+    let (seen, prefix_label) = match crate::store::github_ref(&key) {
+        Some((repo, _)) => (
+            s.project_for_repo(repo)?.map(|pid| {
+                let host = s.last_host_for_project(pid).ok().flatten();
+                (pid, host.unwrap_or_default())
+            }),
+            repo.to_string(),
+        ),
+        None => {
+            let prefix = key
+                .split_once('-')
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default();
+            let label = if key.starts_with("asana:") {
+                "this Asana task".to_string()
+            } else {
+                format!("{prefix}-*")
+            };
+            (s.last_place_for_prefix(&prefix)?, label)
+        }
+    };
     let project_id = match args.project_id.or(seen.as_ref().map(|p| p.0)) {
         Some(pid) => {
             if !s.list_projects()?.iter().any(|p| p.id == pid) {
@@ -488,7 +553,7 @@ pub async fn plan_start(
                 .collect();
             return Err(IpcError::new(
                 codes::E_AMBIGUOUS,
-                format!("no project has worked on {prefix}-* yet; pick one (project_id)"),
+                format!("no project has worked on {prefix_label} yet; pick one (project_id)"),
             )
             .with_details(serde_json::json!({ "candidates": candidates })));
         }
@@ -497,7 +562,7 @@ pub async fn plan_start(
         (Some(h), _) => h.clone(),
         (None, Some(h)) => h.to_string(),
         (None, None) => match seen
-            .filter(|p| p.0 == project_id)
+            .filter(|p| p.0 == project_id && !p.1.is_empty())
             .map(|p| p.1)
             .or(s.last_host_for_project(project_id)?)
         {
@@ -710,9 +775,9 @@ pub async fn start_work(
     reg: &Arc<crate::cancel::CancellationRegistry>,
     args: &StartArgs,
     scope: &OrgScope,
-    transport: Arc<dyn HttpTransport>,
+    net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
-    let plan = plan_start(store, args, scope, transport).await?;
+    let plan = plan_start(store, args, scope, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),
         // The brief is read by the new session's Claude: never another

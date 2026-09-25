@@ -417,6 +417,36 @@ The order serves the user's real setup. Decision D1 below may reorder it.
 
 **Value:** one work model across all of the user's trackers.
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-m6`
+(from M4, with M5 merged in), per
+`plans/2026-09-24-work-graph-m6-more-providers.md` (its *Revisions* list
+every deviation). Verified with `cargo fmt`, `clippy -D warnings`
+(workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub), `cargo
+deny check`, `scripts/hub-e2e.sh` (102/102) and `pnpm check` / `pnpm test`;
+no test reaches a real tracker. The manual acceptance on real accounts is
+still to do.
+
+- **M6.0** (008de56): the provider conformance suite (ten scenarios, a
+  golden per adapter), `Caps` / `ItemRef` / `RefCtx` / sync-token
+  refinements, `TrackerNet`; Jira passes it unchanged.
+- **M6.1 + M6.2** (2694653): GitHub Issues through `gh` on a host
+  (`via_cli`, no token in fleet) and Asana (PAT, `asana:<gid>` keys, events
+  API sync tokens, the section map); `SshExec::run_with_stdin`; per-provider
+  site fences and host policies; `tracker_claims`.
+- **M6.3** (456f517): `via_host` — curl on a host, the credential on stdin
+  into a private temp file, never in argv.
+- **M6.4** (5017bab): Linear (team keys settle `ENG-123`, team moves keep
+  links).
+- **M6.5** (33ff03e): Jira Data Center with an admin-fenced site (exact
+  host, resolve-then-refuse loopback / link-local, pinned connect, an extra
+  CA) and `jira_common.rs`.
+- **M5 merge** (a478a51): migration 050 → 051; every new provider passes
+  M5's isolation rules (acceptance 6).
+- **M6.6** (ea01b01): Connect any tracker by pasting a URL, provider
+  badges, the Asana section map editor; docs.
+- **Not done:** `acli`, GitHub Enterprise Server, per-provider metrics, the
+  phone (M8), the manual acceptance.
+
 ### M7: self-cleaning lifecycle
 
 - **Tidy-up sheet** in Attention, shown only when there are candidates.
@@ -447,7 +477,7 @@ fleet is still to do.
 - **M7.1** (1c9c2e2, the pure planner): `plan_tidy` in `service/gc/tidy.rs` — five
   reasons, ranked secondary reasons, hard-coded protections each with its
   own test, snooze / never, and what auto-tidy may act on.
-- **M7.2** (6932b72, storage and API): migration 051 after the M5 merge (`work_links.archived_at` /
+- **M7.2** (6932b72, storage and API): migration 052 after the M5 and M6 merges (`work_links.archived_at` /
   `tidy_snoozed_until` / `tidy_never`, `sessions.last_touch_at`,
   `work_items.reopened_at`); archive UI-only and undone by the next prompt
   or attach; reopen as an event (`reopened` journal row); `state` in the PR
@@ -460,8 +490,8 @@ fleet is still to do.
   badge and Resume, Settings → Work → Lifecycle with a dry run.
 - **M7.4**: `docs/concepts.md` → *Lifecycle*, `docs/hub.md` → *Tidy-up and
   auto-tidy*, `docs/control-api.md`.
-- **After M5 merged:** migration 051 (M5 took 050), the per-org override
-  `orgs.auto_tidy` (migration 052), and org-scoped candidates / apply / reopened for a
+- **After M5 merged:** migration 051 (M5 took 050; 052 once M6 took 051), the per-org override
+  `orgs.auto_tidy` (migration 052; 053 after M6), and org-scoped candidates / apply / reopened for a
   per-host token.
 - **Not done:** `idle_unlinked`
   (an unlinked session has no link to archive under); the phone (M8); the
@@ -604,7 +634,17 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   `orgs.auto_tidy` (on / off / inherit) overrides `work.auto_tidy` per org,
   and tidy candidates, tidy_apply and reopened work respect the org scope
   of a per-host token. Details in the M7 plan's *Revisions*.
+- 2026-09-24: M6 landed on `claude/cloud-fleet-work-graph-m6` (GitHub
+  through `gh`, Asana, `via_host`, Linear, Jira Data Center — built because
+  the M6 brief asked, overriding D6's default — and the Connect / badge /
+  section-map UI), with M5 merged in: M6's migration is 051. The tool budget
+  grew by 189 B over M5 for `work_admin`'s `transport` / `settings`; no new
+  tool, no contract bump. Deviations are in the M6 plan's *Revisions*.
 - 2026-09-24: M8.0 (hub side) landed on `claude/cloud-fleet-work-graph-m8`:
   `work_suggested` on the phone view, the `work` / `work_link` action enums
   (+72 B on top of M5; generated from M5's action tables), the client
   tool-list gate test. No new tool, no contract bump.
+- 2026-09-25: M6 (main, #266) merged into M7 (no rebase). M6 kept 051; M7's
+  migrations were renumbered to 052 (`work_lifecycle`) and 053
+  (`org_auto_tidy`), and a database that already ran M6's 051 gets both.
+  `work_admin` carries M6's `transport` / `settings` and M7's `auto_tidy`.

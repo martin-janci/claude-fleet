@@ -199,10 +199,20 @@ per-host ticket fence is kept (composed with the org). Cross-org links need
 `force_cross_org` for every caller; `isolate_sessions` (D7) is per org, off.
 Any new `work` / `work_link` / `work_admin` action needs a row in the
 isolation matrix (`mcp/tools/tests_isolation.rs`), which fails otherwise.
+Work graph M6 (more providers) is landed: GitHub Issues (through `gh` on a
+host, `transport = via_cli:<host>`, no token in fleet), Asana (`asana:<gid>`
+keys, events-API sync tokens, the section map), Linear, and Jira Data Center
+(admin-fenced site: exact host, resolve-then-refuse loopback / link-local,
+optional `extra_ca`), all behind the `TrackerProvider` trait and the
+`HttpTransport` seam (`net/via_host.rs` has `gh` and host-side `curl`, the
+credential only ever on stdin), migration 051 (`tracker_views.sync_mark`,
+`trackers.settings`). A new provider must pass the conformance suite
+(`service/trackers/conformance.rs`, `conformance_suite!`) and
+`tests_isolation_providers.rs`.
 Work graph M7 (self-cleaning lifecycle) is landed: the pure planner
-`service/gc/tidy.rs` (reasons, hard-coded protections), migrations 051
+`service/gc/tidy.rs` (reasons, hard-coded protections), migrations 052
 (UI-only archive, snooze / never per link, `sessions.last_touch_at`,
-`work_items.reopened_at`) and 052 (`orgs.auto_tidy`), `work { tidy | reopened }` and
+`work_items.reopened_at`) and 053 (`orgs.auto_tidy`), `work { tidy | reopened }` and
 `work_link { archive | unarchive | snooze | never | dismiss | tidy_apply }`,
 and auto-tidy in the GC sweep behind `work.auto_tidy` (OFF; safe kill only),
 overridable per org. Tidy-up suggests; it never kills a dirty tree except

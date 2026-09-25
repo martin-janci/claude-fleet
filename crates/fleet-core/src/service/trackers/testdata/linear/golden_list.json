@@ -1,0 +1,164 @@
+[
+  {
+    "aliases": [],
+    "assignee_id": "user-0001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "ENG"
+    ],
+    "description": "Roll out SSO to every client.",
+    "external_id": "iss-0001",
+    "hierarchy_level": 0,
+    "iteration": "Cycle 12",
+    "iteration_active": true,
+    "key": "ENG-101",
+    "kind": "Issue",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "in_progress",
+      "name": "In Progress",
+      "resolution": null
+    },
+    "title": "Ship SSO",
+    "updated": 1789985730,
+    "url": "https://linear.app/acme/issue/ENG-101/ship-sso"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "user-0001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "ENG"
+    ],
+    "description": null,
+    "external_id": "iss-0002",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "ENG-102",
+    "kind": "Issue",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "todo",
+      "name": "Todo",
+      "resolution": null
+    },
+    "title": "Audit log export",
+    "updated": 1789977600,
+    "url": "https://linear.app/acme/issue/ENG-102/audit-log-export"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "user-0001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "ENG"
+    ],
+    "description": null,
+    "external_id": "iss-0003",
+    "hierarchy_level": -1,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "ENG-103",
+    "kind": "Sub-issue",
+    "parent_external_id": "iss-0001",
+    "parent_key": "ENG-101",
+    "status": {
+      "category": "todo",
+      "name": "Backlog",
+      "resolution": null
+    },
+    "title": "SSO: map groups",
+    "updated": 1789905600,
+    "url": "https://linear.app/acme/issue/ENG-103/sso:-map-groups"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "user-0001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "OPS"
+    ],
+    "description": null,
+    "external_id": "iss-0004",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "OPS-7",
+    "kind": "Issue",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Done",
+      "resolution": "completed"
+    },
+    "title": "Rotate certificates",
+    "updated": 1789833600,
+    "url": "https://linear.app/acme/issue/OPS-7/rotate-certificates"
+  },
+  {
+    "aliases": [],
+    "assignee_id": null,
+    "assignees": [],
+    "containers": [
+      "OPS"
+    ],
+    "description": null,
+    "external_id": "iss-0005",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "OPS-8",
+    "kind": "Issue",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Canceled",
+      "resolution": "not_planned"
+    },
+    "title": "Migrate to v1 runners",
+    "updated": 1789725600,
+    "url": "https://linear.app/acme/issue/OPS-8/migrate-to-v1-runners"
+  },
+  {
+    "aliases": [
+      "OPS-3"
+    ],
+    "assignee_id": "user-0001",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "ENG"
+    ],
+    "description": null,
+    "external_id": "iss-0006",
+    "hierarchy_level": 0,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "ENG-110",
+    "kind": "Issue",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "todo",
+      "name": "Triage",
+      "resolution": null
+    },
+    "title": "Flaky login test",
+    "updated": 1789722000,
+    "url": "https://linear.app/acme/issue/ENG-110/flaky-login-test"
+  }
+]

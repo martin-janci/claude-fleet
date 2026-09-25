@@ -1,0 +1,21 @@
+{
+  "data": {
+    "viewer": {
+      "id": "user-0001",
+      "name": "Dana Dev"
+    },
+    "organization": {
+      "id": "org-0001",
+      "urlKey": "acme"
+    },
+    "teams": {
+      "nodes": [
+        {
+          "key": "OPS",
+          "cyclesEnabled": false,
+          "activeCycle": null
+        }
+      ]
+    }
+  }
+}

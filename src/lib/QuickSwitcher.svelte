@@ -34,7 +34,15 @@
     scopeEntries,
   } from './quick_switcher';
   import { effectiveScope, scopeOf } from './orgs';
-  import { workTickets, workLookup, startWork, trackers, type TicketRow } from './trackers';
+  import {
+    workTickets,
+    workLookup,
+    startWork,
+    trackers,
+    providerInfo,
+    showProviderBadges,
+    type TicketRow,
+  } from './trackers';
   import { workKeyFor, worktreeBranchById } from './work_keys';
   import { settingsOpen } from './app_views';
   import { push, pushError } from './toasts';
@@ -84,7 +92,19 @@
     });
     tickets = out;
   }
-  const ticketRows = $derived(ticketEntries(tickets));
+  // Work graph M6: a provider badge per ticket, once trackers of two or
+  // more providers exist.
+  const ticketBadges = $derived(
+    new Map(
+      showProviderBadges($trackers)
+        ? $trackers.flatMap((t) => {
+            const p = providerInfo(t.provider);
+            return p ? [[t.id, { icon: p.icon, title: p.label }] as const] : [];
+          })
+        : [],
+    ),
+  );
+  const ticketRows = $derived(ticketEntries(tickets, ticketBadges));
   const lookupRow = $derived(
     lookupEntry(
       query,
@@ -109,6 +129,7 @@
       label: e.label,
       description: e.description,
       meta: e.meta,
+      badge: e.badge,
       group:
         e.kind === 'session'
           ? 'Sessions'
@@ -231,11 +252,12 @@
       openTicket(r.value);
       return;
     }
-    const site = (r.error.details as { site_url?: string } | null | undefined)?.site_url;
+    const d = r.error.details as { site_url?: string; provider?: string } | null | undefined;
+    const site = d?.site_url ?? (d?.provider ? (providerInfo(d.provider)?.label ?? d.provider) : null);
     if (r.error.code === 'E_NOTFOUND' && site) {
       push({
         kind: 'info',
-        message: `${site} is not connected — connect Jira in Settings → Work to look up its tickets.`,
+        message: `${site} is not connected — connect it in Settings → Work to look up its tickets.`,
         action: { label: 'Settings', run: () => settingsOpen.set(true) },
       });
       return;

@@ -370,10 +370,16 @@ Index by area (names only; see the reference for details):
   refused to a per-host token). Prompts are never stored — only matches.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
   on a paired desktop the Settings → Work section says "configure on the
-  hub") manages them: `list`, `add { site_url }` (the site, or any ticket URL
-  on it; only `https://<name>.atlassian.net` is accepted), `update
-  { tracker_id, name }`, `set_credential { tracker_id, username, secret |
-  credential_ref }` (`env:NAME` or `file:/path`, read by the hub at use),
+  hub") manages them: `list`, `add { site_url, provider?, transport?,
+  settings? }` (the site, or any ticket / issue URL on it; the provider —
+  `jira`, `github`, `asana`, `linear`, `jira_dc` — is inferred from the URL
+  unless given, and each provider's site is fenced: `*.atlassian.net`,
+  `github.com[/<owner>]`, `app.asana.com[/<workspace>]`,
+  `linear.app/<workspace>`, one exact Data Center host), `update
+  { tracker_id, name?, transport?, settings? }`, `set_credential { tracker_id,
+  auth_kind?, username?, secret | credential_ref }` (`env:NAME` or
+  `file:/path`, read by the hub at use; without `username` the token is the
+  whole credential; refused for a `via_cli` tracker),
   `test { tracker_id }` (probe the site: account, key prefixes, sprint
   projects, views; the tracker's `state` becomes `ok` or says why not) and
   `remove { tracker_id }` (confirm-gated; its items stay, marked
@@ -382,6 +388,18 @@ Index by area (names only; see the reference for details):
   operator has the same over loopback: `fleet-hub tracker
   list|add|set-credential|test|remove`, which reads the token from stdin or
   `--from-env`, never from argv.
+  More providers (roadmap M6): `transport` is `direct` (HTTPS from the hub),
+  `via_host:<host>` (`curl` on that host, the credential piped on stdin,
+  never in argv) or `via_cli:<host>` (a trusted CLI there with its own login
+  — GitHub's `gh`; fleet then holds no credential, and GitHub accepts only
+  this). `settings` is the provider's admin object: GitHub `repos`
+  (`owner/repo` list narrowing the owner scope), Asana `section_map`
+  (section → `todo` | `in_progress` | `done`) and `section_map_confirmed`,
+  Jira Data Center `extra_ca` (PEM) and `allow_private_network` (the site may
+  resolve to a loopback / link-local address, refused otherwise). Keys are
+  the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
+  (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
+  by URL); `lookup` and `start` take any of them, or the item's URL.
   Reading tickets (M3.4): `work { action: "tickets", tracker_id?, view?,
   query?, limit? }` serves the sync's **cache** (never a live call); `view`
   is `mine` (assigned to the tracker account, not done), `sprint` (in an
