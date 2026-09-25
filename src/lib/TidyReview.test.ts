@@ -182,10 +182,57 @@ describe('TidyReview', () => {
     await mount();
     requestTidy([3]);
     await waitFor(() => expect(screen.getByTestId('tidy-sheet')).toBeTruthy());
+    // M10.4: the sheet also shows only the requested session.
     const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
-    expect(checks.map((c) => c.checked)).toEqual([false, false, true]);
+    expect(checks.map((c) => c.checked)).toEqual([true]);
     expect(get(tidyRequest)).toBeNull();
     expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+  });
+
+  it('a request from the Today view shows only those sessions until Show all (M10.4)', async () => {
+    candidates = [cand(1), cand(2), cand(3, { reason: 'pr_merged_idle' })];
+    await mount();
+    requestTidy([2, 3]);
+    await waitFor(() => expect(screen.getByTestId('tidy-sheet')).toBeTruthy());
+    const rows = () => screen.getAllByTestId('tidy-row').map((r) => Number(r.dataset.sessionId));
+    expect(rows()).toEqual([2, 3]);
+    expect(screen.getByTestId('tidy-only')).toHaveTextContent("From Today's Stale · 2 of 3");
+    await fireEvent.click(screen.getByTestId('tidy-show-all'));
+    expect(rows()).toEqual([1, 2, 3]);
+    expect(screen.queryByTestId('tidy-only')).toBeNull();
+    // Showing all ticks nothing more: only the requested rows stay picked.
+    const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+    expect(checks.map((c) => c.checked)).toEqual([false, true, true]);
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+  });
+
+  it('Enter on Show all never applies (M10.4)', async () => {
+    candidates = [cand(1), cand(2)];
+    await mount();
+    requestTidy([2]);
+    await waitFor(() => expect(screen.getByTestId('tidy-show-all')).toBeTruthy());
+    await fireEvent.keyDown(screen.getByTestId('tidy-show-all'), { key: 'Enter' });
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+  });
+
+  it('the pill after a Today request opens the whole sheet again (M10.4)', async () => {
+    candidates = [cand(1), cand(2)];
+    await mount();
+    requestTidy([2]);
+    await waitFor(() => expect(screen.getAllByTestId('tidy-row')).toHaveLength(1));
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'Escape' });
+    await fireEvent.click(screen.getByTestId('tidy-pill'));
+    await waitFor(() => expect(screen.getAllByTestId('tidy-row')).toHaveLength(2));
+  });
+
+  it('a request none of whose sessions is still a candidate shows everything (M10.4)', async () => {
+    candidates = [cand(1), cand(2)];
+    await mount();
+    requestTidy([99]);
+    await waitFor(() => expect(screen.getByTestId('tidy-sheet')).toBeTruthy());
+    expect(screen.getAllByTestId('tidy-row')).toHaveLength(2);
+    expect(screen.queryByTestId('tidy-only')).toBeNull();
   });
 
   it('an old request is dropped instead of opening the sheet later', async () => {

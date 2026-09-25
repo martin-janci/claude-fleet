@@ -6,6 +6,7 @@ import {
   candidatesFor,
   requestedTicks,
   tidyRequestLive,
+  requestedOnly,
   TIDY_REQUEST_TTL_MS,
   autoTidyPreview,
   choicesFor,
@@ -174,3 +175,12 @@ describe('tidy requests (work graph M9)', () => {
   });
 });
 
+describe('requestedOnly (work graph M10.4)', () => {
+  const c = (id: number) => ({ session_id: id, host_alias: 'h', tmux_name: `s${id}`, reason: 'done_idle', action: 'safe_kill', since: 0 }) as TidyCandidate;
+  it('narrows to the requested candidates, or shows all', () => {
+    const cands = [c(1), c(2), c(3)];
+    expect([...(requestedOnly(cands, [3, 1, 9]) ?? [])].sort()).toEqual([1, 3]);
+    expect(requestedOnly(cands, [])).toBeNull();
+    expect(requestedOnly(cands, [9])).toBeNull();
+  });
+});
