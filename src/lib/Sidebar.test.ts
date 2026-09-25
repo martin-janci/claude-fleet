@@ -1911,6 +1911,56 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
   });
 
+  it('work mode: a project header names work for the sessions that have none (M11.1)', async () => {
+    const keyed = { ...sessionFor(1, 'dev-login'), tags: ['PAY-7'] };
+    const p1 = sessionFor(2, 'dev-pos');
+    const p2 = sessionFor(2, 'dev-pos-2');
+    mockBackend(workProjects, [keyed, p1, p2]);
+    render(Sidebar);
+    await tick(); await tick();
+    // Project mode has no such control.
+    expect(screen.queryByTestId('name-work-group')).toBeNull();
+    sidebarGroupBy.set('work');
+    await tick(); await tick();
+    const buttons = await screen.findAllByTestId('name-work-group');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].getAttribute('title')).toContain('2 sessions with no work');
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cmd: string, args?: { args?: { session_id?: number } }) => {
+        if (cmd === 'name_session_work' || cmd === 'link_session_work') {
+          const id = args?.args?.session_id ?? 0;
+          const row = [p1, p2].find((r) => r.id === id)!;
+          return {
+            ...row,
+            row_version: 9,
+            work: { link_id: id, item_id: 70, key: null, title: 'POS cleanup', source: 'manual' },
+          };
+        }
+        return base(cmd, args);
+      },
+    );
+    await fireEvent.click(buttons[0]);
+    await tick();
+    const dialog = screen.getByTestId('name-work-dialog');
+    expect(within(dialog).getAllByTestId('name-work-session')).toHaveLength(2);
+    await fireEvent.input(within(dialog).getByTestId('name-work-title'), {
+      target: { value: 'POS cleanup' },
+    });
+    await fireEvent.click(within(dialog).getByTestId('name-work-submit'));
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('link_session_work', {
+        args: { session_id: p2.id, item_id: 70 },
+      }),
+    );
+    expect(mockedInvoke).toHaveBeenCalledWith('name_session_work', {
+      args: { session_id: p1.id, title: 'POS cleanup' },
+    });
+  });
+
   it('rolls up PRs and the worst CI state on the group header', async () => {
     const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'], pr_url: 'https://x/pull/1', ci_status: 'passing' as const };
     const b = { ...sessionFor(1, 'dev-b'), tags: ['PAY-7'], pr_url: 'https://x/pull/2', ci_status: 'failing' as const };
