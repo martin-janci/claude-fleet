@@ -55,6 +55,7 @@
   import { fleetSettings, SETTING_KEYS } from './fleet_settings';
   import type { Result } from './result';
   import { orgs } from './orgs';
+  import SpiralLoader from './SpiralLoader.svelte';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -562,7 +563,7 @@
               data-testid="claude-chip"
               style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
               title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >{claudeStatusLabel(sess.claude_status)}</span>
+            >{#if sess.claude_status === 'working'}<SpiralLoader size={10} class="chip-spiral" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
           {/if}
           <div class="row-actions">
             {#if isInactiveAgent(sess)}
@@ -972,6 +973,10 @@
     border: 1px solid;
     flex-shrink: 0;
     white-space: nowrap;
+  }
+  .claude-chip :global(.chip-spiral) {
+    margin-right: 0.2rem;
+    vertical-align: -1px;
   }
   .stuck-chip { font-weight: 600; }
   .inactive-chip {

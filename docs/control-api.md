@@ -1048,14 +1048,19 @@ automatically on app start.
   `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard`,
   `repair_session`, `cancel_task` and `move_session` (not its `dry_run`) return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
   approve the request in the desktop dialog, then retry the call with that
-  nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
-  `broadcast_prompt` including a digest of the content / prompt — so an
-  approval cannot be replayed with different text. **The operator** (the UX
-  agent's own client token, `ux-agent`) is gated whatever the toggle says
-  (work graph M9.7, decision D12): its `new_session`, `new_shell_session`,
-  `safe_kill_session`, `work_link` `start` / `resume` and every tool above
-  return `E_CONFIRM_REQUIRED` until a person approves them on the desktop;
-  on a hub, which has no approver, they are refused with `E_FORBIDDEN`.
+  nonce. The nonce is bound to the call's tool and to EVERY argument — free
+  text as a readable prefix plus a digest of the whole, a prompt or brief as
+  a digest only — so an approval cannot be replayed with different
+  arguments, and is single use. **The operator** (the UX agent's own client
+  token, `ux-agent`) is gated whatever the toggle says (work graph M9.7,
+  decision D12): its session starts and restarts — `new_session`,
+  `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task`
+  with `new_worker`, `restore_host_sessions` (not its `dry_run`),
+  `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
+  its `safe_kill_session`, and every tool above return
+  `E_CONFIRM_REQUIRED` until a person approves them on the desktop; on a
+  hub, which has no approver, they are refused with `E_FORBIDDEN`. Every
+  other caller is unaffected: for them these tools are not gated.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

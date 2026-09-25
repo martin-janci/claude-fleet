@@ -188,7 +188,8 @@ current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
 probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
 never groups a session), and the chip / popover / batch review UI. The
 SessionStart context (M4.5) is built but OFF behind
-`work.session_start_context` (decision D5). M4.6, the opt-in classification
+`work.session_start_context` (decision D5; the remote-host numbers are the
+user's to take with `scripts/measure-session-start.sh`). M4.6, the opt-in classification
 nudge, is landed OFF behind `work.classify_nudge`: after three turns with no
 link and 1–5 candidates in the host's scope, one UserPromptSubmit per
 conversation carries a ≤400-char note after the mail
@@ -234,6 +235,11 @@ and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
 too. Write-back (D3 none), dead-session summaries (D10 off) and webhooks
 (D13 no) are decided against and not built; see
 `docs/superpowers/plans/2026-09-24-work-graph-m9-beyond.md`.
+Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
+M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
+and the M5.5 filters (tracker / status / mine / has-session / archived)
+have chips under the sidebar's "⚑ work" pill (`work_filters.ts`, through
+`rowMatches`).
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

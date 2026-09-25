@@ -92,6 +92,32 @@ describe('LinkReview', () => {
     expect(get(selectedSession)?.id).toBe(2);
   });
 
+  it('says what a decision did, and what the session asks next', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    // Confirming ABC-1 leaves the same session with its next suggestion:
+    // without a word, the row only changes its key and looks untouched.
+    vi.mocked(invoke).mockImplementationOnce(async () =>
+      session('h', 'a', {
+        id: 1,
+        status: 'running',
+        work: { ...sg(11, 'ABC-1'), state: 'confirmed', source: 'manual' },
+        work_suggested: { ...sg(13, 'ABC-9'), suggestions: 2 },
+      }),
+    );
+    await fireEvent.click(screen.getAllByTestId('link-review-yes')[0]);
+    await vi.waitFor(() => expect(get(toasts)).toHaveLength(1));
+    expect(get(toasts)[0].message).toBe('Linked a → ABC-1 · next: ABC-9? (2 left)');
+    expect(screen.getAllByTestId('link-review-row')[0].textContent).toContain('ABC-9?');
+
+    vi.mocked(invoke).mockImplementationOnce(async () => session('h', 'b', { id: 2, status: 'running' }));
+    await fireEvent.click(screen.getAllByTestId('link-review-no')[1]);
+    await vi.waitFor(() => expect(get(toasts)).toHaveLength(2));
+    expect(get(toasts)[1].message).toBe('b: not ABC-2');
+  });
+
   it('toasts a new automatic link with an Undo that rejects it', async () => {
     const base = session('h', 'a', { id: 1, status: 'running', friendly_name: 'blue-sirius' });
     sessions.set([base]);

@@ -53,7 +53,17 @@
   } from './sidebar_index';
   import { workGroupPrSummary, workGroupTicket, workKeyFor, worktreeBranchById } from './work_keys';
   import { nameWork } from './work';
-  import { statusDotClass, unavailableLabel } from './trackers';
+  import { statusDotClass, trackers, unavailableLabel } from './trackers';
+  import {
+    bothPredicates,
+    effectiveWorkFilters,
+    loadMine,
+    mineItemIds,
+    pastWorkFields,
+    toRowFilters,
+    workFilterPredicate,
+    workFilters,
+  } from './work_filters';
   import {
     ciStatusColor,
     ciStatusLabel,
@@ -193,14 +203,37 @@
   const viewBg = $derived(focus ? true : $showBgAgents);
   const viewScope = $derived(focus ? null : scopeSel);
   const viewSearch = $derived(focus ? '' : searchQuery);
+  // The work filters (M10.4): tracker, status, mine, has-session, archived
+  // — persisted chips in SidebarFilters, applied through `rowMatches` and
+  // composed with needs-you. A focused suggestion is past them too.
+  const workFilterView = $derived(
+    effectiveWorkFilters($workFilters, $trackers, $sidebarGroupBy === 'work'),
+  );
+  const workFilterCtx = $derived({ trackers: $trackers, mine: $mineItemIds });
+  const workPredicate = $derived(workFilterPredicate(workFilterView, workFilterCtx));
+  // "Mine" reads the hub's `mine` view; re-read while the chip is on.
+  const mineOn = $derived($workFilters.assignee === 'mine');
+  $effect(() => {
+    if (!mineOn) return;
+    void $trackers.length;
+    untrack(() => void loadMine());
+    const t = setInterval(() => void loadMine(), 120_000);
+    return () => clearInterval(t);
+  });
+  /** A past link passes the work filters (host and scope are the caller's). */
+  function pastPassesWorkFilters(key: string, l: WorkLink): boolean {
+    return rowMatches(
+      { ...pastFilterRow(l), ...pastWorkFields(key, l.item_id, workFilterCtx) },
+      toRowFilters(workFilterView),
+    );
+  }
   const rowPredicate = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
       return (s) => s.id === id;
     }
-    if (!needsYouOnly) return null;
     const opts = attentionOpts;
-    return (s) => needsYou(s, opts);
+    return bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, workPredicate);
   });
 
   // Multi-select for bulk Kill / Send prompt. Rows are toggled with
@@ -476,8 +509,10 @@
     for (const [key, links] of $pastWork) {
       if (live.has(key) || links.length === 0) continue;
       // Hosts (and scopes) outside the filter hide their past work too.
-      const shown = links.filter((l) =>
-        rowMatches(pastFilterRow(l), { host: $hostFilter, scope: $effectiveScope }),
+      const shown = links.filter(
+        (l) =>
+          rowMatches(pastFilterRow(l), { host: $hostFilter, scope: $effectiveScope }) &&
+          pastPassesWorkFilters(key, l),
       );
       if (shown.length === 0) continue;
       if (
@@ -587,7 +622,11 @@
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
-  const outsideFleet = $derived(focus ? [] : buildOutsideFleet($sessions, $hostFilter, scopeSel));
+  const outsideFleet = $derived(
+    focus
+      ? []
+      : buildOutsideFleet($sessions, $hostFilter, scopeSel).filter((s) => !workPredicate || workPredicate(s)),
+  );
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
@@ -1109,7 +1148,7 @@
               {#each split.live as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
               {/each}
-              {@const past = $pastWork.get(g.key) ?? []}
+              {@const past = ($pastWork.get(g.key) ?? []).filter((l) => pastPassesWorkFilters(g.key, l))}
               {#if past.length + split.archived.length > 0}
                 <div
                   class="done-row"

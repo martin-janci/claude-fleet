@@ -368,21 +368,44 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     })
 }
 
+/// An OOM / allocation-failure signal on one lower-cased line. The acronym is
+/// matched only as a whole word (plus the explicit "oomkilled") so prose like
+/// "zoom"/"room" can't trip it.
+fn is_oom_line(lower: &str) -> bool {
+    lower.contains("out of memory")
+        || lower.contains("cannot allocate memory")
+        || lower.contains("fatal error: reached heap limit")
+        || lower.contains("oomkilled")
+        || contains_word(lower, "oom")
+}
+
+/// One lower-cased line of a live Claude REPL's chrome: the input prompt
+/// (`❯ …`, not a numbered dialog choice), the spinner / shortcut hint, the
+/// mode footer or the status line. Any of these below a crash signal means
+/// Claude outlived it.
+fn is_live_repl_line(lower: &str) -> bool {
+    let l = lower.trim_start();
+    (l.starts_with('❯') && parse_choice(l).is_none())
+        || LIVE_REPL_CUES.iter().any(|c| l.contains(c))
+        || l.contains("bypass permissions")
+        || l.contains("shift+tab to cycle")
+        || l.contains("% used")
+}
+
 /// Detect a stuck state from the (already ANSI-stripped) tail. First match wins,
 /// ordered most-specific first.
 fn detect_stuck(text: &str) -> Option<StuckKind> {
     let lower = text.to_lowercase();
 
-    // OOM / allocation failure. The acronym is matched only as a whole word
-    // (plus the explicit "oomkilled") so prose like "zoom"/"room" can't trip it.
-    if lower.contains("out of memory")
-        || lower.contains("cannot allocate memory")
-        || lower.contains("javascript heap out of memory")
-        || lower.contains("fatal error: reached heap limit")
-        || lower.contains("oomkilled")
-        || contains_word(&lower, "oom")
-    {
-        return Some(StuckKind::Oom);
+    // OOM / allocation failure: Claude died. Only the LAST signal counts, and
+    // only when no live REPL chrome is drawn below it — an input box or
+    // footer under the text means Claude is still running and the text is
+    // scrollback (its own prose about another session, a tool's output).
+    let lines: Vec<&str> = lower.lines().collect();
+    if let Some(at) = lines.iter().rposition(|l| is_oom_line(l)) {
+        if !lines[at + 1..].iter().any(|l| is_live_repl_line(l)) {
+            return Some(StuckKind::Oom);
+        }
     }
 
     // Trust-folder prompt.
@@ -965,6 +988,37 @@ mod tests {
         // (this was the false-positive: e.g. a session discussing Zoom).
         assert_eq!(analyze("Let's zoom into the room — boom!").stuck, None);
         assert_eq!(analyze("⏺ Joining the Zoom meeting room").stuck, None);
+    }
+
+    #[test]
+    fn oom_text_above_a_live_repl_is_scrollback_not_a_crash() {
+        // LIVE CAPTURE (2026-09-25, the fleet operator on mefistos): Claude's
+        // own reply mentions another session being OOM-killed, and the idle
+        // input box sits below it. Flagging this pane as OOM told the
+        // operator's composer "the prompt may not be read" for as long as
+        // the reply stayed on screen.
+        let tail = "  Zasekli sa dve — v 240 dispatchers aj 21415 api-tenant-resolution bol Claude\n  \
+                    predtým OOM-zabitý, takže prvý safe-kill prompt padol do shellu. Reštartoval\n  \
+                    som ich, ale:\n\n\
+                    ✻ Churned for 5m 53s · done 1:43 PM\n\
+                    ─────────────────────────────────────── fleet-operator ─\n\
+                    ❯ \n\
+                    ────────────────────────────────────────────────────────\n  \
+                    Opus 5 (1M context)  [██░░░░░░░░] 12% (122k/1.0M)  |  ~/.claude-f…\n  \
+                    ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n";
+        let intel = analyze(tail);
+        assert_eq!(intel.stuck, None);
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Idle));
+        // A tool's output while Claude keeps working is not Claude's OOM.
+        let working = "⏺ Bash(make)\n  ⎿  cc1: out of memory allocating 65536 bytes\n\
+                       ✶ Cooking… (3s · esc to interrupt)\n❯ \n";
+        assert_eq!(analyze(working).stuck, None);
+        // The REPL chrome ABOVE the crash is the screen Claude died on.
+        let crashed = "❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n\
+                       <--- Last few GCs --->\n\
+                       FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n\
+                       me@host:~/proj$ ";
+        assert_eq!(analyze(crashed).stuck, Some(StuckKind::Oom));
     }
 
     #[test]

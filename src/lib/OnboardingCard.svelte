@@ -1,5 +1,6 @@
 <script lang="ts">
   import { hosts } from './hosts';
+  import SpiralLoader from './SpiralLoader.svelte';
   import { projects, refreshProjects } from './projects';
   import { sessions, hasNoPane } from './sessions';
   import { mcpStatus, mcpConfigure, mcpClientConfig, maskToken, provisionHosts, type McpStatus } from './mcp';
@@ -137,7 +138,9 @@
         onclick={() => runStep(step.id)}
         disabled={busy !== null}
       >
-        <span class="ic {step.status}" aria-hidden="true">{step.status === 'done' ? '✓' : busy === step.id ? '◐' : ''}</span>
+        <span class="ic {step.status}" aria-hidden="true"
+          >{#if step.status === 'done'}✓{:else if busy === step.id}<SpiralLoader size={11} />{/if}</span
+        >
         <span class="body">
           <span class="label">
             {step.label}

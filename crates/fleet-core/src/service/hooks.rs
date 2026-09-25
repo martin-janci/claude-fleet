@@ -949,10 +949,17 @@ fn apply_stop_hook(
         let in_flight = before.safe_kill_state.as_deref() == Some("requested");
         remember_transcript_path(&s, before.id, payload, &session_id);
         let after = s.record_stop_hook_for_row(before.id)?;
+        // An agent-written handover's marker block (M9.3) is kept once, as
+        // the note: never in the turn's detail or its progress row.
         let detail: Option<String> = payload
             .last_assistant_message
             .as_deref()
-            .map(|m| m.trim().chars().take(200).collect::<String>())
+            .map(|m| {
+                crate::service::work::agent_handover::strip_markers(m)
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+            })
             .filter(|d| !d.is_empty());
         best_effort_event_for(
             &s,
@@ -2864,6 +2871,38 @@ mod tests {
         assert_eq!(done.detail.as_deref().map(str::len), Some(200));
         assert_eq!(done.claude_session_id.as_deref(), Some(OLD));
         assert_eq!(s.list_conversations(id, 1).unwrap()[0].turns, 1);
+    }
+
+    #[test]
+    fn a_handover_block_stays_out_of_turn_done_and_progress() {
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let host = host_caller("local");
+        for msg in [
+            "Here it is.\nWORK_HANDOVER_BEGIN_ab12cd\nLeft: docs.\nWORK_HANDOVER_END_ab12cd",
+            "WORK_HANDOVER_BEGIN_ab12cd\nonly the block\nWORK_HANDOVER_END_ab12cd",
+        ] {
+            let mut stop = make_payload("Stop", OLD);
+            stop.last_assistant_message = Some(msg.into());
+            apply_hook(&store, &make_ssh(), &stop, &ctx(&host, Some("%3"))).unwrap();
+        }
+        let s = store.lock().unwrap();
+        let details: Vec<Option<String>> = s
+            .list_session_events(id, 10)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "turn_done")
+            .map(|e| e.detail)
+            .collect();
+        assert_eq!(details, vec![None, Some("Here it is.".to_string())]);
+        let progress: Vec<String> = s
+            .journal_for_conversations(&[OLD.to_string()])
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == "progress")
+            .filter_map(|r| r.body)
+            .collect();
+        assert_eq!(progress, vec!["Here it is.".to_string()]);
     }
 
     #[test]

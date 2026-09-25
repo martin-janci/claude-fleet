@@ -215,9 +215,6 @@ impl Store {
         )?)
     }
 
-    /// Return the newest-first event timeline for a session, capped at `limit`.
-    /// Ordering is `at DESC, id DESC` so events inserted within the same second
-    /// still come back in insertion order (newest first).
     /// The newest event of `session_id` whose kind is one of `kinds`.
     pub fn newest_session_event_of(
         &self,
@@ -246,6 +243,9 @@ impl Store {
             .optional()?)
     }
 
+    /// Return the newest-first event timeline for a session, capped at `limit`.
+    /// Ordering is `at DESC, id DESC` so events inserted within the same second
+    /// still come back in insertion order (newest first).
     pub fn list_session_events(
         &self,
         session_id: i64,

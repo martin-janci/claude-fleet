@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.40] - 2026-09-25
+
+### Added
+- **ui:** a spiral loader for loading and working states
+- **phone:** org_id in the phone session view; plan M8.6
+- **sidebar:** chips for the work filters (tracker, status, mine, session, archived)
+- **tidy:** Today's Stale opens the Tidy-up sheet narrowed to those sessions
+- **work:** opt-in classification nudge and agent_inferred suggestions (M4.6)
+- **work-graph:** M9 follow-ups on M7 — Today opens Tidy up; the operator's Tidy up done tickets
+
+### Changed
+- **ui:** the spiral loader animates per frame and holds still when paused
+- **sidebar:** re-read the mine view only when the mine chip toggles
+- **scripts:** measure-session-start.sh, the remote SessionStart procedure
+- **peer:** wait for the parked call's drop before B sends
+- **tidy:** drop the duplicate svelte/store import the main merge left in TidyReview.test.ts
+- **store:** open the file store in WAL with synchronous=NORMAL
+
+### Fixed
+- **work:** link suggestions no longer look stuck after a decision
+- **tidy:** Enter on the sheet's Show all widens instead of applying
+- **new-session:** forget ticked sibling repos when the ticket changes
+- **mcp:** bind every argument into operator confirmations and gate every start
+- **work:** ask for a handover only from an idle Claude REPL
+
+### Documentation
+- **work:** M8.6 on the phone — hub.md, roadmap, plan revisions
+- **work-graph:** M10.4 status, D14-D16, M4.6 decided against
+- **work-graph:** M10 plan — settle, prove, and reach the phone
 ## [0.2.39] - 2026-09-25
 
 ### Added
@@ -1490,6 +1519,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.40]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.40
 [0.2.39]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.39
 [0.2.38]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.38
 [0.2.37]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.37
