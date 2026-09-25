@@ -354,9 +354,7 @@ pub async fn lookup(
                         t.name
                     ),
                 )
-                .with_details(
-                    serde_json::json!({ "state": t.state, "retry_after_secs": left }),
-                ));
+                .with_details(serde_json::json!({ "state": t.state, "retry_after_secs": left })));
             }
             fetch_one(&t, ItemRef::parse(&key), store, net)
                 .await
@@ -721,9 +719,13 @@ pub async fn plan_start(
     })
 }
 
-/// One line of tracker text (a title, a status name) for fleet's own
-/// lines: control characters and newlines flattened, markers defused, capped
-/// — a newline in a Jira title must not be able to write a line of its own.
+/// Most characters of a key fleet's own lines carry.
+const KEY_LINE_MAX: usize = 64;
+
+/// One line of tracker text (a title, a status name, a key) for fleet's
+/// own lines: control characters and newlines flattened, markers defused,
+/// capped — a newline in a Jira title must not be able to write a line of
+/// its own.
 fn tracker_line(s: &str, max: usize) -> String {
     let flat: String = s
         .chars()
@@ -758,7 +760,12 @@ pub fn ticket_brief_with(
         .transpose()?
         .flatten();
     let meta = plan.item_id.map(|id| s.work_item_meta(id)).transpose()?;
-    let mut out = format!("You are starting work on {}", plan.key);
+    // The key is the tracker's text too (only the by-key fetch validates
+    // its shape): flattened and defused like the title.
+    let mut out = format!(
+        "You are starting work on {}",
+        tracker_line(&plan.key, KEY_LINE_MAX)
+    );
     if !plan.title.is_empty() {
         out.push_str(&format!(": {}", tracker_line(&plan.title, 200)));
     }
@@ -806,7 +813,11 @@ pub fn brief_visible_on(store: &Mutex<Store>, plan: &StartPlan) -> Result<bool, 
 /// The short prompt typed once the REPL is ready (the brief rides the
 /// hook's `additionalContext`).
 pub fn start_prompt(key: &str) -> String {
-    format!("Start on {key}: the ticket's context is in your fleet brief. Read it, then plan before you edit.")
+    format!(
+        "Start on {}: the ticket's context is in your fleet brief. Read it, then plan before \
+         you edit.",
+        tracker_line(key, KEY_LINE_MAX)
+    )
 }
 
 /// Do the start. `spawn` makes the session (production: `new_session`).
@@ -968,6 +979,7 @@ pub struct MultiStart {
 
 /// PURE: the line each sibling's brief carries about the others.
 pub fn siblings_line(key: &str, here: &str, others: &[String], branch: &str) -> String {
+    let key = tracker_line(key, KEY_LINE_MAX);
     let mut line = format!(
         "This is one of {} sessions starting {key} together, one per repository: this one \
          works in {here}",
