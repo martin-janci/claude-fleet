@@ -302,6 +302,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // Work graph M9.6: one ticket, one sibling session per repository.
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
+    // Work graph M11.1: "Name this work…" — local work items, listed from
+    // `work`, named and renamed through `work_link { name }`.
+    ("list_local_work_items", Verdict::Routed { tool: "work" }),
+    ("name_session_work", Verdict::Routed { tool: "work_link" }),
+    ("rename_work_item", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
