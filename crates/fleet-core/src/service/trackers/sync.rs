@@ -466,24 +466,54 @@ async fn read_view(
     }
 }
 
-/// A provider snapshot → the store's write shape.
+/// Longest title a tracker item keeps (a person's own titles are held to
+/// `WORK_TITLE_MAX_CHARS`; a tracker's get a little more).
+pub const TITLE_MAX_CHARS: usize = 300;
+/// Longest status name, kind, resolution, iteration, assignee, container
+/// or alias.
+pub const FIELD_MAX_CHARS: usize = 100;
+/// Longest key.
+pub const KEY_MAX_CHARS: usize = 64;
+/// Longest external id (and parent id) and URL.
+pub const ID_MAX_CHARS: usize = 200;
+pub const URL_MAX_CHARS: usize = 2048;
+/// Most aliases, containers or assignees kept.
+pub const LIST_MAX: usize = 16;
+
+fn cap(s: String, max: usize) -> String {
+    if s.chars().count() <= max {
+        s
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
+fn cap_list(v: Vec<String>, max: usize) -> Vec<String> {
+    v.into_iter().take(LIST_MAX).map(|s| cap(s, max)).collect()
+}
+
+/// A provider snapshot → the store's write shape. The one place every
+/// snapshot passes (the sync's and `fetch_one`'s) before it is stored, so
+/// every field is bounded here: the tracker — or a host forging its
+/// answer — controls these strings, and each one rides in every linked
+/// session's row, row event and `GET /events` frame.
 pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
     TrackerItemWrite {
-        external_id: s.external_id,
-        key: s.key,
-        aliases: s.aliases,
-        title: s.title,
-        url: s.url,
-        kind: s.kind,
+        external_id: cap(s.external_id, ID_MAX_CHARS),
+        key: s.key.map(|k| cap(k, KEY_MAX_CHARS)),
+        aliases: cap_list(s.aliases, KEY_MAX_CHARS),
+        title: cap(s.title, TITLE_MAX_CHARS),
+        url: s.url.map(|u| cap(u, URL_MAX_CHARS)),
+        kind: s.kind.map(|k| cap(k, FIELD_MAX_CHARS)),
         hierarchy_level: s.hierarchy_level,
-        status_name: s.status.name,
+        status_name: cap(s.status.name, FIELD_MAX_CHARS),
         status_category: s.status.category,
-        resolution: s.status.resolution,
-        parent_external_id: s.parent_external_id,
-        containers: s.containers,
-        assignees: s.assignees,
-        assignee_id: s.assignee_id,
-        iteration: s.iteration,
+        resolution: s.status.resolution.map(|r| cap(r, FIELD_MAX_CHARS)),
+        parent_external_id: s.parent_external_id.map(|p| cap(p, ID_MAX_CHARS)),
+        containers: cap_list(s.containers, FIELD_MAX_CHARS),
+        assignees: cap_list(s.assignees, FIELD_MAX_CHARS),
+        assignee_id: s.assignee_id.map(|a| cap(a, ID_MAX_CHARS)),
+        iteration: s.iteration.map(|i| cap(i, FIELD_MAX_CHARS)),
         iteration_active: s.iteration_active,
         updated_ext: s.updated,
         description: s.description,

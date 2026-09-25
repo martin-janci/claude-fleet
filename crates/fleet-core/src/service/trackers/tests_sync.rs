@@ -449,6 +449,49 @@ async fn a_429_waits_out_retry_after_then_resumes() {
     assert_eq!(fx.row().state, "ok");
 }
 
+/// A tracker's strings are bounded before they are stored: a 10k-character
+/// summary becomes a `TITLE_MAX_CHARS` title, a long status name a
+/// `FIELD_MAX_CHARS` one, and a list keeps at most `LIST_MAX` entries.
+#[tokio::test]
+async fn oversized_tracker_fields_are_capped_before_they_are_stored() {
+    let fx = Fx::new();
+    fx.fake.once(
+        Method::Post,
+        "/search/jql",
+        Ok(Response::json(
+            200,
+            &json!({"issues": [{"id": "9", "key": "ABC-9", "fields": {
+                "summary": "t".repeat(10_000),
+                "status": {"name": "s".repeat(500), "statusCategory": {"key": "new"}},
+                "issuetype": {"name": "Task", "hierarchyLevel": 0},
+                "project": {"key": "ABC"},
+                "assignee": {"accountId": "a1", "displayName": "n".repeat(400)}}}],
+                "isLast": true}),
+        )),
+    );
+    let p = fx.sync(|| T0).run_pass(&fx.store).await.unwrap().remove(0);
+    assert_eq!((p.seen, p.error.as_deref()), (1, None), "{p:?}");
+    let item = fx.item("ABC-9");
+    assert_eq!(item.title.chars().count(), TITLE_MAX_CHARS);
+    assert_eq!(
+        item.status_name.as_deref().map(str::len),
+        Some(FIELD_MAX_CHARS)
+    );
+    assert!(item
+        .assignees
+        .iter()
+        .all(|a| a.chars().count() <= FIELD_MAX_CHARS));
+    // The lists, at the write shape.
+    let many = (0..40).map(|i| format!("{i}-{}", "x".repeat(300))).collect();
+    let w = to_write(WorkItemSnapshot {
+        external_id: "1".into(),
+        assignees: many,
+        ..Default::default()
+    });
+    assert_eq!(w.assignees.len(), LIST_MAX);
+    assert!(w.assignees.iter().all(|a| a.chars().count() == FIELD_MAX_CHARS));
+}
+
 /// An absurd `Retry-After` neither overflows nor parks the tracker past
 /// `MAX_RETRY_SECS` (plus jitter).
 #[tokio::test]
