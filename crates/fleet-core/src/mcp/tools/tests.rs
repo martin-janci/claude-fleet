@@ -3326,9 +3326,10 @@ fn the_served_definition_budget_stays_bounded() {
     // a move whose live links would cross the org boundary is refused
     // unless forced), one flag with a one-line doc plus a clause on the
     // errors list. Measured at 54,927 on 2026-09-25 (+227); plus 100.
-    // M11.3 merged over main: `keep` on `tidy_apply`'s item action, nothing
-    // else. Measured at 54,932 on 2026-09-25 (+5); plus 100.
-    const BUDGET_BYTES: usize = 55_032;
+    // M11.4 (`work_admin` `status`), 2026-09-25: measured at 54,934; plus 100.
+    // M11.3 merged over M11.4: `keep` on `tidy_apply`'s item action, nothing
+    // else. Measured at 54,939 on 2026-09-25 (+5); plus 100.
+    const BUDGET_BYTES: usize = 55_039;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -1433,7 +1433,7 @@ async fn run_matrix(isolate: bool) {
             move |_, _| json!({ "action": name }),
             move |_, who, a| match who {
                 Who::Master => {
-                    if matches!(name, "list" | "list_orgs") {
+                    if matches!(name, "list" | "list_orgs" | "status") {
                         is_ok(who, a, name);
                     }
                 }

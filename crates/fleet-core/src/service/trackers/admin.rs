@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +169,9 @@ pub enum AdminAction {
     SetCredential,
     Test,
     Remove,
+    /// Work graph M11.4: the sync's per-tracker counters for its last pass
+    /// (in memory, reset on restart).
+    Status,
     /// Work graph M5: org administration (`service::orgs::admin`).
     Org(crate::service::orgs::OrgAction),
 }
@@ -183,6 +186,7 @@ impl AdminAction {
         "set_credential",
         "test",
         "remove",
+        "status",
         "list_orgs",
         "add_org",
         "update_org",
@@ -215,6 +219,7 @@ impl AdminAction {
             "set_credential" => AdminAction::SetCredential,
             "test" => AdminAction::Test,
             "remove" | "remove_tracker" => AdminAction::Remove,
+            "status" | "sync_status" => AdminAction::Status,
             other => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -275,10 +280,12 @@ fn default_name(provider: &str, site: &str) -> String {
     let host_path = site.trim_start_matches("https://");
     match provider {
         "jira" => host_path.trim_end_matches(".atlassian.net").to_string(),
-        "github" => host_path
-            .strip_prefix("github.com/")
-            .map(|o| format!("{o} (GitHub)"))
-            .unwrap_or_else(|| "GitHub".into()),
+        "github" => match crate::store::github_site(site) {
+            Some((None, Some(o))) => format!("{o} (GitHub)"),
+            Some((Some(h), Some(o))) => format!("{o} ({h})"),
+            Some((Some(h), None)) => format!("GitHub {h}"),
+            _ => "GitHub".into(),
+        },
         "asana" => "Asana".into(),
         "linear" => host_path
             .strip_prefix("linear.app/")
@@ -360,6 +367,46 @@ pub fn refuse_agent_transport_on_tracker_host(s: &Store, alias: &str) -> Result<
     Ok(())
 }
 
+/// A GitHub tracker's `settings.hostname` held to its site (M11.4): an
+/// enterprise site (`https://<host>[/<owner>]`) always has one, whose host
+/// part is the site's — the one given, else the one it had (an update that
+/// resends `repos` alone keeps it), else the site's host; a github.com site
+/// never has one.
+fn github_hostname(
+    site: &str,
+    settings: &mut crate::store::TrackerSettings,
+    had: Option<&str>,
+) -> Result<(), IpcError> {
+    let site_host = crate::store::github_site(site).and_then(|(h, _)| h);
+    let hostname = settings
+        .hostname
+        .clone()
+        .or_else(|| had.map(str::to_string));
+    settings.hostname =
+        match (site_host, hostname) {
+            (None, None) => None,
+            (None, Some(_)) => return Err(IpcError::new(
+                codes::E_INVALID,
+                "hostname is for a GitHub Enterprise Server site; a github.com tracker has none",
+            )),
+            (Some(h), None) => Some(crate::store::validate_ghes_hostname(&h)?),
+            (Some(h), Some(given)) => {
+                let given = crate::store::validate_ghes_hostname(&given)?;
+                if crate::store::ghes_host_part(&given) != h {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        format!(
+                            "hostname {given} is not the site's host {h}; an enterprise tracker's \
+                         site is https://<hostname without port>[/<owner>]"
+                        ),
+                    ));
+                }
+                Some(given)
+            }
+        };
+    Ok(())
+}
+
 /// `settings` as a person sent it → validated for `provider`.
 fn parse_settings(
     provider: &str,
@@ -384,8 +431,14 @@ pub fn admin_sync(
                 .site_url
                 .as_deref()
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "add needs site_url"))?;
+            // An enterprise hostname says GitHub: its URL's host cannot.
+            let ghes = args
+                .settings
+                .as_ref()
+                .is_some_and(|v| v.get("hostname").is_some());
             let provider = match args.provider.as_deref() {
                 Some(p) => p,
+                None if ghes => "github",
                 None => infer_provider(raw).unwrap_or("jira"),
             };
             let site = site_from_input(provider, raw)?;
@@ -396,11 +449,16 @@ pub fn admin_sync(
                 .transpose()?;
             check_transport(provider, transport.as_deref().unwrap_or("direct"))?;
             check_host_transport(&s, transport.as_deref().unwrap_or("direct"))?;
-            let settings = args
+            let mut settings = args
                 .settings
                 .as_ref()
                 .map(|v| parse_settings(provider, v))
                 .transpose()?;
+            if provider == "github" {
+                let mut st = settings.take().unwrap_or_default();
+                github_hostname(&site, &mut st, None)?;
+                settings = (!st.is_default()).then_some(st);
+            }
             let name = args
                 .name
                 .clone()
@@ -425,11 +483,14 @@ pub fn admin_sync(
                     "update needs name, transport or settings",
                 ));
             }
-            let settings = args
+            let mut settings = args
                 .settings
                 .as_ref()
                 .map(|v| parse_settings(&row.provider, v))
                 .transpose()?;
+            if let (Some(st), "github") = (settings.as_mut(), row.provider.as_str()) {
+                github_hostname(&row.site_url, st, row.settings.hostname.as_deref())?;
+            }
             if let Some(n) = args.name.as_deref() {
                 s.rename_tracker(id, n)?;
             }
@@ -468,6 +529,11 @@ pub fn admin_sync(
             }
             s.emit_tracker_removed(id);
             json(&serde_json::json!({ "removed": id }))
+        }
+        AdminAction::Status => {
+            let ids: Vec<i64> = s.list_trackers()?.iter().map(|t| t.id).collect();
+            drop(s);
+            json(&super::sync::metrics_for(&ids))
         }
         AdminAction::Test => Err(IpcError::new(
             codes::E_INTERNAL,
