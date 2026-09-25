@@ -8,6 +8,7 @@ pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
+pub mod nudge;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
@@ -86,7 +87,7 @@ pub struct WorkLinkArgs {
     /// For unlink.
     #[serde(default)]
     pub link_id: Option<i64>,
-    /// manual (default) | agent
+    /// manual (default) | agent | agent_inferred (a suggestion)
     #[serde(default)]
     pub source: Option<String>,
     /// last|brief|fresh
@@ -636,7 +637,14 @@ pub fn work_link<'a>(
             let source = args.source.as_deref().unwrap_or("manual");
             let (t, org) = visible_target(target()?)?;
             orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
-            s.link_session_work(session_id, t, source)?;
+            if source == AGENT_INFERRED {
+                // The classification nudge's answer (work graph M4.6): a
+                // guess, so a pre-selected suggestion (R11), never a link.
+                let (key, tracker) = inferred_target(&s, t)?;
+                detect::on_agent_inference(&s, session_id, &key, tracker)?;
+            } else {
+                s.link_session_work(session_id, t, source)?;
+            }
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
         // `reject { key | item_id }` any target.
@@ -704,6 +712,31 @@ pub fn work_link<'a>(
 fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+/// `work_link { action: link, source }`'s value for the agent's answer to
+/// the classification nudge (work graph M4.6).
+pub const AGENT_INFERRED: &str = "agent_inferred";
+
+/// The resolver target an agent inference names: the key (normalised) and,
+/// for an item, its tracker. A keyless item cannot be one — the resolver
+/// addresses work by key.
+fn inferred_target(s: &Store, t: WorkTarget<'_>) -> Result<(String, Option<i64>), IpcError> {
+    match t {
+        WorkTarget::Key(k) | WorkTarget::Ref(k) => Ok((crate::store::normalize_work_ref(k)?, None)),
+        WorkTarget::Item(id) => {
+            let item = s
+                .get_work_item(id)?
+                .ok_or_else(|| orgs::not_found("work item", id))?;
+            let key = item.key.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_INVALID,
+                    format!("work item {id} has no key; an inference names work by its key"),
+                )
+            })?;
+            Ok((crate::store::normalize_work_ref(&key)?, item.tracker_id))
+        }
+    }
 }
 
 /// A target as a sentence names it.
@@ -821,6 +854,67 @@ mod tests {
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
+    }
+
+    /// Work graph M4.6: an agent's answer to the classification nudge is a
+    /// pre-selected suggestion (R11), never the session's work; a person's
+    /// rejection is final (R9); and confirming it makes it a link.
+    #[test]
+    fn an_agent_inference_is_a_preselected_suggestion_a_person_decides() {
+        let (st, sid) = store();
+        {
+            let s = st.lock().unwrap();
+            s.create_local_work_item(Some("PAY-7"), "Retry").unwrap();
+        }
+        let infer = |key: &str| WorkLinkArgs {
+            key: Some(key.into()),
+            source: Some(AGENT_INFERRED.into()),
+            ..link(sid, "link")
+        };
+
+        let row = work_link(&infer("pay-7"), &st, &OrgScope::All).unwrap();
+        assert_eq!(row.work, None, "a guess never becomes the session's work");
+        let g = row.work_suggested.expect("the inference is suggested");
+        assert_eq!(g.key.as_deref(), Some("PAY-7"));
+        assert_eq!(g.source, AGENT_INFERRED);
+        assert_eq!(g.strength.as_deref(), Some("inferred"));
+        assert_eq!(g.rule.as_deref(), Some("R11"));
+        assert!(g.preselected, "shown ticked");
+
+        // Said twice, it is still one suggestion.
+        let again = work_link(&infer("PAY-7"), &st, &OrgScope::All).unwrap();
+        assert_eq!(again.work_suggested.map(|w| w.link_id), Some(g.link_id));
+
+        // Rejected by the person: the agent cannot bring it back.
+        work_link(
+            &WorkLinkArgs {
+                link_id: Some(g.link_id),
+                ..link(sid, "reject")
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        let after = work_link(&infer("PAY-7"), &st, &OrgScope::All).unwrap();
+        assert_eq!(
+            after.work_suggested, None,
+            "R9: a rejected pair is never proposed again"
+        );
+        assert_eq!(after.work, None);
+
+        // A fresh inference, confirmed by the person, becomes the link.
+        let row = work_link(&infer("PAY-8"), &st, &OrgScope::All).unwrap();
+        let g8 = row.work_suggested.expect("suggested");
+        let row = work_link(
+            &WorkLinkArgs {
+                link_id: Some(g8.link_id),
+                ..link(sid, "confirm")
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(row.work.and_then(|w| w.key).as_deref(), Some("PAY-8"));
     }
 
     /// Roadmap M1, "Name this work…": a title for a bare key binds the

@@ -368,6 +368,11 @@ Index by area (names only; see the reference for details):
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
   sole branch key in that project link by itself (master or client token;
   refused to a per-host token). Prompts are never stored — only matches.
+  `work_link { action: "link", source: "agent_inferred", key }` is Claude's
+  answer to the opt-in classification nudge (`work.classify_nudge`, M4.6):
+  not a decision but a pre-selected suggestion (rule R11, strength
+  `inferred`) that a person confirms or rejects; a rejected pair stays
+  rejected. `source: "agent"` remains a confirmed declaration.
   `work_link { action: "name", name, key? }` names a piece of work (roadmap
   M1, "Name this work…"): a local item with that title, or a retitle of the
   local item with that key; links naming the key as a bare reference bind to

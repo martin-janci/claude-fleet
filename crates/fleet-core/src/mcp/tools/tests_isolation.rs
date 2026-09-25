@@ -1759,3 +1759,68 @@ fn nobody_but_the_master_administers_orgs() {
     assert!(!present::visible_to(&Who::HostA.caller(), "work_admin"));
     let _ = OrgScope::All;
 }
+
+/// The classification nudge (work graph M4.6) is read by the Claude on the
+/// session's host, so it offers only what that host may read. B's ticket is
+/// "mine" to the tracker account and even force-linked on h-a — the host
+/// fence alone would let it through — yet h-a's note never names it; h-b's
+/// does.
+#[test]
+fn the_classification_nudge_offers_only_the_hosts_own_tickets() {
+    let fx = fixture(false);
+    let s = fx.t.store.lock().unwrap();
+    let me = crate::store::TrackerConfig {
+        account_id: Some("me".into()),
+        ..Default::default()
+    };
+    for t in [fx.tracker_a, fx.tracker_b] {
+        s.set_tracker_probe(t, None, &me).unwrap();
+    }
+    let mine = |tracker: i64, key: &str, title: &str| {
+        s.upsert_tracker_item(
+            tracker,
+            &TrackerItemWrite {
+                external_id: format!("mine-{key}"),
+                key: Some(key.into()),
+                title: title.into(),
+                status_name: "To Do".into(),
+                status_category: "todo".into(),
+                assignee_id: Some("me".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+    };
+    let aa9 = mine(fx.tracker_a, "AA-9", "Alpha nine");
+    let bb9 = mine(fx.tracker_b, "BB-9", "Bravo nine");
+    s.link_session_work(fx.s_a, WorkTarget::Item(aa9), "manual")
+        .unwrap();
+    s.link_session_work(fx.s_b, WorkTarget::Item(bb9), "manual")
+        .unwrap();
+    s.link_session_work(fx.s_x, WorkTarget::Item(bb9), "manual")
+        .unwrap();
+    crate::service::settings::set(&s, crate::service::settings::WORK_CLASSIFY_NUDGE, "true")
+        .unwrap();
+    let fresh = |host: &str, conv: &str| {
+        let id = s
+            .upsert_session(conv, host, None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, conv).unwrap();
+        s.rebind_conversation(id, conv, crate::store::StartSource::Fleet, None, None)
+            .unwrap();
+        for _ in 0..crate::service::work::nudge::NUDGE_AFTER_TURNS {
+            s.conversation_bump_turns(id, conv).unwrap();
+        }
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        crate::service::work::nudge::classify_nudge(&s, &row, conv, 0).unwrap()
+    };
+    let a = fresh("h-a", "conv-nudge-a").expect("A's own ticket is offered");
+    assert!(a.contains("AA-9"), "{a}");
+    for m in B_MARKERS.iter().chain(["BB-9", "Bravo nine"].iter()) {
+        assert!(!a.contains(m), "LEAK in h-a's nudge: {m:?}: {a}");
+    }
+    let b = fresh("h-b", "conv-nudge-b").expect("B's own ticket is offered on h-b");
+    assert!(b.contains("BB-9"), "{b}");
+    assert!(!b.contains("AA-9"), "{b}");
+}

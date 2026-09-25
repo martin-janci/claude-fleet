@@ -59,6 +59,7 @@ describe('eventCategory', () => {
   // design's "visible failure" for the block cap rendered as a generic chip.
   it('categorises the Stop-block kinds', () => {
     expect(eventCategory(ev(1, 'stop_blocked_for_message'))).toBe('turns');
+    expect(eventCategory(ev(1, 'work_classify_nudge'))).toBe('turns');
     expect(eventCategory(ev(2, 'stop_block_cap_reached'))).toBe('errors');
   });
 

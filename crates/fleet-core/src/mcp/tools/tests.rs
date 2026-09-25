@@ -3247,7 +3247,10 @@ fn the_served_definition_budget_stays_bounded() {
     // Hub federation merged onto M9 (main): `list_peer_links` and the
     // federation clauses on the messaging tools. Measured at 71,066 on
     // 2026-09-25 (+301 over M9's 70,765); plus 100.
-    const BUDGET_BYTES: usize = 71_166;
+    // The M1 leftovers (`work_link { name }`: the action, its clause, the
+    // `name` doc) merged onto M4.6 (main, which spent 32 of the headroom on
+    // the `agent_inferred` doc). Measured at 71,174 on 2026-09-25; plus 100.
+    const BUDGET_BYTES: usize = 71_274;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

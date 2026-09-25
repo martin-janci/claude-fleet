@@ -345,8 +345,13 @@ acceptance on a real fleet is still to do.
 - **M4.5** (51fc47b): SessionStart work context behind
   `work.session_start_context`, **off**; measured and recorded (D5 stays
   the user's).
-- **Not done:** M4.6 (the classification nudge), suggestions on the phone
-  (M8), the remote-host SessionStart measurement.
+- **M4.6** (landed 2026-09-25, OFF behind `work.classify_nudge`): the
+  opt-in classification nudge — one ≤ 400-char note per conversation after
+  three link-less turns with 1–5 candidates in the host's scope; Claude's
+  answer (`source: agent_inferred`) is a pre-selected suggestion only (R11).
+  See the M4 plan's Revisions.
+- **Not done:** the remote-host SessionStart measurement. (Suggestions on
+  the phone landed with M8.)
 
 **Value:** most sessions are linked correctly without touching anything, and
 every link says why. **Tests:** the resolver table (conflicts, a sticky reject,

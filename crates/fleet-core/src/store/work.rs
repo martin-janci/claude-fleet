@@ -416,6 +416,24 @@ impl Store {
     /// Create a local work item, or return the local item that already has
     /// `key` (updating its title when a non-empty one is given). A local item
     /// with no key is always new.
+    /// Keyed local work items changed since `since` (unix seconds), newest
+    /// first — the classification nudge's (work graph M4.6) local
+    /// candidates. A keyless item cannot be named back by key, so it is not
+    /// one.
+    pub fn recent_local_work_items(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<WorkItemRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM work_items \
+             WHERE source = 'local' AND key IS NOT NULL AND updated_at >= ?1 \
+             ORDER BY updated_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit as i64], map_item)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn create_local_work_item(
         &self,
         key: Option<&str>,

@@ -391,6 +391,42 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the classification nudge (work graph M4.6) was already sent in
+    /// this conversation. A conversation fleet has no row for reads as sent:
+    /// the nudge never fires into a conversation it cannot stamp.
+    pub fn conversation_nudged(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+    ) -> Result<bool, IpcError> {
+        let at: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT classify_nudged_at FROM conversations \
+                 WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, claude_session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(at.is_none_or(|a| a.is_some()))
+    }
+
+    /// Stamp the classification nudge as sent in this conversation (once:
+    /// a later call keeps the first time).
+    pub fn mark_conversation_nudged(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+        at: i64,
+    ) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE conversations SET classify_nudged_at = COALESCE(classify_nudged_at, ?3) \
+             WHERE session_id = ?1 AND claude_session_id = ?2",
+            rusqlite::params![session_id, claude_session_id, at],
+        )?;
+        Ok(())
+    }
+
     /// First 200 chars of the conversation's first prompt; later calls no-op.
     pub fn conversation_set_first_prompt(
         &self,
@@ -534,6 +570,38 @@ mod tests {
         assert_eq!(row.end_reason, None);
         assert_eq!(row.model, None);
         assert_eq!(row.first_prompt, None);
+    }
+
+    /// Work graph M4.6: the classification nudge is stamped per
+    /// conversation, once; a new conversation starts un-nudged, and one
+    /// fleet has no row for never reads as "not yet".
+    #[test]
+    fn the_classify_nudge_is_stamped_once_per_conversation() {
+        let (s, _bus) = store_with_recorder();
+        let id = session(&s);
+        s.rebind_conversation(id, A, StartSource::Fleet, None, None)
+            .unwrap();
+        assert!(!s.conversation_nudged(id, A).unwrap());
+        s.mark_conversation_nudged(id, A, 100).unwrap();
+        s.mark_conversation_nudged(id, A, 200).unwrap();
+        assert!(s.conversation_nudged(id, A).unwrap());
+        let at: i64 = s
+            .conn
+            .query_row(
+                "SELECT classify_nudged_at FROM conversations WHERE claude_session_id = ?1",
+                [A],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at, 100, "the first stamp is kept");
+
+        s.rebind_conversation(id, B, StartSource::Clear, None, None)
+            .unwrap();
+        assert!(
+            !s.conversation_nudged(id, B).unwrap(),
+            "a new conversation starts un-nudged"
+        );
+        assert!(s.conversation_nudged(id, "unknown-conversation").unwrap());
     }
 
     #[test]

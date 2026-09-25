@@ -56,7 +56,8 @@ export interface WorkLink {
 /** One evidence line of a link (`service::work::resolve::Evidence`). */
 export interface WorkEvidence {
   /** `branch` | `pr_head` | `pr_closing` | `pr_text` | `trailer` |
-   *  `prompt_url` | `prompt_key` | `prompt_issue` — tolerant of more. */
+   *  `prompt_url` | `prompt_key` | `prompt_issue` | `agent_inferred` —
+   *  tolerant of more. */
   signal: string;
   rule: string;
   text: string;
@@ -174,7 +175,7 @@ export async function setWorkProjectTrust(projectId: number, on: boolean): Promi
 }
 
 /** Link sources detection writes; a confirmed link with one is "auto". */
-export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt'];
+export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred'];
 
 /** A confirmed link detection made without a person (shown with a dot and
  *  offered for Undo). */
@@ -188,6 +189,7 @@ const SOURCE_LABEL: Record<string, string> = {
   trailer: 'commit trailer',
   url: 'ticket URL',
   prompt: 'prompt',
+  agent_inferred: "Claude's guess when asked",
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
@@ -227,6 +229,8 @@ export function describeEvidence(e: WorkEvidence): string {
     case 'prompt_key':
     case 'prompt_issue':
       return `mentioned ${e.text} in a prompt at ${clock(e.at)}${note}${rule}`;
+    case 'agent_inferred':
+      return `Claude named ${e.text} when asked at ${clock(e.at)}${rule}`;
     default:
       return `${e.signal}: ${e.text}${rule}`;
   }
@@ -236,6 +240,8 @@ export function describeEvidence(e: WorkEvidence): string {
 export function workWhy(w: { source: string; state?: string; rule?: string | null }): string {
   const what = w.state === 'suggested' ? 'suggested from the' : 'from the';
   const rule = w.rule ? ` · rule ${w.rule}` : '';
+  // The classification nudge's answer (M4.6) is Claude's, not a signal's.
+  if (w.source === 'agent_inferred') return `${w.state === 'suggested' ? 'suggested' : 'named'} by Claude when asked${rule}`;
   return AUTO_SOURCES.includes(w.source)
     ? `${what} ${sourceLabel(w.source)}${rule}`
     : `${sourceLabel(w.source)}${rule}`;
