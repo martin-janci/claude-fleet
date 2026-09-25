@@ -388,6 +388,43 @@ impl SshClient {
             .await
     }
 
+    /// `run_bounded_capped` with `stdin` written to the remote command and
+    /// then closed (see [`SshExec::run_with_stdin`]). Not retried on a mux
+    /// failure: the bytes may already have been consumed. A fleet-agent host
+    /// is refused (`E_UNSUPPORTED`): its exec frames carry no stdin.
+    pub async fn run_with_stdin(
+        &self,
+        host: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        if self.agent_route(host).is_some() {
+            return Err(IpcError::new(
+                codes::E_UNSUPPORTED,
+                format!("{host} is reached through fleet-agent, which cannot pipe stdin"),
+            ));
+        }
+        self.inner.seen.insert(host.to_string(), ());
+        let mut cmd = self.ssh_command();
+        for opt in self.mux_opts(host, connect_timeout) {
+            cmd.arg(opt);
+        }
+        cmd.arg("--").arg(host).args(args);
+        self.run_child_io(
+            host,
+            cmd,
+            wall_clock,
+            None,
+            "E_SSH",
+            Some(max_output),
+            Some(stdin),
+        )
+        .await
+    }
+
     /// `run_bounded` raced against a `CancellationToken`, for a long-running
     /// script that must keep an independent connect timeout / wall-clock
     /// pair (see `run_bounded`'s doc comment) while still being abortable —
@@ -555,13 +592,34 @@ impl SshClient {
     pub(crate) async fn run_child_capped(
         &self,
         host: &str,
-        mut cmd: tokio::process::Command,
+        cmd: tokio::process::Command,
         wall_clock: Duration,
         token: Option<CancellationToken>,
         spawn_code: &str,
         max_output: Option<usize>,
     ) -> Result<Output, IpcError> {
+        self.run_child_io(host, cmd, wall_clock, token, spawn_code, max_output, None)
+            .await
+    }
+
+    /// `run_child_capped`, optionally writing `stdin` to the child and then
+    /// closing it (a writer task, so a child that never reads cannot block
+    /// the wait; the wall clock still bounds everything).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_child_io(
+        &self,
+        host: &str,
+        mut cmd: tokio::process::Command,
+        wall_clock: Duration,
+        token: Option<CancellationToken>,
+        spawn_code: &str,
+        max_output: Option<usize>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Output, IpcError> {
         let in_flight = InFlight::enter(&self.inner, host);
+        if stdin.is_some() {
+            cmd.stdin(std::process::Stdio::piped());
+        }
         let mut child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -578,6 +636,14 @@ impl SshClient {
         let stderr = child.stderr.take();
         let stdout_task = tokio::spawn(read_capped(stdout, max_output));
         let stderr_task = tokio::spawn(read_capped(stderr, max_output));
+        if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = pipe.write_all(&bytes).await;
+                let _ = pipe.shutdown().await;
+                // `pipe` drops here: EOF for the remote command.
+            });
+        }
 
         // Without a token this arm never fires; `select!` still needs a
         // future, so use a pending one.
@@ -1119,6 +1185,27 @@ pub trait SshExec: Send + Sync {
 
     async fn remote_home(&self, host: &str) -> Result<String, IpcError>;
 
+    /// `run_bounded_capped` with `stdin` fed to the remote command (work
+    /// graph M6: a tracker request body, or a token for a `curl` header,
+    /// which must never be in argv). The bytes are written once and the
+    /// pipe closed. The default refuses (`E_UNSUPPORTED`): only transports
+    /// that can pipe stdin opt in.
+    async fn run_with_stdin(
+        &self,
+        host: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        let _ = (args, stdin, connect_timeout, wall_clock, max_output);
+        Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!("{host}: this transport cannot pipe stdin to a command"),
+        ))
+    }
+
     /// The host's resolved toolchain (login `PATH`, `$HOME`, absolute
     /// `tmux`/`claude`), or `None` when it either hasn't been resolved yet
     /// or resolution failed. Default `None` keeps every existing
@@ -1196,6 +1283,27 @@ impl SshExec for SshClient {
         SshClient::remote_home(self, host).await
     }
 
+    async fn run_with_stdin(
+        &self,
+        host: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_with_stdin(
+            self,
+            host,
+            args,
+            stdin,
+            connect_timeout,
+            wall_clock,
+            max_output,
+        )
+        .await
+    }
+
     async fn toolchain(&self, host: &str) -> Option<HostToolchain> {
         SshClient::toolchain(self, host).await
     }
@@ -1267,6 +1375,20 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
     ) -> Result<(), IpcError> {
         (**self)
             .upload_file(host, local_path, remote_path, timeout)
+            .await
+    }
+
+    async fn run_with_stdin(
+        &self,
+        host: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        (**self)
+            .run_with_stdin(host, args, stdin, connect_timeout, wall_clock, max_output)
             .await
     }
 
@@ -1665,6 +1787,35 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(10),
             "timeout arm must fire near the bound (incl. best-effort master reset), took {elapsed:?}"
+        );
+    }
+
+    /// `run_with_stdin`'s lower half: the bytes reach the child's stdin and
+    /// the pipe is closed (so `cat` ends), under the output cap.
+    #[tokio::test]
+    async fn stdin_reaches_the_child_and_is_closed() {
+        if !have_sh() {
+            eprintln!("skipping: no sh on this box");
+            return;
+        }
+        let c = SshClient::new();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "cat; echo end"]);
+        let out = c
+            .run_child_io(
+                "fleet-test-nonexistent-host",
+                cmd,
+                Duration::from_secs(10),
+                None,
+                "E_SSH",
+                Some(1024),
+                Some(b"secret-on-stdin\n".to_vec()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "secret-on-stdin\nend\n"
         );
     }
 

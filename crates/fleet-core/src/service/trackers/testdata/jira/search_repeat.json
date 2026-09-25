@@ -1,0 +1,17 @@
+{
+  "issues": [
+    {
+      "id": "10101",
+      "key": "ABC-101",
+      "fields": {
+        "summary": "Move invoices to the new ledger",
+        "status": { "name": "In Review", "statusCategory": { "key": "indeterminate" } },
+        "issuetype": { "name": "Story", "hierarchyLevel": 0 },
+        "updated": "2026-09-20T10:15:30.123+0200",
+        "project": { "key": "ABC" }
+      }
+    }
+  ],
+  "nextPageToken": "SAME-TOKEN",
+  "isLast": false
+}

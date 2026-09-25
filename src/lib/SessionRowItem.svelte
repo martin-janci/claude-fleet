@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     recreateSession,
     dismissGhostSession,
@@ -34,6 +35,25 @@
   import { hubConnection } from './hub_connection';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import { pendingInputFor } from './pending_input';
+  import type { WorkKey } from './work_keys';
+  import WorkChip from './WorkChip.svelte';
+  import {
+    confirmSessionWork,
+    describeEvidence,
+    linkSessionWork,
+    rejectSessionWork,
+    rejectWorkLink,
+    sessionWorkLinks,
+    setWorkProjectTrust,
+    unlinkSessionWork,
+    workWhy,
+    crossOrgOf,
+    crossOrgSentence,
+    type WorkLink,
+  } from './work';
+  import { fleetSettings, SETTING_KEYS } from './fleet_settings';
+  import type { Result } from './result';
+  import { orgs } from './orgs';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -49,6 +69,8 @@
     relatedCount,
     nowSec,
     readOnly = false,
+    workKey = null,
+    workOf = undefined,
     onSelectSession,
     onKeySession,
     toggleSelected,
@@ -59,6 +81,7 @@
     askRecreate,
     askRestart,
     askKill,
+    orgColor = null,
   }: {
     sess: SessionRow;
     selectMode: boolean;
@@ -75,6 +98,14 @@
      *  chip only, no rename / restart / recreate / kill actions. Selecting
      *  still works. */
     readOnly?: boolean;
+    /** The row's work key (work_keys.ts), drawn as a chip after the name.
+     *  Null when it has none, or when the row already sits under its work
+     *  group's header, which names the key. */
+    workKey?: WorkKey | null;
+    /** The row's work key whether or not the chip shows it (inside a work
+     *  group the header names it): what the work menu's "Not this" / "Clear"
+     *  act on. Defaults to `workKey`. */
+    workOf?: WorkKey | null;
     onSelectSession: (sess: SessionRow, e?: MouseEvent) => void;
     /** Handles Enter/Space on the ROW. It must ignore events that bubbled
      *  up from a nested control (the action cluster, the select box, the
@@ -90,6 +121,9 @@
     askRecreate: (sess: SessionRow, e?: Event) => void;
     askRestart: (sess: SessionRow, e?: Event) => void;
     askKill: (sess: SessionRow, e?: Event) => void;
+    /** Work graph M5: the org's colour, drawn as a thin bar at the row's
+     *  left edge — only when two or more orgs exist (the caller decides). */
+    orgColor?: string | null;
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
@@ -165,6 +199,191 @@
   const ghostDismissBlocked = $derived(
     hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection),
   );
+  const workBlocked = $derived(hubActionBlocked('link_session_work', $hubStatus, $hubConnection));
+
+  // ── Work menu (roadmap M1b.2): set the row's work, "Not this", "Clear". ──
+  const rowWork = $derived(workOf === undefined ? workKey : workOf);
+  let workMenuOpen = $state(false);
+  let workDraft = $state('');
+  let workBusy = $state(false);
+
+  function toggleWorkMenu(e: Event) {
+    e.stopPropagation();
+    workMenuOpen = !workMenuOpen;
+    workDraft = '';
+  }
+
+  // Work graph M5: a link across orgs is refused with a reason; the menu
+  // explains it and offers "Link anyway", which retries with the override.
+  let crossOrg = $state<{ sentence: string; retry: () => Promise<Result<unknown>> } | null>(null);
+
+  async function workAction(
+    run: () => Promise<Result<unknown>>,
+    failure: string,
+    forced?: { what: string; retry: () => Promise<Result<unknown>> },
+  ) {
+    if (workBusy) return;
+    workBusy = true;
+    const r = await run();
+    workBusy = false;
+    if (!r.ok) {
+      const c = forced ? crossOrgOf(r.error) : null;
+      if (c && forced) {
+        const names = new Map($orgs.map((o) => [o.id, o.name]));
+        crossOrg = { sentence: crossOrgSentence(forced.what, c, (id) => names.get(id)), retry: forced.retry };
+        return;
+      }
+      pushError(r.error, failure);
+      return;
+    }
+    crossOrg = null;
+    workMenuOpen = false;
+    workDraft = '';
+  }
+
+  function linkAnyway(e?: Event) {
+    e?.stopPropagation();
+    const c = crossOrg;
+    if (!c) return;
+    crossOrg = null;
+    void workAction(c.retry, 'Set work failed');
+  }
+
+  function setWork(e?: Event) {
+    e?.stopPropagation();
+    const key = workDraft.trim();
+    if (!key) return;
+    void workAction(() => linkSessionWork(sess.id, { key }), 'Set work failed', {
+      what: key.toUpperCase(),
+      retry: () => linkSessionWork(sess.id, { key }, { forceCrossOrg: true }),
+    });
+  }
+
+  function rejectWork(e: Event) {
+    e.stopPropagation();
+    const w = rowWork;
+    if (!w) return;
+    // A linked item is rejected by id (its key may be null); anything else
+    // by the key the row shows.
+    const ref = w.source === 'link' && sess.work?.item_id != null
+      ? { item_id: sess.work.item_id }
+      : { key: w.key };
+    void workAction(() => rejectSessionWork(sess.id, ref), 'Not this failed');
+  }
+
+  function clearWork(e: Event) {
+    e.stopPropagation();
+    const linkId = sess.work?.link_id;
+    if (linkId == null) return;
+    void workAction(() => unlinkSessionWork(sess.id, linkId), 'Clear work failed');
+  }
+
+  // ── Detection (work graph M4.4): the suggestion chip, its evidence, and
+  // the decisions. A suggestion never regroups the row; only Confirm does.
+  const suggestion = $derived(sess.work_suggested ?? null);
+  const suggestionKey = $derived<WorkKey | null>(
+    suggestion && (suggestion.key || suggestion.title)
+      ? {
+          key: (suggestion.key || suggestion.title) as string,
+          source: 'link',
+          from: suggestion.title,
+          why: workWhy({ ...suggestion, state: 'suggested' }),
+        }
+      : null,
+  );
+  let workLinks = $state<WorkLink[] | null>(null);
+  let workInput = $state<HTMLInputElement | null>(null);
+  let trustedOverride = $state<boolean | null>(null);
+  const projectTrusted = $derived.by(() => {
+    if (trustedOverride !== null) return trustedOverride;
+    try {
+      const ids: unknown = JSON.parse($fleetSettings[SETTING_KEYS.workTrustedBranchProjects] ?? '[]');
+      return Array.isArray(ids) && sess.project_id != null && ids.includes(sess.project_id);
+    } catch {
+      return false;
+    }
+  });
+
+  async function loadWorkLinks() {
+    const r = await sessionWorkLinks(sess.id);
+    workLinks = r.ok && Array.isArray(r.value) ? r.value : [];
+  }
+
+  function openWorkMenu(e?: Event) {
+    e?.stopPropagation();
+    workMenuOpen = true;
+    workDraft = '';
+    void loadWorkLinks();
+  }
+
+  /** The links the popover explains: suggestions, then the primary. */
+  const explained = $derived(
+    (workLinks ?? []).filter((l) => l.state === 'suggested' || (l.is_primary && l.state === 'confirmed')),
+  );
+
+  function linkLabel(l: WorkLink): string {
+    return l.ref_key ?? (l.item_id != null ? `item ${l.item_id}` : 'work');
+  }
+
+  function confirmLink(linkId: number, e?: Event) {
+    e?.stopPropagation();
+    void workAction(() => confirmSessionWork(sess.id, linkId), 'Confirm failed', {
+      what: 'That suggestion',
+      retry: () => confirmSessionWork(sess.id, linkId, { forceCrossOrg: true }),
+    });
+  }
+
+  function rejectLink(linkId: number, e?: Event) {
+    e?.stopPropagation();
+    void workAction(() => rejectWorkLink(sess.id, linkId), 'Not this failed');
+  }
+
+  function pickAnother(e: Event) {
+    e.stopPropagation();
+    workInput?.focus();
+  }
+
+  async function toggleTrust(e: Event) {
+    e.stopPropagation();
+    const pid = sess.project_id;
+    if (pid == null) return;
+    const on = (e.currentTarget as HTMLInputElement).checked;
+    const r = await setWorkProjectTrust(pid, on);
+    if (!r.ok) {
+      pushError(r.error, 'Trust failed');
+      return;
+    }
+    trustedOverride = r.value.includes(pid);
+  }
+
+  /** `y` / `n` decide the row's top suggestion, `l` links or picks. */
+  function onRowKey(e: KeyboardEvent) {
+    if (e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey && workBlocked === null) {
+      if (e.key === 'y' && suggestion) {
+        e.preventDefault();
+        confirmLink(suggestion.link_id);
+        return;
+      }
+      if (e.key === 'n' && suggestion) {
+        e.preventDefault();
+        rejectLink(suggestion.link_id);
+        return;
+      }
+      if (e.key === 'l') {
+        e.preventDefault();
+        openWorkMenu();
+        void tick().then(() => workInput?.focus());
+        return;
+      }
+    }
+    onKeySession(e, sess);
+  }
+
+  function onWorkKey(e: KeyboardEvent) {
+    e.stopPropagation();
+    if (e.key === 'Enter') setWork(e);
+    else if (e.key === 'Escape') workMenuOpen = false;
+  }
 </script>
 
 <div
@@ -175,13 +394,15 @@
   class:stuck={sess.stuck_kind !== null}
   data-testid="sess-row"
   data-session-id={sess.id}
+  data-org-color={orgColor ?? undefined}
+  style:box-shadow={orgColor ? `inset 3px 0 0 ${orgColor}` : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
   role="button"
   tabindex="0"
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
-  onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onKeySession(e, sess)}
+  onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onRowKey(e)}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
 >
   {#if selectMode && !readOnly}
@@ -287,6 +508,17 @@
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
           <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
+          {#if workKey}
+            <WorkChip {workKey} />
+          {/if}
+          {#if suggestionKey && suggestion}
+            <WorkChip
+              workKey={suggestionKey}
+              suggested
+              testid="work-suggestion"
+              onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
+            />
+          {/if}
           {#if sess.stuck_kind}
             <!-- Stuck outranks claude_status: one red chip, no green "working"
                  next to it to soften the signal. -->
@@ -330,6 +562,15 @@
             >↻</button>
             <button
               class="icon-btn small"
+              data-testid="work-menu"
+              onclick={(e) => (workMenuOpen ? toggleWorkMenu(e) : openWorkMenu(e))}
+              disabled={workBlocked !== null}
+              title={workBlocked ?? 'Work: set, "Not this", clear'}
+              aria-label="Work"
+              aria-expanded={workMenuOpen}
+            >#</button>
+            <button
+              class="icon-btn small"
               data-testid="edit-label"
               onclick={(e) => beginLabelEdit(sess, e)}
               disabled={labelBlocked !== null}
@@ -367,6 +608,100 @@
             {/if}
           </div>
         </div>
+        {#if workMenuOpen}
+          <!-- Every control stops its click: the panel sits inside the row,
+               whose own click selects the session. -->
+          <div
+            class="work-menu"
+            data-testid="work-menu-panel"
+            role="group"
+            aria-label="Work for {primaryName}"
+          >
+            {#if explained.length > 0}
+              <div class="work-why" data-testid="work-why">
+                {#each explained as l (l.id)}
+                  <div class="why-link" data-testid="why-link" data-state={l.state}>
+                    <span class="why-key">{linkLabel(l)}</span>
+                    <span class="why-what">{workWhy(l)}</span>
+                    {#each l.evidence ?? [] as ev, i (i)}
+                      <span class="why-ev" data-testid="why-evidence" title={ev.snippet ?? ''}>{describeEvidence(ev)}</span>
+                    {/each}
+                    {#if l.state === 'suggested'}
+                      <span class="why-actions">
+                        <button class="work-btn" data-testid="why-confirm" disabled={workBusy}
+                          title="Confirm (↵ / y)" onclick={(e) => confirmLink(l.id, e)}>Confirm</button>
+                        <button class="work-btn" data-testid="why-reject" disabled={workBusy}
+                          title="Not this (⌫ / n): never suggested again" onclick={(e) => rejectLink(l.id, e)}>Not this</button>
+                        <button class="work-btn" data-testid="why-pick" disabled={workBusy}
+                          title="Type or paste another key or ticket URL" onclick={pickAnother}>Pick another…</button>
+                      </span>
+                    {/if}
+                  </div>
+                {/each}
+                {#if sess.project_id != null}
+                  <!-- The label only stops the row's own click (it would
+                       select the session); the checkbox is the control. -->
+                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+                  <label class="why-trust" onclick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" data-testid="why-trust" checked={projectTrusted} onchange={toggleTrust} />
+                    Trust branch keys in this repo
+                  </label>
+                {/if}
+              </div>
+            {/if}
+            {#if crossOrg}
+              <div class="cross-org" data-testid="cross-org" role="alert">
+                <span>{crossOrg.sentence}</span>
+                <button class="work-btn" data-testid="cross-org-force" disabled={workBusy} onclick={linkAnyway}
+                  >Link anyway</button
+                >
+                <button
+                  class="work-btn"
+                  data-testid="cross-org-cancel"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    crossOrg = null;
+                  }}>Cancel</button
+                >
+              </div>
+            {/if}
+            <input
+              bind:this={workInput}
+              class="work-input"
+              data-testid="work-input"
+              aria-label="Work key or name"
+              onclick={(e) => e.stopPropagation()}
+              placeholder={rowWork ? `Replace ${rowWork.key}…` : 'ABC-123 or a name'}
+              bind:value={workDraft}
+              onkeydown={onWorkKey}
+              disabled={workBusy}
+            />
+            <button
+              class="work-btn"
+              data-testid="work-set"
+              disabled={workBusy || !workDraft.trim()}
+              onclick={setWork}
+            >Set</button>
+            {#if rowWork}
+              <button
+                class="work-btn"
+                data-testid="work-reject"
+                disabled={workBusy}
+                title="{rowWork.key} is not this session's work; it will not be suggested again"
+                onclick={rejectWork}
+              >Not {rowWork.key}</button>
+              {#if rowWork.source === 'link' && sess.work}
+                <button
+                  class="work-btn"
+                  data-testid="work-unlink"
+                  disabled={workBusy}
+                  title="Remove the link (it may be recognised again)"
+                  onclick={clearWork}
+                >Clear</button>
+              {/if}
+            {/if}
+          </div>
+        {/if}
         {#if answerView}
           <!-- Claude is asking this row a question. The "Needs you" filter
                shows exactly these rows, so the answer belongs here and not
@@ -655,6 +990,67 @@
     flex-shrink: 0;
     white-space: nowrap;
     text-transform: uppercase;
+  }
+  .work-why {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: 100%;
+    font-size: 0.7rem;
+  }
+  .why-link {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.15rem 0.4rem;
+    align-items: baseline;
+  }
+  .why-key {
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .why-what,
+  .why-ev {
+    color: var(--fg-muted);
+  }
+  .why-ev {
+    flex-basis: 100%;
+    padding-left: 0.6rem;
+  }
+  .why-actions {
+    display: flex;
+    gap: 0.3rem;
+    flex-basis: 100%;
+  }
+  .why-trust {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+    color: var(--fg-muted);
+  }
+  .cross-org {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: center;
+    font-size: 0.72rem;
+    color: var(--warn, #f59e0b);
+  }
+  .work-menu {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: center;
+    padding: 0.2rem 0 0.1rem;
+  }
+  .work-input {
+    flex: 1 1 8rem;
+    min-width: 0;
+    font-size: 0.7rem;
+    padding: 0.1rem 0.3rem;
+  }
+  .work-btn {
+    font-size: 0.65rem;
+    padding: 0.05rem 0.35rem;
+    white-space: nowrap;
   }
   .pr-link {
     font-size: 0.65rem;

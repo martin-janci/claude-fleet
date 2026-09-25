@@ -250,6 +250,31 @@ const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[(
 
 /// The other half of the tool check in [`check`]: a wrong tool must not be
 /// able to hide by having no case at all.
+/// Work graph M5: every Routed work command is one fleet-core's isolation
+/// matrix knows (`ROUTED_WORK_COMMANDS`, whose actions the matrix runs for
+/// every caller), and the list names nothing this table does not route.
+#[test]
+fn every_routed_work_command_is_in_the_isolation_matrix() {
+    let table: BTreeSet<(&str, &str)> = VERDICTS
+        .iter()
+        .filter_map(|(cmd, v)| match v {
+            Verdict::Routed { tool } if matches!(*tool, "work" | "work_link" | "work_admin") => {
+                Some((*cmd, *tool))
+            }
+            _ => None,
+        })
+        .collect();
+    let listed: BTreeSet<(&str, &str)> = fleet_core::service::work::ROUTED_WORK_COMMANDS
+        .iter()
+        .map(|(cmd, tool, _)| (*cmd, *tool))
+        .collect();
+    assert_eq!(
+        table, listed,
+        "a Routed work command without an isolation-matrix entry (or a stale entry): add it \
+         to fleet_core::service::work::ROUTED_WORK_COMMANDS"
+    );
+}
+
 #[test]
 fn every_routed_row_is_driven_by_a_case() {
     let driven: BTreeSet<&str> = routed_read_cases()
@@ -443,6 +468,176 @@ fn routed_read_cases() -> Vec<Case> {
                 ))
                 .map(|_| ())
             }),
+        ),
+        (
+            "session_work_links",
+            "work",
+            json!({ "session_id": 7, "key": null }),
+            // `work` answers null-stripped rows.
+            r#"[{"id":1,"ref_key":"ABC-1","state":"confirmed","source":"manual","is_primary":true,"created_at":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::session_work_links(
+                    b,
+                    fleet_core::service::work::WorkArgs {
+                        session_id: Some(7),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_resume_plan",
+            "work",
+            json!({ "session_id": null, "key": "ABC-1", "action": "resume_plan",
+                    "host_alias": "h", "with_brief": true }),
+            r#"{"key":"ABC-1","modes":[{"mode":"last","ok":true}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_resume_plan(
+                    b,
+                    commands::work::WorkResumePlanArgs {
+                        key: "ABC-1".into(),
+                        link_id: None,
+                        host_alias: Some("h".into()),
+                        with_brief: true,
+                    },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_trackers",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "trackers" }),
+            r#"[{"id":1,"provider":"jira","name":"acme","site_url":"https://acme.atlassian.net","state":"ok","created_at":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::list_trackers(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "work_scopes",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "scopes" }),
+            r#"[{"id":1,"label":"Company A","session_count":2,"needs_you":1}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::work_scopes(b, s)).map(|_| ())),
+        ),
+        (
+            "list_orgs",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "orgs" }),
+            r#"[{"id":1,"name":"Company A","created_at":1,"rules":[{"id":2,"org_id":1,"owner":"acme"}],"hosts":["h"],"trackers":[]}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::list_orgs(b, s)).map(|_| ())),
+        ),
+        (
+            "org_suggestions",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "org_suggestions" }),
+            r#"[{"name":"acme","owner":"acme","sessions":2,"reason":"2 live sessions under acme/*"}]"#,
+            Box::new(|b, s, _| block_on(commands::orgs::routed::org_suggestions(b, s)).map(|_| ())),
+        ),
+        (
+            "work_tickets",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "tickets",
+                    "view": "mine", "query": "login", "limit": 20 }),
+            r#"[{"id":3,"source":"jira","key":"ABC-1","title":"Login","status_category":"todo","created_at":1,"updated_at":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::work_tickets(
+                    b,
+                    commands::trackers::WorkTicketsArgs {
+                        tracker_id: None,
+                        view: Some("mine".into()),
+                        query: Some("login".into()),
+                        limit: Some(20),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_lookup",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "lookup",
+                    "url": "https://acme.atlassian.net/browse/ABC-1" }),
+            r#"{"id":3,"source":"jira","key":"ABC-1","title":"Login","status_category":"todo","created_at":1,"updated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::work_lookup(
+                    b,
+                    commands::trackers::WorkLookupArgs {
+                        reference: "https://acme.atlassian.net/browse/ABC-1".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_ticket_card",
+            "work",
+            json!({ "session_id": null, "key": "PAY-7", "action": "card" }),
+            r#"{"key":"PAY-7","title":"Refund","cached":true,"acceptance":["Refund issued"],"composer_text":"Ticket PAY-7: Refund\n"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_ticket_card(
+                    b,
+                    commands::work::WorkTicketCardArgs {
+                        key: "PAY-7".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_today",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "today", "since": 1_700_000_000 }),
+            r#"{"since":1700000000,"now":1700003600,"groups":[{"bucket":"waiting","key":"PAY-7","title":"Refund","sessions":[{"id":4,"name":"pay","host_alias":"h","attention":"waiting","last_activity_at":1700003000}]}],"shipped":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_today(
+                    b,
+                    commands::work::WorkTodayArgs {
+                        since: Some(1_700_000_000),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_purge_impact",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "purge_impact",
+                    "project_id": 3, "host_aliases": ["h"] }),
+            r#"{"keys":["ABC-1"]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_purge_impact(
+                    b,
+                    commands::work::WorkPurgeImpactArgs {
+                        project_id: 3,
+                        host_aliases: vec!["h".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_tidy",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "tidy" }),
+            r#"{"candidates":[],"auto_tidy":false,"auto_reasons":[],"done_days":2,"idle_hours":4}"#,
+            Box::new(|b, s, _| block_on(commands::work::routed::work_tidy(b, s)).map(|_| ())),
+        ),
+        (
+            "work_reopened",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "reopened" }),
+            r#"[{"item_id":3,"key":"ABC-1","title":"Login","reopened_at":5,"past_sessions":2}]"#,
+            Box::new(|b, s, _| block_on(commands::work::routed::work_reopened(b, s)).map(|_| ())),
         ),
         (
             "session_history",
@@ -831,6 +1026,302 @@ fn routed_mutation_cases() -> Vec<Case> {
                         host_alias: "trn".into(),
                         tmux_name: "demo".into(),
                         friendly_name: "the demo".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "link_session_work",
+            "work_link",
+            // A person on the desktop: the source is always `manual`.
+            json!({ "session_id": 7, "action": "link", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": "manual" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::link_session_work(
+                    b,
+                    commands::work::LinkSessionWorkArgs {
+                        session_id: 7,
+                        key: Some("ABC-1".into()),
+                        item_id: None,
+                        force_cross_org: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "start_work",
+            "work_link",
+            // Only the start fields travel.
+            json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": null, "project_id": 3, "host_alias": "h",
+                    "with_brief": true }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::start_work(
+                    b,
+                    commands::trackers::StartWorkArgs {
+                        reference: Some("ABC-1".into()),
+                        project_id: Some(3),
+                        host_alias: Some("h".into()),
+                        with_brief: true,
+                        ..Default::default()
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "start_work_multi",
+            "work_link",
+            json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": null, "project_ids": [3, 4], "host_alias": "h",
+                    "with_brief": true }),
+            r#"{"key":"ABC-1","started":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::start_work_multi(
+                    b,
+                    commands::trackers::StartWorkMultiArgs {
+                        start: commands::trackers::StartWorkArgs {
+                            reference: Some("ABC-1".into()),
+                            host_alias: Some("h".into()),
+                            with_brief: true,
+                            ..Default::default()
+                        },
+                        project_ids: vec![3, 4],
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "request_work_handover",
+            "work_link",
+            json!({ "session_id": 5, "action": "handover", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::request_work_handover(
+                    b,
+                    commands::work::RequestWorkHandoverArgs { session_id: 5 },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "resume_work",
+            "work_link",
+            // Only the resume fields travel; an older hub never sees them
+            // for the other work_link commands.
+            json!({ "session_id": null, "action": "resume", "key": "ABC-1", "item_id": null,
+                    "link_id": 4, "source": null, "mode": "brief", "brief": "edited" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::resume_work(
+                    b,
+                    commands::work::ResumeWorkArgs {
+                        key: "ABC-1".into(),
+                        mode: "brief".into(),
+                        link_id: Some(4),
+                        host_alias: None,
+                        brief: Some("edited".into()),
+                        force_cross_org: false,
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reject_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "reject", "key": null, "item_id": 3,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::reject_session_work(
+                    b,
+                    commands::work::RejectSessionWorkArgs {
+                        session_id: 7,
+                        key: None,
+                        item_id: Some(3),
+                        link_id: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unlink_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "unlink", "key": null, "item_id": null,
+                    "link_id": 5, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::unlink_session_work(
+                    b,
+                    commands::work::UnlinkSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "confirm_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "confirm", "key": null, "item_id": null,
+                    "link_id": 5, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::confirm_session_work(
+                    b,
+                    commands::work::ConfirmSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        force_cross_org: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "archive_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "archive", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::archive_session_work(
+                    b,
+                    commands::work::SessionLifecycleArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unarchive_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "unarchive", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::unarchive_session_work(
+                    b,
+                    commands::work::SessionLifecycleArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "snooze_tidy",
+            "work_link",
+            json!({ "session_id": 7, "action": "snooze", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "days": 3 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::snooze_tidy(
+                    b,
+                    commands::work::TidyFlagArgs {
+                        session_id: 7,
+                        link_id: Some(5),
+                        days: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "never_tidy",
+            "work_link",
+            json!({ "session_id": 7, "action": "never", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::never_tidy(
+                    b,
+                    commands::work::TidyFlagArgs {
+                        session_id: 7,
+                        link_id: None,
+                        days: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "tidy_apply",
+            "work_link",
+            json!({ "session_id": null, "action": "tidy_apply", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "items": [{ "session_id": 7, "action": "safe_kill" }] }),
+            r#"{"results":[{"session_id":7,"action":"safe_kill","ok":true,"outcome":"safe_kill_requested"}]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::work::routed::tidy_apply(
+                    b,
+                    commands::work::TidyApplyArgs {
+                        items: vec![fleet_core::service::work::tidy::TidyApplyItem {
+                            session_id: 7,
+                            action: "safe_kill".into(),
+                            ..Default::default()
+                        }],
+                    },
+                    s,
+                    ssh,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "dismiss_reopened",
+            "work_link",
+            json!({ "session_id": null, "action": "dismiss", "key": null, "item_id": 3,
+                    "link_id": null, "source": null }),
+            r#"{"dismissed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::dismiss_reopened(
+                    b,
+                    commands::work::DismissReopenedArgs { item_id: 3 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_work_project_trust",
+            "work_link",
+            json!({ "session_id": null, "action": "trust_project", "key": null,
+                    "item_id": null, "link_id": null, "source": null,
+                    "project_id": 3, "on": true }),
+            r#"{"trusted":[3]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_project_trust(
+                    b,
+                    commands::work::SetWorkProjectTrustArgs {
+                        project_id: 3,
+                        on: true,
                     },
                     s,
                 ))
@@ -1476,6 +1967,60 @@ fn standalone_reads_still_come_from_the_local_store() {
     ))
     .expect("history");
     assert!(events.is_empty());
+}
+
+/// The work-link commands answer from the local store when standalone.
+/// Proof without seeding a session (no public way from this crate): the read
+/// comes back empty and every decision answers the local store's
+/// `E_NOTFOUND` for an unknown session — the hub arm would have returned a
+/// payload instead.
+#[test]
+fn standalone_work_links_are_decided_in_the_local_store() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+    let links = block_on(commands::work::routed::session_work_links(
+        &local,
+        fleet_core::service::work::WorkArgs {
+            session_id: Some(99),
+            ..Default::default()
+        },
+        &st,
+    ))
+    .expect("links");
+    assert!(links.is_empty());
+    let errs = [
+        block_on(commands::work::routed::link_session_work(
+            &local,
+            commands::work::LinkSessionWorkArgs {
+                session_id: 99,
+                key: Some("ABC-1".into()),
+                item_id: None,
+                force_cross_org: false,
+            },
+            &st,
+        )),
+        block_on(commands::work::routed::reject_session_work(
+            &local,
+            commands::work::RejectSessionWorkArgs {
+                session_id: 99,
+                key: Some("ABC-1".into()),
+                item_id: None,
+                link_id: None,
+            },
+            &st,
+        )),
+        block_on(commands::work::routed::unlink_session_work(
+            &local,
+            commands::work::UnlinkSessionWorkArgs {
+                session_id: 99,
+                link_id: 1,
+            },
+            &st,
+        )),
+    ];
+    for r in errs {
+        assert_eq!(r.expect_err("unknown session").code, codes::E_NOTFOUND);
+    }
 }
 
 /// The SSH-backed reads take the local path too. Proof without a network:
@@ -2791,6 +3336,12 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
+    ("commands/work.rs", include_str!("../commands/work.rs")),
+    (
+        "commands/trackers.rs",
+        include_str!("../commands/trackers.rs"),
+    ),
+    ("commands/orgs.rs", include_str!("../commands/orgs.rs")),
     (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),

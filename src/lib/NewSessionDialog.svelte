@@ -1,6 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { listHostWorktrees, type ProjectTreeRow, type WorktreeRow } from './projects';
+  import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
+  import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
+  import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
+  import ResumeDialog from './ResumeDialog.svelte';
+  import { selectSessionExplicitly } from './selection';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
@@ -10,7 +14,7 @@
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
   import type { PickerItem } from './PickerList.svelte';
   import {
     fleetSettings,
@@ -23,6 +27,8 @@
   } from './fleet_settings';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
+  import { startWorkMulti, siblingCandidates, multiStartNote } from './multi_start';
 
   let {
     project,
@@ -30,6 +36,7 @@
     onCancel,
     initialName,
     initialHost,
+    ticket,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -42,6 +49,10 @@
     /** Preselect this host (e.g. where Add project just put the project);
      *  wins over the remembered choices while it is pickable. */
     initialHost?: string;
+    /** Start work on this ticket (work graph M3): the dialog offers "Brief
+     *  Claude with the ticket" with an editable preview, and creating goes
+     *  through `start_work`, which links the session `started`. */
+    ticket?: TicketRow;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -293,6 +304,8 @@
     // a local row id that would be foreign (and rejected) on that host; the
     // scan-then-repair effects below correct this the moment real rows land.
     if (chosenHost !== 'local') return null;
+    // A ticket start works on its own branch (`slug(key + title)`).
+    if (ticket) return null;
     const remembered = rememberedFor(chosenHost);
     if (remembered === 'new') return null;
     if (typeof remembered === 'number' && project.worktrees.some((w) => w.id === remembered)) {
@@ -314,6 +327,8 @@
     const rows = hostWorktrees.rows;
     const current = untrack(() => chosenWorktreeId);
     if (current !== null && rows.some((w) => w.id === current)) return;
+    // A ticket start stays on its own new branch until someone picks a row.
+    if (current === null && untrack(() => ticket) && untrack(() => newWorktreeName)) return;
     const remembered = rememberedFor(untrack(() => chosenHost));
     const pick =
       (typeof remembered === 'number' && rows.find((w) => w.id === remembered)) ||
@@ -362,6 +377,51 @@
   });
 
   const friendlySlug = $derived(finalizeBranchSlug(friendlyName));
+
+  // ── Work key (roadmap M1) ──
+  // The ticket / workstream key this session will carry, read from the
+  // branch it will run on: the new branch (which follows the Name field, so
+  // "ABC-123 Fix login" gives `abc-123-fix-login`) or the picked worktree's.
+  // The sidebar groups by it (work_keys.ts). When a live session already
+  // carries the same key, say so and offer to open it instead of starting a
+  // duplicate — never block: a second session on a ticket is legitimate.
+  const plannedKey = $derived(
+    inNewMode
+      ? extractWorkKey(newWorktreeName)
+      : extractWorkKey(chosenWorktree?.branch ?? chosenWorktree?.name ?? null),
+  );
+  const branchById = $derived(worktreeBranchById($projects));
+  const duplicateOf = $derived(
+    plannedKey
+      ? ($sessions.find(
+          (s) =>
+            s.status !== 'ghost' &&
+            s.kind !== 'external' &&
+            workKeyFor(s, branchById)?.key === plannedKey,
+        ) ?? null)
+      : null,
+  );
+  // A key with only PAST work (M2.5): say so and offer to resume it rather
+  // than start from nothing. Read from the hub per key; an older hub has no
+  // answer and the note stays the plain one.
+  let pastOfKey = $state<{ key: string; links: WorkLink[] } | null>(null);
+  let resumeOpen = $state(false);
+  $effect(() => {
+    const key = plannedKey;
+    if (!key || duplicateOf) return;
+    void endedWorkLinks(key).then((r) => {
+      if (plannedKey !== key) return;
+      pastOfKey = r.ok && Array.isArray(r.value) && r.value.length > 0 ? { key, links: r.value } : null;
+    });
+  });
+  const pastWork = $derived(
+    pastOfKey && pastOfKey.key === plannedKey && !duplicateOf ? pastOfKey.links : null,
+  );
+  function openDuplicate() {
+    if (!duplicateOf) return;
+    selectSessionExplicitly(duplicateOf);
+    onCancel();
+  }
   const termSuffix = $derived(chosenKind === 'shell' ? '-term' : '');
 
   // The tmux name: `dev-<owner>-<repo>--<worktree>` (or the bare base for
@@ -539,6 +599,9 @@
   }
 
   function onFriendlyNameInput(value: string) {
+    // A pasted ticket URL becomes its key, ready for a title to follow.
+    const fromUrl = keyFromTicketUrl(value);
+    if (fromUrl) value = `${fromUrl} `;
     friendlyName = value;
     // Clearing the field hands it back to the generator.
     nameDirty = value.trim() !== '';
@@ -589,8 +652,129 @@
     });
   }
 
+  // ── Ticket start (work graph M3) ──
+  // With a ticket, creating is `start_work`: the same session, linked
+  // `started`, and — when "Brief Claude" is on — the ticket's context queued
+  // for the first hook (the description fenced as untrusted). The preview is
+  // editable; an untouched preview lets the backend build the canonical one.
+  let briefOn = $state(true);
+  let briefEdited = $state(false);
+  let briefDraft = $state('');
+  const briefBranch = $derived(
+    inNewMode ? finalizeBranchSlug(newWorktreeName) : (chosenWorktree?.name ?? ''),
+  );
+  const briefPreview = $derived(ticket ? ticketBriefPreview(ticket, briefBranch) : '');
+  const briefText = $derived(briefEdited ? briefDraft : briefPreview);
+  function onBriefInput(v: string) {
+    briefDraft = v;
+    briefEdited = true;
+  }
+  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+
+  // ── Multi-repo start (work graph M9.6) ──
+  // One ticket, one sibling session per repository, all on the same branch
+  // name (D11). Offered: the projects this key ran in before.
+  let ticketPast = $state<WorkLink[]>([]);
+  $effect(() => {
+    const key = ticket?.key;
+    if (!key) return;
+    void endedWorkLinks(key).then((r) => {
+      if (ticket?.key === key && r.ok && Array.isArray(r.value)) ticketPast = r.value;
+    });
+  });
+  const siblings = $derived(
+    ticket?.key ? siblingCandidates(ticket.key, projectId, ticketPast, $sessions, $projects) : [],
+  );
+  let alsoIn = $state<number[]>([]);
+  function toggleAlso(id: number, on: boolean) {
+    alsoIn = on ? [...alsoIn.filter((x) => x !== id), id] : alsoIn.filter((x) => x !== id);
+  }
+  const multiBlocked = $derived(hubActionBlocked('start_work_multi', $hubStatus, $hubConnection));
+
+  async function submitMulti(t: TicketRow, host: string) {
+    if (multiBlocked) return;
+    busy = true;
+    error = null;
+    const r = await startWorkMulti({
+      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      project_ids: [projectId, ...alsoIn],
+      host_alias: host,
+      worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
+      with_brief: briefOn,
+    });
+    busy = false;
+    if (!r.ok) {
+      if (destroyed) pushError(r.error, 'Start work failed');
+      else error = r.error.message;
+      return;
+    }
+    const labelOf = (id: number) => {
+      const p = $projects.find((x) => x.project.id === id)?.project;
+      return p ? `${p.owner}/${p.repo}` : `project ${id}`;
+    };
+    const note = multiStartNote(r.value, labelOf);
+    const first = r.value.started[0];
+    if (!first) {
+      error = note ?? 'Nothing was started';
+      return;
+    }
+    if (note) push({ kind: 'info', message: note });
+    onCreate(first);
+  }
+
+  async function submitTicket(t: TicketRow) {
+    if (startBlocked) return;
+    if (inNewMode) {
+      const cleaned = finalizeBranchSlug(newWorktreeName);
+      if (cleaned !== newWorktreeName) newWorktreeName = cleaned;
+      if (!newWorktreeName.trim()) {
+        error = 'Worktree name required';
+        return;
+      }
+    }
+    const submittedHost = chosenHost;
+    const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
+    if (alsoIn.length > 0) {
+      await submitMulti(t, submittedHost);
+      if (!error) remember(submittedHost, submittedWorktreeId);
+      return;
+    }
+    busy = true;
+    error = null;
+    const r = await startWork({
+      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      project_id: project.project.id,
+      host_alias: submittedHost,
+      name: friendlyName.trim() || undefined,
+      worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
+      with_brief: briefOn,
+      brief: briefOn && briefEdited ? briefDraft : undefined,
+    });
+    busy = false;
+    if (!r.ok) {
+      const d = r.error.details as { session_id?: number } | null | undefined;
+      if (r.error.code === 'E_EXISTS' && d?.session_id != null) {
+        const live = $sessions.find((x) => x.id === d.session_id);
+        if (live) {
+          selectSessionExplicitly(live);
+          onCancel();
+          return;
+        }
+      }
+      if (destroyed) pushError(r.error, 'Start work failed');
+      else error = r.error.message;
+      return;
+    }
+    remember(submittedHost, submittedWorktreeId);
+    onCreate(r.value);
+  }
+
   async function submit() {
     if (busy) return;
+    if (ticket && chosenKind === 'work') {
+      await submitTicket(ticket);
+      return;
+    }
     // The Create button's `disabled` reads the same derived, but Enter in
     // any field (`onKeydown` below) calls `submit()` directly — the handler
     // must refuse too, or a blocked hub client could still route
@@ -713,6 +897,75 @@
         aria-label="Roll a new name"
       >🎲</button>
     </div>
+    {#if plannedKey}
+      <p class="work-note" data-testid="work-note">
+        <span class="k">work</span> <code>{plannedKey}</code>
+        {#if duplicateOf}
+          <span class="dup" data-testid="work-duplicate">
+            — already running as <b>{duplicateOf.friendly_name ?? duplicateOf.tmux_name}</b>
+            on {duplicateOf.host_alias}.
+            <button type="button" class="linkish" data-testid="open-duplicate" onclick={openDuplicate}
+              >Open it</button
+            >
+          </span>
+        {:else if pastWork}
+          <span class="dup" data-testid="work-past">
+            — has previous work ({pastWorkSummary(pastWork, now * 1000)}).
+            <button type="button" class="linkish" data-testid="resume-past" onclick={() => (resumeOpen = true)}
+              >Resume</button
+            >
+          </span>
+        {:else}
+          <span class="muted">— sessions on this branch group under it (sidebar: by work)</span>
+        {/if}
+      </p>
+    {/if}
+    {#if ticket}
+      <div class="ticket-box" data-testid="ticket-box">
+        <p class="work-note">
+          <span class="k">ticket</span> <code>{ticket.key}</code>
+          {ticket.title}{#if ticket.status_name}<span class="muted"> — {ticket.status_name}</span>{/if}
+        </p>
+        {#if chosenKind === 'work'}
+          <label class="brief-toggle">
+            <input type="checkbox" data-testid="ticket-brief-on" bind:checked={briefOn} />
+            Brief Claude with the ticket
+          </label>
+          {#if briefOn}
+            <textarea
+              class="brief"
+              data-testid="ticket-brief"
+              rows="6"
+              value={briefText}
+              oninput={(e) => onBriefInput((e.target as HTMLTextAreaElement).value)}
+            ></textarea>
+            <p class="muted small">
+              Delivered with the first prompt (never typed into the pane). The description is
+              the ticket author's text and stays fenced as untrusted.
+            </p>
+          {/if}
+          {#if siblings.length > 0}
+            <fieldset class="also-in" data-testid="ticket-also-in">
+              <legend>Also start in <span class="muted small">(one session each, same branch)</span></legend>
+              {#each siblings as c (c.id)}
+                <label>
+                  <input
+                    type="checkbox"
+                    data-testid="ticket-also-in-{c.id}"
+                    checked={alsoIn.includes(c.id)}
+                    onchange={(e) => toggleAlso(c.id, (e.target as HTMLInputElement).checked)}
+                  />
+                  {c.label}
+                </label>
+              {/each}
+            </fieldset>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+    {#if resumeOpen && plannedKey}
+      <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
+    {/if}
 
     <label for="kind-picker">Type</label>
     <div class="kind-row" id="kind-picker" role="group">
@@ -820,9 +1073,11 @@
       <button
         class="primary"
         onclick={submit}
-        disabled={(inNewMode && !newWorktreeName.trim()) || newSessionBlocked !== null}
-        title={newSessionBlocked ?? ''}
-      >Create</button>
+        data-testid="create-btn"
+        disabled={(inNewMode && !newWorktreeName.trim()) ||
+          (ticket && chosenKind === 'work' ? startBlocked !== null : newSessionBlocked !== null)}
+        title={(ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
+      >{ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
     {/if}
   </div>
 </div>
@@ -866,6 +1121,21 @@
     min-width: 0;
   }
   .name-row { display: flex; gap: 0.3rem; }
+  .work-note {
+    margin: 0;
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+  }
+  .work-note .dup { color: var(--fg); }
+  .work-note .linkish {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: inherit;
+    text-decoration: underline;
+  }
   .name-row input { flex: 1 1 auto; }
   .dice {
     font-size: 1rem;
@@ -923,4 +1193,26 @@
   }
   .actions button.primary { border-color: var(--accent); }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .ticket-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .brief-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+  }
+  .brief {
+    font: inherit;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.72rem;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+  }
+  .small {
+    font-size: 0.7rem;
+  }
 </style>

@@ -1,17 +1,22 @@
 <script lang="ts">
+  import { applyWorkEvents, loadTrackers, sessionsMentioning } from './lib/trackers';
+  import { loadOrgs, cycleScope } from './lib/orgs';
+  import type { WorkEvent } from './lib/trackers';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
+  import { todayOpen } from './lib/today';
+  import { composerInsert } from './lib/conversation';
   import TerminalView from './lib/TerminalView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames } from './lib/sessions';
+  import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
   import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
   import { viewHostSessions } from './lib/host_actions';
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
@@ -157,6 +162,27 @@
     return `${what}: ${r.error.code}`;
   }
 
+  let trackerRefresh: ReturnType<typeof setInterval> | null = null;
+  onDestroy(() => {
+    if (trackerRefresh) clearInterval(trackerRefresh);
+  });
+
+  // `work:*` frames: trackers and their first sync. When a tracker finishes
+  // its FIRST sync, the sessions whose keys it owns just got titles and
+  // status (retro-binding); say how many, and offer the Group-by-Work view.
+  function onWorkEvents(events: WorkEvent[]) {
+    for (const t of applyWorkEvents(events)) {
+      const keys = get(sessions).map((s) => s.work?.key ?? null);
+      const { count, prefixes } = sessionsMentioning(t, keys);
+      if (count === 0) continue;
+      push({
+        kind: 'info',
+        message: `${count} session${count === 1 ? '' : 's'} mention ${prefixes.map((p) => `${p}-*`).join(', ')}`,
+        action: { label: 'Review', run: () => sidebarGroupBy.set('work') },
+      });
+    }
+  }
+
   onMount(async () => {
     // FIRST, and awaited: the rest of this function branches on it. A hub
     // client must not poll account usage (the backend refuses it, so it would
@@ -206,6 +232,7 @@
       onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
+      onWorkEvents: onWorkEvents,
     });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
@@ -237,6 +264,20 @@
     // subscription is live so no `task:updated` is missed, and never block
     // startup on it (a failure only leaves the Tasks panel empty).
     void loadTasks();
+    // Trackers (work graph M3): their state badges, chip staleness and the
+    // quick switcher's tickets. A hub older than M3 has no answer.
+    void loadTrackers();
+    // Orgs (work graph M5): the scope selector, colour bars and Settings.
+    // Org changes arrive as `session:updated` for the rows they move; the
+    // list itself is refreshed with the trackers.
+    void loadOrgs();
+    // A tracker's `last_sync_at` moves every pass without a frame (the sync
+    // pushes only real changes), so the chips' "synced … ago" and stale
+    // clock read a copy refreshed here.
+    trackerRefresh = setInterval(() => {
+      void loadTrackers();
+      void loadOrgs();
+    }, 120_000);
     // Account usage: same reasoning — not on the critical bootstrap path,
     // loaded after the subscription so no `account_usage:updated` is missed.
     //
@@ -530,6 +571,18 @@
     requestNewSessionOnHost(alias);
   }
 
+  // "Insert into composer" (work graph M9.2) shows where the text went: the
+  // selected session's conversation, over Today if it was open.
+  let lastInsertSeq = 0;
+  $effect(() => {
+    const ins = $composerInsert;
+    if (!ins || ins.seq === lastInsertSeq) return;
+    lastInsertSeq = ins.seq;
+    if ($selectedSession?.id !== ins.sessionId) return;
+    todayOpen.set(false);
+    setSessionView('conversation');
+  });
+
   function onChordKeydown(e: KeyboardEvent) {
     const chord = appChord(e, isMac);
     if (!chord) return;
@@ -542,6 +595,8 @@
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
     else if (chord === 'agent') void toggleAgent();
+    else if (chord === 'scope') cycleScope();
+    else if (chord === 'today') todayOpen.update((v) => !v);
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -619,6 +674,8 @@
   <NewSessionDialog
     project={$newSessionRequest.project}
     initialName={$newSessionRequest.initialName}
+    initialHost={$newSessionRequest.initialHost}
+    ticket={$newSessionRequest.ticket}
     onCreate={(s) => {
       clearNewSessionRequest();
       selectSessionExplicitly(s);

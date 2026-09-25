@@ -1,0 +1,36 @@
+{
+  "data": [
+    {
+      "status_code": 200,
+      "headers": {},
+      "body": {
+        "data": {
+          "gid": "1207000000000002",
+          "name": "Write release notes",
+          "completed": false,
+          "modified_at": "2026-09-22T07:00:00.000Z",
+          "notes": "",
+          "permalink_url": "https://app.asana.com/0/1200000000001001/1207000000000002",
+          "resource_subtype": "default_task",
+          "assignee": {
+            "gid": "1200000000000100",
+            "name": "Dana Dev"
+          },
+          "parent": null,
+          "memberships": [
+            {
+              "project": {
+                "gid": "1200000000001001",
+                "name": "Company B \u00b7 Platform"
+              },
+              "section": {
+                "gid": "2",
+                "name": "In progress"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

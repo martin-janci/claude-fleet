@@ -1,10 +1,18 @@
 <script lang="ts">
-  import { sessions, showBgAgents, showFriendlyNames, showRowDetails } from './sessions';
+  import { sessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy } from './sessions';
   import { hosts, hostFilter } from './hosts';
   import { hintAnchor } from './hints';
   import { accountByUuid } from './accounts';
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
+  import ScopeAttention from './ScopeAttention.svelte';
+  import { scopes, scopeSelectorShown, scopeFilter, effectiveScope, UNASSIGNED } from './orgs';
+  import { scopeChordLabel } from './app_views';
+  import { detectMac } from './terminal_keys';
+
+  const scopeTitle = `Organisation scope (${scopeChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator))})`;
+  import LinkReview from './LinkReview.svelte';
+  import TidyReview from './TidyReview.svelte';
   import { RECENCY_VALUES, type Recency } from './session_status';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -65,6 +73,24 @@
 
 <header class="sidebar-header" data-testid="sidebar-chrome-top">
   <div class="row">
+    {#if $scopeSelectorShown}
+      <!-- Work graph M5: the org scope — a view, never a boundary here. Only
+           with two or more scopes, so a one-company fleet sees no chrome. -->
+      <select
+        class="scope"
+        data-testid="scope-select"
+        aria-label="Organisation scope"
+        title={scopeTitle}
+        value={$effectiveScope}
+        onchange={(e) => scopeFilter.set((e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="all">All</option>
+        {#each $scopes as sc (sc.id)}
+          <option value={sc.id}>{sc.label}</option>
+        {/each}
+        <option value={UNASSIGNED}>Unassigned</option>
+      </select>
+    {/if}
     <input
       class="search"
       placeholder="Search sessions, projects…"
@@ -162,6 +188,9 @@
     </button>
   </nav>
   <Attention />
+  <ScopeAttention />
+  <LinkReview />
+  <TidyReview />
 
   {#if selectedCount > 0}
     <div class="bulk-bar" data-testid="bulk-bar" role="toolbar" aria-label="bulk actions">
@@ -217,6 +246,18 @@
     >
       ≡ details {$showRowDetails ? 'on' : 'off'}
     </button>
+    <button
+      class="pill"
+      class:active={$sidebarGroupBy === 'work'}
+      data-testid="group-by-toggle"
+      aria-pressed={$sidebarGroupBy === 'work'}
+      title={$sidebarGroupBy === 'work'
+        ? 'Group sessions by project'
+        : 'Group sessions by work: a ticket key (ABC-123) in a tag, branch or worktree name'}
+      onclick={() => sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))}
+    >
+      ⧉ by {$sidebarGroupBy}
+    </button>
   </nav>
 
   {#if loadError}
@@ -249,6 +290,16 @@
     border-radius: 5px;
   }
   .search::placeholder { color: var(--fg-muted); }
+  .scope {
+    flex: 0 0 auto;
+    max-width: 7.5rem;
+    font-size: 0.8rem;
+    padding: 0.25rem 0.3rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 5px;
+  }
 
   .icon-btn {
     background: transparent;
@@ -269,7 +320,7 @@
   .icon-btn:disabled { opacity: 0.6; cursor: progress; }
 
   .recency { display: flex; gap: 0.25rem; }
-  .bg-toggle { display: flex; gap: 0.25rem; }
+  .bg-toggle { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .triage { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
   .triage-pill.hot { color: #e64a4a; border-color: rgba(230, 74, 74, 0.5); }
   .triage-pill.active { background: rgba(230, 74, 74, 0.12); }

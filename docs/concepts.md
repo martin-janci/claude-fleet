@@ -18,6 +18,65 @@ Each host has a **projects base**, the directory that holds its repositories, se
 
 An embedded MCP server (disabled by default, bound to `localhost`, protected by a bearer token, default port 4180) exposes the full fleet API so an AI assistant can drive sessions programmatically — creating sessions, sending prompts, reading output. When the control API is enabled, **reverse SSH tunnels** (`ssh -R`) forward that localhost port to each remote host's localhost, allowing remote agents to call back to the central server. Each tunnel is supervised: if the `ssh` process exits it restarts with capped exponential backoff. The same fleet can instead be run headless as the `fleet-hub` daemon, with the control API always on and bound to a configurable address; a hub given a public URL is reached directly by every host, and reverse tunnels exist only for a hub left on loopback. The desktop can also be paired with a hub as an ordinary client (Settings → Hub), and it then becomes a live window onto the hub's fleet rather than a second owner of it, decided once at startup. See [control-api.md](control-api.md) for the full tool reference and [hub.md](hub.md) for the daemon and for pointing a desktop at it.
 
+## Work
+
+A session can say **what work** it is doing: a ticket key (`ABC-123`) or a
+free-form workstream, linked to the session's identity so it survives moves
+and restarts. Keys found in branch names group sessions in the sidebar with
+no setup; an explicit link (from the UI, or the in-session agent) wins over
+recognition, and "Not this" is sticky. When a session ends its link ends
+with a snapshot, and the work journal keeps what its conversations did, so
+the work can be resumed later — continued, or started fresh with a handover
+brief. A **tracker** (Jira Cloud, GitHub Issues through `gh`, Asana, Linear
+or Jira Data Center, configured on the hub) only enriches
+this: titles and status on the chips, tickets in ⌘K, and starting a session
+from a ticket in one step. Trackers are polled, read-only, and never gate
+anything. See [control-api.md](control-api.md) (`work`, `work_link`,
+`work_admin`) and [hub.md](hub.md) → *Trackers*.
+
+**Organisations** are optional. A session belongs to at most one: the most
+specific text rule (path, `owner/repo`, owner, host) else its host's org; a
+ticket belongs to its tracker's. For people an org is a view — the
+sidebar's scope selector, shown only when there are two or more scopes
+(named orgs, or GitHub owners when none are named). For the Claude on a host
+it is a boundary: a host placed in an org reads only that org's work and
+unassigned work, and `isolate_sessions` can fence the sessions themselves.
+See [hub.md](hub.md) → *Organisations and isolation*.
+
+## Lifecycle
+
+Fleet keeps the sidebar about current work without destroying anything
+useful. It **suggests** cleaning up — "Tidy up · n" in the attention strip,
+shown only when there is something to tidy — and a person confirms in one
+sheet; nothing is killed automatically unless `work.auto_tidy` is turned on
+(off by default, see [hub.md](hub.md) → *Tidy-up and auto-tidy*). A
+suggestion has a reason: the linked ticket is done (for
+`work.tidy_done_days`) and the session idle (for `work.tidy_idle_hours`), its
+PR is merged, the ticket was closed as won't-do or duplicate, two sessions
+work in one worktree, or a lost session is a day from being reaped. Work that
+comes back — a ticket moved out of done — shows as **Reopened** with its past
+sessions and Resume.
+
+A "session" is six things, and fleet may touch only the first three, only on
+a confirm (or opt-in auto-tidy):
+
+| Layer | Fleet may… | Fleet never… |
+|---|---|---|
+| work link | end it (with its snapshot) when the session is killed; **archive** a live session, UI-only | delete it |
+| sidebar visibility | collapse archived or done work into the group's *Done* | hide a session that needs you |
+| tmux session | kill it through **safe kill** (Claude commits and pushes first); plain-kill a session that shares its worktree with another | kill a dirty or unpushed worktree any other way |
+| Claude conversation / transcript | — | delete it |
+| worktree / branch | — (safe kill removes the worktree only after the push succeeded) | delete a branch with unpushed commits |
+| journal / history | — (retention is `work.journal_days`) | delete it |
+
+**Archive** collapses a live session into its work group's Done; tmux keeps
+running, and the next prompt or attach brings it back. **Snooze 7 d** and
+**Never for this work** are per link. No setting overrides the protections:
+a session that is working, blocked, stuck or waiting on a dialog, one linked
+to an in-progress ticket, the controller and the operator, a session
+prompted or attached to within the hour, and a background agent with open
+tasks are never suggested.
+
 ## Asset catalog
 
 Skills, subagents, hooks, MCP servers and plugin references can be kept in a

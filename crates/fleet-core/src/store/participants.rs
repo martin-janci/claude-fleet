@@ -23,17 +23,17 @@ pub struct ParticipantRow {
     #[serde(default)]
     pub retired_at: Option<i64>,
     /// The full `<fleet>/session/<host>/<name>` address of a `remote`
-    /// participant (migration 045). `None` for every other kind.
+    /// participant (migration 054). `None` for every other kind.
     #[serde(default)]
     pub address: Option<String>,
     /// The `peer_links` row this `remote` participant belongs to (migration
-    /// 045). `None` for every other kind.
+    /// 054). `None` for every other kind.
     #[serde(default)]
     pub peer_link_id: Option<i64>,
 }
 
 /// A participant standing for a session on another, linked hub (migration
-/// 045) — see `store::peer_links`.
+/// 054) — see `store::peer_links`.
 pub const PARTICIPANT_REMOTE: &str = "remote";
 
 const COLUMNS: &str =
@@ -154,6 +154,20 @@ impl Store {
                 )?;
                 self.conn.execute(
                     "UPDATE session_messages SET from_participant_id = ?1 WHERE from_participant_id = ?2",
+                    rusqlite::params![participant_id, existing.id],
+                )?;
+                // Review C8: the collision's live work links move to the
+                // survivor too (never as a second primary, never a duplicate
+                // of a target the survivor already links); what is left ends
+                // with the retire below, as history.
+                self.conn.execute(
+                    "UPDATE work_links SET participant_id = ?1, is_primary = is_primary AND NOT \
+                       EXISTS(SELECT 1 FROM work_links s WHERE s.participant_id = ?1 \
+                              AND s.ended_at IS NULL AND s.is_primary = 1) \
+                     WHERE participant_id = ?2 AND ended_at IS NULL AND NOT EXISTS( \
+                       SELECT 1 FROM work_links s WHERE s.participant_id = ?1 \
+                         AND s.ended_at IS NULL AND s.item_id IS work_links.item_id \
+                         AND s.ref_key IS work_links.ref_key)",
                     rusqlite::params![participant_id, existing.id],
                 )?;
                 self.retire_participant(existing.id)?;
@@ -342,6 +356,46 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// Migration 045: identity is minted with the row, not on first mail, so
+    /// anything anchored on the participant (a move's re-point, work links)
+    /// never finds a session without one.
+    #[test]
+    fn every_new_session_row_has_a_live_participant_at_once() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "fresh");
+        let p = s
+            .participant_for_session(sid)
+            .unwrap()
+            .expect("minted on insert");
+        assert_eq!(p.kind, "session");
+        assert_eq!(p.retired_at, None);
+        assert_eq!(
+            s.ensure_participant_for_session(sid).unwrap(),
+            p.id,
+            "ensure finds the minted identity rather than forking a second"
+        );
+    }
+
+    /// `sessions.id` is reused. The dead session's participant was retired
+    /// (and unbound) by the delete, so the row that takes its id gets a new
+    /// identity — never the dead one's mail.
+    #[test]
+    fn a_reused_session_id_gets_a_fresh_identity() {
+        let s = Store::open_in_memory().unwrap();
+        let first = seed(&s, "first");
+        let dead = s.participant_for_session(first).unwrap().unwrap().id;
+        s.delete_session(first).unwrap();
+        let second = seed(&s, "second");
+        let p = s.participant_for_session(second).unwrap().expect("minted");
+        assert_ne!(p.id, dead);
+        assert!(s
+            .participant_by_id(dead)
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_some());
     }
 
     #[test]

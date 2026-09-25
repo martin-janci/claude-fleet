@@ -118,11 +118,92 @@ fn messages_have_participant_columns(conn: &Connection) -> rusqlite::Result<bool
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 045: `participants.address` exists,
+/// `already_applied` guard of migration 054: `participants.address` exists,
 /// so its `ALTER TABLE ... ADD COLUMN` lines would fail again.
 fn participants_have_address(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('participants') WHERE name = 'address'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 047: `work_links` already has its
+/// `role` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
+/// [`Migration`].
+fn work_links_has_role(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'role'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 048: `work_items` already has its
+/// `aliases` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
+/// [`Migration`].
+fn work_items_has_aliases(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'aliases'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 049: `work_links` already has its
+/// `evidence` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
+/// [`Migration`].
+fn work_links_has_evidence(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'evidence'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 050 (work graph M5): its last ADD
+/// COLUMN (`work_links.snap_org_id`) present means the whole migration is.
+fn work_links_has_snap_org(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'snap_org_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 051: `trackers` already has its
+/// `settings` column (the last of the two it adds).
+fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('trackers') WHERE name = 'settings'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 052: `work_links` already has its
+/// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'archived_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 053: `orgs` already has its
+/// `auto_tidy` column.
+fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'auto_tidy'",
         [],
         |r| r.get(0),
     )?;
@@ -388,16 +469,80 @@ const MIGRATIONS: &[Migration] = &[
     // `read_cursors` (smart caching, cycle 2): CREATE TABLE / INDEX IF NOT
     // EXISTS only, so re-running it is a no-op — no `already_applied` guard.
     Migration::plain(44, include_str!("../../migrations/044_read_cursors.sql")),
+    // A participant for every session row, minted by trigger on INSERT, plus
+    // a backfill. `CREATE TRIGGER IF NOT EXISTS` and an `INSERT ... WHERE
+    // NOT IN`, so re-running it is a no-op — no `already_applied` guard.
+    Migration::plain(
+        45,
+        include_str!("../../migrations/045_session_participants.sql"),
+    ),
+    // Work graph M1b: `work_items`, `work_links` and the trigger that ends a
+    // link (with its snapshot) when the session's participant retires. All
+    // `IF NOT EXISTS`, so re-running it is a no-op.
+    Migration::plain(46, include_str!("../../migrations/046_work_graph.sql")),
+    // Work graph M2: `work_journal` (+ its conversation triggers), and
+    // `work_links.role` / `.resumable` — ADD COLUMNs, so the 038-043 guard.
+    Migration {
+        version: 47,
+        sql: include_str!("../../migrations/047_work_journal.sql"),
+        already_applied: Some(work_links_has_role),
+    },
+    // Work graph M3: `trackers`, `tracker_secrets`, `tracker_views` and the
+    // tracker columns of `work_items` — ADD COLUMNs, so the 038-047 guard.
+    Migration {
+        version: 48,
+        sql: include_str!("../../migrations/048_trackers.sql"),
+        already_applied: Some(work_items_has_aliases),
+    },
+    // Work graph M4: the live branch and PR signals on `sessions`, and the
+    // explanation columns of `work_links` — ADD COLUMNs, so the same guard.
+    Migration {
+        version: 49,
+        sql: include_str!("../../migrations/049_work_detection.sql"),
+        already_applied: Some(work_links_has_evidence),
+    },
+    // Work graph M5: `orgs`, `org_rules`, `hosts.org_id`,
+    // `work_links.snap_org_id` and its retirement trigger — ADD COLUMNs, so
+    // the same guard.
+    Migration {
+        version: 50,
+        sql: include_str!("../../migrations/050_orgs.sql"),
+        already_applied: Some(work_links_has_snap_org),
+    },
+    // Work graph M6: `tracker_views.sync_mark` (sync tokens) and
+    // `trackers.settings` (admin-owned provider settings) — ADD COLUMNs, so
+    // the same guard. (Written as 050 on the M6 branch; renumbered when M5,
+    // which took 050, was merged.)
+    Migration {
+        version: 51,
+        sql: include_str!("../../migrations/051_tracker_providers.sql"),
+        already_applied: Some(trackers_has_settings),
+    },
+    // Work graph M7: archive / snooze / never on `work_links`, the last
+    // touch on `sessions`, `work_items.reopened_at` — ADD COLUMNs, so the
+    // same guard. (Written as 051 and 052 on the M7 branch; renumbered when
+    // M6, which took 051, was merged.)
+    Migration {
+        version: 52,
+        sql: include_str!("../../migrations/052_work_lifecycle.sql"),
+        already_applied: Some(work_links_has_archived_at),
+    },
+    // Work graph M7 on M5: `orgs.auto_tidy` — one ADD COLUMN, its own guard.
+    Migration {
+        version: 53,
+        sql: include_str!("../../migrations/053_org_auto_tidy.sql"),
+        already_applied: Some(orgs_has_auto_tidy),
+    },
     // Hub↔hub federation (cycle 3): `peer_links`, remote participants, and the
     // remote / outbox columns on `session_messages`. Guarded: ADD COLUMN.
     Migration {
-        version: 45,
-        sql: include_str!("../../migrations/045_peer_links.sql"),
+        version: 54,
+        sql: include_str!("../../migrations/054_peer_links.sql"),
         already_applied: Some(participants_have_address),
     },
     // `participants(peer_link_id)` index (federation review G17):
     // `CREATE INDEX IF NOT EXISTS`, safe to re-run.
-    Migration::plain(46, include_str!("../../migrations/046_peer_link_index.sql")),
+    Migration::plain(55, include_str!("../../migrations/055_peer_link_index.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1965,13 +2110,28 @@ mod tests {
     /// ...)` is itself idempotent: re-running just that statement, and
     /// separately a full guarded second pass through `migrate()`, must not
     /// duplicate the row.
+    /// Insert a bare `sessions` row with raw SQL. For a store held at an old
+    /// schema version: `upsert_session` reads the row back through
+    /// `SESSION_COLUMNS`, which names tables (participants, work_links) that
+    /// an old version does not have yet.
+    fn raw_session(s: &Store, name: &str) -> i64 {
+        s.conn
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES (?1, 'h', 1, 1, 'running')",
+                rusqlite::params![name],
+            )
+            .unwrap();
+        s.conn.last_insert_rowid()
+    }
+
     #[test]
     fn migration_043_backfills_existing_sessions() {
         let old = store_at_version(42);
-        old.upsert_host("h").unwrap();
-        let sid = old
-            .upsert_session("sess", "h", None, None, 1, 1, "running", None)
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
             .unwrap();
+        let sid = raw_session(&old, "sess");
 
         old.migrate().expect("043 backfill");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
@@ -2033,22 +2193,248 @@ mod tests {
         );
     }
 
-    // ── migration 045: peer_links, remote participants, outbox columns ──
+    /// Migration 045 backfills the sessions created after 043 that never
+    /// messaged anyone (and so never got a participant), and from then on the
+    /// trigger mints one per insert. Re-running it duplicates nothing.
+    #[test]
+    fn migration_045_gives_every_session_a_participant() {
+        let old = store_at_version(44);
+        old.conn
+            .execute("INSERT INTO hosts (alias) VALUES ('h')", [])
+            .unwrap();
+        let quiet = raw_session(&old, "quiet");
+        let count = |s: &Store, sid: i64| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM participants WHERE session_id = ?1",
+                    rusqlite::params![sid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count(&old, quiet), 0, "044 minted nothing on insert");
 
-    /// A guarded second pass over 045: roll the recorded version back and
+        old.migrate().expect("045");
+        assert_eq!(count(&old, quiet), 1, "the backfill gave it one");
+        let later = old
+            .upsert_session("later", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(count(&old, later), 1, "the trigger mints on insert");
+
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 45;")
+            .unwrap();
+        old.migrate().expect("re-run 045");
+        assert_eq!(count(&old, quiet), 1);
+        assert_eq!(count(&old, later), 1);
+    }
+
+    /// Migration 048 (work graph M3): the tracker tables and the new
+    /// `work_items` columns land on a database with work items, and a re-run
+    /// (the guard) keeps both the tracker and the item's new attributes.
+    #[test]
+    fn migration_048_adds_trackers_and_item_columns_and_reruns_safely() {
+        let old = store_at_version(47);
+        old.conn
+            .execute_batch(
+                "INSERT INTO work_items (source, key, title, created_at, updated_at) \
+                 VALUES ('local', 'ABC-1', 'x', 1, 1);",
+            )
+            .unwrap();
+        old.migrate().expect("048 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let t = old
+            .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "UPDATE work_items SET aliases = '[\"OLD-1\"]', status_name = 'In Review';",
+            )
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 48;")
+            .unwrap();
+        old.migrate().expect("re-running 048 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(old.get_tracker(t.id).unwrap().is_some());
+        let item = old.work_item_by_key("ABC-1").unwrap().unwrap();
+        assert_eq!(item.aliases, vec!["OLD-1"]);
+        assert_eq!(item.status_name.as_deref(), Some("In Review"));
+    }
+
+    /// Migration 049 (work graph M4): the detection columns land on a
+    /// database with links, old links read with no strength / evidence, and a
+    /// re-run (the guard) keeps what was written since.
+    #[test]
+    fn migration_049_adds_detection_columns_and_reruns_safely() {
+        let old = store_at_version(48);
+        // Raw SQL: the store's own session reads already expect 049.
+        old.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h'); \
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES ('dev', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        let sid: i64 = old
+            .conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "INSERT INTO work_links (ref_key, participant_id, state, source, is_primary, created_at) \
+                 SELECT 'ABC-1', id, 'confirmed', 'manual', 1, 1 FROM participants;",
+            )
+            .unwrap();
+        old.migrate().expect("049 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let links = old.session_work_links(sid).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].strength, None);
+        assert!(links[0].evidence.is_empty());
+        old.conn
+            .execute_batch("UPDATE sessions SET current_branch = 'abc-2-x';")
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 49;")
+            .unwrap();
+        old.migrate().expect("re-running 049 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let branch: Option<String> = old
+            .conn
+            .query_row(
+                "SELECT current_branch FROM sessions WHERE id = ?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch.as_deref(), Some("abc-2-x"));
+    }
+
+    /// Migration 051 (work graph M6): a tracker with views keeps them and
+    /// its watermark, gains an empty sync mark and settings, and a re-run
+    /// (the guard) keeps what was written since.
+    #[test]
+    fn migration_051_adds_sync_marks_and_settings_and_reruns_safely() {
+        let old = store_at_version(50);
+        old.conn
+            .execute_batch(
+                "INSERT INTO trackers (id, provider, name, site_url, created_at) \
+                 VALUES (3, 'jira', 'Acme', 'https://acme.atlassian.net', 1); \
+                 INSERT INTO tracker_views (tracker_id, view_id, label, query, watermark) \
+                 VALUES (3, 'mine', 'My work', 'q', 1700000000);",
+            )
+            .unwrap();
+        old.migrate().expect("051 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let views = old.list_tracker_views(3).unwrap();
+        assert_eq!(views[0].watermark, Some(1_700_000_000));
+        assert_eq!(views[0].sync_mark, None);
+        assert_eq!(
+            old.get_tracker(3).unwrap().unwrap().settings,
+            Default::default()
+        );
+        old.set_tracker_view_mark(3, "mine", Some("tok-1")).unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 51;")
+            .unwrap();
+        old.migrate().expect("re-running 051 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),
+            Some("tok-1")
+        );
+    }
+
+    /// Migrations 052 and 053 (work graph M7) on a database that already ran
+    /// M6's 051: the lifecycle columns land on a database with a live link, a
+    /// done item and a tracker with M6's sync mark and settings; nothing is
+    /// archived, snoozed or reopened by the migration itself, M6's columns
+    /// are untouched, and a re-run (the guards) keeps what was written since.
+    #[test]
+    fn migrations_052_053_add_lifecycle_columns_after_051_and_rerun_safely() {
+        let old = store_at_version(51);
+        assert_eq!(old.schema_version().unwrap(), 51);
+        old.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h'); \
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES ('dev', 'h', 1, 1, 'running'); \
+                 INSERT INTO work_items (source, key, title, status_category, created_at, updated_at) \
+                 VALUES ('local', 'ABC-1', 't', 'done', 1, 1); \
+                 INSERT INTO work_links (item_id, participant_id, state, source, is_primary, created_at) \
+                 SELECT 1, id, 'confirmed', 'manual', 1, 1 FROM participants; \
+                 INSERT INTO trackers (id, provider, name, site_url, created_at) \
+                 VALUES (3, 'jira', 'Acme', 'https://acme.atlassian.net', 1); \
+                 INSERT INTO tracker_views (tracker_id, view_id, label, query, sync_mark) \
+                 VALUES (3, 'mine', 'My work', 'q', 'tok-0');",
+            )
+            .unwrap();
+        let sid: i64 = old
+            .conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        old.migrate().expect("052 and 053 on a database at 051");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),
+            Some("tok-0")
+        );
+        let (archived, snoozed, never): (Option<i64>, Option<i64>, i64) = old
+            .conn
+            .query_row(
+                "SELECT archived_at, tidy_snoozed_until, tidy_never FROM work_links",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((archived, snoozed, never), (None, None, 0));
+        let row = old.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().archived_at, None);
+        old.conn
+            .execute_batch(
+                "UPDATE work_links SET archived_at = 7; UPDATE sessions SET last_touch_at = 9;",
+            )
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 52;")
+            .unwrap();
+        old.migrate().expect("re-running 052 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = old.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().archived_at, Some(7));
+        let reopened: Option<i64> = old
+            .conn
+            .query_row("SELECT reopened_at FROM work_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reopened, None);
+        // 053: an org's override, NULL (inherit) on existing orgs.
+        old.conn
+            .execute_batch(
+                "INSERT INTO orgs (name, created_at) VALUES ('A', 1); \
+                 DELETE FROM schema_version WHERE version >= 53;",
+            )
+            .unwrap();
+        old.migrate().expect("re-running 053 is safe");
+        assert_eq!(old.list_orgs().unwrap()[0].auto_tidy, None);
+    }
+
+    // ── migration 054: peer_links, remote participants, outbox columns ──
+
+    /// A guarded second pass over 054: roll the recorded version back and
     /// migrate again. `participants_have_address` sees the ADD COLUMNs
-    /// already applied, so 045's whole body is skipped and only its version
+    /// already applied, so 054's whole body is skipped and only its version
     /// is re-recorded — must not error, and `participants.address` must
     /// still exist exactly once.
     #[test]
-    fn migration_045_guarded_second_pass_does_not_error() {
+    fn migration_054_guarded_second_pass_does_not_error() {
         let s = Store::open_in_memory().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 45;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 54;")
             .unwrap();
-        s.migrate().expect("guarded second pass over 045");
+        s.migrate().expect("guarded second pass over 054");
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
         let n: i64 = s
@@ -2062,39 +2448,30 @@ mod tests {
         assert_eq!(n, 1, "participants.address must exist exactly once");
     }
 
-    /// Migration 045 on a POPULATED v44 database: sessions, participants and
+    /// Migration 054 on a POPULATED v53 database: sessions, participants and
     /// messages survive with their ids, every new column reads NULL or its
     /// default, and the partial unique indexes exist.
     #[test]
-    fn migration_045_upgrades_a_populated_v44_db_and_keeps_its_rows() {
-        const SEED_AT: i64 = 44;
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= SEED_AT) {
-            conn.execute_batch(sql)
-                .unwrap_or_else(|e| panic!("migration {version}: {e}"));
-        }
-        conn.execute_batch(
-            "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+    fn migration_054_upgrades_a_populated_v53_db_and_keeps_its_rows() {
+        const SEED_AT: i64 = 53;
+        let s = store_at_version(SEED_AT);
+        // Since 045 a session's participant is minted by trigger on insert;
+        // renumber the two it mints so the messages below can name them.
+        s.conn
+            .execute_batch(
+                "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
              INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
                VALUES (11, 'a1', 'local', 1, 1, 'running'),
                       (12, 'b1', 'local', 1, 1, 'running');
-             INSERT INTO participants (id, kind, session_id, created_at)
-               VALUES (21, 'session', 11, 1), (22, 'session', 12, 1);
+             UPDATE participants SET id = 21 WHERE session_id = 11;
+             UPDATE participants SET id = 22 WHERE session_id = 12;
              INSERT INTO session_messages
                (id, from_session_id, to_session_id, from_participant_id, to_participant_id,
                 body, kind, sent_at, reply_to, delivered_at)
                VALUES (31, 11, 12, 21, 22, 'hello', 'message', 5, NULL, 6),
                       (32, 12, 11, 22, 21, 'back', 'task_result', 7, 31, NULL);",
-        )
-        .unwrap();
-        let s = Store {
-            conn,
-            bus: StoreBus::new(Arc::new(NoopEventBus)),
-            kills: Default::default(),
-            message_notify: Arc::new(tokio::sync::Notify::new()),
-            peer_generations: Default::default(),
-        };
+            )
+            .unwrap();
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("peer_links").unwrap());
         s.migrate().unwrap();
@@ -2204,13 +2581,13 @@ mod tests {
     /// G17: `pending_outbox`, `has_pending_outbox`, `mark_peer_accepted`,
     /// `handover_upto` and `peer_links_down`'s listener branch all join
     /// `participants ON participants.peer_link_id = peer_links.id` — every
-    /// poll of every dialer loop and every listener exchange. Migration 046
+    /// poll of every dialer loop and every listener exchange. Migration 055
     /// gives that join an index; this pins that it exists, is partial (only
     /// the `remote` rows that ever set the column), and is a plain (not
     /// unique) index — more than one participant can belong to the same
     /// link.
     #[test]
-    fn migration_046_adds_a_partial_index_on_participants_peer_link_id() {
+    fn migration_055_adds_a_partial_index_on_participants_peer_link_id() {
         let s = Store::open_in_memory().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let (unique, sql): (i64, Option<String>) = s
@@ -2229,41 +2606,30 @@ mod tests {
         assert!(sql.contains(" WHERE "), "partial: {sql}");
     }
 
-    /// Migration 046 on a database that already has migration 045 and rows
+    /// Migration 055 on a database that already has migration 054 and rows
     /// in `participants`: it must not disturb them, and running it twice
     /// (`CREATE INDEX IF NOT EXISTS`) is a no-op.
     #[test]
-    fn migration_046_on_a_populated_v45_database_is_a_safe_reindex() {
-        const SEED_AT: i64 = 45;
-        let conn = Connection::open_in_memory().unwrap();
-        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= SEED_AT) {
-            conn.execute_batch(sql)
-                .unwrap_or_else(|e| panic!("migration {version}: {e}"));
-        }
-        conn.execute_batch(
-            "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
-             INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
-               VALUES (1, 'a1', 'local', 1, 1, 'running');
-             INSERT INTO participants (id, kind, session_id, created_at)
-               VALUES (1, 'session', 1, 1);
-             INSERT INTO participants (id, kind, address, peer_link_id, created_at)
-               VALUES (2, 'remote', 'fleet-b/session/h/b1', NULL, 1);",
-        )
-        .unwrap();
-        let s = Store {
-            conn,
-            bus: StoreBus::new(Arc::new(NoopEventBus)),
-            kills: Default::default(),
-            message_notify: Arc::new(tokio::sync::Notify::new()),
-            peer_generations: Default::default(),
-        };
+    fn migration_055_on_a_populated_v54_database_is_a_safe_reindex() {
+        const SEED_AT: i64 = 54;
+        let s = store_at_version(SEED_AT);
+        // The session's own participant is minted by the 045 trigger.
+        s.conn
+            .execute_batch(
+                "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+                 INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+                   VALUES (1, 'a1', 'local', 1, 1, 'running');
+                 INSERT INTO participants (id, kind, address, peer_link_id, created_at)
+                   VALUES (2, 'remote', 'fleet-b/session/h/b1', NULL, 1);",
+            )
+            .unwrap();
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         // Re-running the migration script directly (as `migrate()` would on
-        // a database that already recorded 46) must not fail.
+        // a database that already recorded 55) must not fail.
         s.conn
-            .execute_batch(include_str!("../../migrations/046_peer_link_index.sql"))
+            .execute_batch(include_str!("../../migrations/055_peer_link_index.sql"))
             .unwrap();
         let rows: i64 = s
             .conn

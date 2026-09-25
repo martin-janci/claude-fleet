@@ -1,0 +1,20 @@
+{
+  "data": [
+    {
+      "gid": "1",
+      "name": "Backlog"
+    },
+    {
+      "gid": "2",
+      "name": "In progress"
+    },
+    {
+      "gid": "3",
+      "name": "In review"
+    },
+    {
+      "gid": "4",
+      "name": "Done"
+    }
+  ]
+}

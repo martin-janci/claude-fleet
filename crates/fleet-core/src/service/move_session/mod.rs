@@ -3070,6 +3070,17 @@ async fn move_session_inner(
                 );
             }
         }
+        // Tags are the operator's (and the in-session agent's) labels for
+        // the work, not a property of the host: a move used to drop them.
+        if !snap.row.tags.is_empty() {
+            if let Err(e) = s.set_session_tags(row.id, &snap.row.tags) {
+                tracing::warn!(
+                    session_id = row.id,
+                    error = %e,
+                    "[move_session] copying tags failed"
+                );
+            }
+        }
         s.set_parent_session_id(row.id, Some(snap.row.id))?;
         row
     };
@@ -3592,6 +3603,8 @@ mod tests {
         s.set_claude_session_id(id, SID).unwrap();
         s.set_claude_status_by_session_id(SID, "idle").unwrap();
         s.set_friendly_name("alpha", "dev-o-r--feat", Some("Feat work"))
+            .unwrap();
+        s.set_session_tags(id, &["ABC-123".to_string(), "wip".to_string()])
             .unwrap();
         // beta's projects root → the layout hint is exactly TGT_CWD.
         s.set_setting("projects.base_path", r#"{"beta":"~/p"}"#)
@@ -4500,6 +4513,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_work_follows_a_move_and_is_copied_to_a_fork() {
+        for keep_source in [false, true] {
+            let f = fixture();
+            let link = f
+                .store
+                .lock()
+                .unwrap()
+                .link_session_work(
+                    f.source_id,
+                    crate::store::WorkTarget::Key("ABC-1"),
+                    "manual",
+                )
+                .unwrap();
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let rep = run(&f, &hooks, keep_source).await.expect("move");
+            let s = f.store.lock().unwrap();
+            let links = s.session_work_links(rep.target_session_id).unwrap();
+            assert_eq!(links.len(), 1, "{keep_source}");
+            assert_eq!(links[0].ref_key.as_deref(), Some("ABC-1"));
+            if keep_source {
+                assert_eq!(links[0].source, "forked");
+                assert_eq!(s.session_work_links(f.source_id).unwrap()[0].id, link.id);
+            } else {
+                assert_eq!(links[0].id, link.id, "the same link, re-pointed");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn happy_path_copies_the_transcript_resumes_on_target_and_kills_the_source() {
         let f = fixture();
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
@@ -4557,6 +4599,7 @@ mod tests {
         assert_eq!(t.parent_session_id, Some(f.source_id));
         assert_eq!(t.claude_session_id.as_deref(), Some(SID));
         assert_eq!(t.friendly_name.as_deref(), Some("Feat work"));
+        assert_eq!(t.tags, vec!["ABC-123".to_string(), "wip".to_string()]);
         assert!(t.started_at.is_some());
         drop(s);
 

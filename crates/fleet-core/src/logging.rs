@@ -163,6 +163,27 @@ pub fn tail_lines(dir: &Path, n: usize) -> Vec<String> {
 static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(bearer)(\s+)([A-Za-z0-9\-._~+/]{8,}=*)").expect("bearer regex")
 });
+/// `Basic` plus a candidate base64 value (group 3): an HTTP Basic
+/// `Authorization` header, which is `base64(user:secret)` (a Jira Cloud
+/// email + API token). Masked under the same [`is_token_shaped`] rule as
+/// `Bearer`, so "Basic authentication" survives.
+static BASIC_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})").expect("basic regex")
+});
+/// An Atlassian API token (`ATATT…`), wherever it appears.
+static ATLASSIAN_TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"ATATT[A-Za-z0-9_\-=]{20,}").expect("atlassian token regex"));
+/// Tracker tokens of the providers after Jira (work graph M6), wherever they
+/// appear: GitHub (`ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_`,
+/// `github_pat_`), Linear (`lin_api_`, `lin_oauth_`) and Asana personal
+/// access tokens (`2/<user>/<app>:<32 hex>`, `1/<user>:<32 hex>`, the
+/// legacy `0/<32 hex>`).
+static PROVIDER_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|lin_(?:api|oauth)_[A-Za-z0-9]{20,}|[0-9]/[0-9]{6,}(?:/[0-9]{6,})?:[0-9A-Fa-f]{32}|0/[0-9A-Fa-f]{32})\b",
+    )
+    .expect("provider token regex")
+});
 static QUERY_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)([?&](?:access_)?token=)[^&\s"'#]+"#).expect("query token regex")
 });
@@ -221,8 +242,10 @@ fn mask_matches<'a>(
 }
 
 /// Mask anything that looks like a bearer token: a token-shaped value after
-/// `Bearer` (see [`is_token_shaped`]; "the bearer of" and "Bearer
-/// authentication" survive), `?token=` / `&token=` query values, and runs
+/// `Bearer` or `Basic` (see [`is_token_shaped`]; "the bearer of" and "Basic
+/// authentication" survive), Atlassian API tokens (`ATATT…`, work graph
+/// M3), GitHub, Linear and Asana tokens (M6, [`PROVIDER_TOKEN_RE`]),
+/// `?token=` / `&token=` query values, and runs
 /// of exactly 64 hex digits (see [`HEX_RUN_RE`]). Text with nothing to mask
 /// is returned borrowed and unchanged.
 pub fn redact(input: &str) -> Cow<'_, str> {
@@ -230,6 +253,17 @@ pub fn redact(input: &str) -> Cow<'_, str> {
     if let Cow::Owned(s) = mask_matches(&BEARER_RE, &out, |c| {
         is_token_shaped(&c[3]).then(|| format!("{}{}{REDACTED}", &c[1], &c[2]))
     }) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = mask_matches(&BASIC_RE, &out, |c| {
+        is_token_shaped(&c[3]).then(|| format!("{}{}{REDACTED}", &c[1], &c[2]))
+    }) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = ATLASSIAN_TOKEN_RE.replace_all(&out, REDACTED) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = PROVIDER_TOKEN_RE.replace_all(&out, REDACTED) {
         out = Cow::Owned(s);
     }
     if let Cow::Owned(s) = QUERY_TOKEN_RE.replace_all(&out, format!("${{1}}{REDACTED}")) {
@@ -702,6 +736,63 @@ mod tests {
             redact("Bearer authentication with Bearer tok-98765"),
             "Bearer authentication with Bearer [REDACTED]"
         );
+    }
+
+    #[test]
+    fn redacts_github_linear_and_asana_tokens() {
+        // Assembled at run time: a literal token shape in the source trips
+        // push protection, although every one of these is invented.
+        let hex = "0123456789abcdef".repeat(2);
+        for tok in [
+            format!("{}_{}", "ghp", "abcdefghijklmnopqrstuvwxyz0123456789"),
+            format!("{}_{}", "gho", "16C7e42F292c6912E7710c838347Ae178B4a"),
+            format!(
+                "{}_{}",
+                "github_pat", "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz"
+            ),
+            format!(
+                "{}_{}",
+                "lin_api", "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+            ),
+            format!("2/{}/{}:{hex}", "1201234567890123", "1209876543210987"),
+            format!("1/{}:{hex}", "1201234567890"),
+            format!("0/{hex}"),
+        ] {
+            let got = redact(&format!("Authorization: {tok} (refused)")).into_owned();
+            assert_eq!(got, "Authorization: [REDACTED] (refused)", "{tok}");
+        }
+        // Look-alikes that are not tokens survive.
+        for text in [
+            "ghp_short",
+            "see acme/api#42 and 1/2 of the work",
+            "ratio 3/1234567:beef",
+        ] {
+            assert_eq!(redact(text), text);
+        }
+    }
+
+    #[test]
+    fn redacts_basic_auth_and_atlassian_tokens() {
+        // base64("me@acme.com:ATATT3xFf…")
+        let b64 = "bWVAYWNtZS5jb206QVRBVFQzeEZmR0YwYWJjZGVmZ2hpams=";
+        assert_eq!(
+            redact(&format!("Authorization: Basic {b64}")),
+            "Authorization: Basic [REDACTED]"
+        );
+        assert_eq!(
+            redact(&format!(r#"{{"authorization":"basic {b64}"}}"#)),
+            r#"{"authorization":"basic [REDACTED]"}"#
+        );
+        assert_eq!(
+            redact("uses Basic authentication over TLS"),
+            "uses Basic authentication over TLS"
+        );
+        let tok = "ATATT3xFfGF0T2hpc0lzTm90QVJlYWxUb2tlbg-_=AbCd";
+        assert_eq!(
+            redact(&format!("jira said no to {tok}.")),
+            "jira said no to [REDACTED]."
+        );
+        assert_eq!(redact("ATATT short"), "ATATT short");
     }
 
     #[test]

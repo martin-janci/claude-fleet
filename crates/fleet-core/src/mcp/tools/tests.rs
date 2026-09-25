@@ -85,6 +85,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "session_conversation",
         "wait_for_task",
         "list_tasks",
+        "work",
     ] {
         assert!(enforce_mode(&ro, t).is_ok(), "{t} is a read");
     }
@@ -97,6 +98,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "dispatch_task",
         "cancel_task",
         "set_session_tags",
+        "work_link",
     ] {
         let err = enforce_mode(&ro, t).expect_err(t);
         assert!(
@@ -1027,6 +1029,122 @@ fn forbidden(e: McpError) {
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
 }
 
+/// Work links are session-addressed: a per-host token decides and reads only
+/// its own host's sessions, and never another host's past work by key.
+#[tokio::test]
+async fn work_tools_are_gated_to_the_callers_host() {
+    use crate::service::work::{WorkArgs, WorkLinkArgs};
+    let (s, _, on_b) = two_host_store();
+    let t = test_tools(s);
+    let link = |key: &str| WorkLinkArgs {
+        session_id: Some(on_b),
+        action: "link".into(),
+        key: Some(key.into()),
+        ..Default::default()
+    };
+    let a = host_caller("hosta", TokenMode::Full);
+    forbidden(
+        t.work_link(Extension(a.clone()), Parameters(link("ABC-1")))
+            .await
+            .unwrap_err(),
+    );
+    forbidden(
+        t.work(
+            Extension(a.clone()),
+            Parameters(WorkArgs {
+                session_id: Some(on_b),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    let b = host_caller("hostb", TokenMode::Full);
+    let row = result_json(
+        &t.work_link(Extension(b.clone()), Parameters(link("abc-1")))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(row["work"]["key"], "ABC-1");
+    // The session ends; its link is past work on hostb.
+    {
+        let st = t.store.lock().unwrap();
+        st.delete_session(on_b).unwrap();
+    }
+    let by_key = |c: Caller| {
+        t.work(
+            Extension(c),
+            Parameters(WorkArgs {
+                key: Some("ABC-1".into()),
+                ..Default::default()
+            }),
+        )
+    };
+    let seen = result_json(&by_key(b.clone()).await.unwrap());
+    assert_eq!(seen.as_array().map(Vec::len), Some(1), "{seen}");
+    let hidden = result_json(&by_key(a.clone()).await.unwrap());
+    assert_eq!(hidden, serde_json::json!([]));
+
+    // M2.4: the resume plan and context of that work are hostb's to read,
+    // and hosta cannot resume it.
+    let plan = |c: Caller| {
+        t.work(
+            Extension(c),
+            Parameters(WorkArgs {
+                key: Some("ABC-1".into()),
+                action: Some("resume_plan".into()),
+                ..Default::default()
+            }),
+        )
+    };
+    let p = result_json(&plan(b).await.unwrap());
+    assert_eq!(p["key"], "ABC-1");
+    assert!(p["modes"].as_array().is_some_and(|m| m.len() == 3), "{p}");
+    forbidden(plan(a.clone()).await.unwrap_err());
+    forbidden(
+        t.work_link(
+            Extension(a),
+            Parameters(WorkLinkArgs {
+                action: "resume".into(),
+                key: Some("ABC-1".into()),
+                mode: Some("fresh".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+}
+
+/// Work graph M4.4: trusting a project's branch keys is fleet configuration
+/// — never a per-host token's — while the master may.
+#[tokio::test]
+async fn trust_project_is_refused_to_a_per_host_token() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = test_tools(s);
+    let args = || WorkLinkArgs {
+        action: "trust_project".into(),
+        project_id: Some(pid),
+        on: Some(true),
+        ..Default::default()
+    };
+    forbidden(
+        t.work_link(
+            Extension(host_caller("hostb", TokenMode::Full)),
+            Parameters(args()),
+        )
+        .await
+        .unwrap_err(),
+    );
+    let ok = result_json(
+        &t.work_link(Extension(Caller::master()), Parameters(args()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(ok["trusted"], serde_json::json!([pid]));
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     let (s, pid, on_b) = two_host_store();
@@ -1046,6 +1164,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 start_command: None,
                 friendly_name: None,
                 resume_claude_session_id: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1062,6 +1181,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 new_worktree: None,
                 base_branch: None,
                 start_command: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1258,6 +1378,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 kind: Some("shell".into()),
                 start_command: Some("echo hi".into()),
                 friendly_name: Some("a".repeat(81)), // over the 80-char cap
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1630,8 +1751,9 @@ fn capture_default_cap_matches_docs() {
 /// count is 73 with `list_host_worktrees`, 74 with `resolve_move`, and 80
 /// with restore_host_sessions/discover_lost_sessions. The fleet-mesh
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
-/// the merged count is 81.) 82 with `peer_exchange`; 83 with
-/// `list_peer_links`.
+/// the merged count is 81, 83 with the work graph's `work` / `work_link`,
+/// 84 with `work_admin`; hub federation adds `peer_exchange` and
+/// `list_peer_links`: 86.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1652,7 +1774,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 83);
+    assert_eq!(served, 86);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2530,6 +2652,58 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
     assert!(!client.iter().any(|n| n == "provision_hosts"));
 }
 
+/// The phone gates its work UI on `tools/list` rather than on the contract
+/// revision (work graph M8, review C19): `work` present → chips and
+/// grouping, `work_link` present → Confirm / Not this / Start / Resume. So a
+/// readonly paired token must be served `work` and not `work_link`, a full
+/// one both, and neither ever `work_admin` (master only). The served
+/// `action` enums are what the phone reads for per-action buttons.
+#[test]
+fn a_client_token_is_served_work_and_work_link_by_mode_and_never_work_admin() {
+    let all = FleetTools::tool_router_for_doc().list_all();
+    let served = |caller: &Caller| -> Vec<rmcp::model::Tool> {
+        all.iter()
+            .filter(|t| present::visible_to(caller, &t.name))
+            .cloned()
+            .map(present::present)
+            .collect()
+    };
+    let has = |tools: &[rmcp::model::Tool], name: &str| tools.iter().any(|t| t.name == name);
+
+    let ro = served(&client_caller("phone", TokenMode::Readonly));
+    assert!(has(&ro, "work"), "a readonly phone must see work");
+    assert!(
+        !has(&ro, "work_link"),
+        "a readonly phone must not see work_link"
+    );
+    assert!(!has(&ro, "work_admin"));
+
+    let full = served(&client_caller("phone", TokenMode::Full));
+    assert!(has(&full, "work") && has(&full, "work_link"));
+    assert!(!has(&full, "work_admin"), "work_admin is master only");
+
+    for (tool, table) in [
+        (
+            "work",
+            crate::service::work::WORK_ACTIONS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "work_link",
+            crate::service::work::WORK_LINK_ACTIONS.to_vec(),
+        ),
+    ] {
+        let t = full.iter().find(|t| t.name == tool).expect(tool);
+        assert_eq!(
+            t.input_schema["properties"]["action"]["enum"],
+            serde_json::json!(table),
+            "{tool}'s served action enum"
+        );
+    }
+}
+
 #[test]
 fn presented_tools_drop_schema_noise_and_keep_the_contract() {
     let tool = FleetTools::tool_router_for_doc()
@@ -2989,7 +3163,91 @@ fn the_served_definition_budget_stays_bounded() {
     // surface (`peer_exchange` alone does not count — it is peer-only, see
     // the `peer` entry logged below). Measured at 64,929; raised to that plus
     // the customary 100.
-    const BUDGET_BYTES: usize = 65_029;
+    //
+    // Raised for the work graph (roadmap M1b.2, review C21): two tools,
+    // `work` (read) and `work_link` (link / reject / unlink), with one-line
+    // descriptions and one-clause parameter docs. The surface had 100 bytes
+    // of headroom and two new tools cannot fit in that whatever the wording.
+    // Measured at 65,687 on 2026-09-24; raised to that plus the customary
+    // 100. M0.6 (tighten the existing descriptions) is still open and is
+    // where this is paid back.
+    //
+    // Raised again for work graph M2.4: the `work` read actions (context,
+    // resume_plan, purge_impact) and `work_link { action: resume }` go on
+    // the two existing tools (no new tool), but their eight parameters cost
+    // schema bytes whatever the wording; descriptions stay one clause.
+    // Measured at 66,421 on 2026-09-24; raised to that plus 100.
+    // Raised for work graph M3.1: `work_admin`, the one new tool the M3 plan
+    // allows (trackers and credentials, master only), ten parameters of
+    // one clause each. Measured at 67,312 on 2026-09-24; plus 100.
+    // Raised for work graph M3.4: `work` gains tickets / lookup / trackers
+    // (tracker_id, view, query, limit, url) and `work_link` gains start
+    // (url, project_id, with_brief) — eight parameters on the two existing
+    // tools, no new tool. Measured at 68,066 on 2026-09-24; plus 100.
+    // M3.5: start's `name` / `worktree`, so the New-session dialog's edits
+    // reach a ticket start. Measured at 68,213 on 2026-09-24; plus 100.
+    // Work graph M4.4: `work_link` gains confirm / reject-by-link_id /
+    // trust_project (one new parameter, `on`, and a longer description);
+    // no new tool. Measured at 68,385 on 2026-09-24 (+172); plus 100.
+    // Work graph M5.1 + M5.2: `work` gains scopes / orgs / org_suggestions
+    // (no parameter) and `work_admin` gains the org actions with eight
+    // one-word parameters (org_id, color, isolate_sessions, owner, repo,
+    // path_prefix, host_alias, rule_id); its description was cut to "see
+    // action" to pay part of it. No new tool. Measured at 69,012 on
+    // 2026-09-24 (+627); plus 100.
+    // Work graph M5.3: `work_link` gains `force_cross_org` (the cross-org
+    // integrity override). Measured at 69,099 on 2026-09-24 (+87); plus 100.
+    // Work graph M7.2 (merged onto M5): `work` gains tidy / reopened,
+    // `work_link` gains archive / unarchive / snooze / never / dismiss /
+    // tidy_apply (three new parameters: days, items, confirm_nonce), and is
+    // now confirm-gated for tidy_apply's kills; no new tool. M7 alone
+    // measured +639; with M5's `work_admin` gaining `auto_tidy` (the per-org
+    // override), measured at 69,759 on 2026-09-24 (+660).
+    // Work graph M6.1: `work_admin` gains `transport` (direct | via_host |
+    // via_cli, so GitHub is read through `gh` on a host) and `settings`
+    // (the provider's admin settings object); `provider` lists the five
+    // providers. No new tool. Measured at 68,553 on the M4 base (+168);
+    // merged over M5, 69,288 on 2026-09-24 (+189 over M5's 69,099); plus
+    // 100.
+    // Work graph M8.0: `work` / `work_link` `action` became a schema `enum`
+    // generated from the tables the parser and the dispatch read
+    // (`WORK_ACTIONS`, `WORK_LINK_ACTIONS`), so the phone draws a button only
+    // for an action the hub serves; the two doc lines that listed them by
+    // hand were cut to "Default links." / "The decision.". Measured at 69,171
+    // on 2026-09-24 on top of M5 alone (+72).
+    // M7 merged with M8.0 (M7's actions now in the enums): measured at
+    // 70,020 on 2026-09-24 (+261 over M7-on-M5; the enums list M7's eight
+    // actions too).
+    // M6.1 and M8.0 merged (main): measured at 69,360 on 2026-09-24 (M5's
+    // 69,099 + 189 for M6.1 + 72 for M8.0).
+    // M6 (main, #266) merged into M7: `work_admin` carries both M6's
+    // `transport` / `settings` and M7's `auto_tidy`, the enums M7's actions.
+    // Measured at 70,209 on 2026-09-25 (M7-on-M8.0 70,020 + 189 for M6.1);
+    // plus 100.
+    // Work graph M9.1: `work` gains `today` (the Today view's digest) and
+    // one parameter, `since`. No new tool. Measured at 69,265 on 2026-09-25
+    // (+94); plus 100.
+    // Work graph M9.2: `work` gains `card` (the ticket context card; no
+    // parameter). Measured at 69,284 on 2026-09-25 (+19): inside the
+    // headroom, so the constant was not raised.
+    // M9.1 + M9.2 merged over M6: measured at 69,473 on 2026-09-25 (M6's
+    // 69,360 + 113); plus 100.
+    // Work graph M9.7 (decision D12): `confirm_nonce` on new_session,
+    // new_shell_session, safe_kill_session and work_link, so the operator's
+    // starts and kills can carry an approval. Measured at 69,801 on
+    // 2026-09-25 (+328); plus 100.
+    // Work graph M9.3: `work_link` gains `handover` (one enum value and a
+    // clause of description). Measured at 69,865 on 2026-09-25 (+64): inside
+    // the headroom, not raised.
+    // Work graph M9.6: `work_link` start gains `project_ids` (a multi-repo
+    // start). Measured at 69,998 on 2026-09-25 (+133); plus 100.
+    // M7 (main, #267) merged into M9: measured at 70,765 on 2026-09-25
+    // (M7-on-M6's 70,209 + 556 for M9.1-M9.7; M7 had already added
+    // `confirm_nonce` to `work_link`); plus 100.
+    // Hub federation merged onto M9 (main): `list_peer_links` and the
+    // federation clauses on the messaging tools. Measured at 71,066 on
+    // 2026-09-25 (+301 over M9's 70,765); plus 100.
+    const BUDGET_BYTES: usize = 71_166;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -4049,6 +4307,17 @@ fn one_full_row() -> serde_json::Value {
     // pinning test pass by that field never being there — which is the thing
     // it exists to catch.
     row.claude_status = Some("blocked".to_string());
+    // With a suggestion, for the same reason: `work_suggested` is skipped
+    // when there is none, so without one the pinning tests could not tell
+    // the field from a misspelling.
+    row.work_suggested = Some(crate::store::WorkSummary {
+        link_id: 7,
+        key: Some("ABC-1".to_string()),
+        source: "prompt".to_string(),
+        state: "suggested".to_string(),
+        suggestions: 1,
+        ..Default::default()
+    });
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -4089,6 +4358,8 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "turn_seq",
             "usage_cost_micros",
             "usage_model",
+            "work",
+            "work_suggested",
         ]
     );
 }
@@ -4159,14 +4430,18 @@ async fn fresh_for_is_opt_in_and_the_default_answer_is_byte_identical() {
     // list_sessions: fully defaulted, so an empty object round-trips.
     let p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
     assert!(p.fresh_for.is_none());
-    t.list_sessions(Parameters(p)).await.unwrap();
+    t.list_sessions(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
     assert_eq!(cursor_count(&t), 0, "list_sessions wrote a cursor unasked");
 
     // session_history
     let p: SessionHistoryParams =
         serde_json::from_value(serde_json::json!({ "session_id": sid, "limit": null })).unwrap();
     assert!(p.fresh_for.is_none());
-    t.session_history(Parameters(p)).await.unwrap();
+    t.session_history(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
     assert_eq!(
         cursor_count(&t),
         0,
@@ -5217,11 +5492,14 @@ async fn a_history_cursor_that_falls_behind_pages_through_everything() {
     let mut more_pages = 0;
     for _ in 0..4 {
         let out = t
-            .session_history(Parameters(SessionHistoryParams {
-                session_id: target,
-                limit: Some(2),
-                fresh_for: Some(reader),
-            }))
+            .session_history(
+                Extension(Caller::master()),
+                Parameters(SessionHistoryParams {
+                    session_id: target,
+                    limit: Some(2),
+                    fresh_for: Some(reader),
+                }),
+            )
             .await
             .unwrap();
         let v = result_json(&out);
@@ -5262,12 +5540,18 @@ async fn a_history_read_that_has_caught_up_answers_unchanged_with_no_rows() {
         limit: Some(50),
         fresh_for: Some(reader),
     };
-    let first = t.session_history(Parameters(params())).await.unwrap();
+    let first = t
+        .session_history(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v = result_json(&first);
     assert_eq!(v["unchanged"], false);
     assert_eq!(v["data"].as_array().unwrap().len(), 1);
 
-    let second = t.session_history(Parameters(params())).await.unwrap();
+    let second = t
+        .session_history(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(v2["unchanged"], true);
     assert_eq!(v2["data"].as_array().unwrap().len(), 0);
@@ -5293,11 +5577,14 @@ async fn two_readers_of_one_targets_history_each_see_the_full_sequence() {
     let t = test_tools(s);
     for reader in [reader_a, reader_b] {
         let out = t
-            .session_history(Parameters(SessionHistoryParams {
-                session_id: target,
-                limit: Some(50),
-                fresh_for: Some(reader),
-            }))
+            .session_history(
+                Extension(Caller::master()),
+                Parameters(SessionHistoryParams {
+                    session_id: target,
+                    limit: Some(50),
+                    fresh_for: Some(reader),
+                }),
+            )
             .await
             .unwrap();
         let v = result_json(&out);
@@ -5320,11 +5607,14 @@ async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cu
     let t = test_tools(s);
     let missing_reader = 999_999;
     let out = t
-        .session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(50),
-            fresh_for: Some(missing_reader),
-        }))
+        .session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(missing_reader),
+            }),
+        )
         .await
         .unwrap();
     let v = result_json(&out);
@@ -5360,11 +5650,14 @@ async fn session_history_with_an_unknown_reader_terminates_with_the_default_page
     }
     let t = test_tools(s);
     let call = |fresh_for: Option<i64>| {
-        t.session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(2),
-            fresh_for,
-        }))
+        t.session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(2),
+                fresh_for,
+            }),
+        )
     };
     let default_page = result_json(&call(None).await.unwrap());
     for n in 1..=2 {
@@ -5623,11 +5916,14 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     let t = test_tools(s);
 
     let out = t
-        .session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(0),
-            fresh_for: None,
-        }))
+        .session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(0),
+                fresh_for: None,
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -5637,11 +5933,14 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     );
 
     let out = t
-        .session_history(Parameters(SessionHistoryParams {
-            session_id: target,
-            limit: Some(-1),
-            fresh_for: None,
-        }))
+        .session_history(
+            Extension(Caller::master()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(-1),
+                fresh_for: None,
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -5713,6 +6012,17 @@ fn the_phone_view_drops_the_columns_no_screen_reads() {
     for kept in PHONE_SESSION_FIELDS {
         assert!(obj.contains_key(*kept), "{kept} fell out of the phone view");
     }
+}
+
+/// The phone's tags editor starts from the row's `tags` and
+/// `set_session_tags` replaces the whole list, so a view without them made a
+/// phone that added one tag delete all the others.
+#[test]
+fn the_phone_view_keeps_tags_so_a_phone_edit_does_not_wipe_them() {
+    let mut rows = one_full_row();
+    rows[0]["tags"] = serde_json::json!(["mobile", "wip"]);
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    assert_eq!(rows[0]["tags"], serde_json::json!(["mobile", "wip"]));
 }
 
 /// A projection that is not an array of rows is left alone rather than
@@ -5824,7 +6134,10 @@ async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
         p
     };
 
-    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v1 = result_json(&first);
     assert_eq!(
         v1["unchanged"], false,
@@ -5835,7 +6148,10 @@ async fn list_sessions_fresh_for_answers_unchanged_on_a_repeat_read() {
         "first read must carry the payload: {v1}"
     );
 
-    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let second = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(
         v2["unchanged"], true,
@@ -5864,7 +6180,10 @@ async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
         p
     };
 
-    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     assert_eq!(result_json(&first)["unchanged"], false);
 
     // A status change on the target row, applied directly — the freshness
@@ -5880,7 +6199,10 @@ async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
         )
         .unwrap();
 
-    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let second = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(
         v2["unchanged"], false,
@@ -5918,7 +6240,10 @@ async fn a_new_session_reusing_a_dead_readers_id_gets_a_full_first_list_sessions
         p.fresh_for = Some(reader);
         p
     };
-    let first = t.list_sessions(Parameters(params(reviewer))).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params(reviewer)))
+        .await
+        .unwrap();
     assert_eq!(result_json(&first)["unchanged"], false);
 
     // The reviewer is killed and reaped; a new one is spawned at once, well
@@ -5943,7 +6268,11 @@ async fn a_new_session_reusing_a_dead_readers_id_gets_a_full_first_list_sessions
         )
         .unwrap();
 
-    let v = result_json(&t.list_sessions(Parameters(params(reborn))).await.unwrap());
+    let v = result_json(
+        &t.list_sessions(Extension(Caller::master()), Parameters(params(reborn)))
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         v["unchanged"], false,
         "a new session's FIRST read is never unchanged: {v}"
@@ -5978,13 +6307,19 @@ async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
     let filter_a: ListSessionsParams =
         serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
             .unwrap();
-    let out_a1 = t.list_sessions(Parameters(filter_a)).await.unwrap();
+    let out_a1 = t
+        .list_sessions(Extension(Caller::master()), Parameters(filter_a))
+        .await
+        .unwrap();
     assert_eq!(result_json(&out_a1)["unchanged"], false);
 
     let filter_a_repeat: ListSessionsParams =
         serde_json::from_value(serde_json::json!({ "status": "running", "fresh_for": reader }))
             .unwrap();
-    let out_a2 = t.list_sessions(Parameters(filter_a_repeat)).await.unwrap();
+    let out_a2 = t
+        .list_sessions(Extension(Caller::master()), Parameters(filter_a_repeat))
+        .await
+        .unwrap();
     assert_eq!(
         result_json(&out_a2)["unchanged"],
         true,
@@ -5995,7 +6330,10 @@ async fn list_sessions_fresh_for_keeps_two_different_filters_independent() {
     // first read, never `unchanged` from filter_a's cursor.
     let filter_b: ListSessionsParams =
         serde_json::from_value(serde_json::json!({ "fresh_for": reader })).unwrap();
-    let out_b1 = t.list_sessions(Parameters(filter_b)).await.unwrap();
+    let out_b1 = t
+        .list_sessions(Extension(Caller::master()), Parameters(filter_b))
+        .await
+        .unwrap();
     assert_eq!(
         result_json(&out_b1)["unchanged"],
         false,
@@ -6033,7 +6371,10 @@ async fn list_sessions_with_an_unknown_fresh_for_answers_full_and_writes_no_curs
     // Make the assertion able to fail: the read itself must succeed even
     // though the reader does not exist — a missing ReaderUnknown guard would
     // otherwise visibly insert a row here rather than silently no-op.
-    let out = t.list_sessions(Parameters(p)).await.unwrap();
+    let out = t
+        .list_sessions(Extension(Caller::master()), Parameters(p))
+        .await
+        .unwrap();
     let v = result_json(&out);
     assert_eq!(v["cursor_reset"], "reader_unknown");
     assert_eq!(v["unchanged"], false);
@@ -6221,7 +6562,10 @@ async fn list_sessions_fresh_for_is_unchanged_when_only_row_order_flips() {
         p
     };
 
-    let first = t.list_sessions(Parameters(params())).await.unwrap();
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     assert_eq!(result_json(&first)["unchanged"], false);
 
     // Only `last_activity_at` moves — no field the slim shape (or the hash)
@@ -6237,10 +6581,224 @@ async fn list_sessions_fresh_for_is_unchanged_when_only_row_order_flips() {
         .unwrap();
     assert!(a != b, "sanity: two distinct rows");
 
-    let second = t.list_sessions(Parameters(params())).await.unwrap();
+    let second = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
     let v2 = result_json(&second);
     assert_eq!(
         v2["unchanged"], true,
         "a pure reorder from a field the slim shape drops must not invalidate the cursor: {v2}"
     );
+}
+
+/// Work graph M9.7 (decision D12): the operator's starts and kills always
+/// need a person's approval, whatever `mcp.confirm_destructive` says; for
+/// everyone else nothing changes.
+#[test]
+fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
+    for tool in [
+        "new_session",
+        "new_shell_session",
+        "safe_kill_session",
+        "work_link",
+        "kill_session",
+        "delete_worktree",
+        "broadcast_prompt",
+    ] {
+        assert!(guard::operator_must_confirm(true, tool), "{tool}");
+        assert!(!guard::operator_must_confirm(false, tool), "{tool}");
+    }
+    for tool in ["list_sessions", "send_prompt", "work", "restart_session"] {
+        assert!(!guard::operator_must_confirm(true, tool), "{tool}");
+    }
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    assert!(op.is_operator());
+    assert!(!client_caller("phone", TokenMode::Full).is_operator());
+    assert!(!Caller::master().is_operator());
+    assert!(!host_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full
+    )
+    .is_operator());
+}
+
+fn guarded_tools(s: Store, approver: bool) -> FleetTools {
+    let g = McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {}));
+    FleetTools::new(
+        Arc::new(Mutex::new(s)),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        if approver { g } else { g.without_approver() },
+    )
+}
+
+fn confirm_nonce_of(e: &McpError) -> String {
+    assert!(e.message.starts_with("E_CONFIRM_REQUIRED"), "{}", e.message);
+    e.data.as_ref().unwrap()["details"]["confirm_nonce"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    // An unknown item: the start itself fails locally, after the gate.
+    let start = |nonce: Option<String>| WorkLinkArgs {
+        action: "start".into(),
+        item_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+    let phone = t
+        .work_link(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(start(None)),
+        )
+        .await
+        .unwrap_err();
+    assert!(phone.message.starts_with("E_NOTFOUND"), "{}", phone.message);
+
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(start(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(
+        asked
+            .message
+            .contains("the operator's starts and kills always do"),
+        "{}",
+        asked.message
+    );
+    // Approved: the call goes through to the start (which then refuses the
+    // unknown item on its own).
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let after = t
+        .work_link(Extension(op.clone()), Parameters(start(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(after.message.starts_with("E_NOTFOUND"), "{}", after.message);
+
+    // Denied: refused, and nothing ran.
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(start(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, false));
+    let denied = t
+        .work_link(Extension(op.clone()), Parameters(start(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        denied.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        denied.message
+    );
+
+    // A decision on a link is not a start: never gated.
+    t.work_link(
+        Extension(op),
+        Parameters(WorkLinkArgs {
+            session_id: Some(on_b),
+            action: "link".into(),
+            key: Some("PAY-7".into()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("link is not gated");
+}
+
+#[tokio::test]
+async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
+    let (s, pid, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let e = t
+        .new_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "project_id": pid, "name": "x"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .new_shell_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "project_id": pid, "name": "sh"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .safe_kill_session(
+            Extension(op.clone()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    // `kill_session` is confirm-gated for everyone once the toggle is on; for
+    // the operator it is gated with the toggle off too.
+    let e = t
+        .kill_session(
+            Extension(op),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+}
+
+#[tokio::test]
+async fn a_hub_with_no_approver_refuses_the_operator_s_start_outright() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, false);
+    let e = t
+        .work_link(
+            Extension(client_caller(
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                TokenMode::Full,
+            )),
+            Parameters(WorkLinkArgs {
+                action: "start".into(),
+                item_id: Some(1),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("no approver"),
+        "{}",
+        e.message
+    );
+    assert!(t.guards.confirms.pending_tools().is_empty());
 }

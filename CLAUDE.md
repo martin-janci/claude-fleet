@@ -107,7 +107,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 123
+  verdict is written down once, in `backend/verdicts.rs`, for all 173
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -172,6 +172,62 @@ reached `main` only on 2026-09-22: PR #161 was merged into the stacked branch
 `feat/host-reboot-survival`, which was never re-merged after PR 1/2 (#135)
 landed on its own, so for three days this paragraph described half a feature.
 When a stacked PR says MERGED, check what it was merged INTO.
+
+The work graph's M0–M3 are landed (work links anchored on participants,
+group-by-work, and M2's work journal, carry rules, handover brief and resume
+— `work` / `work_link` actions, `service/work/`; M3's trackers: Jira Cloud
+read-only over `fleet-core::net`, the sync tick, `work_admin`, tickets /
+lookup / start — `service/trackers/`, `store/trackers.rs`,
+`store/tracker_items.rs`); read
+`docs/superpowers/2026-09-24-work-graph-roadmap.md` before touching them.
+Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
+Work graph M4 (detection) is landed: one recogniser in Rust and TS over a
+shared fixture (`service/work/recognize.rs`, `src/lib/work_keys.ts`), the
+pure resolver (`service/work/resolve.rs`, rules R1–R9 and R3u; state signals are
+current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
+probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
+never groups a session), and the chip / popover / batch review UI. The
+SessionStart context (M4.5) is built but OFF behind
+`work.session_start_context` (decision D5); M4.6 is not done.
+Work graph M5 (organisations) is landed: migration 050 (`orgs`, text-keyed
+`org_rules`, `hosts.org_id`, `work_links.snap_org_id`), `SessionRow.org_id`
+(SQL, `session_org_sql!`, held equal to `store::org_of_session`), and the
+org BOUNDARY for per-host tokens — `service::orgs::OrgScope`, made only by
+`Caller::org_scope`, filters every work read in the service layer, and
+`call_tool` redacts session rows' work in everything a host receives. M3's
+per-host ticket fence is kept (composed with the org). Cross-org links need
+`force_cross_org` for every caller; `isolate_sessions` (D7) is per org, off.
+Any new `work` / `work_link` / `work_admin` action needs a row in the
+isolation matrix (`mcp/tools/tests_isolation.rs`), which fails otherwise.
+Work graph M6 (more providers) is landed: GitHub Issues (through `gh` on a
+host, `transport = via_cli:<host>`, no token in fleet), Asana (`asana:<gid>`
+keys, events-API sync tokens, the section map), Linear, and Jira Data Center
+(admin-fenced site: exact host, resolve-then-refuse loopback / link-local,
+optional `extra_ca`), all behind the `TrackerProvider` trait and the
+`HttpTransport` seam (`net/via_host.rs` has `gh` and host-side `curl`, the
+credential only ever on stdin), migration 051 (`tracker_views.sync_mark`,
+`trackers.settings`). A new provider must pass the conformance suite
+(`service/trackers/conformance.rs`, `conformance_suite!`) and
+`tests_isolation_providers.rs`.
+Work graph M7 (self-cleaning lifecycle) is landed: the pure planner
+`service/gc/tidy.rs` (reasons, hard-coded protections), migrations 052
+(UI-only archive, snooze / never per link, `sessions.last_touch_at`,
+`work_items.reopened_at`) and 053 (`orgs.auto_tidy`), `work { tidy | reopened }` and
+`work_link { archive | unarchive | snooze | never | dismiss | tidy_apply }`,
+and auto-tidy in the GC sweep behind `work.auto_tidy` (OFF; safe kill only),
+overridable per org. Tidy-up suggests; it never kills a dirty tree except
+through safe kill, and a per-host token sees only its host's and org's
+candidates.
+Work graph M9.1 / M9.2 are landed: the Today view (`work { action: today }`,
+Details' empty state and ⌘⇧T, a plain-text Copy standup) and the ticket
+context card (`work { action: card }`, acceptance criteria from the cache,
+Insert into composer with the hub-fenced `composer_text` — never sent).
+M9.7 (the operator's starts and kills always confirmed; refused on a hub),
+M9.3 (agent-written handover on demand, `work_link { action: handover }`)
+and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
+too. Write-back (D3 none), dead-session summaries (D10 off) and webhooks
+(D13 no) are decided against and not built; see
+`docs/superpowers/plans/2026-09-24-work-graph-m9-beyond.md`.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

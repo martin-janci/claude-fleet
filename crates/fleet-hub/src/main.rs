@@ -2,12 +2,14 @@
 
 mod config;
 mod demo;
+mod org;
 mod out;
 mod pair;
 mod peer;
 mod reports;
 mod serve;
 mod tls;
+mod tracker;
 
 use clap::{Parser, Subcommand};
 use config::HubOptions;
@@ -100,6 +102,27 @@ enum Cmd {
     Peer {
         #[command(subcommand)]
         cmd: PeerCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Add, test and remove issue trackers (Jira Cloud). Needs a running hub.
+    ///
+    /// The API token is read from stdin, `--from-env` or a `--ref`, never
+    /// from an argument.
+    Tracker {
+        #[command(subcommand)]
+        cmd: tracker::TrackerCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Name organisations, their placement rules, and which org each host
+    /// and tracker belongs to (work graph M5). Needs a running hub.
+    ///
+    /// A host's org is its token's boundary: that host's Claude reads only
+    /// its org's and unassigned work.
+    Org {
+        #[command(subcommand)]
+        cmd: org::OrgCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -241,6 +264,8 @@ async fn main() -> ExitCode {
             PeerCmd::List => peer::list(&opts, &env),
             PeerCmd::Remove { target } => peer::remove(&opts, &env, &target),
         },
+        Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
+        Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,

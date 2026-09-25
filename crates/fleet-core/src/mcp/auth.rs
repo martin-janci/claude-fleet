@@ -113,12 +113,41 @@ impl Caller {
         self.client.is_some()
     }
 
+    /// True for the UX agent's operator session: the paired client token
+    /// `ensure_operator` mints under [`OPERATOR_CLIENT_NAME`]. Its session
+    /// starts and kills always need a person's approval (work graph M9.7,
+    /// decision D12).
+    ///
+    /// [`OPERATOR_CLIENT_NAME`]: crate::service::operator::OPERATOR_CLIENT_NAME
+    pub fn is_operator(&self) -> bool {
+        self.host_alias.is_none()
+            && self
+                .client
+                .as_ref()
+                .is_some_and(|c| c.name == crate::service::operator::OPERATOR_CLIENT_NAME)
+    }
+
     /// True for a paired client the operator has vouched for
     /// (`client_tokens.trusted_at` set): its text is the operator's own, so
     /// the untrusted-content marker is left off. Never true for the master
     /// (which has `raw` for that) or a per-host token.
     pub fn is_trusted_client(&self) -> bool {
         self.client.as_ref().is_some_and(|c| c.trusted)
+    }
+
+    /// The work graph's org scope for this caller (M5) — the ONE place a
+    /// caller becomes a scope. The master and a paired client read every
+    /// org (the org is a view there); a per-host token is bounded by its
+    /// host's org, read from the store now, so a host moved by the master
+    /// is fenced from its next call on.
+    pub fn org_scope(
+        &self,
+        store: &crate::store::Store,
+    ) -> Result<crate::service::orgs::OrgScope, crate::ipc_error::IpcError> {
+        match &self.host_alias {
+            None => Ok(crate::service::orgs::OrgScope::All),
+            Some(h) => crate::service::orgs::OrgScope::for_host(store, h),
+        }
     }
 
     /// Short identity label for audit rows and rate-limit buckets.

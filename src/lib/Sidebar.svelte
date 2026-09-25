@@ -10,6 +10,7 @@
     restartSession,
     purgeProject,
     showBgAgents,
+    sidebarGroupBy,
     sameSession,
     hasNoPane,
     type SessionRow,
@@ -27,6 +28,7 @@
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter } from './hosts';
+  import { effectiveScope, scopeOf, orgColorById, orgColorOf, projectOwners } from './orgs';
   import { onboardingDismissed } from './onboarding';
   import {
     hostsViewOpen,
@@ -39,13 +41,23 @@
     buildSessionsByProject,
     buildOutsideFleet,
     buildRelatedCountById,
+    buildSessionsByWork,
     sessionVisible,
+    rowMatches,
     sortProjectsBySeverity,
+    sortWorkGroups,
+    type FilterRow,
     type SessionPredicate,
+    type WorkGroup,
   } from './sidebar_index';
+  import { workGroupPrSummary, workGroupTicket, workKeyFor, worktreeBranchById } from './work_keys';
+  import { statusDotClass, unavailableLabel } from './trackers';
   import {
+    ciStatusColor,
+    ciStatusLabel,
     countNeedsYou,
     needsYou,
+    severity,
     worstSeverityByProject,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
@@ -58,6 +70,22 @@
   import TasksPanel from './TasksPanel.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
   import SessionRowItem from './SessionRowItem.svelte';
+  import ResumeButton from './ResumeButton.svelte';
+  import {
+    reopenedBadge,
+    reopenedByKey,
+    reopenedWork,
+    splitArchived,
+    unarchiveSession,
+  } from './tidy';
+  import {
+    loadPastWork,
+    pastWork,
+    pastWorkSummary,
+    workPurgeImpact,
+    type WorkLink,
+  } from './work';
+  import { timeAgo } from './session_status';
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
   import { isRecency, matchesRecency, type Recency } from './session_status';
 
@@ -149,6 +177,12 @@
     return () => clearInterval(t);
   });
   const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
+  // The org scope (work graph M5): a view filter composed into every
+  // builder below through `rowMatches`. `null` while no scope is chosen or
+  // the selector is hidden (fewer than two scopes).
+  const scopeSel = $derived(
+    $effectiveScope === 'all' ? null : { id: $effectiveScope, of: $scopeOf },
+  );
   const rowPredicate = $derived.by((): SessionPredicate => {
     if (!needsYouOnly) return null;
     const opts = attentionOpts;
@@ -209,6 +243,8 @@
   // is open by default — most users have one or two projects and want to
   // see their sessions immediately.
   let collapsed: Set<number> = $state(new Set());
+  // Work groups the user collapsed ("group by work" mode), by key.
+  let collapsedWork: Set<string> = $state(new Set());
 
   let sidebarEl: HTMLElement | undefined = $state();
 
@@ -223,6 +259,12 @@
       const next = new Set(collapsed);
       next.delete(sess.project_id);
       collapsed = next;
+    }
+    const workKey = workKeyed?.get(sess.id)?.key;
+    if (workKey !== undefined && collapsedWork.has(workKey)) {
+      const next = new Set(collapsedWork);
+      next.delete(workKey);
+      collapsedWork = next;
     }
     void tick().then(() => {
       const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${sess.id}"]`);
@@ -322,7 +364,7 @@
   // counters must keep reporting while a triage filter is active, and the
   // project sort must weigh every visible session, not just the filtered ones.
   const hostVisibleSessions = $derived(
-    $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents)),
+    $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents, null, scopeSel)),
   );
   // countNeedsYou() classifies each row, and classify() files an external
   // (Outside fleet) row as working/idle, so a read-only row never inflates
@@ -357,11 +399,127 @@
 
   // --- Memoised indices (rebuilt once per $sessions change, not per row) ---
 
+  // ── Group by work (roadmap M1) ──
+  // worktree id → branch, and the sessions that carry a work key (tag,
+  // branch or worktree name — see work_keys.ts). Only built in work mode.
+  const branchById = $derived(worktreeBranchById($projects));
+  const workIndex = $derived(
+    $sidebarGroupBy === 'work'
+      ? buildSessionsByWork(
+          $sessions,
+          $hostFilter,
+          $showBgAgents,
+          rowPredicate,
+          (s) => workKeyFor(s, branchById),
+          scopeSel,
+        )
+      : null,
+  );
+  const workKeyed = $derived(workIndex?.keyed ?? null);
+  function workGroupMatchesSearch(g: WorkGroup, q: string): boolean {
+    if (!q) return true;
+    const needle = q.toLowerCase();
+    if (g.key.toLowerCase().includes(needle)) return true;
+    return g.sessions.some((s) => sessionMatchesSearch(s, needle));
+  }
+  const workGroups = $derived(
+    workIndex
+      ? sortWorkGroups(
+          workIndex.groups.filter((g) => workGroupMatchesSearch(g, searchQuery)),
+          severity,
+        )
+      : [],
+  );
+  // The project tree (and "Other sessions") keep only what no work group
+  // took: hybrid grouping, no "Unclassified" bucket. In project mode this is
+  // just the triage predicate.
+  const treePredicate = $derived.by((): SessionPredicate => {
+    const keyed = workKeyed;
+    const base = rowPredicate;
+    if (!keyed || keyed.size === 0) return base;
+    return (s) => !keyed.has(s.id) && (base ? base(s) : true);
+  });
+
+  // ── Past work (roadmap M2.5) ──
+  // Ended links: a live group's collapsed "Done · n", and a group of its own
+  // (collapsed) for work that has only ended sessions — so reopened work has
+  // somewhere to show. Reloaded when the live keys or the session count
+  // change (a session ending is what makes past work).
+  let openDone: Set<string> = $state(new Set());
+  let openPast: Set<string> = $state(new Set());
+  const liveWorkKeys = $derived(workGroups.map((g) => g.key).join('\n'));
+  $effect(() => {
+    if ($sidebarGroupBy !== 'work') return;
+    const keys = liveWorkKeys;
+    void $sessions.length;
+    untrack(() => void loadPastWork(keys ? keys.split('\n') : []));
+  });
+  const pastOnlyGroups = $derived.by((): { key: string; links: WorkLink[] }[] => {
+    if ($sidebarGroupBy !== 'work') return [];
+    const live = new Set(workGroups.map((g) => g.key));
+    const q = searchQuery.toLowerCase();
+    const out: { key: string; links: WorkLink[] }[] = [];
+    for (const [key, links] of $pastWork) {
+      if (live.has(key) || links.length === 0) continue;
+      // Hosts (and scopes) outside the filter hide their past work too.
+      const shown = links.filter((l) =>
+        rowMatches(pastFilterRow(l), { host: $hostFilter, scope: $effectiveScope }),
+      );
+      if (shown.length === 0) continue;
+      if (
+        q &&
+        !key.toLowerCase().includes(q) &&
+        !shown.some((l) => (l.snap_name ?? '').toLowerCase().includes(q))
+      )
+        continue;
+      out.push({ key, links: shown });
+    }
+    return out.sort((a, b) => (b.links[0].ended_at ?? 0) - (a.links[0].ended_at ?? 0));
+  });
+  // ── Lifecycle (work graph M7.3) ──
+  // Archived live sessions collapse into their group's Done (tmux keeps
+  // running; one click brings them back); reopened work carries a badge.
+  const reopenedKeys = $derived(reopenedByKey($reopenedWork));
+  let unarchiving: Set<number> = $state(new Set());
+  async function unarchive(id: number, e?: Event) {
+    e?.stopPropagation();
+    if (unarchiving.has(id)) return;
+    unarchiving = new Set([...unarchiving, id]);
+    const r = await unarchiveSession(id);
+    unarchiving = new Set([...unarchiving].filter((x) => x !== id));
+    if (!r.ok) pushError(r.error, 'Un-archive failed');
+  }
+  /** A past (ended) link as a filter row: its snapshot's host, and its
+   *  org — else its snapshot project's owner — as its scope. */
+  function pastFilterRow(l: WorkLink): FilterRow {
+    const owner = l.snap_project_id != null ? $projectOwners.get(l.snap_project_id) : undefined;
+    return {
+      host: l.snap_host ?? null,
+      scope: l.org_id != null ? `org:${l.org_id}` : owner ? `owner:${owner}` : 'unassigned',
+      live: false,
+      archived: true,
+    };
+  }
+  function toggleIn(set: Set<string>, key: string): Set<string> {
+    const next = new Set(set);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  }
+
+  function toggleWorkCollapse(key: string) {
+    const next = new Set(collapsedWork);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    collapsedWork = next;
+  }
+
+
   // Map: project_id → sessions filtered by current hostFilter. This derived
   // value is read directly in the template so Svelte tracks it reactively —
   // using a plain function via {@const} doesn't establish the dependency.
   const filteredSessionsByProject = $derived(
-    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, rowPredicate),
+    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, treePredicate, scopeSel),
   );
 
 
@@ -384,14 +542,14 @@
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
-        sessionVisible(s, $hostFilter, $showBgAgents, rowPredicate),
+        sessionVisible(s, $hostFilter, $showBgAgents, treePredicate, scopeSel),
     ),
   );
 
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
-  const outsideFleet = $derived(buildOutsideFleet($sessions, $hostFilter));
+  const outsideFleet = $derived(buildOutsideFleet($sessions, $hostFilter, scopeSel));
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
@@ -705,6 +863,19 @@
   // --- Purge Project ---
   let pendingPurge: ProjectRow | null = $state(null);
 
+  // The work keys whose conversations the purge would take away, named in
+  // the confirmation (M2.5). Empty when there are none or the hub is older.
+  let purgeKeys: string[] = $state([]);
+  $effect(() => {
+    const p = pendingPurge;
+    purgeKeys = [];
+    if (!p) return;
+    const hosts = untrack(() => purgeHostsForProject(p.id, $sessions));
+    void workPurgeImpact(p.id, hosts).then((r) => {
+      if (r.ok && pendingPurge === p) purgeKeys = r.value;
+    });
+  });
+
   async function confirmPurge() {
     if (!pendingPurge) return;
     const project = pendingPurge;
@@ -732,9 +903,11 @@
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
-  {#snippet sessionRow(sess: SessionRow, readOnly = false)}
+  {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false)}
     <SessionRowItem
       {sess}
+      workKey={inWorkGroup || readOnly ? null : workKeyFor(sess, branchById)}
+      workOf={readOnly ? null : workKeyFor(sess, branchById)}
       {selectMode}
       isChecked={selectedIds.has(sess.id)}
       isRenaming={renaming !== null && renaming.id === sess.id}
@@ -755,6 +928,7 @@
       {askRecreate}
       {askRestart}
       {askKill}
+      orgColor={orgColorOf(sess, $orgColorById)}
     />
   {/snippet}
 
@@ -782,6 +956,154 @@
   <div class="scroller">
     {#if !$onboardingDismissed}
       <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
+    {/if}
+    {#snippet pastRow(key: string, l: WorkLink)}
+      <div
+        class="past-row"
+        data-testid="past-work-row"
+        title="Ended {l.ended_at ? timeAgo(l.ended_at, nowSec * 1000) : ''}{l.snap_worktree ? ` · worktree ${l.snap_worktree}` : ''}"
+      >
+        <span class="past-label">{l.snap_name ?? l.snap_tmux ?? key}</span>
+        <span class="past-meta"
+          >{[l.snap_host, l.snap_branch].filter(Boolean).join(' · ')}{l.ended_at
+            ? ` · ended ${timeAgo(l.ended_at, nowSec * 1000)}`
+            : ''}</span
+        >
+        {#if l.resumable === false}<span class="past-purged" title="Its transcripts were purged: only a fresh start is possible">purged</span>{/if}
+        <ResumeButton workKey={key} link={l} />
+      </div>
+    {/snippet}
+    {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
+      <ul class="tree work-tree" data-testid="work-groups">
+        {#each workGroups as g (g.key)}
+          {@const isCollapsed = collapsedWork.has(g.key)}
+          {@const pr = workGroupPrSummary(g.sessions)}
+          {@const ticket = workGroupTicket(g.key, g.sessions)}
+          {@const split = splitArchived(g.sessions, (s) => needsYou(s, attentionOpts))}
+          {@const reopened = reopenedKeys.get(g.key)}
+          {@const groupColor = orgColorOf(
+            { org_id: g.sessions[0]?.work?.org_id ?? g.sessions[0]?.org_id ?? null },
+            $orgColorById,
+          )}
+          <li class="proj">
+            <div
+              class="proj-row work-row"
+              class:work-done={ticket?.status?.category === 'done'}
+              data-testid="work-row"
+              data-org-color={groupColor ?? undefined}
+              style:box-shadow={groupColor ? `inset 3px 0 0 ${groupColor}` : undefined}
+              title="Sessions whose tag, branch or worktree names {g.key}"
+              role="button"
+              tabindex="0"
+              onclick={() => toggleWorkCollapse(g.key)}
+              onkeydown={(e) => {
+                if (!fromRowItself(e)) return;
+                if (e.key === 'Enter' || e.key === ' ') toggleWorkCollapse(g.key);
+              }}
+            >
+              <span class="caret" class:collapsed={isCollapsed}>▾</span>
+              <span class="label"
+                ><span class="work-key" class:unavailable={ticket?.status?.unavailable}
+                  >{g.key}</span
+                >{#if ticket?.status && !ticket.status.unavailable}<span
+                    class="work-dot {statusDotClass(ticket.status.category)}"
+                    data-testid="work-header-dot"
+                    title={ticket.status.name ?? ticket.status.category}
+                  ></span>{/if}{#if ticket?.title}<span
+                    class="work-title"
+                    data-testid="work-header-title"
+                    title={ticket.status?.unavailable
+                      ? `${ticket.title} — ${unavailableLabel('not_found_or_no_permission')}`
+                      : ticket.title}>{ticket.title}</span
+                  >{/if}</span
+              >
+              {#if pr.prCount > 0}
+                <span
+                  class="work-pr"
+                  data-testid="work-pr"
+                  title="{pr.prCount} pull request{pr.prCount === 1 ? '' : 's'}{pr.ci ? ` · CI ${pr.ci}` : ''}"
+                >PR{pr.prCount > 1 ? ` ×${pr.prCount}` : ''}{#if pr.ci}<span
+                      class="work-ci"
+                      style="color: {ciStatusColor(pr.ci)};"> {ciStatusLabel(pr.ci)}</span
+                    >{/if}</span>
+              {/if}
+              {#if reopened}
+                <span class="work-reopened" data-testid="work-reopened-badge">{reopenedBadge(reopened)}</span>
+                <ResumeButton workKey={g.key} />
+              {/if}
+              <span class="count">{split.live.length}</span>
+            </div>
+
+            {#if !isCollapsed}
+              {#each split.live as sess (sess.id)}
+                {@render sessionRow(sess, false, true)}
+              {/each}
+              {@const past = $pastWork.get(g.key) ?? []}
+              {#if past.length + split.archived.length > 0}
+                <div
+                  class="done-row"
+                  data-testid="work-done"
+                  role="button"
+                  tabindex="0"
+                  onclick={() => (openDone = toggleIn(openDone, g.key))}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') openDone = toggleIn(openDone, g.key);
+                  }}
+                >
+                  <span class="caret" class:collapsed={!openDone.has(g.key)}>▾</span>
+                  Done · {past.length + split.archived.length}
+                </div>
+                {#if openDone.has(g.key)}
+                  {#each split.archived as sess (sess.id)}
+                    <div class="archived-wrap" data-testid="archived-session">
+                      {@render sessionRow(sess, false, true)}
+                      <button
+                        class="archived-chip"
+                        data-testid="archived-chip"
+                        disabled={unarchiving.has(sess.id)}
+                        title="Archived: collapsed here, tmux still running. Click to bring it back (a prompt or an attach does too)"
+                        onclick={(e) => void unarchive(sess.id, e)}>archived · show</button
+                      >
+                    </div>
+                  {/each}
+                  {#each past as l (l.id)}{@render pastRow(g.key, l)}{/each}
+                {/if}
+              {/if}
+            {/if}
+          </li>
+        {/each}
+        {#each pastOnlyGroups as pg (pg.key)}
+          {@const isOpen = openPast.has(pg.key)}
+          <li class="proj past-only" data-testid="past-work-group">
+            <div
+              class="proj-row work-row"
+              data-testid="past-work-header"
+              title="Past work on {pg.key}: no session is running it"
+              role="button"
+              tabindex="0"
+              onclick={() => (openPast = toggleIn(openPast, pg.key))}
+              onkeydown={(e) => {
+                if (!fromRowItself(e)) return;
+                if (e.key === 'Enter' || e.key === ' ') openPast = toggleIn(openPast, pg.key);
+              }}
+            >
+              <span class="caret" class:collapsed={!isOpen}>▾</span>
+              <span class="label"><span class="work-key">{pg.key}</span></span>
+              {#if reopenedKeys.get(pg.key)}
+                <span class="work-reopened" data-testid="work-reopened-badge"
+                  >{reopenedBadge(reopenedKeys.get(pg.key)!)}</span
+                >
+              {:else}
+                <span class="past-note">{pastWorkSummary(pg.links, nowSec * 1000)}</span>
+              {/if}
+              <ResumeButton workKey={pg.key} link={pg.links[0]} />
+            </div>
+            {#if isOpen}
+              {#each pg.links as l (l.id)}{@render pastRow(pg.key, l)}{/each}
+            {/if}
+          </li>
+        {/each}
+      </ul>
     {/if}
     {#if filtered.length > 0}
       <ul class="tree">
@@ -831,7 +1153,7 @@
           </li>
         {/each}
       </ul>
-    {:else if !loadError && orphanSessions.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       <p class="empty" data-testid="sidebar-empty">
         {hubSkewEmptyMessage ??
           ($projects.length === 0
@@ -1017,6 +1339,12 @@
     confirmTestId="confirm-purge"
   >
     This will permanently delete all Claude Code state for <code>{pendingPurge.repo}</code>. This is irreversible.
+    {#if purgeKeys.length > 0}
+      <p class="purge-work" data-testid="purge-work-keys">
+        Past work loses its conversations: {purgeKeys.join(', ')}. It can only be restarted
+        fresh (with a brief) afterwards, not continued.
+      </p>
+    {/if}
   </ConfirmDialog>
 {/if}
 
@@ -1115,6 +1443,110 @@
   }
   .owner { color: var(--fg-muted); font-weight: 400; }
   .repo { color: var(--fg); }
+  .work-key {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-weight: 600;
+  }
+  .work-key.unavailable {
+    text-decoration: line-through;
+    opacity: 0.6;
+  }
+  .work-dot {
+    display: inline-block;
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    margin-left: 0.3rem;
+    background: var(--fg-muted);
+    vertical-align: middle;
+  }
+  .work-dot.dot-progress {
+    background: var(--accent, #3b82f6);
+  }
+  .work-dot.dot-done {
+    background: var(--ok, #22c55e);
+  }
+  .work-title {
+    margin-left: 0.4rem;
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .done-row {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1rem 0.5rem 0.1rem 1.6rem;
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  /* Work graph M7.3: a done item's group reads as finished; an archived live
+     session sits in Done with a chip that brings it back. */
+  .work-row.work-done {
+    opacity: 0.6;
+  }
+  .work-reopened {
+    font-size: 0.68rem;
+    color: var(--accent, #3b82f6);
+    white-space: nowrap;
+  }
+  .archived-wrap {
+    position: relative;
+    opacity: 0.75;
+  }
+  .archived-chip {
+    position: absolute;
+    right: 0.5rem;
+    top: 0.15rem;
+    font-size: 0.62rem;
+    padding: 0 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .past-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.15rem 0.5rem 0.15rem 1.6rem;
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+    opacity: 0.85;
+  }
+  .past-label {
+    color: var(--fg);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .past-meta {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .past-note {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .past-purged {
+    font-size: 0.65rem;
+    color: var(--danger, #e5534b);
+  }
+  .purge-work {
+    margin: 0.5rem 0 0;
+  }
+  .work-pr {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
   .count {
     font-size: 0.7rem;
     color: var(--fg-muted);

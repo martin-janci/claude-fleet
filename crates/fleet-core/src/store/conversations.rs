@@ -243,6 +243,15 @@ impl Store {
         ];
         let n_params = if resets { 5 } else { 4 };
         tx.execute(&sql, &params[..n_params])?;
+        // Work graph M2.2: a conversation that an ENDED work link snapshotted
+        // is being resumed (from fleet's Resume, `claude --resume`, or a
+        // `/resume`) — the work follows it. Best-effort: work links never
+        // fail a rebind.
+        if !same {
+            if let Err(e) = self.carry_resumed_work(session_id, claude_session_id) {
+                tracing::warn!(session_id, error = %e.message, "[work] resume carry failed");
+            }
+        }
         tx.commit()?;
         self.bus.conversations_changed(session_id);
         Ok(self.emit_session(session_id)?)

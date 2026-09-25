@@ -9,4 +9,4 @@
 CREATE INDEX IF NOT EXISTS idx_participants_peer_link
   ON participants(peer_link_id) WHERE peer_link_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (46);
+INSERT OR IGNORE INTO schema_version (version) VALUES (55);

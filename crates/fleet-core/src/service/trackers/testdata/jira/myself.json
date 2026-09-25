@@ -1,0 +1,10 @@
+{
+  "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:00000000-aaaa-bbbb-cccc-000000000001",
+  "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001",
+  "accountType": "atlassian",
+  "emailAddress": "dev@example.com",
+  "displayName": "Dana Dev",
+  "active": true,
+  "timeZone": "Europe/Bratislava",
+  "locale": "en_US"
+}

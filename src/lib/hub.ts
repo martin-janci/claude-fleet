@@ -164,6 +164,33 @@ const REASONS = {
     'these are a fleet owner’s per-host tokens; this desktop is a paired client and has none',
   mcp_configure:
     'starting a second control API against a fleet that already has one is the failure remote mode exists to prevent',
+  // Trackers (work graph M3): the hub's work_admin is master-only.
+  add_tracker:
+    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker add`',
+  update_tracker:
+    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker`',
+  set_tracker_credential:
+    'tracker credentials live on the hub, and a client is never the fleet’s administrator — use `fleet-hub tracker set-credential`',
+  test_tracker:
+    'the hub tests its trackers with its own credentials, and a client is never the fleet’s administrator — use `fleet-hub tracker test`',
+  remove_tracker:
+    'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
+  // Organisations (work graph M5): the per-host tokens' boundary is set on
+  // the hub only; `work_admin` is master-only.
+  add_org:
+    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org add`',
+  update_org:
+    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org set`',
+  remove_org:
+    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org rm`',
+  add_org_rule:
+    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule add`',
+  remove_org_rule:
+    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule rm`',
+  assign_host_org:
+    'a host’s org is its token’s boundary, set only by the fleet’s administrator — use `fleet-hub org assign-host`',
+  assign_tracker_org:
+    'which org a tracker belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org assign-tracker`',
 
   // --- things about THIS machine ------------------------------------------
   // (No `terminal` key: the terminal is not blocked by being a hub client.
@@ -281,6 +308,20 @@ export const ROUTED_ACTIONS = [
   'move_session',
   'new_session',
   'repair_session',
+  'link_session_work',
+  'reject_session_work',
+  'unlink_session_work',
+  'confirm_session_work',
+  'set_work_project_trust',
+  'start_work',
+  'start_work_multi',
+  'request_work_handover',
+  'tidy_apply',
+  'archive_session_work',
+  'unarchive_session_work',
+  'snooze_tidy',
+  'never_tidy',
+  'dismiss_reopened',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

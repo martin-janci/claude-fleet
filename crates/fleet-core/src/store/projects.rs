@@ -13,7 +13,7 @@ fn session_ids_on_worktree(conn: &Connection, worktree_id: i64) -> rusqlite::Res
 }
 
 impl Store {
-    fn get_project(&self, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
+    pub fn get_project(&self, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
         fetch_project(&self.conn, id)
     }
 

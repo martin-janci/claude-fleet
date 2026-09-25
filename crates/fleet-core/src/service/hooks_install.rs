@@ -149,10 +149,41 @@ pub fn session_start_command(hook_url: &str) -> String {
     )
 }
 
+/// Connect timeout of the synchronous SessionStart command (seconds).
+pub const SYNC_START_CONNECT_SECS: u32 = 1;
+/// Whole-request cap of the synchronous SessionStart command (seconds): the
+/// most a start can wait on a hub that is down (decision D5).
+pub const SYNC_START_MAX_SECS: u32 = 2;
+
+/// The SYNCHRONOUS SessionStart command (work graph M4.5, behind
+/// `work.session_start_context`): the same POST, but the hub's answer goes
+/// to stdout, where Claude Code reads `hookSpecificOutput.additionalContext`
+/// (review C15). Bounded by a 1 s connect and a 2 s total, and `|| true`
+/// with `-f` and `-s`: a hub that is down or erroring prints nothing, so the
+/// start is never failed and never shown an error body.
+pub fn session_start_command_sync(hook_url: &str) -> String {
+    format!(
+        "curl -sf --connect-timeout {SYNC_START_CONNECT_SECS} -m {SYNC_START_MAX_SECS} -X POST \
+         -H @\"$HOME/.claude/{HOOK_HEADERS_FILE}\" \
+         -H \"X-Fleet-Pane: ${{TMUX_PANE:-}}\" \
+         -H 'Content-Type: application/json' \
+         --data-binary @- {} || true",
+        crate::shell::quote(hook_url)
+    )
+}
+
 /// One Claude Code `type: "command"` hook entry for `SessionStart`: a `curl`
 /// invocation of [`session_start_command`], run asynchronously so it never
-/// stalls the session start.
-fn command_hook_entry(hook_url: &str) -> serde_json::Value {
+/// stalls the session start — or, with `sync` (the M4.5 setting), the
+/// synchronous [`session_start_command_sync`] whose stdout Claude reads.
+fn command_hook_entry(hook_url: &str, sync: bool) -> serde_json::Value {
+    if sync {
+        return serde_json::json!({
+            "type": "command",
+            "command": session_start_command_sync(hook_url),
+            "timeout": SYNC_START_MAX_SECS + 1
+        });
+    }
     serde_json::json!({
         "type": "command",
         "command": session_start_command(hook_url),
@@ -182,6 +213,17 @@ pub fn merge_hook_into_settings_json(
     existing: &str,
     hook_url: &str,
     token: &str,
+) -> Result<String, IpcError> {
+    merge_hook_into_settings_json_with(existing, hook_url, token, false)
+}
+
+/// [`merge_hook_into_settings_json`], with the SessionStart hook installed
+/// synchronously when `sync_start` (work graph M4.5).
+pub fn merge_hook_into_settings_json_with(
+    existing: &str,
+    hook_url: &str,
+    token: &str,
+    sync_start: bool,
 ) -> Result<String, IpcError> {
     let mut settings: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
@@ -254,7 +296,7 @@ pub fn merge_hook_into_settings_json(
         let mut arr = strip_fleet(hooks.get(*event).unwrap_or(&serde_json::json!([])));
         let entry = match kind {
             HookKind::Http => hook_entry(hook_url, token),
-            HookKind::Command => command_hook_entry(hook_url),
+            HookKind::Command => command_hook_entry(hook_url, sync_start),
         };
         arr.as_array_mut().unwrap().push(serde_json::json!({
             "matcher": matcher,
@@ -319,6 +361,17 @@ pub fn install_hook_at(
     hook_url: &str,
     token: &str,
 ) -> Result<HookInstall, IpcError> {
+    install_hook_at_with(settings_path, hook_url, token, false)
+}
+
+/// [`install_hook_at`] with the SessionStart hook synchronous when
+/// `sync_start` (work graph M4.5).
+pub fn install_hook_at_with(
+    settings_path: &std::path::Path,
+    hook_url: &str,
+    token: &str,
+    sync_start: bool,
+) -> Result<HookInstall, IpcError> {
     let existing = if settings_path.exists() {
         std::fs::read_to_string(settings_path)
             .map_err(|e| IpcError::new(codes::E_IO, format!("read settings.json: {e}")))?
@@ -326,7 +379,7 @@ pub fn install_hook_at(
         String::new()
     };
 
-    let merged = merge_hook_into_settings_json(&existing, hook_url, token)?;
+    let merged = merge_hook_into_settings_json_with(&existing, hook_url, token, sync_start)?;
     let settings_changed = merged != existing;
 
     let headers_path = settings_path.with_file_name(HOOK_HEADERS_FILE);
@@ -379,7 +432,11 @@ pub fn auto_install_local_hook(store: &Mutex<Store>, base: &HubBase) {
             return Ok(None);
         }
         let token = local_hook_token(store)?;
-        install_hook_at(&path, &base.hook_url(), &token).map(Some)
+        let sync = crate::service::settings::get_bool(
+            &*lock(store)?,
+            crate::service::settings::WORK_SESSION_START_CONTEXT,
+        );
+        install_hook_at_with(&path, &base.hook_url(), &token, sync).map(Some)
     })();
     match result {
         Ok(Some(HookInstall::Written)) => {
@@ -403,6 +460,52 @@ pub fn auto_install_local_hook(store: &Mutex<Store>, base: &HubBase) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Work graph M4.5 golden: with the setting on, SessionStart is installed
+    /// SYNCHRONOUSLY with its answer on stdout (bounded 1 s connect / 2 s
+    /// total, never failing the start); off (the default) keeps the async,
+    /// discard-the-body form every host has today.
+    #[test]
+    fn session_start_is_synchronous_only_with_the_setting() {
+        let url = "http://127.0.0.1:4180/hook";
+        let entry = |sync: bool| -> serde_json::Value {
+            let out: serde_json::Value = serde_json::from_str(
+                &merge_hook_into_settings_json_with("", url, "t", sync).unwrap(),
+            )
+            .unwrap();
+            out["hooks"]["SessionStart"][0]["hooks"][0].clone()
+        };
+        let off = entry(false);
+        assert_eq!(off["async"], true);
+        assert!(off["command"].as_str().unwrap().contains("-o /dev/null"));
+        assert_eq!(
+            merge_hook_into_settings_json("", url, "t").unwrap(),
+            merge_hook_into_settings_json_with("", url, "t", false).unwrap(),
+            "the default is the old install"
+        );
+        let on = entry(true);
+        assert!(on.get("async").is_none(), "{on}");
+        assert_eq!(on["timeout"], 3);
+        let cmd = on["command"].as_str().unwrap();
+        assert_eq!(
+            cmd,
+            "curl -sf --connect-timeout 1 -m 2 -X POST \
+             -H @\"$HOME/.claude/fleet-hook.headers\" \
+             -H \"X-Fleet-Pane: ${TMUX_PANE:-}\" \
+             -H 'Content-Type: application/json' \
+             --data-binary @- 'http://127.0.0.1:4180/hook' || true"
+        );
+        // Switching either way replaces fleet's entry, never duplicates it.
+        let both = merge_hook_into_settings_json_with(
+            &merge_hook_into_settings_json_with("", url, "t", true).unwrap(),
+            url,
+            "t",
+            false,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&both).unwrap();
+        assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn install_hook_at_creates_then_is_idempotent() {

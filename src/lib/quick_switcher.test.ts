@@ -289,3 +289,127 @@ describe('the operator\'s system project', () => {
     expect(contextProject([], operatorSess, [operatorProject])).toBeNull();
   });
 });
+
+// ---- tickets (work graph M3) -------------------------------------------------
+
+import {
+  ticketEntries as _ticketEntries,
+  lookupEntry as _lookupEntry,
+  placeForTicket as _placeForTicket,
+  rankEntries as _rankEntries,
+  type SwitcherEntry as _SwitcherEntry,
+} from './quick_switcher';
+import type { TicketRow as _TicketRow } from './trackers';
+
+function _ticket(key: string, title: string, over: Partial<_TicketRow> = {}): _TicketRow {
+  return {
+    id: key.length,
+    source: 'jira',
+    key,
+    title,
+    status_category: 'todo',
+    status_name: 'To Do',
+    created_at: 1,
+    updated_at: 1,
+    tracker_id: 1,
+    ...over,
+  };
+}
+
+function _session(id: number, label: string): _SwitcherEntry {
+  return {
+    kind: 'session',
+    key: `session:${id}`,
+    label,
+    description: '',
+    meta: '',
+    fields: [label],
+    session: { id, host_alias: 'h', tmux_name: `t${id}`, last_activity_at: id } as never,
+  };
+}
+
+describe('quick switcher tickets', () => {
+  const tickets = _ticketEntries([
+    { ticket: _ticket('ABC-1', 'Login page'), section: 'Recent' },
+    { ticket: _ticket('ABC-2', 'Billing', { live_session_ids: [7] }), section: 'My work' },
+    { ticket: _ticket('ABC-1', 'Login page'), section: 'My work' },
+    { ticket: _ticket('ABC-3', 'Sprint thing'), section: 'Current sprint' },
+  ]);
+
+  it('one row per key, labelled with key and title, live ones jump', () => {
+    expect(tickets.map((t) => t.key)).toEqual(['ticket:ABC-1', 'ticket:ABC-2', 'ticket:ABC-3']);
+    expect(tickets[0].label).toBe('ABC-1 Login page');
+    expect(tickets[1].meta).toBe('jump');
+    expect(tickets[0].meta).toBe('start');
+  });
+
+  it('tickets rank below sessions, by section on an empty query', () => {
+    const ranked = _rankEntries([...tickets, _session(1, 'login work')], '', []);
+    expect(ranked.map((e) => e.key)).toEqual([
+      'session:1',
+      'ticket:ABC-2',
+      'ticket:ABC-3',
+      'ticket:ABC-1',
+    ]);
+    const q = _rankEntries([...tickets, _session(1, 'login work')], 'login', []);
+    expect(q[0].key).toBe('session:1');
+  });
+
+  it('an exact key match ranks first, even above sessions', () => {
+    const ranked = _rankEntries([...tickets, _session(1, 'abc-1 notes')], 'abc-1', []);
+    expect(ranked[0].key).toBe('ticket:ABC-1');
+  });
+
+  it('a pasted URL or an unknown exact key offers a lookup row, ranked first', () => {
+    const known = new Set(['ABC-1']);
+    expect(_lookupEntry('https://acme.atlassian.net/browse/ABC-9', known)?.lookup).toBe(
+      'https://acme.atlassian.net/browse/ABC-9',
+    );
+    expect(_lookupEntry('abc-9', known)?.label).toBe('Look up ABC-9');
+    expect(_lookupEntry('abc-1', known)).toBeNull();
+    expect(_lookupEntry('login page', known)).toBeNull();
+    const row = _lookupEntry('abc-9', known)!;
+    expect(_rankEntries([_session(1, 'x'), row], 'abc-9', [])[0].kind).toBe('lookup');
+  });
+
+  it('a ticket lands where its key prefix last ran', () => {
+    const p1 = { project: { id: 1, owner: 'o', repo: 'a', base_path: '/a', last_session_at: 1, adopted: false, system: false }, worktrees: [] };
+    const p2 = { project: { id: 2, owner: 'o', repo: 'b', base_path: '/b', last_session_at: 9, adopted: false, system: false }, worktrees: [] };
+    const s = (id: number, pid: number, key: string, at: number) =>
+      ({ id, project_id: pid, host_alias: `h${id}`, last_activity_at: at, work: { key } }) as never;
+    const keyOf = (x: { work?: { key: string } }) => x.work?.key ?? null;
+    const place = _placeForTicket('ABC-9', [s(1, 1, 'ABC-1', 5), s(2, 2, 'ZED-1', 50)], [p1, p2] as never, keyOf as never);
+    expect(place?.project.project.id).toBe(1);
+    expect(place?.host).toBe('h1');
+    expect(_placeForTicket('QQ-1', [s(1, 1, 'ABC-1', 5)], [p1] as never, keyOf as never)).toBeNull();
+  });
+});
+
+describe('ticket rows across providers (work graph M6)', () => {
+  const t = (over: Partial<_TicketRow>): _TicketRow => ({
+    id: 1,
+    source: 'asana',
+    key: 'asana:1207000000000001',
+    title: 'Migrate login to SSO',
+    status_category: 'in_progress',
+    created_at: 1,
+    updated_at: 1,
+    tracker_id: 3,
+    ...over,
+  });
+
+  it('shows an Asana key short and carries the tracker badge', () => {
+    const rows = _ticketEntries([{ ticket: t({}), section: 'My work' }], new Map([[3, { icon: 'A', title: 'Asana' }]]));
+    expect(rows[0].label).toBe('Asana …000001 Migrate login to SSO');
+    expect(rows[0].badge).toEqual({ icon: 'A', title: 'Asana' });
+    expect(rows[0].key).toBe('ticket:asana:1207000000000001');
+    // No badges given (one provider): none shown.
+    expect(_ticketEntries([{ ticket: t({}), section: 'My work' }])[0].badge).toBeUndefined();
+  });
+
+  it('a typed owner/repo#n is looked up as typed', () => {
+    const e = _lookupEntry('acme/api#42', new Set());
+    expect(e?.label).toBe('Look up acme/api#42');
+    expect(e?.lookup).toBe('acme/api#42');
+  });
+});

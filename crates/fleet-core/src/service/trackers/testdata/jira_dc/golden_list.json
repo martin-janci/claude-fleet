@@ -1,0 +1,162 @@
+[
+  {
+    "aliases": [],
+    "assignee_id": "ddev",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "PLAT"
+    ],
+    "description": null,
+    "external_id": "40001",
+    "hierarchy_level": null,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "PLAT-1",
+    "kind": "Epic",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "in_progress",
+      "name": "In Progress",
+      "resolution": null
+    },
+    "title": "Billing platform",
+    "updated": 1789977600,
+    "url": "https://jira.corp.example/jira/browse/PLAT-1"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "ddev",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "PLAT"
+    ],
+    "description": "Export invoices as CSV.\nPlain text on Data Center.",
+    "external_id": "40002",
+    "hierarchy_level": null,
+    "iteration": "PLAT Sprint 3",
+    "iteration_active": true,
+    "key": "PLAT-2",
+    "kind": "Story",
+    "parent_external_id": "40001",
+    "parent_key": "PLAT-1",
+    "status": {
+      "category": "in_progress",
+      "name": "In Review",
+      "resolution": null
+    },
+    "title": "Invoice export",
+    "updated": 1789978530,
+    "url": "https://jira.corp.example/jira/browse/PLAT-2"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "ddev",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "PLAT"
+    ],
+    "description": null,
+    "external_id": "40003",
+    "hierarchy_level": -1,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "PLAT-3",
+    "kind": "Sub-task",
+    "parent_external_id": "40002",
+    "parent_key": "PLAT-2",
+    "status": {
+      "category": "todo",
+      "name": "Open",
+      "resolution": null
+    },
+    "title": "Export: date format",
+    "updated": 1789898400,
+    "url": "https://jira.corp.example/jira/browse/PLAT-3"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "ddev",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "OPS"
+    ],
+    "description": null,
+    "external_id": "40004",
+    "hierarchy_level": null,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "OPS-4",
+    "kind": "Task",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Closed",
+      "resolution": "completed"
+    },
+    "title": "Renew certificates",
+    "updated": 1789826400,
+    "url": "https://jira.corp.example/jira/browse/OPS-4"
+  },
+  {
+    "aliases": [],
+    "assignee_id": "ddev",
+    "assignees": [
+      "Dana Dev"
+    ],
+    "containers": [
+      "OPS"
+    ],
+    "description": null,
+    "external_id": "40005",
+    "hierarchy_level": null,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "OPS-5",
+    "kind": "Task",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "done",
+      "name": "Closed",
+      "resolution": "not_planned"
+    },
+    "title": "Migrate CI to v1",
+    "updated": 1789718400,
+    "url": "https://jira.corp.example/jira/browse/OPS-5"
+  },
+  {
+    "aliases": [],
+    "assignee_id": null,
+    "assignees": [],
+    "containers": [
+      "OPS"
+    ],
+    "description": null,
+    "external_id": "40006",
+    "hierarchy_level": null,
+    "iteration": null,
+    "iteration_active": false,
+    "key": "OPS-6",
+    "kind": "Task",
+    "parent_external_id": null,
+    "parent_key": null,
+    "status": {
+      "category": "todo",
+      "name": "To Do",
+      "resolution": null
+    },
+    "title": "Rotate backups",
+    "updated": 1789714800,
+    "url": "https://jira.corp.example/jira/browse/OPS-6"
+  }
+]

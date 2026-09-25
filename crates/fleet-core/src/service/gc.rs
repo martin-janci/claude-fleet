@@ -32,6 +32,8 @@ use crate::store::{SessionRow, Store};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+pub mod tidy;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcConfig {
     pub enabled: bool,
@@ -250,6 +252,17 @@ pub struct GcReport {
     /// shipped outage against an older hub.
     #[serde(default)]
     pub swept_read_cursors: usize,
+    /// Work-journal rows past `work.journal_days` swept this sweep
+    /// (`Store::sweep_work_journal`; rows of confirmed work are kept). Not
+    /// gated on `gc.enabled`, like the two sweeps above. `#[serde(default)]`
+    /// for the same wire reason.
+    #[serde(default)]
+    pub swept_journal: usize,
+    /// Sessions auto-tidy acted on this sweep (work graph M7: only with
+    /// `work.auto_tidy` on; safe kill or archive of the allowed reasons).
+    /// `#[serde(default)]` for the same wire reason.
+    #[serde(default)]
+    pub tidied: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -262,6 +275,8 @@ pub async fn sweep_with(
     now: i64,
 ) -> GcReport {
     let mut report = GcReport::default();
+    // Sessions the idle killer acted on: auto-tidy (below) leaves them be.
+    let mut acted: HashSet<i64> = HashSet::new();
     // The session-idle killer stays opt-in (`cfg.enabled`, default off): it
     // is a destructive action against a live session. The mail-retention
     // sweep below is NOT gated on it — it only ever touches participants
@@ -287,6 +302,7 @@ pub async fn sweep_with(
             }
         };
         for p in plan(&rows, cfg, controller.as_ref(), &reachable, now) {
+            acted.insert(p.session_id);
             let via_claude = match p.action {
                 GcAction::Kill => false,
                 GcAction::InspectThenKill => {
@@ -343,6 +359,10 @@ pub async fn sweep_with(
             }
         }
     }
+    // Auto-tidy (work graph M7): its own opt-in, `work.auto_tidy` (off by
+    // default); with it off this reads one setting and does nothing, so the
+    // idle killer above behaves exactly as before.
+    report.tidied = crate::service::work::tidy::auto_tidy(store, exec, &acted, now).await;
     // `sweep_retired_participants` returns `Result<usize, IpcError>`, but
     // this function returns a plain `GcReport` (not a `Result`), so a
     // failed sweep contributes 0 and the pass still completes — the same
@@ -376,6 +396,24 @@ pub async fn sweep_with(
             tracing::warn!(error = %e, "[gc] peer outbox sweep failed");
         }
     }
+    // Work memory retention (work graph M2.1): same best-effort, ungated
+    // shape. Journal rows of a conversation a confirmed link references are
+    // never swept.
+    report.swept_journal = match store.lock() {
+        Ok(s) => {
+            let days = crate::service::settings::resolve(
+                crate::service::settings::WORK_JOURNAL_DAYS,
+                s.get_setting(crate::service::settings::WORK_JOURNAL_DAYS)
+                    .ok()
+                    .flatten()
+                    .as_deref(),
+            )
+            .parse::<i64>()
+            .unwrap_or(90);
+            s.sweep_work_journal(now, days).unwrap_or(0)
+        }
+        Err(_) => 0,
+    };
     report
 }
 
@@ -423,6 +461,8 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             failed = report.failed,
             swept_participants = report.swept_participants,
             swept_read_cursors = report.swept_read_cursors,
+            swept_journal = report.swept_journal,
+            tidied = report.tidied,
             "[gc] sweep"
         );
     }
@@ -441,7 +481,12 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn row(id: i64, kind: &str, idle_since: Option<i64>, last_activity_at: i64) -> SessionRow {
+    pub(super) fn row(
+        id: i64,
+        kind: &str,
+        idle_since: Option<i64>,
+        last_activity_at: i64,
+    ) -> SessionRow {
         SessionRow {
             id,
             row_version: 0,
@@ -491,6 +536,10 @@ mod tests {
             usage: Default::default(),
             context: Default::default(),
             pending_input: None,
+            work: None,
+            work_rejected: vec![],
+            work_suggested: None,
+            org_id: None,
         }
     }
 
@@ -724,6 +773,8 @@ mod tests {
                 failed: 0,
                 swept_participants: 0,
                 swept_read_cursors: 0,
+                swept_journal: 0,
+                tidied: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -748,6 +799,8 @@ mod tests {
                 failed: 0,
                 swept_participants: 0,
                 swept_read_cursors: 0,
+                swept_journal: 0,
+                tidied: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -802,6 +855,8 @@ mod tests {
                 failed: 0,
                 swept_participants: 1,
                 swept_read_cursors: 0,
+                swept_journal: 0,
+                tidied: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -857,6 +912,8 @@ mod tests {
                 failed: 0,
                 swept_participants: 1,
                 swept_read_cursors: 0,
+                swept_journal: 0,
+                tidied: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );

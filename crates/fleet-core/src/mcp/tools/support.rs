@@ -661,6 +661,40 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
 /// every block non-empty.
 pub(super) const EMPTY_RESULT_PLACEHOLDER: &str = "(no output)";
 
+/// Apply `f` to every JSON text block of a result, re-serialising only the
+/// blocks it changed (a non-JSON block is left alone).
+pub(super) fn rewrite_json_content(
+    result: &mut CallToolResult,
+    mut f: impl FnMut(&mut serde_json::Value),
+) {
+    for c in result.content.iter_mut() {
+        let Some(t) = c.as_text() else {
+            continue;
+        };
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&t.text) else {
+            continue;
+        };
+        let before = v.clone();
+        f(&mut v);
+        if v != before {
+            *c = text_content(v.to_string());
+        }
+    }
+    if let Some(sc) = result.structured_content.as_mut() {
+        f(sc);
+    }
+}
+
+/// Fail closed: drop every work field of every session row in a result.
+fn strip_all_work(result: &mut CallToolResult) {
+    let nobody = crate::service::orgs::OrgScope::Host {
+        alias: String::new(),
+        org: None,
+        isolated: Default::default(),
+    };
+    rewrite_json_content(result, |v| nobody.redact_json(v, &|_| Some(i64::MIN)));
+}
+
 /// Build a text content block guaranteed to be non-empty. Empty or
 /// whitespace-only text is replaced with [`EMPTY_RESULT_PLACEHOLDER`]. Every
 /// tool result must go through here (directly or via [`ok_json`]) so the fleet
@@ -862,7 +896,7 @@ pub(super) struct InboxSummary {
     pub(super) reply_to: Option<i64>,
     pub(super) body_chars: usize,
     pub(super) body_preview: String,
-    /// The remote sender's address (migration 045) when `from_session_id`
+    /// The remote sender's address (migration 054) when `from_session_id`
     /// is `0`; absent for a local message, matching `SessionMessage`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) from_addr: Option<String>,
@@ -999,11 +1033,25 @@ impl FleetTools {
         caller: &Caller,
     ) -> Result<(), McpError> {
         debug_assert!(
-            guard::needs_confirmation(tool),
+            guard::needs_confirmation(tool) || guard::OPERATOR_CONFIRMS.contains(&tool),
             "{tool} is not in guard::CONFIRM_TOOLS"
         );
-        if !self.confirm_enabled()? {
+        // The operator's starts and kills are always confirmed (D12); for
+        // everyone else only the `confirm: true` tools, and only with the
+        // toggle on.
+        let forced = guard::operator_must_confirm(caller.is_operator(), tool);
+        if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
             return Ok(());
+        }
+        if forced && !self.guards.approver {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "{tool} from the operator needs a person to approve it, and this hub has \
+                     no approver; ask the person to do it from the sidebar"
+                ),
+                None,
+            ));
         }
         let confirms = &self.guards.confirms;
         if let Some(n) = nonce {
@@ -1033,8 +1081,13 @@ impl FleetTools {
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
             format!(
-                "{tool} needs approval on the claude-fleet desktop (mcp.confirm_destructive is on); \
+                "{tool} needs approval on the claude-fleet desktop ({}); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
+                if forced {
+                    "the operator's starts and kills always do"
+                } else {
+                    "mcp.confirm_destructive is on"
+                },
                 req.nonce
             ),
             Some(serde_json::json!({ "confirm_nonce": req.nonce })),
@@ -1055,6 +1108,73 @@ impl FleetTools {
     ) -> Result<(String, String), McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         resolve_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
+    }
+
+    /// Decision D7 on a session-addressed read a per-host token may make of
+    /// any host's session (history, repo reads): a session of an org
+    /// isolated from the caller's answers exactly as a missing one.
+    pub(super) fn require_visible_session(
+        &self,
+        caller: &Caller,
+        session_id: i64,
+    ) -> Result<(), McpError> {
+        if caller.host_alias.is_none() {
+            return Ok(());
+        }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+        match s
+            .get_session_by_id(session_id)
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?
+        {
+            Some(row) if !scope.sees_row(&row) => Err(mcp_err(
+                codes::E_NOTFOUND,
+                format!("session {session_id} not found"),
+                None,
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// The org boundary's backstop over EVERY tool result a per-host token
+    /// receives (work graph M5): each session row anywhere in the JSON loses
+    /// the work its reader may not see (`OrgScope::redact_json`), the row's
+    /// org read from the store by id, never from the payload — a projection
+    /// that dropped `org_id` cannot make a row look unassigned. Fails
+    /// closed: if the scope or a row's org cannot be read, every work field
+    /// goes.
+    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
+        let Ok(s) = self.store.lock() else {
+            strip_all_work(result);
+            return;
+        };
+        let scope = match caller.org_scope(&s) {
+            Ok(sc) => sc,
+            Err(_) => {
+                drop(s);
+                strip_all_work(result);
+                return;
+            }
+        };
+        if scope.is_all() {
+            return;
+        }
+        // An org no scope can hold: any failed lookup reads as "not yours".
+        const UNREADABLE: i64 = i64::MIN;
+        let org_of = |m: &serde_json::Map<String, serde_json::Value>| -> Option<i64> {
+            let own = m.get("org_id").and_then(serde_json::Value::as_i64);
+            match m.get("id").and_then(serde_json::Value::as_i64) {
+                // A row that is gone (a kill's answer) keeps the org it was
+                // serialised with.
+                Some(id) => match s.session_org(id) {
+                    Ok(Some(o)) => Some(o),
+                    Ok(None) => own,
+                    Err(_) => Some(UNREADABLE),
+                },
+                None => Some(UNREADABLE),
+            }
+        };
+        rewrite_json_content(result, |v| scope.redact_json(v, &org_of));
     }
 
     /// [`Self::resolve_target`] returning the whole row.

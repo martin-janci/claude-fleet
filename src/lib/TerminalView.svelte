@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
@@ -522,6 +523,10 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
       attachedAt = Date.now();
+      // Work graph M7: a person attaching is a touch — it un-archives the
+      // session and keeps tidy-up off it for an hour. Not an automatic
+      // reconnect. Best-effort: an older hub without the action refuses it.
+      if (!isAutoReconnect) void unarchiveSession(sess.id).catch(() => {});
 
       // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
       // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.

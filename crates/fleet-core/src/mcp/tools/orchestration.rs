@@ -403,8 +403,10 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             let task = tasks::create_task(&s, p.requester_session_id, Some(worker.id), &p.prompt)
                 .map_err(to_mcp_err)?;
-            if p.requester_session_id.is_some() {
-                let _ = s.set_parent_session_id(worker.id, p.requester_session_id);
+            if let Some(req) = p.requester_session_id {
+                let _ = s.set_parent_session_id(worker.id, Some(req));
+                // The worker does the requester's work (work graph M2.2).
+                let _ = s.inherit_worker_work(worker.id, req);
             }
             if let Some(cid) = worker.claude_session_id.as_deref() {
                 let _ = s.set_task_worker_claude_id(task.id, cid);
@@ -551,5 +553,352 @@ impl FleetTools {
             .map_err(|e| to_mcp_err(IpcError::from(e)))?
             .ok_or_else(|| mcp_err("E_NOTFOUND", format!("session {} vanished", row.id), None))?;
         ok_json(&updated)
+    }
+
+    #[tool(description = "Work links: {session_id} → its live links; \
+        {key} → ended (past) links; neither → recently ended. action \
+        context|resume_plan {key}; purge_impact; tickets (cached); lookup \
+        {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
+        tidy; reopened.")]
+    pub(super) async fn work(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::work::WorkArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::work::{self as w, WorkAction};
+        audit(
+            "work",
+            &format!(
+                "action={:?} session_id={:?} key={:?} link_id={:?} host_alias={:?}",
+                args.action, args.session_id, args.key, args.link_id, args.host_alias
+            ),
+        );
+        // The one scope every action below runs under (work graph M5):
+        // `All` for the master and clients, the host's org boundary for a
+        // per-host token. The service functions filter with it.
+        let scope = self.org_scope(&caller)?;
+        match args.parsed_action().map_err(to_mcp_err)? {
+            WorkAction::Links => {
+                if let Some(id) = args.session_id {
+                    self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+                }
+                ok_json_compact(&w::work(&args, &self.store, &scope).map_err(to_mcp_err)?)
+            }
+            WorkAction::Context => ok_json(
+                &w::work_context(&args, &self.store, &self.ssh, &scope)
+                    .await
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::ResumePlan => ok_json_compact(
+                &w::work_resume_plan(&args, &self.store, &self.ssh, &scope)
+                    .await
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::PurgeImpact => {
+                ok_json(&w::work_purge_impact(&args, &self.store, &scope).map_err(to_mcp_err)?)
+            }
+            WorkAction::Tickets => {
+                let rows = crate::service::trackers::tickets::tickets(
+                    &self.store,
+                    args.tracker_id,
+                    args.view.as_deref(),
+                    args.query.as_deref(),
+                    args.limit,
+                    &scope,
+                )
+                .map_err(to_mcp_err)?;
+                ok_json_compact(&rows)
+            }
+            WorkAction::Lookup => {
+                let reference = w::lookup_reference(&args).map_err(to_mcp_err)?;
+                let t = crate::service::trackers::tickets::lookup(
+                    &self.store,
+                    reference,
+                    &scope,
+                    &crate::service::trackers::default_net(),
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                ok_json(&t)
+            }
+            WorkAction::Trackers => ok_json_compact(
+                &crate::service::trackers::tickets::trackers(&self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Scopes => ok_json_compact(
+                &crate::service::orgs::scopes(&self.store, &scope).map_err(to_mcp_err)?,
+            ),
+            WorkAction::OrgSuggestions => ok_json_compact(
+                &crate::service::orgs::org_suggestions(&self.store, &scope).map_err(to_mcp_err)?,
+            ),
+            WorkAction::Orgs => ok_json_compact(
+                &crate::service::orgs::org_details(&self.store, &scope).map_err(to_mcp_err)?,
+            ),
+            WorkAction::Card => ok_json(
+                &w::card::card(&self.store, args.key.as_deref().unwrap_or_default(), &scope)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Today => ok_json_compact(
+                &w::today::today(&self.store, args.since, &scope).map_err(to_mcp_err)?,
+            ),
+            WorkAction::Tidy => ok_json_compact(
+                &crate::service::work::tidy::work_tidy(
+                    &self.store,
+                    &scope,
+                    crate::service::catalog::now_secs(),
+                )
+                .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Reopened => ok_json_compact(
+                &crate::service::work::tidy::reopened(&self.store, &scope).map_err(to_mcp_err)?,
+            ),
+        }
+    }
+
+    #[tool(description = "Decide a session's work: action link (becomes its \
+        primary; key or item_id), reject (sticky 'not this'; or a \
+        suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
+        the updated row. trust_project {project_id, on}. resume {key, mode}: \
+        new session on past work. start {key|url|item_id}: new session on a \
+        ticket (project_ids: one per repo). handover {session_id}: ask it to \
+        write its hand-off. archive|unarchive (UI only), snooze {days}|never \
+        (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
+        kill when dirty).")]
+    pub(super) async fn work_link(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::work::WorkLinkArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "work_link",
+            &format!(
+                "session_id={:?} action={} key={:?} item_id={:?} link_id={:?} source={:?} mode={:?} host_alias={:?}",
+                args.session_id,
+                args.action,
+                args.key,
+                args.item_id,
+                args.link_id,
+                args.source,
+                args.mode,
+                args.host_alias
+            ),
+        );
+        if !crate::service::work::WORK_LINK_ACTIONS.contains(&args.action.as_str()) {
+            return Err(mcp_err(
+                "E_INVALID",
+                format!(
+                    "unknown work_link action {:?}; one of {}",
+                    args.action,
+                    crate::service::work::WORK_LINK_ACTIONS.join(", ")
+                ),
+                None,
+            ));
+        }
+        let scope = self.org_scope(&caller)?;
+        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
+            // Only ever gates the operator (D12): a session is about to exist.
+            // (`work_link` is `confirm: true` for M7's tidy kills; a person's
+            // start or resume is never gated.)
+            self.confirm_gate(
+                "work_link",
+                args.confirm_nonce.as_deref(),
+                &format!(
+                    "{} key={:?} url={:?} item_id={:?} host={:?} project_id={:?} project_ids={:?} mode={:?}",
+                    args.action,
+                    args.key,
+                    args.url,
+                    args.item_id,
+                    args.host_alias,
+                    args.project_id,
+                    args.project_ids,
+                    args.mode
+                ),
+                &caller,
+            )?;
+        }
+        if args.action == "handover" {
+            // Work graph M9.3: ask a live session to write its hand-off (on
+            // demand only, D9). The host and org fences are inside.
+            let sid = args
+                .session_id
+                .ok_or_else(|| mcp_err("E_INVALID", "handover needs session_id", None))?;
+            let row =
+                crate::service::work::agent_handover::request(&self.store, &self.ssh, sid, &scope)
+                    .await
+                    .map_err(to_mcp_err)?;
+            return ok_json(&row);
+        }
+        if args.action == "resume" {
+            // The host fence (a per-host token resumes only onto its own
+            // host) and the org fence are inside `resume_work`'s scope.
+            let ra = crate::service::work::resume_args(&args).map_err(to_mcp_err)?;
+            let row = crate::service::work::resume::resume_work(
+                &self.store,
+                &self.ssh,
+                &self.reg,
+                &ra,
+                &scope,
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&row);
+        }
+        if args.action == "trust_project" {
+            // Trust is fleet configuration, not one host's to change.
+            if caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "trust_project is not available to a per-host token",
+                    None,
+                ));
+            }
+            return ok_json(
+                &crate::service::work::trust_project(&args, &self.store).map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "dismiss" {
+            // Reopened work is fleet-wide, not one host's to dismiss.
+            if caller.host_alias.is_some() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "dismiss is not available to a per-host token",
+                    None,
+                ));
+            }
+            return ok_json(
+                &crate::service::work::dismiss_reopened(&args, &self.store).map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "tidy_apply" {
+            let items = args.items.clone().unwrap_or_default();
+            let summary = format!(
+                "tidy_apply {}",
+                items
+                    .iter()
+                    .map(|i| format!("{}:{}", i.session_id, i.action))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            // Kills: gated like kill_session when mcp.confirm_destructive is on.
+            if items
+                .iter()
+                .any(|i| matches!(i.action.as_str(), "kill" | "safe_kill"))
+            {
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    &summary,
+                    &caller,
+                )?;
+            }
+            let exec = crate::service::gc::RealGcExec {
+                store: std::sync::Arc::clone(&self.store),
+                ssh: std::sync::Arc::clone(&self.ssh),
+            };
+            let report = crate::service::work::tidy::tidy_apply(
+                &self.store,
+                &exec,
+                &items,
+                &scope,
+                crate::service::catalog::now_secs(),
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&report);
+        }
+        if args.action == "start" {
+            if let Some(ids) = args.project_ids.as_ref().filter(|v| !v.is_empty()) {
+                // Work graph M9.6: one sibling per repository, same branch.
+                if args.project_id.is_some() {
+                    return Err(mcp_err(
+                        "E_INVALID",
+                        "pass project_id or project_ids, not both",
+                        None,
+                    ));
+                }
+                let out = crate::service::trackers::tickets::start_work_many(
+                    &self.store,
+                    &self.ssh,
+                    &self.reg,
+                    &crate::service::work::start_args(&args),
+                    ids,
+                    &scope,
+                    &crate::service::trackers::default_net(),
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                return ok_json(&out);
+            }
+            // The host fence (a per-host token starts only its own host's
+            // tickets, on its own host) is inside `start_work`'s scope.
+            let row = crate::service::trackers::tickets::start_work(
+                &self.store,
+                &self.ssh,
+                &self.reg,
+                &crate::service::work::start_args(&args),
+                &scope,
+                &crate::service::trackers::default_net(),
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&row);
+        }
+        let sid = args.session_id.ok_or_else(|| {
+            mcp_err(
+                "E_INVALID",
+                format!("{} needs session_id", args.action),
+                None,
+            )
+        })?;
+        self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
+        let row =
+            crate::service::work::work_link(&args, &self.store, &scope).map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Trackers and orgs; see action. Never \
+        returns a secret.")]
+    pub(super) async fn work_admin(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::trackers::admin::WorkAdminArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::trackers::admin::{self as a, AdminAction};
+        // Master-only enforcement already happened centrally
+        // (`enforce_admin`, `work_admin` is `Access::Master`). The audit line
+        // is built by hand: the secret never reaches it, not even as a length.
+        let summary = args.audit_summary();
+        audit("work_admin", &summary);
+        match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
+            AdminAction::Test => {
+                let id = args
+                    .tracker_id
+                    .ok_or_else(|| mcp_err("E_INVALID", "test needs tracker_id", None))?;
+                let report =
+                    a::test_tracker(id, &self.store, &crate::service::trackers::default_net())
+                        .await
+                        .map_err(to_mcp_err)?;
+                ok_json(&report)
+            }
+            action if action.is_removal() => {
+                self.confirm_gate(
+                    "work_admin",
+                    args.confirm_nonce.as_deref(),
+                    &summary,
+                    &caller,
+                )?;
+                ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?)
+            }
+            _ => ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?),
+        }
+    }
+
+    /// The caller's org scope (work graph M5), read under a short lock.
+    pub(super) fn org_scope(
+        &self,
+        caller: &Caller,
+    ) -> Result<crate::service::orgs::OrgScope, McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        caller.org_scope(&s).map_err(to_mcp_err)
     }
 }

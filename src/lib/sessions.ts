@@ -125,6 +125,52 @@ export interface SessionRow {
     question: string | null;
     options: { n: number; label: string; selected: boolean }[];
   } | null;
+  /** The session's primary work link (migration 046), set through the work
+   *  commands (`work.ts`). Absent from a hub older than the work graph. */
+  work?: SessionWork | null;
+  /** Keys the user said this session does NOT work on (sticky "Not this").
+   *  Key recognition (`work_keys.ts`) must not show them. */
+  work_rejected?: string[];
+  /** The session's top link SUGGESTION (work graph M4): a guess nobody has
+   *  decided. Never a work group — only `work` groups a session. */
+  work_suggested?: SessionWork | null;
+  /** The session's org (work graph M5): the most specific org rule, else
+   *  its host's org. Absent = unassigned (or a hub older than M5). */
+  org_id?: number | null;
+}
+
+/** `SessionRow.work`: the primary link's summary. `key` is the item's key or
+ *  the link's own reference; null for an item named by title only. */
+export interface SessionWork {
+  link_id: number;
+  item_id: number | null;
+  key: string | null;
+  title: string;
+  /** `manual` | `started` | `agent` — tolerant: a newer hub may add more. */
+  source: string;
+  /** The tracker item's status (work graph M3); absent for a bare key, a
+   *  local item, or a hub older than M3. `todo` | `in_progress` | `done`. */
+  status_category?: string | null;
+  /** The tracker's own status name ("In Review"). */
+  status_name?: string | null;
+  url?: string | null;
+  /** The tracker no longer answers for the item (deleted or not visible). */
+  unavailable?: boolean;
+  /** Work graph M4: `confirmed` | `suggested` (absent from older hubs). */
+  state?: string;
+  /** `explicit` | `strong` | `weak`. */
+  strength?: string | null;
+  /** The detection rule that made it (`R3`, `R5` …). */
+  rule?: string | null;
+  /** A suggestion shown pre-selected. */
+  preselected?: boolean;
+  /** Live suggestions still to decide. */
+  suggestions?: number;
+  /** The link's org (work graph M5): its tracker's, else the session's. */
+  org_id?: number | null;
+  /** Work graph M7: archived from the UI at this unix second — the session
+   *  collapses into its group's Done while tmux keeps running. */
+  archived_at?: number | null;
 }
 
 type UsageFields = Partial<
@@ -227,6 +273,14 @@ showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 // (details) line: host, tmux name / worktree, elapsed, badges, last prompt.
 export const showRowDetails = writable<boolean>(readPref('rows.details', true, isBool));
 showRowDetails.subscribe((v) => writePref('rows.details', v));
+
+// Sidebar grouping — `project` (the tree by repository) or `work` (sessions
+// that carry a work key grouped by it first, the rest still under their
+// project; see work_keys.ts). Persisted across restarts.
+export type SidebarGroupBy = 'project' | 'work';
+const isGroupBy = (v: unknown): v is SidebarGroupBy => v === 'project' || v === 'work';
+export const sidebarGroupBy = writable<SidebarGroupBy>(readPref('sidebar.group', 'project', isGroupBy));
+sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 
 // `force: true` (the sidebar Refresh button) makes the backend run a fleet
 // reconcile pass now; the default returns stored rows while the last pass is
@@ -525,7 +579,7 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
 /** Apply a row returned by a mutation command (rename/restart/new). Unlike an
  *  event, a command result is the authoritative response to a request the
  *  user just made, so it clears any tombstone for that id before merging. */
-function acceptCommandRow(row: SessionRow | null | undefined): void {
+export function acceptCommandRow(row: SessionRow | null | undefined): void {
   rows.accept(row);
 }
 

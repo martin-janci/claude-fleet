@@ -521,6 +521,36 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Work links (roadmap M1b.2). A per-host token reads and decides only
+    // its own host's sessions (`require_host`).
+    ToolPolicy {
+        name: "work",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // `resume` starts a session: the lifecycle deadline. Confirm-gated for
+    // `tidy_apply`'s kills (work graph M7), like `kill_session`; every other
+    // action passes through the gate untouched, as `work_admin`'s do.
+    ToolPolicy {
+        name: "work_link",
+        access: Access::Client,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
+    // Trackers and their credentials (work graph M3): fleet admin, so the
+    // master only — on a paired desktop every command behind it is
+    // `LocalOnly` (review C17). Confirm-gated for `remove`; `test` talks to
+    // the tracker, hence the lifecycle deadline.
+    ToolPolicy {
+        name: "work_admin",
+        access: Access::Master,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Lifecycle,
+    },
     // repo.rs
     ToolPolicy {
         name: "list_projects",
@@ -776,6 +806,25 @@ pub fn is_readonly_tool(name: &str) -> bool {
 /// Tools gated by the `mcp.confirm_destructive` toggle.
 pub fn needs_confirmation(name: &str) -> bool {
     policy(name).is_some_and(|p| p.confirm)
+}
+
+/// Tools that start or retire sessions without being `confirm: true`. For
+/// the operator (`Caller::is_operator`) these — and every `confirm: true`
+/// tool — need a person's approval whatever `mcp.confirm_destructive` says
+/// (work graph M9.7, decision D12). For anyone else they are ungated.
+/// `work_link` is gated only for `start` / `resume`, the actions that
+/// create a session.
+pub const OPERATOR_CONFIRMS: &[&str] = &[
+    "new_session",
+    "new_shell_session",
+    "safe_kill_session",
+    "work_link",
+];
+
+/// Whether a call by this caller must be approved on the desktop even with
+/// `mcp.confirm_destructive` off.
+pub fn operator_must_confirm(is_operator: bool, name: &str) -> bool {
+    is_operator && (needs_confirmation(name) || OPERATOR_CONFIRMS.contains(&name))
 }
 
 /// Fleet-administration tools: reachable with the master token only — see
@@ -1263,6 +1312,22 @@ pub fn mark_untrusted(text: &str, from: &str) -> String {
     format!("{}\n{text}", untrusted_marker(from))
 }
 
+/// `[claude-fleet` opens every fleet marker line; third-party text must not
+/// be able to write one — a fake end-of-untrusted line would let what
+/// follows pass as fleet's own. Shared by the work handover and the tracker
+/// ticket paths (work graph M2 / M3).
+pub fn defuse(s: &str) -> String {
+    s.replace("[claude-fleet", "(claude-fleet")
+}
+
+/// Third-party text fenced on both sides: the marker line, the text with
+/// every marker defused, then [`UNTRUSTED_END`]. At most `max` characters of
+/// the TEXT are kept, so the end marker always survives.
+pub fn fence_untrusted(text: &str, from: &str, max: usize) -> String {
+    let body: String = defuse(text).chars().take(max).collect();
+    format!("{}\n{UNTRUSTED_END}", mark_untrusted(&body, from))
+}
+
 /// The body without its leading [`mark_untrusted`] line (D8 / Q2).
 ///
 /// The DELIVERED text always keeps the marker — that is the whole point of it.
@@ -1288,12 +1353,21 @@ pub fn strip_marker(text: &str) -> &str {
 
 /// Argument keys whose values are free text an agent authored (or a secret):
 /// never persisted, only their length.
-const REDACT_KEYS: &[&str] = &["prompt", "body", "content", "start_command"];
+/// `initial_prompt` and `brief` (work graph) may carry third-party ticket text.
+const REDACT_KEYS: &[&str] = &[
+    "prompt",
+    "body",
+    "content",
+    "start_command",
+    "initial_prompt",
+    "brief",
+];
 /// Argument keys dropped from the summary entirely: a confirmation nonce is
 /// a one-time credential and must not land in the timeline, and `value` is
 /// `set_secret`'s secret value — not even its length may be persisted (a
-/// length still leaks information about a secret).
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value"];
+/// length still leaks information about a secret). `secret` is `work_admin`'s
+/// tracker credential, for the same reason.
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see
@@ -1421,10 +1495,12 @@ mod tests {
             "move_session",
             "resolve_move",
             "apply_sync",
+            "work_admin",
+            "work_link",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 9);
+        assert_eq!(CONFIRM_TOOLS.len(), 11);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
@@ -1675,6 +1751,8 @@ mod tests {
             "pair_client",
             "revoke_client",
             "set_client_trust",
+            // Trackers and their credentials (work graph M3).
+            "work_admin",
         ] {
             assert!(is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");
@@ -1804,10 +1882,19 @@ mod tests {
         assert!(!s.contains("hunter2"), "{s}");
         assert!(!s.contains("value"), "{s}");
         assert_eq!(s, "host_alias=mefistos name=FOO");
-        for k in ["body", "content", "start_command"] {
+        for k in [
+            "body",
+            "content",
+            "start_command",
+            "initial_prompt",
+            "brief",
+        ] {
             let a = serde_json::json!({ k: "xyz" });
             assert_eq!(redact_args(a.as_object()), format!("{k}=<3 chars>"));
         }
+        // `work_admin`'s tracker credential: dropped entirely.
+        let tracker = serde_json::json!({ "secret": "ATATT-unique-9", "tracker_id": 1 });
+        assert_eq!(redact_args(tracker.as_object()), "tracker_id=1");
     }
 
     /// The audit row is written before any tool validates its arguments, so

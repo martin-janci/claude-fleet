@@ -37,7 +37,7 @@ import { sendPrompt, sessions, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
 import { composerPresets, resetComposerPresets } from './composer_presets';
-import { composerDrafts } from './conversation';
+import { composerDrafts, insertIntoComposer } from './conversation';
 import { scrollMemory } from './conversation_nav';
 import { openPathRequest } from './app_views';
 import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
@@ -1528,6 +1528,37 @@ describe('ConversationPanel drafts and focus', () => {
     await second.rerender({ session: session({ id: 1 }), visible: true });
     await settle();
     expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('half typed');
+  });
+
+  it('Insert into composer (work graph M9.2) fills the shown box, keeps what was typed, and sends nothing', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session({ id: 21 }), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'look at this' } });
+    insertIntoComposer(21, 'Ticket PAY-7\n[fenced]');
+    await settle();
+    expect(box.value).toBe('look at this\n\nTicket PAY-7\n[fenced]');
+    expect(composerDrafts.get(21)).toBe(box.value);
+    expect(mockedSend).not.toHaveBeenCalled();
+    // Another session's insert leaves this box alone.
+    insertIntoComposer(22, 'other');
+    await settle();
+    expect(box.value).toBe('look at this\n\nTicket PAY-7\n[fenced]');
+  });
+
+  it('a remount does not replay an old insert over what was typed since', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    insertIntoComposer(23, 'inserted');
+    const first = render(ConversationPanel, { session: session({ id: 23 }), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.value).toBe('inserted');
+    await fireEvent.input(box, { target: { value: 'edited' } });
+    first.unmount();
+    render(ConversationPanel, { session: session({ id: 23 }), visible: true });
+    await settle();
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('edited');
   });
 
   it('sending forgets the stored draft', async () => {

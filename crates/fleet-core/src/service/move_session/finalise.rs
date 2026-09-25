@@ -79,6 +79,15 @@ pub(super) async fn finalise_source(
 ) -> Result<FinaliseOutcome, IpcError> {
     let mut warnings = Vec::new();
     let mut source_killed = false;
+    if a.keep_source {
+        // A fork: both sessions live on, and the copy does the same work
+        // (review C7). Best-effort — work links never fail a move.
+        if let Ok(s) = store.lock() {
+            if let Err(e) = s.copy_work_links(a.source_row_id, a.target_row_id) {
+                warnings.push(format!("the work links were not copied ({})", e.message));
+            }
+        }
+    }
     if !a.keep_source {
         // The source kept running through the copy: if its transcript moved
         // on since, it took a turn the target does not have. Killing it would

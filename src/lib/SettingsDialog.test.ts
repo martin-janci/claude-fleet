@@ -481,3 +481,52 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(get(composerPresets)).toEqual(DEFAULT_PRESETS);
   });
 });
+
+describe('SettingsDialog — Work lifecycle (work graph M7.3)', () => {
+  it('shows the thresholds, auto-tidy off with its warning, and a dry run of the current candidates', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'work_tidy')
+        return {
+          candidates: [
+            { session_id: 1, host_alias: 'h', tmux_name: 'done-one', reason: 'done_idle', action: 'safe_kill', since: 0, idle_secs: 18000, key: 'ABC-1' },
+            { session_id: 2, host_alias: 'h', tmux_name: 'dup', reason: 'duplicate_worktree', action: 'kill', since: 0, idle_secs: 90000 },
+            { session_id: 3, host_alias: 'h', tmux_name: 'wontdo', reason: 'not_planned', action: 'safe_kill', since: 0, idle_secs: 18000 },
+          ],
+          auto_tidy: false,
+          auto_reasons: ['done_idle', 'pr_merged_idle'],
+          done_days: 2,
+          idle_hours: 4,
+        };
+      if (cmd === 'work_reopened') return [];
+      return base(cmd, a);
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    expect((screen.getByTestId('work-tidy-done-days') as HTMLInputElement).value).toBe('2');
+    expect((screen.getByTestId('work-tidy-idle-hours') as HTMLInputElement).value).toBe('4');
+    expect((screen.getByTestId('work-auto-tidy') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByTestId('work-auto-tidy-warning').textContent).toContain('never touched');
+    const reason = (r: string) => screen.getByTestId(`work-auto-tidy-reason-${r}`) as HTMLInputElement;
+    expect([reason('done_idle').checked, reason('pr_merged_idle').checked, reason('not_planned').checked]).toEqual([
+      true,
+      true,
+      false,
+    ]);
+    await fireEvent.click(screen.getByTestId('work-auto-tidy-dry-run'));
+    const preview = await screen.findByTestId('work-auto-tidy-preview');
+    const rows = screen.getAllByTestId('work-auto-tidy-preview-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain('done-one');
+    expect(preview.textContent).toContain('once turned on');
+    // Ticking a reason writes the comma list.
+    await fireEvent.click(reason('not_planned'));
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'work.auto_tidy_reasons',
+        value: 'done_idle,pr_merged_idle,not_planned',
+      }),
+    );
+  });
+});

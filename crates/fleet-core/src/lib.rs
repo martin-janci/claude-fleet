@@ -19,6 +19,7 @@ pub mod ipc_error;
 pub mod json;
 pub mod logging;
 pub mod mcp;
+pub mod net;
 #[cfg(test)]
 mod no_eprintln_tests;
 pub mod projects;

@@ -113,6 +113,9 @@ pub struct NewSessionParams {
     /// on the host already holds (use restore_host_sessions).
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -139,6 +142,9 @@ pub struct NewShellSessionParams {
     /// The pane stays alive after the command exits.
     #[serde(default)]
     pub start_command: Option<String>,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -182,6 +188,9 @@ pub struct SafeKillSessionParams {
     /// tmux session name to safely retire (with `host_alias`).
     #[serde(default)]
     pub tmux_name: Option<String>,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

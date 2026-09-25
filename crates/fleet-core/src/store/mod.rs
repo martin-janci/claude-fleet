@@ -13,6 +13,7 @@ mod clients;
 mod conversations;
 mod hosts_accounts;
 mod layers;
+mod orgs;
 mod participants;
 mod peer_links;
 mod projects;
@@ -26,13 +27,23 @@ mod tasks;
 #[cfg(test)]
 mod test_support;
 mod timeline;
+mod tracker_items;
+mod trackers;
 mod usage;
+mod work;
+mod work_detect;
+mod work_journal;
+mod work_tidy;
 
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
+pub use orgs::{
+    normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
+    SessionOrgFacts, ORG_NAME_MAX_CHARS,
+};
 pub use participants::{ParticipantRow, PARTICIPANT_REMOTE, RETIRED_RETENTION_SECS};
 pub use peer_links::{
     Adopted, Inbound, OutboxRow, PeerLinkRow, PeerLinkSummary, LINK_CONNECTED, LINK_INCOMPATIBLE,
@@ -45,6 +56,22 @@ pub use rows::*;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
+pub use trackers::{
+    is_allowed_tracker_host, normalize_dc_site, normalize_provider_site, normalize_site_url,
+    validate_credential_ref, validate_tracker_settings, validate_tracker_transport, Secret,
+    TrackerConfig, TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow,
+    TRACKER_AUTH_KINDS, TRACKER_PROVIDERS, TRACKER_STATES,
+};
+pub use work::{
+    canonical_key, github_ref, normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary,
+    WorkTarget, WORK_LINK_SOURCES,
+};
+pub use work_detect::DetectionState;
+pub use work_journal::{
+    JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
+};
+pub use work_tidy::ReopenedWork;
 
 pub struct Store {
     conn: Connection,
@@ -191,6 +218,13 @@ impl Store {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// The raw connection, for a test outside `store` that has to set up a
+    /// state no public method writes (a claude_session_id, say).
+    #[cfg(test)]
+    pub(crate) fn conn_for_test(&self) -> &Connection {
+        &self.conn
     }
 
     #[cfg(test)]

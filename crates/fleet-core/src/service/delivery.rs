@@ -49,6 +49,17 @@ pub struct Packed {
     pub included: Vec<i64>,
     /// How many of `messages` did not fit.
     pub remaining: usize,
+    /// Handover rows (work graph M2.3, `work_journal` kind `handover`)
+    /// included in `text`, ahead of every message. Stamped `delivered_at`
+    /// exactly like `included`.
+    pub handovers: Vec<i64>,
+}
+
+/// A handover brief waiting for its session's next hook (work graph M2.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingHandover {
+    pub id: i64,
+    pub body: String,
 }
 
 /// PURE: render `messages` (oldest first) into one `additionalContext` value,
@@ -56,7 +67,7 @@ pub struct Packed {
 ///
 /// `sender_label` turns a message into something human to name its sender —
 /// normally `"<tmux_name>@<host_alias>"` for a local sender, or the remote
-/// address (migration 045) for one on another fleet. Taken as a closure so
+/// address (migration 054) for one on another fleet. Taken as a closure so
 /// this stays pure and testable without a store.
 pub fn pack(
     messages: &[SessionMessage],
@@ -80,13 +91,50 @@ pub fn pack_within(
     max_chars: usize,
     max_lines: usize,
 ) -> Packed {
+    pack_with_handovers(&[], messages, sender_label, max_chars, max_lines)
+}
+
+/// As [`pack_within`], with handover briefs packed AHEAD of the messages in
+/// the same budget (work graph M2.3): a brief is fleet's context for the
+/// turn about to run, so it rides first. Whole briefs only; one that does not
+/// fit what is left waits for the next hook, and one that cannot fit even an
+/// empty batch rides as a stub pointing at the `work` tool (the same
+/// no-starvation rule as an oversized message).
+pub fn pack_with_handovers(
+    handovers: &[PendingHandover],
+    messages: &[SessionMessage],
+    sender_label: &dyn Fn(&SessionMessage) -> String,
+    max_chars: usize,
+    max_lines: usize,
+) -> Packed {
     let budget_chars = max_chars.saturating_sub(TAIL_RESERVE_CHARS);
     let budget_lines = max_lines.saturating_sub(TAIL_RESERVE_LINES);
 
     let mut blocks: Vec<String> = Vec::new();
     let mut included: Vec<i64> = Vec::new();
+    let mut handover_ids: Vec<i64> = Vec::new();
     let mut chars = 0usize;
     let mut lines = 0usize;
+
+    for h in handovers {
+        let mut block = format!("[fleet handover #{}]\n{}", h.id, h.body);
+        if block.chars().count() > budget_chars || block.lines().count() > budget_lines {
+            block = format!(
+                "[fleet handover #{}]: (brief too large to inline — call the fleet `work` tool with action context)",
+                h.id
+            );
+        }
+        let (joiner_c, joiner_l) = if blocks.is_empty() { (0, 0) } else { (2, 1) };
+        let c = block.chars().count() + joiner_c;
+        let l = block.lines().count() + joiner_l;
+        if chars + c > budget_chars || lines + l > budget_lines {
+            break;
+        }
+        chars += c;
+        lines += l;
+        handover_ids.push(h.id);
+        blocks.push(block);
+    }
 
     for m in messages {
         let who = sender_label(m);
@@ -183,6 +231,7 @@ pub fn pack_within(
         text: blocks.join("\n\n"),
         included,
         remaining,
+        handovers: handover_ids,
     }
 }
 
@@ -236,6 +285,58 @@ mod tests {
     }
     fn label(_: &SessionMessage) -> String {
         "alpha@local".into()
+    }
+
+    fn handover(id: i64, body: &str) -> PendingHandover {
+        PendingHandover {
+            id,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn handovers_ride_first_and_an_oversized_one_is_a_stub() {
+        let p = pack_with_handovers(
+            &[handover(7, "the brief")],
+            &[msg(1, "mail")],
+            &label,
+            CTX_MAX_CHARS,
+            CTX_MAX_LINES,
+        );
+        assert_eq!(p.handovers, vec![7]);
+        assert_eq!(p.included, vec![1]);
+        assert!(p.text.starts_with("[fleet handover #7]\nthe brief"));
+
+        let huge = "x".repeat(CTX_MAX_CHARS);
+        let p = pack_with_handovers(
+            &[handover(8, &huge)],
+            &[],
+            &label,
+            CTX_MAX_CHARS,
+            CTX_MAX_LINES,
+        );
+        assert_eq!(
+            p.handovers,
+            vec![8],
+            "stamped, so it cannot starve the queue"
+        );
+        assert!(p.text.contains("brief too large"));
+        assert!(p.text.chars().count() <= CTX_MAX_CHARS);
+
+        // A brief that takes most of the budget leaves the mail for later,
+        // counted in the tail.
+        let big = "y".repeat(CTX_MAX_CHARS - 500);
+        let p = pack_with_handovers(
+            &[handover(9, &big)],
+            &[msg(1, &"z".repeat(1000))],
+            &label,
+            CTX_MAX_CHARS,
+            CTX_MAX_LINES,
+        );
+        assert_eq!(p.handovers, vec![9]);
+        assert!(p.included.is_empty());
+        assert_eq!(p.remaining, 1);
+        assert!(p.text.chars().count() <= CTX_MAX_CHARS);
     }
 
     #[test]

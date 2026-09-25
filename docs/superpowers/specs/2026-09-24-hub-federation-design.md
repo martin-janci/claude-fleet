@@ -65,7 +65,7 @@ smallest thing that works end to end between two real hub processes, proven in
 - A `peer` token cannot open `GET /events`, `/report` or `/reports`. Those
   routes check the mode and refuse `Peer` with 403.
 
-### The `peer_links` table (migration 045)
+### The `peer_links` table (migration 054)
 
 One row per link on each hub:
 
@@ -123,13 +123,13 @@ flag on `peer add` is `--insecure`, with the same meaning.
 
 ### Remote participants
 
-A foreign endpoint becomes a participant of a new kind, `remote`. Migration 045
+A foreign endpoint becomes a participant of a new kind, `remote`. Migration 054
 adds `participants.address` (TEXT, unique where not NULL: the full
 `<fleet>/session/<host>/<name>`) and `participants.peer_link_id`.
 
 `session_messages.from_session_id` and `to_session_id` are `NOT NULL` from
 migration 015. Instead of rebuilding the table, a remote end stores `0` there;
-no session has id 0. Its true end is always its participant. Migration 045 also
+no session has id 0. Its true end is always its participant. Migration 054 also
 adds:
 
 - `session_messages.remote_fleet_id` TEXT and `remote_message_id` INTEGER, with
@@ -524,7 +524,7 @@ Controller rulings during the build changed the design above as follows
 | HTTP client | `fleet-core/src/http_client/` (moved from `src-tauri/src/backend/{remote.rs,http1.rs}`) | `HubTransport` trait, `TcpTransport`, HTTP/1 parsing | `tokio-rustls`, `rustls-native-certs` |
 | Peer wire types | `fleet-core/src/service/peer/wire.rs` | request/response structs, `proto`, limits | serde |
 | Validation | `service/peer/validate.rs` (pure) | the receiving checks, `reply_to` mapping | `service/address` |
-| Link store | `store/peer_links.rs` | link rows, outbox query, idempotent insert, `after` | migration 045 |
+| Link store | `store/peer_links.rs` | link rows, outbox query, idempotent insert, `after` | migrations 054, 055 |
 | Listener | `service/peer/listen.rs` + `mcp/tools/peer.rs` | `peer_exchange` handler, long-poll | store, validation |
 | Dialer | `service/peer/dial.rs` | the exchange loop, backoff, state | HTTP client, store, validation |
 | Mode gate | `mcp/auth.rs`, `mcp/tools/support.rs`, `present.rs` | `TokenMode::Peer` | — |
@@ -540,7 +540,7 @@ do not change.
    ownership, the body and batch caps); `reply_to` mapping in both directions;
    the backoff schedule; classifying transport failure versus refusal; the
    state transitions.
-2. **Store.** Migration 045 on an empty and on a populated database; the outbox
+2. **Store.** Migration 054 on an empty and on a populated database; the outbox
    query; handing over by `after`; the duplicate insert being ignored; the
    remote participant; the pending-to-undeliverable sweep (7 days and
    revocation) with its event; every reader from the section 2 sweep rendering

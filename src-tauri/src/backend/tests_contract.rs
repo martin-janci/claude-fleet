@@ -9,10 +9,13 @@ use fleet_core::service::repo_read::{
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
 use fleet_core::service::tunnel::TunnelHealth;
 use fleet_core::service::usage::DayUsage;
+use fleet_core::service::work::resume::{LiveWork, ResumeCandidate, ResumeMode, ResumePlan};
+use fleet_core::service::work::PurgeImpact;
 use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
     AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectRow, SessionContext,
-    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorktreeRow,
+    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkLinkRow, WorkSummary,
+    WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -95,6 +98,28 @@ pub(crate) fn sample_session() -> SessionRow {
                 selected: true,
             }],
         }),
+        work: Some(WorkSummary {
+            link_id: 5,
+            item_id: Some(6),
+            key: Some("ABC-123".into()),
+            title: "Login".into(),
+            source: "manual".into(),
+            org_id: Some(2),
+            ..Default::default()
+        }),
+        work_rejected: vec!["XYZ-9".into()],
+        work_suggested: Some(WorkSummary {
+            link_id: 7,
+            key: Some("ABC-99".into()),
+            source: "prompt".into(),
+            state: "suggested".into(),
+            rule: Some("R5".into()),
+            preselected: true,
+            suggestions: 1,
+            org_id: Some(2),
+            ..Default::default()
+        }),
+        org_id: Some(2),
     }
 }
 
@@ -112,6 +137,7 @@ pub(crate) fn sample_host() -> HostRow {
         // Consistent with the `ssh_alias` above: this sample is an SSH host.
         // `transport` is not an `Option`, so either value pins the same key.
         transport: "ssh".into(),
+        org_id: Some(2),
     }
 }
 
@@ -323,6 +349,78 @@ fn sample_subagent() -> ConvItem {
     }
 }
 
+fn sample_work_link() -> WorkLinkRow {
+    WorkLinkRow {
+        id: 5,
+        item_id: Some(6),
+        ref_key: Some("ABC-123".into()),
+        participant_id: Some(7),
+        state: "confirmed".into(),
+        source: "manual".into(),
+        is_primary: true,
+        created_at: 1,
+        decided_at: Some(2),
+        ended_at: Some(3),
+        snap_host: Some("trn".into()),
+        snap_tmux: Some("demo".into()),
+        snap_name: Some("Fix login".into()),
+        snap_project_id: Some(8),
+        snap_worktree: Some("abc-123".into()),
+        snap_branch: Some("abc-123-login".into()),
+        snap_pr_url: Some("https://example.com/pr/1".into()),
+        snap_claude_ids: Some("[\"c1\"]".into()),
+        role: "work".into(),
+        resumable: true,
+        claude_session_id: Some("c1".into()),
+        strength: Some("strong".into()),
+        rule: Some("R3".into()),
+        evidence: vec![serde_json::json!({
+            "signal": "branch", "rule": "R3", "text": "abc-123-login", "at": 1
+        })],
+        preselected: false,
+        end_reason: Some("branch_changed".into()),
+        org_id: Some(2),
+    }
+}
+
+fn sample_resume_plan() -> ResumePlan {
+    ResumePlan {
+        key: "ABC-123".into(),
+        title: Some("Fix login".into()),
+        live: vec![LiveWork {
+            session_id: 1,
+            host_alias: "trn".into(),
+            tmux_name: "demo".into(),
+            friendly_name: Some("Fix login".into()),
+        }],
+        candidates: vec![ResumeCandidate {
+            link_id: 5,
+            ended_at: Some(3),
+            name: Some("Fix login".into()),
+            host_alias: Some("trn".into()),
+            branch: Some("abc-123-login".into()),
+            worktree: Some("abc-123-login".into()),
+            pr_url: Some("https://example.com/pr/1".into()),
+            conversations: 2,
+            last_claude_session_id: Some("c1".into()),
+            resumable: true,
+        }],
+        link_id: Some(5),
+        host_alias: Some("trn".into()),
+        project_id: Some(8),
+        branch: Some("abc-123-login".into()),
+        worktree: Some("abc-123-login".into()),
+        worktree_present: true,
+        modes: vec![ResumeMode {
+            mode: "last".into(),
+            ok: false,
+            reason: Some("live".into()),
+        }],
+        hosts: vec!["trn".into()],
+        brief: Some("# Handover".into()),
+    }
+}
+
 fn sample_changed_file() -> ChangedFile {
     ChangedFile {
         path: "src/lib.rs".into(),
@@ -349,6 +447,18 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         c.insert(name.to_string(), keys);
     };
     put("SessionRow", wire_keys(&sample_session()));
+    put("WorkLinkRow", wire_keys(&sample_work_link()));
+    let plan = sample_resume_plan();
+    put("ResumePlan", wire_keys(&plan));
+    put("ResumePlan.live", wire_keys(&plan.live[0]));
+    put("ResumePlan.candidates", wire_keys(&plan.candidates[0]));
+    put("ResumePlan.modes", wire_keys(&plan.modes[0]));
+    put(
+        "PurgeImpact",
+        wire_keys(&PurgeImpact {
+            keys: vec!["ABC-123".into()],
+        }),
+    );
     put("HostRow", wire_keys(&sample_host()));
     put("AccountRow", wire_keys(&sample_account()));
     put("SessionEvent", wire_keys(&sample_event()));
@@ -653,7 +763,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_three() {
+fn a_session_rows_wire_names_are_these_exact_fifty_eight() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -682,6 +792,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_three() {
         "lost_reason",
         "model",
         "notes",
+        "org_id",
         "parent_session_id",
         "pending_input",
         "pr_url",
@@ -707,11 +818,14 @@ fn a_session_rows_wire_names_are_these_exact_fifty_three() {
         "usage_model",
         "usage_output_tokens",
         "usage_updated_at",
+        "work",
+        "work_rejected",
+        "work_suggested",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 54, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 58, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

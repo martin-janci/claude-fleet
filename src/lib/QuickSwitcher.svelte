@@ -11,13 +11,12 @@
   import Modal from './Modal.svelte';
   import PickerList, { optionId } from './PickerList.svelte';
   import type { PickerItem } from './PickerList.svelte';
-  import { sessions } from './sessions';
+  import { sessions, type SessionRow } from './sessions';
   import { projects } from './projects';
   import { hosts } from './hosts';
   import { requestHostsView } from './app_views';
   import { selectedSession, selectSessionExplicitly } from './selection';
   import { requestNewSession } from './new_session_request';
-  import { push } from './toasts';
   import { detectMac } from './terminal_keys';
   import {
     buildEntries,
@@ -27,8 +26,28 @@
     noteRecent,
     isSwitcherChord,
     chordLabel,
+    ticketEntries,
+    lookupEntry,
+    placeForTicket,
     type SwitcherEntry,
+    type SwitcherTicket,
+    scopeEntries,
   } from './quick_switcher';
+  import { effectiveScope, scopeOf } from './orgs';
+  import {
+    workTickets,
+    workLookup,
+    startWork,
+    trackers,
+    providerInfo,
+    showProviderBadges,
+    type TicketRow,
+  } from './trackers';
+  import { workKeyFor, worktreeBranchById } from './work_keys';
+  import { settingsOpen } from './app_views';
+  import { push, pushError } from './toasts';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let {
     // Injectable for tests; defaults to the real platform.
@@ -51,7 +70,58 @@
   });
   onDestroy(unsubSelected);
 
-  const entries = $derived(buildEntries($sessions, $projects, $hosts));
+  // Tickets (work graph M3): the cached My work / Current sprint / Recent,
+  // loaded when the switcher opens and there is a tracker.
+  let tickets = $state<SwitcherTicket[]>([]);
+  async function loadTickets() {
+    if ($trackers.length === 0) {
+      tickets = [];
+      return;
+    }
+    const views: [string, string][] = [
+      ['mine', 'My work'],
+      ['sprint', 'Current sprint'],
+      ['recent', 'Recent'],
+    ];
+    const answers = await Promise.all(views.map(([view]) => workTickets({ view, limit: 20 })));
+    const out: SwitcherTicket[] = [];
+    answers.forEach((r, i) => {
+      if (r.ok && Array.isArray(r.value)) {
+        for (const ticket of r.value) out.push({ ticket, section: views[i][1] });
+      }
+    });
+    tickets = out;
+  }
+  // Work graph M6: a provider badge per ticket, once trackers of two or
+  // more providers exist.
+  const ticketBadges = $derived(
+    new Map(
+      showProviderBadges($trackers)
+        ? $trackers.flatMap((t) => {
+            const p = providerInfo(t.provider);
+            return p ? [[t.id, { icon: p.icon, title: p.label }] as const] : [];
+          })
+        : [],
+    ),
+  );
+  const ticketRows = $derived(ticketEntries(tickets, ticketBadges));
+  const lookupRow = $derived(
+    lookupEntry(
+      query,
+      new Set(ticketRows.map((e) => (e.ticket?.key ?? '').toUpperCase())),
+    ),
+  );
+  // Work graph M5: the sidebar's org scope narrows ⌘K too (one
+  // `rowMatches` for both, so they never disagree).
+  const trackerOrg = $derived(new Map($trackers.map((t) => [t.id, t.org_id ?? null])));
+  const entries = $derived(
+    scopeEntries(
+      [...buildEntries($sessions, $projects, $hosts), ...ticketRows, ...(lookupRow ? [lookupRow] : [])],
+      $effectiveScope,
+      $scopeOf,
+      trackerOrg,
+    ),
+  );
   const ranked: SwitcherEntry[] = $derived(rankEntries(entries, query, $recentSessions));
   const items: PickerItem[] = $derived(
     ranked.map((e) => ({
@@ -59,7 +129,17 @@
       label: e.label,
       description: e.description,
       meta: e.meta,
-      group: e.kind === 'session' ? 'Sessions' : e.kind === 'host' ? 'Hosts' : 'Projects',
+      badge: e.badge,
+      group:
+        e.kind === 'session'
+          ? 'Sessions'
+          : e.kind === 'host'
+            ? 'Hosts'
+            : e.kind === 'ticket'
+              ? (e.section ?? 'Tickets')
+              : e.kind === 'lookup'
+                ? 'Lookup'
+                : 'Projects',
       testid: `switcher-${e.kind}`,
     })),
   );
@@ -79,6 +159,7 @@
     query = '';
     activeKey = null;
     open = true;
+    void loadTickets();
   }
   function hide() {
     open = false;
@@ -123,6 +204,10 @@
     } else if (e.kind === 'project' && e.project) {
       requestNewSession({ project: e.project });
       hide();
+    } else if (e.kind === 'ticket' && e.ticket) {
+      openTicket(e.ticket);
+    } else if (e.kind === 'lookup' && e.lookup) {
+      void lookupThenOpen(e.lookup);
     } else if (e.kind === 'host' && e.host) {
       const alias = e.host.alias;
       hide();
@@ -130,6 +215,83 @@
       // view remembers the right element to restore on close.
       void tick().then(() => requestHostsView(alias));
     }
+  }
+
+  // ── Tickets ──
+  const branchById = $derived(worktreeBranchById($projects));
+  function liveSessionOf(t: TicketRow): SessionRow | null {
+    const ids = t.live_session_ids ?? [];
+    return $sessions.find((s) => ids.includes(s.id) && s.status !== 'ghost') ?? null;
+  }
+  /** Enter on a ticket: jump to its live session, else the dialog, prefilled. */
+  function openTicket(t: TicketRow) {
+    const live = liveSessionOf(t);
+    if (live) {
+      selectSessionExplicitly(live);
+      hide();
+      return;
+    }
+    const key = t.key ?? '';
+    const place = placeForTicket(key, $sessions, $projects, (s) => workKeyFor(s, branchById)?.key ?? null);
+    const project = place?.project ?? contextProject(ranked, $selectedSession, $projects);
+    if (!project) {
+      push({ kind: 'info', message: 'No projects yet — refresh the sidebar first.' });
+      return;
+    }
+    requestNewSession({
+      project,
+      initialName: t.title ? `${key} ${t.title}` : key,
+      initialHost: place?.host,
+      ticket: t,
+    });
+    hide();
+  }
+  async function lookupThenOpen(reference: string) {
+    const r = await workLookup(reference);
+    if (r.ok) {
+      openTicket(r.value);
+      return;
+    }
+    const d = r.error.details as { site_url?: string; provider?: string } | null | undefined;
+    const site = d?.site_url ?? (d?.provider ? (providerInfo(d.provider)?.label ?? d.provider) : null);
+    if (r.error.code === 'E_NOTFOUND' && site) {
+      push({
+        kind: 'info',
+        message: `${site} is not connected — connect it in Settings → Work to look up its tickets.`,
+        action: { label: 'Settings', run: () => settingsOpen.set(true) },
+      });
+      return;
+    }
+    pushError(r.error, 'Lookup failed');
+  }
+  /** Cmd/Ctrl+Enter on a ticket: start with the defaults, no dialog. */
+  async function startTicketNow(e: SwitcherEntry) {
+    const blocked = hubActionBlocked('start_work', $hubStatus, $hubConnection);
+    if (blocked) {
+      push({ kind: 'info', message: blocked });
+      return;
+    }
+    const ref = e.ticket?.id != null ? { item_id: e.ticket.id } : { reference: e.lookup ?? '' };
+    hide();
+    const r = await startWork({ ...ref, with_brief: true });
+    if (r.ok) {
+      selectSessionExplicitly(r.value);
+      return;
+    }
+    const d = r.error.details as { session_id?: number } | null | undefined;
+    if (r.error.code === 'E_EXISTS' && d?.session_id != null) {
+      const live = $sessions.find((s) => s.id === d.session_id);
+      if (live) {
+        selectSessionExplicitly(live);
+        return;
+      }
+    }
+    if (r.error.code === 'E_AMBIGUOUS' && e.ticket) {
+      // No project to default to: the dialog asks.
+      openTicket(e.ticket);
+      return;
+    }
+    pushError(r.error, 'Start work failed');
   }
 
   function newWithQuery() {
@@ -151,7 +313,10 @@
       move(-1);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (e.metaKey || e.ctrlKey) newWithQuery();
+      const active = ranked.find((x) => x.key === activeKey);
+      if ((e.metaKey || e.ctrlKey) && (active?.kind === 'ticket' || active?.kind === 'lookup')) {
+        void startTicketNow(active);
+      } else if (e.metaKey || e.ctrlKey) newWithQuery();
       else if (activeKey !== null) pick(activeKey);
       else newWithQuery();
     }
@@ -171,7 +336,7 @@
       aria-activedescendant={activeKey !== null ? optionId(LIST_ID, activeKey) : undefined}
       bind:value={query}
       onkeydown={onInputKeydown}
-      placeholder="Jump to a session or host… (name, project, host, branch, status)"
+      placeholder="Jump to a session, host or ticket… (name, key, project, host, branch, status, or paste a ticket URL)"
       autocomplete="off"
       spellcheck="false"
     />
@@ -189,7 +354,7 @@
     <div class="hint">
       <span>↑↓ move</span>
       <span>↵ attach / open</span>
-      <span>{modKey}↵ new session named “{query.trim() || '…'}”</span>
+      <span>{modKey}↵ new session named “{query.trim() || '…'}” (on a ticket: start it)</span>
       <span>esc / {chord} close</span>
     </div>
   </Modal>

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { buildOutsideFleet, buildSessionsByProject, sessionVisible, sortProjectsBySeverity } from './sidebar_index';
+import {
+  buildOutsideFleet,
+  buildSessionsByProject,
+  buildSessionsByWork,
+  sessionVisible,
+  sortProjectsBySeverity,
+  sortWorkGroups,
+} from './sidebar_index';
+import { workKeyFor, type WorkKey } from './work_keys';
 import type { SessionRow } from './sessions';
 
 let nextId = 1;
@@ -109,5 +117,67 @@ describe('sortProjectsBySeverity', () => {
     expect(sortProjectsBySeverity(rows, sev).map((r) => r.project.id)).toEqual([2, 4, 3, 1]);
     // No severities at all ⇒ untouched.
     expect(sortProjectsBySeverity(rows, new Map()).map((r) => r.project.id)).toEqual([1, 2, 3, 4]);
+  });
+});
+
+describe('buildSessionsByWork / sortWorkGroups', () => {
+  const keyOf = (s: SessionRow): WorkKey | null =>
+    s.tags.length ? { key: s.tags[0], source: 'tag', from: s.tags[0] } : null;
+
+  it('groups keyed sessions and leaves the rest to the project tree', () => {
+    const a1 = row({ tags: ['ABC-1'] });
+    const a2 = row({ tags: ['ABC-1'], host_alias: 'mefistos' });
+    const b = row({ tags: ['DEF-2'] });
+    const plain = row();
+    const ext = row({ kind: 'external', tags: ['ABC-1'] });
+    const { groups, keyed } = buildSessionsByWork([a1, plain, b, a2, ext], 'all', true, null, keyOf);
+    expect(groups.map((g) => [g.key, g.sessions.map((s) => s.id)])).toEqual([
+      ['ABC-1', [a1.id, a2.id]],
+      ['DEF-2', [b.id]],
+    ]);
+    expect([...keyed.keys()].sort()).toEqual([a1.id, a2.id, b.id].sort());
+  });
+
+  it('a suggestion never regroups: only a confirmed link makes a work group (M4.4)', () => {
+    const suggested = row({
+      tags: ['ABC-1'],
+      work_suggested: {
+        link_id: 3, item_id: null, key: 'ABC-1', title: '', source: 'branch', state: 'suggested',
+      },
+    });
+    const linked = row({
+      work: { link_id: 4, item_id: null, key: 'ABC-1', title: '', source: 'branch', state: 'confirmed' },
+    });
+    const real = (s: SessionRow) => workKeyFor(s, new Map());
+    const { groups, keyed } = buildSessionsByWork([suggested, linked], 'all', true, null, real);
+    expect(groups.map((g) => [g.key, g.sessions.map((s) => s.id)])).toEqual([['ABC-1', [linked.id]]]);
+    expect(keyed.has(suggested.id)).toBe(false);
+  });
+
+  it('filters rows but still reports every keyed session', () => {
+    const a1 = row({ tags: ['ABC-1'] });
+    const a2 = row({ tags: ['ABC-1'], host_alias: 'mefistos' });
+    const { groups, keyed } = buildSessionsByWork([a1, a2], 'mefistos', true, null, keyOf);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].sessions.map((s) => s.id)).toEqual([a2.id]);
+    // a1 is hidden by the host filter, but it is still keyed: it must not
+    // reappear under its project header.
+    expect(keyed.has(a1.id)).toBe(true);
+  });
+
+  it('drops a group with no visible session', () => {
+    const bg = row({ tags: ['ABC-1'], kind: 'bg' });
+    const { groups, keyed } = buildSessionsByWork([bg], 'all', false, null, keyOf);
+    expect(groups).toEqual([]);
+    expect(keyed.has(bg.id)).toBe(true);
+  });
+
+  it('sorts groups by worst severity, keeping recency order on ties', () => {
+    const g = (key: string, ...sev: number[]) => ({
+      key,
+      sessions: sev.map((n) => row({ context_pct: n })),
+    });
+    const sorted = sortWorkGroups([g('A', 1), g('B', 3, 0), g('C', 1)], (s) => s.context_pct ?? 0);
+    expect(sorted.map((x) => x.key)).toEqual(['B', 'A', 'C']);
   });
 });

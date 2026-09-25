@@ -735,6 +735,234 @@ named you. An id that only looks right — a purely local thread, another
 fleet's traffic, or a message this link never carried — is refused
 (`E_INVALID`) rather than silently accepted.
 
+## Trackers
+
+A hub can read tickets from **Jira Cloud, GitHub Issues, Asana, Linear and
+Jira Data Center**, read-only: sessions then show their ticket's title and
+status, ⌘K lists *My work* (and a current sprint / cycle where one exists),
+and work can be started from a ticket. Every provider behaves the same in
+⌘K, on the chips, in start and resume and in detection; with trackers of two
+or more kinds, a small provider badge tells them apart. Nothing needs a
+tracker — keys in branch names group sessions without one — and nothing
+waits on it: with a tracker down or its token expired, everything answers
+from the cache.
+
+Trackers are fleet administration, so they are configured **on the hub**
+(`work_admin` is master-only; a paired desktop shows them read-only and says
+so). From the hub machine — paste any ticket or issue URL; the provider and
+site are inferred from it:
+
+```sh
+fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123   # Jira Cloud
+fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
+fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
+fleet-hub tracker list
+fleet-hub tracker remove 1        # its items stay, marked unavailable
+```
+
+A token is read from **stdin**, from an environment variable of that command
+(`--from-env JIRA_TOKEN`), or not read at all: `--ref env:NAME` or `--ref
+file:/run/secrets/jira` stores a *reference* the hub resolves each time it
+syncs. It is never an argument, so it never lands in `ps` or shell history.
+Without `--email` the token is the whole credential (Asana, Linear, Data
+Center). With Docker, put the token in a secret and point the tracker at it:
+
+```yaml
+services:
+  fleet-hub:
+    secrets: [jira]
+secrets:
+  jira:
+    file: ./jira-token.txt     # mounted at /run/secrets/jira
+```
+
+```sh
+docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
+  --email you@acme.com --ref file:/run/secrets/jira
+```
+
+### Per provider
+
+| Provider | Add | Credential | What fleet reads |
+|---|---|---|---|
+| **Jira Cloud** | `https://<name>.atlassian.net` or any ticket URL | email + API token (id.atlassian.com → Security → API tokens; they expire within a year) | `search/jql` views *My work*, *Current sprint* (projects with sprints), *Recent*, favourite filters; status category + resolution; epics by `hierarchyLevel` |
+| **GitHub Issues** | `https://github.com/<owner>` or any issue URL, **`--via-cli <host>`** (`--repo owner/repo` to narrow) | **none in fleet**: `gh` on that host, with its own `gh auth login` | GraphQL through `gh api`: `assignee:@me` issues in the owner's repositories; `OPEN` → to do (in progress when GitHub links a branch or a closing PR), `CLOSED` → done / not planned / duplicate by `stateReason`; sub-issues' parent; a transferred issue keeps its links |
+| **Asana** | `https://app.asana.com[/<workspace gid>]` or any task URL | personal access token | *My tasks*, one view per project your tasks sit in (the **events API**, a sync token per project; an expired token lists the project whole once), *Recent* where search exists (Premium); `completed` → done, otherwise the task's section through the section map |
+| **Linear** | `https://linear.app/<workspace>` or any issue URL | personal API key | issues assigned to you: *My issues*, *Current cycle* (teams with cycles), *Recent*; team keys are the key prefixes; `state.type` → status (canceled → not planned); a team move keeps the link |
+| **Jira Data Center** | `--provider jira_dc https://jira.corp.example[/jira]` | personal access token | API v2 (`/search` by `startAt`), the Epic Link field, the same views and filters as Cloud |
+
+- **GitHub reads through `gh`**, run over SSH on the host you name
+  (`transport = via_cli:<host>`). Fleet never reads, stores or sends a GitHub
+  token: the host's `gh` login is used, and `set-credential` refuses a
+  GitHub tracker. A host without `gh`, or with `gh` logged out, makes the
+  tracker `unreachable` with the fix in its error.
+- **Asana has no human keys.** A task's reference is its URL (both forms,
+  `/0/<project>/<task>` and `/1/<workspace>/project/<p>/task/<t>`); the UI
+  shows a short `Asana …123456`. A task in two projects is listed under both.
+  Which **sections** mean *in progress* is inferred on the first test from
+  their names (progress / doing / review → in progress, done / shipped →
+  done) and shown in Settings → Work with a Confirm button; once confirmed,
+  your map wins (`work_admin update` with `settings.section_map`).
+- **Linear vs Jira keys:** `ENG-123` belongs to the tracker whose probed
+  prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
+  trackers claim is never bound automatically.
+
+### Reaching a tracker from a host: `via_host`
+
+A tracker only one machine can reach (a VPN, an internal network), or one
+whose requests should leave from a particular host, is read with `curl` on
+that host: `fleet-hub tracker add <url> --via-host <host>`. The token goes to
+the host **on stdin** into a private temp file (`umask 077`, removed on
+exit) that `curl -q` reads with `-H @file`: it is in no argv on the host
+(`ps` shows only file names), no environment variable and no log. Requests
+are https only, never follow a redirect, and still go only to that
+tracker's own host. `curl` 7.55 or newer is needed on the host.
+
+### Jira Data Center
+
+The site is whatever an admin enters, so it is fenced harder than the others:
+https only, one exact host (no subdomain, no port, no userinfo, an optional
+context path), and **before connecting the hub resolves the name and refuses
+a loopback, link-local (169.254.0.0/16, cloud metadata) or unspecified
+address**, then connects to the address it checked. A site that really is on
+such an address needs `settings.allow_private_network: true`. An internal CA
+goes into `settings.extra_ca` (PEM), trusted besides the system store. A site
+only a VPN host can reach uses `--via-host` instead (that host's trust store).
+
+```sh
+fleet-hub tracker add --provider jira_dc https://jira.corp.example/jira
+fleet-hub tracker set-credential 3 < pat.txt
+fleet-hub tracker test 3
+```
+
+### What to know
+
+- **Sites are fenced** per provider — `*.atlassian.net`, `api.github.com`
+  (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
+  — and redirects are never followed: a tracker's URL is where the hub sends
+  a credential from its own network position.
+- **States.** An expired or refused credential sets `auth_failed` and polling
+  stops until you set a new one and `test` it; a CAPTCHA (`captcha`) needs
+  one browser login to the site. `rate_limited` (429, `Retry-After`, Linear's
+  complexity limit, GitHub's spent quota) and `unreachable` retry on their
+  own.
+- **Sync** runs every `work.sync_interval_secs` (default 300; `0` turns it
+  off, read at start): each view from its watermark with a 2-minute overlap
+  (Asana projects: from their sync token), every linked ticket by id, and
+  references typed before the tracker was connected (which then bind to their
+  tickets on their own). A ticket that vanishes is marked *unavailable* —
+  deleted or no longer visible, a tracker cannot say which — never deleted,
+  and its links stay.
+- **Secrets** never leave `tracker_secrets`: no answer, event, log line,
+  diagnostics bundle or error report carries a token (a row shows only
+  `…abcd`), and `last_error` is redacted before it is stored — Atlassian,
+  GitHub (`ghp_`, `gho_`, `github_pat_` …), Linear (`lin_api_`) and Asana
+  token shapes included.
+- **Isolation:** a per-host token (an in-session Claude) sees only tickets
+  linked to sessions on its own host, inside its host's organisation (see
+  *Organisations and isolation* below), whatever the provider, and never
+  receives `work:*` frames on `/events`. Master and paired clients see all.
+- **Migrating from the desktop:** a copied `state.db` carries the desktop's
+  trackers and a stored token. Re-enter the token on the hub (or rotate it
+  and use a `--ref`) rather than keep one that lived on another machine.
+
+## Organisations and isolation
+
+Organisations are optional. With none, the desktop's scope selector offers
+the GitHub owners of the live sessions (only when there are two or more) and
+nothing is fenced. Name an org to merge or split owners, to attach a
+tracker, or to make it a **boundary** for the hosts you put in it.
+
+An org is two things at once:
+
+- **A view** for people. The master and every paired client read every org;
+  the sidebar's selector (⌘⇧O / Ctrl+Shift+O) only narrows what is shown,
+  and a session waiting on you in another scope still says so ("2 need you
+  in Personal →").
+- **A boundary** for per-host tokens. The Claude on a host in org A reads
+  only org A's work and unassigned work; the Claude on a host in no org
+  reads unassigned work only. That covers work items and tickets, trackers,
+  work links (live and past), the work journal and every text built from it
+  (`work { context }`, resume and start briefs, the SessionStart context),
+  and a session row's `work` / `work_suggested` / `work_rejected` in any
+  answer or `/events` frame. An item, link or tracker id outside the
+  boundary answers exactly as an id that does not exist; a key or URL
+  outside it answers as a key nothing is linked to on that host.
+
+Which org a session is in: the most specific matching rule — a path prefix,
+then `owner/repo`, then `owner`, then a host-only rule — else its host's
+org. Rules are text (a project row that is re-created keeps its org);
+`local` (an adopted folder's placeholder owner) is never an owner. A
+ticket's org is its tracker's. A link's is its ticket's, else its session's.
+
+```sh
+fleet-hub org add "Company A" --color '#e11d48'
+fleet-hub org rule add 1 --owner acme                  # acme/*
+fleet-hub org rule add 1 --owner acme-labs --repo api  # one repo of another owner
+fleet-hub org rule add 1 --path /home/me/work/acme     # by where the worktree lives
+fleet-hub org assign-host hetzner-a 1                  # the boundary for that host's token
+fleet-hub org assign-tracker 2 1                       # its tickets are Company A's
+fleet-hub org set 1 --isolate-sessions on              # see below
+fleet-hub org list
+```
+
+Only the master can change any of it (`work_admin`); a paired desktop shows
+it read-only, and a host can never move itself into another org.
+
+What else to know:
+
+- **Linking across orgs is refused for everyone**, the master included,
+  unless `force_cross_org: true`: it is a data-integrity rule that stops
+  Company B's ticket from being attached to a Company A session by mistake
+  (the desktop explains it and offers "Link anyway"). Detection never
+  guesses across orgs, and the sync never binds (nor fetches) a bare key
+  for another org's session.
+- **Sessions are not fenced by default.** `isolate_sessions` (per org, off
+  by default) also hides that org's sessions from every other org's hosts —
+  `list_sessions`, `whoami`, `peer_status`, `related_sessions`,
+  `session_history`, the repo reads, `send_message`, `broadcast_prompt` and
+  `session:*` frames — and its own hosts then see only its sessions and
+  unassigned ones. A host always sees its own sessions. It can break a
+  controller that dispatches across companies, which is why it is yours to
+  turn on.
+- **With isolation off, a session's own fields are not work data.** A
+  session's name, branch, worktree and last prompt stay readable by other
+  orgs' hosts (so a branch named after a ticket shows its key); turn
+  `isolate_sessions` on for an org whose session names must not be seen.
+- **A host in no org sees only unassigned work.** Assign every host of a
+  company before connecting a second company's tracker.
+
+## Tidy-up and auto-tidy
+
+The hub (or a standalone desktop) plans tidy-up on every GC sweep
+(`gc.sweep_interval_secs`) and on request (`work { action: "tidy" }`, the
+desktop's "Tidy up · n"). Suggestions only, by default. The settings, all
+under Settings → Work → Lifecycle or `set_fleet_setting`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `work.tidy_done_days` | `2` | a linked ticket must have been done this many days (from the tracker transition) |
+| `work.tidy_idle_hours` | `4` | a session must have been idle this long before any reason suggests it |
+| `work.auto_tidy` | `false` | the sweep acts on the allowed reasons by itself |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | comma list of `done_idle`, `pr_merged_idle`, `not_planned` |
+
+With `work.auto_tidy` on, the sweep **safe-kills** (or, for a session with
+no worktree fleet can inspect, archives) the candidates whose primary reason
+is allowed — never a plain kill, so a duplicate worktree and a lost session
+stay suggestions. Every action is written to the session's timeline
+(`gc_tidied`, or `gc_failed`) and to its work journal (`tidy`). The
+protections apply to auto-tidy exactly as to a person's confirm: working,
+blocked, stuck or dialog-waiting sessions, sessions linked to in-progress
+work, the controller and the operator, anything prompted or attached to in
+the last hour, and background agents with open tasks are never touched. The
+idle killer (`gc.enabled`, `gc.*_idle_secs`) is separate and unchanged.
+
+**Per organisation.** An org can override `work.auto_tidy` for its own
+sessions: `fleet-hub org set 1 --auto-tidy on|off|inherit` (or `work_admin
+{ update_org, org_id, auto_tidy }`); `inherit` (the default) follows the
+fleet-wide setting. The allowed reasons and thresholds stay fleet-wide. A
+per-host token sees and applies only its own host's candidates of its org.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
@@ -785,7 +1013,7 @@ columns the phone app reads — the session list's `id`, `tmux_name`,
 `last_activity_at`, `ci_status`, `pending_input`, `needs_attention`, and the
 session card's `is_controller`, `tags`, `turn_seq`, `safe_kill_state`,
 `started_at`, `last_turn_at`, `last_stop_at`, `usage_cost_micros`,
-`usage_model`. The first cut — the list's sixteen alone — measured
+`usage_model`, plus the work graph's `work` (the row's primary work link). The first cut — the list's sixteen alone — measured
 **46 990 → 16 733 B of JSON (−64 %), 7 712 → 3 023 B gzipped** on the same
 44-session fleet; the card's nine are short scalars and do not change that
 picture. The first cut left the card's columns out, and a phone that
@@ -801,7 +1029,11 @@ same reason: it carries the dialog a blocked session is waiting on and its
 options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
 is there for the mirror of that reason: projected away, the view would hand a
-phone the columns to re-derive the answer instead of the answer.
+phone the columns to re-derive the answer instead of the answer. `tags`
+is there because the phone's tag editor starts from them and
+`set_session_tags` replaces the whole list: without them a phone that added
+one tag deleted the rest. `work` (the primary work link: key, title) is the
+row's key chip and what the list groups by work on.
 
 `list_projects { has_sessions: true }` keeps only the projects that hold a
 live session — the rows a client needs to turn a session's `project_id` into
@@ -1128,9 +1360,13 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
 | — | — | `reports.max_rows` | `5000` |
 | — | — | `reports.max_age_secs` | `604800` |
+| — | — | `work.journal_days` | `90` |
+| — | — | `work.recent_days` | `14` |
 
-The two `reports.*` settings have no flag: set them over the API with
-`set_setting`.
+The `reports.*` and `work.*` settings have no flag: set them over the API
+with `set_setting`. `work.journal_days` is how long work memory (the
+journal behind resume and the handover brief) is kept for conversations no
+confirmed work link references; `0` keeps it forever.
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all
@@ -1213,6 +1449,10 @@ the next press retries.
    `curl … /hook?token=` command hooks, which carry the desktop's token; a
    hub with a public URL refuses that `?token=` form outright, so such a
    host reports no hooks until it is re-provisioned.
+
+If the desktop had a Jira tracker, its token came along in `state.db`:
+set it again on the hub (`fleet-hub tracker set-credential`), ideally a
+rotated one, and see *Trackers* above.
 
 The desktop's `state.db` carries a `local` host row for the machine it ran
 on. Since the hub defaults `hub.local_host` to `false`, that copied `local`
@@ -1389,14 +1629,19 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 133 commands, 42 route to a hub tool, 1 routes except for one argument shape, 69 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
+| `add_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
+| `add_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
+| `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assets_scan_hosts` | the hub has this as its scan_assets tool, but its result feeds an inventory panel built on the catalog checkout, which only the machine that owns the fleet has; call scan_assets on the hub, or scan from that machine |
+| `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
+| `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_apply_sync` | the hub's apply_sync is master-only: a paired client is never the fleet's administrator, and a sync writes to every host over SSH; run the sync on the hub |
 | `catalog_commit_pending` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
@@ -1446,6 +1691,9 @@ Of the 133 commands, 42 route to a hub tool, 1 routes except for one argument sh
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
+| `remove_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
+| `remove_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
+| `remove_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `repair_session` | Refuses when explicit: false, the automatic pre-attach check (otherwise routes to `repair_session`): the hub's repair_session always runs the EXPLICIT repair, which may unregister a stale worktree entry, adopt a moved checkout and recreate a branch — this app will not turn an automatic pre-attach check into that; repair explicitly, or from the hub |
 | `repo_checkout` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_checkout_commit` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
@@ -1462,7 +1710,11 @@ Of the 133 commands, 42 route to a hub tool, 1 routes except for one argument sh
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
+| `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
+| `update_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
+| `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew
@@ -1651,6 +1903,14 @@ deliberately.
   reached over Tailscale/SSH, with no public URL at all. Whichever you pick,
   a routable bind serving plaintext is refused unless you pass
   `--allow-plaintext`.
+- **Per-host tokens and the org boundary.** A per-host token's scope is
+  computed from its host's org on every call (and on every `/events`
+  frame after an org change), in one place (`Caller::org_scope`); the
+  work service layer filters with it, and every tool answer a per-host
+  token receives passes one more redaction of session rows' work fields.
+  An isolation matrix test runs every `work` / `work_link` / `work_admin`
+  action for master, clients and hosts in two orgs and in none. See
+  *Organisations and isolation*.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
   the desktop.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
@@ -1661,6 +1921,13 @@ deliberately.
   and the hub logs a warning naming the tool and nonce. A `state.db` copied
   from a desktop can carry it switched on; `fleet-hub serve` logs a warning
   at startup when it is.
+- **The operator's starts and kills.** The UX agent's operator session
+  must have its session starts (`new_session`, `new_shell_session`,
+  `work_link` `start` / `resume`) and kills approved by a person, whatever
+  `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
+  no approver, so an operator homed on a hub-served fleet is refused those
+  calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from
+  the sidebar.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions

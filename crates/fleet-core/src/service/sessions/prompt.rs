@@ -226,6 +226,12 @@ pub(super) async fn send_prompt_inner(
             Some(truncated)
         });
         record_prompt_outcome(store, host_alias, tmux_name, &body, label);
+        // A prompt is a touch (work graph M7), also where no hook reports it.
+        if let Ok(s) = lock(store) {
+            if let Err(e) = s.touch_session_by_name(host_alias, tmux_name) {
+                tracing::debug!(error = %e.message, "[work] touch after a prompt failed");
+            }
+        }
     }
     Ok(())
 }
@@ -597,6 +603,9 @@ pub struct BroadcastFilter {
     pub host: Option<String>,
     pub project_id: Option<i64>,
     pub status: Option<String>,
+    /// Work graph M5 (D7): a per-host token's broadcast never reaches a
+    /// session isolated from its host. `None` = every org.
+    pub scope: Option<crate::service::orgs::OrgScope>,
 }
 
 /// PURE selector: pick the session ids a broadcast should target.
@@ -624,6 +633,7 @@ pub fn select_targets(
             f.status.as_deref() == Some("blocked")
                 || (s.claude_status.as_deref() != Some("blocked") && s.stuck_kind.is_none())
         })
+        .filter(|s| f.scope.as_ref().is_none_or(|sc| sc.sees_row(s)))
         .filter(|s| match &f.host {
             Some(h) => &s.host_alias == h,
             None => true,

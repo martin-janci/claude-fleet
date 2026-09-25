@@ -321,6 +321,187 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
   `list_tasks`, `cancel_task`, `set_session_tags`.
+- **Work** — `work` (read: `{session_id}` → that session's live work links,
+  primary first; `{key}` → ended links to the key, each with the snapshot of
+  the session that did it), `work_link` (`{session_id, action}`: `link` a key
+  or `item_id` — it becomes the session's primary work, `source` `manual` by
+  default or `agent` from the in-session agent; `reject` — a sticky "not
+  this"; `unlink` a `link_id`). Returns the updated row; a session row's
+  `work` carries its primary link. A per-host token reads and decides only
+  its own host's sessions. With neither `session_id` nor `key`, `work`
+  lists the links that ended within `work.recent_days`.
+  Resume and work memory (roadmap M2): `work { action: "context", key }` is
+  the full handover context of a key — its sessions, conversations, the
+  last progress line and compaction summary Claude wrote (from the work
+  journal, which outlives the sessions), plus a live read-only git probe;
+  third-party text is fenced as untrusted. `work { action: "resume_plan",
+  key, link_id?, host_alias?, with_brief? }` says what a resume would do:
+  live sessions (Jump, never a second one), the ended candidates, where it
+  lands, and per mode (`last` | `brief` | `fresh`) whether it is possible
+  and why not. `work_link { action: "resume", key, mode, link_id?,
+  host_alias?, brief? }` starts it: `last` continues the conversation in its
+  worktree (recreated from the branch when it is gone), `brief` starts fresh
+  with the handover brief delivered through the first hook's
+  `additionalContext` (never typed into the pane; a short start prompt is
+  typed only into a ready REPL, never into the trust dialog), `fresh` starts
+  clean. `work { action: "purge_impact", project_id, host_aliases }` names
+  the keys a purge would leave without resumable conversations. A per-host
+  token reads context and plans only for work that ran on its host, and
+  resumes only onto it.
+  Detection and explanations (roadmap M4): fleet proposes links by itself
+  from the session's current branch, its PR (head branch, closing issues,
+  keys in the title / body and in commit trailers) and the references in
+  submitted prompts (keys, Jira / Linear / Asana / GitHub ticket URLs,
+  `#n` against the session's own repo). Each link carries `state`
+  (`confirmed` | `suggested` | `rejected`), `strength` (`explicit` |
+  `strong` | `weak`), `rule` (the resolver rule, R2–R8 and R3u of design §0.3.1) and
+  `evidence` (what was seen: signal, matched text, a ±40-character redacted
+  prompt snippet unless `work.evidence_snippets` is off, when, which
+  conversation) — `work { session_id }` returns it all. A session row's
+  `work` stays the primary CONFIRMED link; `work_suggested` is its top
+  suggestion (with `suggestions`, the count), kept apart so a guess never
+  groups a session. A branch or PR change ends the automatic link it made
+  (`end_reason` `branch_changed` | `pr_changed`, snapshotted as past work);
+  manual, `started` and `agent` links are never ended by it, and a rejected
+  (session, target) pair is never proposed again. Decide with `work_link
+  { session_id, action: "confirm", link_id }` or `{ action: "reject",
+  link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
+  sole branch key in that project link by itself (master or client token;
+  refused to a per-host token). Prompts are never stored — only matches.
+  Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
+  on a paired desktop the Settings → Work section says "configure on the
+  hub") manages them: `list`, `add { site_url, provider?, transport?,
+  settings? }` (the site, or any ticket / issue URL on it; the provider —
+  `jira`, `github`, `asana`, `linear`, `jira_dc` — is inferred from the URL
+  unless given, and each provider's site is fenced: `*.atlassian.net`,
+  `github.com[/<owner>]`, `app.asana.com[/<workspace>]`,
+  `linear.app/<workspace>`, one exact Data Center host), `update
+  { tracker_id, name?, transport?, settings? }`, `set_credential { tracker_id,
+  auth_kind?, username?, secret | credential_ref }` (`env:NAME` or
+  `file:/path`, read by the hub at use; without `username` the token is the
+  whole credential; refused for a `via_cli` tracker),
+  `test { tracker_id }` (probe the site: account, key prefixes, sprint
+  projects, views; the tracker's `state` becomes `ok` or says why not) and
+  `remove { tracker_id }` (confirm-gated; its items stay, marked
+  unavailable). No answer, event, log line or error ever carries the secret:
+  a tracker row has only `has_credential` and a `…abcd` hint. The hub's
+  operator has the same over loopback: `fleet-hub tracker
+  list|add|set-credential|test|remove`, which reads the token from stdin or
+  `--from-env`, never from argv.
+  More providers (roadmap M6): `transport` is `direct` (HTTPS from the hub),
+  `via_host:<host>` (`curl` on that host, the credential piped on stdin,
+  never in argv) or `via_cli:<host>` (a trusted CLI there with its own login
+  — GitHub's `gh`; fleet then holds no credential, and GitHub accepts only
+  this). `settings` is the provider's admin object: GitHub `repos`
+  (`owner/repo` list narrowing the owner scope), Asana `section_map`
+  (section → `todo` | `in_progress` | `done`) and `section_map_confirmed`,
+  Jira Data Center `extra_ca` (PEM) and `allow_private_network` (the site may
+  resolve to a loopback / link-local address, refused otherwise). Keys are
+  the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
+  (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
+  by URL); `lookup` and `start` take any of them, or the item's URL.
+  Reading tickets (M3.4): `work { action: "tickets", tracker_id?, view?,
+  query?, limit? }` serves the sync's **cache** (never a live call); `view`
+  is `mine` (assigned to the tracker account, not done), `sprint` (in an
+  active sprint), `recent` (updated within 14 days) or `filter:<id>` (a
+  favourite filter), each row with the live sessions already on it.
+  `work { action: "lookup", key | url }` answers one ticket from the cache,
+  or fetches it once and caches it (a URL names its site; an unknown site is
+  `E_NOTFOUND` with the `site_url` to add). `work { action: "trackers" }`
+  lists the trackers (no secrets). `work_link { action: "start", key | url |
+  item_id, project_id?, host_alias?, with_brief?, brief? }` starts work on a
+  ticket in one call: a live session on the key is `E_EXISTS` (details name
+  it — jump, do not start a second); the project defaults to where that key
+  prefix last ran (else `E_AMBIGUOUS` with candidates), the host likewise;
+  the worktree is `slug(key + title)`, the session's name `KEY title`, and it
+  is linked `started`. With a brief, the ticket's context (its description
+  fenced as untrusted) rides the first hook's `additionalContext` and a short
+  start prompt is typed only into a ready REPL. A per-host token reads,
+  looks up and starts only tickets linked to sessions on its own host, and
+  starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
+  frames on `/events`. Events: `work:item`, `work:tracker`,
+  `work:tracker_removed` — emitted only when something a reader sees
+  changed; a session's `work` carries its item's `status_category`,
+  `status_name`, `url` and `unavailable`.
+  Organisations (roadmap M5): `work { action: "scopes" }` lists the scope
+  selector's entries (named orgs, then GitHub owners no org covers, then
+  the unassigned rest, each with `session_count` and `needs_you`), `work
+  { action: "orgs" }` the orgs with their rules, hosts and trackers, and
+  `work { action: "org_suggestions" }` proposed orgs (from owners of live
+  sessions and tracker sites; never applied, empty for a per-host token).
+  `work_admin` adds `list_orgs`, `add_org { name, color?, isolate_sessions? }`,
+  `update_org { org_id, … }`, `remove_org { org_id }` (confirm-gated;
+  refused while a tracker belongs to it, naming it), `add_rule { org_id,
+  owner?, repo?, path_prefix?, host_alias? }`, `remove_rule { rule_id }`,
+  `assign_host` / `unassign_host { host_alias, org_id }` and `assign_tracker
+  { tracker_id, org_id? }` — master only, so a host can never move itself.
+  Rows gain `org_id` (session, host, tracker, link, `work` summaries). For a
+  **per-host token** the host's org is a boundary on everything above: it
+  reads links, tickets, trackers, context and briefs only inside its org or
+  unassigned (a host in no org: unassigned only), an id outside answers as
+  an unknown id, a key outside links as the bare key it typed, and every
+  session row it receives has other orgs' work taken out. Linking,
+  confirming, starting or resuming work of one org on a session of another
+  is `E_FORBIDDEN` for every caller (details `cross_org: true`) unless
+  `force_cross_org: true`. An org with `isolate_sessions` also hides its
+  sessions from other orgs' hosts (lists, `whoami`, `peer_status`,
+  `session_history`, repo reads, messages, `session:*` frames). See
+  [hub.md](hub.md) → *Organisations and isolation*.
+  Lifecycle (roadmap M7): `work { action: "tidy" }` returns the tidy-up
+  candidates — each with `session_id`, `link_id`, a primary `reason`
+  (`done_idle` | `pr_merged_idle` | `not_planned` | `duplicate_worktree` |
+  `ghost_expiring`), `secondary` reasons, the preselected `action`
+  (`safe_kill` | `kill` | `archive` | `resume_or_expire`), a preview (host,
+  branch, key, item status, PR, idle time) and `auto` (auto-tidy would act
+  on it) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
+  `idle_hours`). `work { action: "reopened" }` lists work moved out of done
+  that has past sessions. `work_link { action: "tidy_apply", items: [{
+  session_id, action, link_id?, days? }] }` applies a batch (`safe_kill`,
+  `kill`, `archive`, `snooze`, `never`) and reports every item: one failing
+  never stops the rest, a protected session is refused per item, a kill of a
+  session's own worktree always inspects it first (dirty or unpushed ⇒ the
+  safe-kill path), and a worktree another live session shares is only
+  plain-killed. With `mcp.confirm_destructive` on, a batch containing a kill
+  needs the desktop's confirmation (`confirm_nonce`), like `kill_session`.
+  `work_link { session_id, action: "archive" | "unarchive" }` collapses a
+  live session into its group's Done (UI only; tmux keeps running) or brings
+  it back — a prompt or an attach does too; `{ action: "snooze", days? }`
+  (default 7) and `{ action: "never" }` flag the session's primary link (or
+  `link_id`); `{ action: "dismiss", item_id }` clears a reopened entry
+  (refused to a per-host token). A per-host token sees and applies only its
+  own host's candidates of its org (a session outside answers as an unknown
+  one), and reads reopened work only when its newest past session ran there
+  and its item is in the token's org. `work_admin { add_org | update_org,
+  auto_tidy: "on" | "off" | "inherit" }` overrides `work.auto_tidy` for one
+  org (master only).
+  Work graph M9: `work { action: "today", since? }` is the Today view's
+  digest — live sessions grouped by primary work into `waiting` (someone
+  is needed), `stale` (idle three days, or the ticket is done while a
+  session runs) and `in_progress`, plus what `shipped` since `since` (unix
+  seconds; default the last 24 h): tickets that moved to done and work that
+  ended with a PR. `work { action: "card", key }` is a ticket's context
+  card from the tracker cache (never a fetch): title, status, url, the
+  `acceptance` criteria parsed from the description (else an `excerpt`),
+  and `composer_text` — the ticket text fenced as untrusted, for inserting
+  into a prompt. A per-host token reads only its own host's day and cards
+  for its own work, and gets `composer_text` without the plain fields.
+  `work_link { action: "handover", session_id }` (M9.3, on demand only)
+  asks a live, idle Claude session linked to work to write the hand-off the
+  next session will need: fleet types one prompt asking for it between two
+  nonce-tagged marker lines, and the next Stop hook keeps the text between
+  them as a work-journal `note` from the `agent`. The resume brief and
+  `work { action: "context" }` show the newest one first, fenced as
+  untrusted. Refused while the session is busy, waiting on a dialog or
+  stuck, without work, when a request is already pending (30 min), and for
+  the operator's own session. Timeline: `handover_requested`,
+  `handover_written`, `handover_missing`, `handover_send_failed`.
+  `work_link { action: "start", …, project_ids: [..] }` (M9.6) starts one
+  ticket in several repositories at once — up to 8 — one sibling session
+  per project, all on the same branch name (`slug(key + title)`, or the
+  `worktree` given), each linked `started`, each brief naming the others.
+  A repository where the key already runs is skipped (naming the session)
+  rather than refusing the whole start; the reply is `{ key, started,
+  skipped, failed }`. `project_id` and `project_ids` are exclusive.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
@@ -396,8 +577,7 @@ dialog — derived alongside `current_activity` on the same reconcile pass.
 
 Responses are sized for MCP token limits: `list_sessions` and `list_projects`
 return slim summary rows by default and accept `limit` (`list_sessions` also
-takes `view: "phone"`, a named projection to the 14 columns a phone's session
-list draws, and `list_projects` takes `has_sessions: true`, which keeps only
+takes `view: "phone"`, a named projection to the columns the phone app reads, and `list_projects` takes `has_sessions: true`, which keeps only
 the projects a live session can name — see *Asking for fewer columns* in
 `docs/hub.md`); `list_worktrees`
 answers `{total, worktrees}` with slim rows, at most 100 of them (`limit`,
@@ -858,7 +1038,12 @@ automatically on app start.
   approve the request in the desktop dialog, then retry the call with that
   nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
   `broadcast_prompt` including a digest of the content / prompt — so an
-  approval cannot be replayed with different text.
+  approval cannot be replayed with different text. **The operator** (the UX
+  agent's own client token, `ux-agent`) is gated whatever the toggle says
+  (work graph M9.7, decision D12): its `new_session`, `new_shell_session`,
+  `safe_kill_session`, `work_link` `start` / `resume` and every tool above
+  return `E_CONFIRM_REQUIRED` until a person approves them on the desktop;
+  on a hub, which has no approver, they are refused with `E_FORBIDDEN`.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

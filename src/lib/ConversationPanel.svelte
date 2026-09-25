@@ -78,6 +78,7 @@
     hasPendingCall,
     formatDuration,
     composerDrafts,
+    composerInsert,
     rememberDraft,
     newItemCount,
     promptHistory,
@@ -1004,6 +1005,25 @@
   // Keep the unsent text across tab switches (the panel unmounts).
   $effect(() => {
     if (draftFor !== null) rememberDraft(draftFor, draft);
+  });
+
+  // "Insert into composer" from the ticket card (work graph M9.2): adopt the
+  // new draft when it is for the session shown, and put the cursor at its
+  // end. It is never sent from here.
+  $effect(() => {
+    const ins = $composerInsert;
+    if (!ins || ins.sessionId !== session.id) return;
+    untrack(() => {
+      // The store keeps the last insert: on a later mount it must not undo
+      // what was typed since — only a draft still equal to it is adopted.
+      if (composerDrafts.get(session.id) !== ins.draft) return;
+      draft = ins.draft;
+      draftFor = session.id;
+      void tick().then(() => {
+        box?.focus();
+        box?.setSelectionRange(draft.length, draft.length);
+      });
+    });
   });
 
   // Put the cursor in the composer when the tab shows a promptable session,

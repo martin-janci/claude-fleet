@@ -1,0 +1,57 @@
+{
+  "issues": [
+    {
+      "id": "10103",
+      "key": "ABC-103",
+      "fields": {
+        "summary": "Export to CSV v1",
+        "status": { "name": "Closed", "statusCategory": { "id": 3, "key": "done", "name": "Done" } },
+        "resolution": { "id": "10001", "name": "Won't Do" },
+        "issuetype": { "id": "10001", "name": "Story", "hierarchyLevel": 0 },
+        "assignee": null,
+        "updated": "2026-09-18T08:00:00.000Z",
+        "project": { "id": "10000", "key": "ABC" }
+      }
+    },
+    {
+      "id": "10104",
+      "key": "ABC-104",
+      "fields": {
+        "summary": "Rounding again",
+        "status": { "name": "Closed", "statusCategory": { "id": 3, "key": "done", "name": "Done" } },
+        "resolution": { "id": "10002", "name": "Duplicate" },
+        "issuetype": { "id": "10004", "name": "Bug", "hierarchyLevel": 0 },
+        "updated": "2026-09-18T09:00:00.000Z",
+        "project": { "id": "10000", "key": "ABC" }
+      }
+    },
+    {
+      "id": "20007",
+      "key": "TEAM-7",
+      "fields": {
+        "summary": "Onboarding checklist",
+        "status": { "name": "Doing", "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" } },
+        "resolution": null,
+        "issuetype": { "id": "10020", "name": "Task", "hierarchyLevel": 0, "scope": { "type": "PROJECT", "project": { "id": "10001" } } },
+        "assignee": { "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001", "displayName": "Dana Dev" },
+        "updated": "2026-09-20T07:30:00.000+0000",
+        "project": { "id": "10001", "key": "TEAM" },
+        "description": "plain text from a v2-shaped body"
+      }
+    },
+    {
+      "id": "20008",
+      "key": "TEAM-8",
+      "fields": {
+        "summary": "Status with no category yet",
+        "status": { "name": "Triage", "statusCategory": { "id": 1, "key": "undefined", "name": "No Category" } },
+        "resolution": null,
+        "issuetype": { "id": "10021", "name": "Subtask", "hierarchyLevel": -1, "subtask": true },
+        "parent": { "id": "20007", "key": "TEAM-7" },
+        "updated": "2026-09-20T07:45:00.000+0000",
+        "project": { "id": "10001", "key": "TEAM" }
+      }
+    }
+  ],
+  "isLast": true
+}

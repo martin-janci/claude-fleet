@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, within } from '@testing-library/svelte';
+import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
+import { readPref } from './prefs';
 
 // Three sample projects. Sessions are attached per-test so we can verify
 // the new "hide projects without sessions" behavior.
@@ -62,7 +63,7 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, loadProjects } from './projects';
-import { sessions, loadSessions, showBgAgents, showRowDetails, resetTombstonesForTests, type SessionRow } from './sessions';
+import { sessions, loadSessions, showBgAgents, showRowDetails, sidebarGroupBy, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession, selectSessionExplicitly } from './selection';
 import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, loadAccounts } from './accounts';
@@ -1802,5 +1803,209 @@ describe('Sidebar: a hub contract skew', () => {
     await tick(); await tick();
     const empty = await screen.findByTestId('sidebar-empty');
     expect(empty.textContent).toContain('No projects yet');
+  });
+});
+
+describe('Sidebar — group by work (roadmap M1)', () => {
+  // A worktree whose branch names a ticket, on project 1.
+  const workProjects = [
+    {
+      ...fakeProjects[0],
+      worktrees: [
+        ...fakeProjects[0].worktrees,
+        { id: 12, project_id: 1, host_alias: 'local', name: 'abc-123-login', path: '/r/cf-wt', branch: 'abc-123-login' },
+      ],
+    },
+    fakeProjects[1],
+  ];
+
+  beforeEach(() => {
+    sidebarGroupBy.set('project');
+  });
+
+  it('project mode keeps the tree, and shows the work key as a chip on the row', async () => {
+    const keyed = { ...sessionFor(1, 'dev-login'), worktree_id: 12 };
+    mockBackend(workProjects, [keyed, sessionFor(2, 'dev-pos')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('work-groups')).toBeNull();
+    expect(await screen.findAllByTestId('proj-row')).toHaveLength(2);
+    const chip = await screen.findByTestId('work-chip');
+    expect(chip).toHaveTextContent('ABC-123');
+    expect(chip.getAttribute('title')).toContain('branch abc-123-login');
+  });
+
+  it('work mode groups keyed sessions by key and leaves the rest under their project', async () => {
+    const a = { ...sessionFor(1, 'dev-login'), worktree_id: 12 };
+    const b = { ...sessionFor(2, 'dev-pos-fix'), tags: ['ABC-123'] };
+    const plain = sessionFor(2, 'dev-pos');
+    mockBackend(workProjects, [a, b, plain]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    await fireEvent.click(screen.getByTestId('group-by-toggle'));
+    await tick();
+
+    const workRows = await screen.findAllByTestId('work-row');
+    expect(workRows).toHaveLength(1);
+    expect(workRows[0]).toHaveTextContent('ABC-123');
+    expect(workRows[0]).toHaveTextContent('2');
+    const group = screen.getByTestId('work-groups');
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(2);
+    // Inside its group the key is in the header, not repeated on the row.
+    expect(within(group).queryByTestId('work-chip')).toBeNull();
+
+    // Only the unkeyed session remains in the project tree: project 1 had
+    // nothing else, so it is gone; project 2 keeps dev-pos.
+    const projRows = screen.getAllByTestId('proj-row');
+    expect(projRows).toHaveLength(1);
+    expect(projRows[0]).toHaveTextContent('pos-frontend');
+    expect(projRows[0]).toHaveTextContent('1');
+
+    const isStr = (v: unknown): v is string => typeof v === 'string';
+    expect(readPref('sidebar.group', 'unset', isStr)).toBe('work');
+  });
+
+  it('a work group header collapses its sessions', async () => {
+    const a = { ...sessionFor(1, 'dev-login'), tags: ['PAY-7'] };
+    mockBackend(workProjects, [a]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('work-groups');
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('work-row'));
+    await tick();
+    expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
+  });
+
+  it('rolls up PRs and the worst CI state on the group header', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'], pr_url: 'https://x/pull/1', ci_status: 'passing' as const };
+    const b = { ...sessionFor(1, 'dev-b'), tags: ['PAY-7'], pr_url: 'https://x/pull/2', ci_status: 'failing' as const };
+    mockBackend(workProjects, [a, b]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const pr = await screen.findByTestId('work-pr');
+    expect(pr).toHaveTextContent('PR ×2');
+    expect(pr.getAttribute('title')).toContain('CI failing');
+  });
+
+  it('past work: a live group gets a collapsed Done, past-only work a collapsed group of its own (M2.5)', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ended = (id: number, key: string, name: string) => ({
+      id, ref_key: key, state: 'confirmed', source: 'manual', created_at: 1,
+      ended_at: nowSec - 3 * 86400, snap_host: 'local', snap_name: name, snap_branch: key.toLowerCase(),
+    });
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
+    mockBackend(workProjects, [a]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { key?: string } }) => {
+      if (cmd === 'session_work_links') {
+        const key = args?.args?.key;
+        if (key === 'PAY-7') return [ended(1, 'PAY-7', 'old pay')];
+        if (key === undefined) return [ended(2, 'ABC-9', 'login fix'), ended(1, 'PAY-7', 'old pay')];
+        return [];
+      }
+      return base(cmd, args);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const pg = await screen.findByTestId('past-work-group');
+    expect(pg).toHaveTextContent('ABC-9');
+    expect(pg).toHaveTextContent('1 session, last 3d ago');
+    expect(within(pg).getByTestId('resume-button')).toBeTruthy();
+    expect(within(pg).queryAllByTestId('past-work-row')).toHaveLength(0);
+    await fireEvent.click(within(pg).getByTestId('past-work-header'));
+    await tick();
+    const row = within(pg).getByTestId('past-work-row');
+    expect(row).toHaveTextContent('login fix');
+    expect(row).toHaveTextContent('abc-9');
+    expect(row).toHaveTextContent('ended 3d ago');
+
+    // The live PAY-7 group: one session, and its past collapsed under Done.
+    const done = screen.getByTestId('work-done');
+    expect(done).toHaveTextContent('Done · 1');
+    const liveGroup = done.closest('li')!;
+    expect(within(liveGroup as HTMLElement).queryAllByTestId('past-work-row')).toHaveLength(0);
+    await fireEvent.click(done);
+    await tick();
+    expect(within(liveGroup as HTMLElement).getByTestId('past-work-row')).toHaveTextContent('old pay');
+    // PAY-7 is live: it never shows up as a past-only group as well.
+    expect(screen.getAllByTestId('past-work-group')).toHaveLength(1);
+  });
+
+  it('archived sessions sit in Done, one click un-archives; reopened and done headers (M7.3)', async () => {
+    const work = (archived: number | null) => ({
+      link_id: 5, item_id: 9, key: 'PAY-7', title: 'Retry', source: 'manual',
+      status_category: 'done', status_name: 'Done', archived_at: archived,
+    });
+    const live = { ...sessionFor(1, 'dev-live'), work: work(null) };
+    const parked = { ...sessionFor(1, 'dev-parked'), work: work(1_700_000_000) };
+    mockBackend(workProjects, [live, parked]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'work_reopened')
+        return [{ item_id: 9, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+      if (cmd === 'unarchive_session_work') return { ...parked, work: work(null) };
+      return base(cmd, args);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const group = await screen.findByTestId('work-groups');
+    // Only the live one is listed; the archived one is under Done.
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(1);
+    const header = screen.getByTestId('work-row');
+    expect(header.classList.contains('work-done')).toBe(true);
+    const badge = await screen.findByTestId('work-reopened-badge');
+    expect(badge).toHaveTextContent('reopened · 2 past sessions');
+    expect(within(header).getByTestId('resume-button')).toBeTruthy();
+    const done = screen.getByTestId('work-done');
+    expect(done).toHaveTextContent('Done · 1');
+    await fireEvent.click(done);
+    await tick();
+    const archived = screen.getByTestId('archived-session');
+    expect(archived).toHaveTextContent('dev-parked');
+    await fireEvent.click(within(archived).getByTestId('archived-chip'));
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
+        args: { session_id: parked.id },
+      }),
+    );
+    await tick();
+    expect(within(group).getAllByTestId('sess-row').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('the purge confirmation names the work that loses its conversations (M2.5)', async () => {
+    mockBackend(workProjects, [sessionFor(1, 'dev-a')]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'work_purge_impact') return { keys: ['ABC-1', 'PAY-7'] };
+      return base(cmd, args);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click((await screen.findAllByTestId('purge-project'))[0]);
+    const warn = await screen.findByTestId('purge-work-keys');
+    expect(warn).toHaveTextContent('ABC-1, PAY-7');
+  });
+
+  it('with nothing keyed, work mode looks exactly like project mode', async () => {
+    mockBackend(workProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-b')]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('work-groups')).toBeNull();
+    expect(await screen.findAllByTestId('proj-row')).toHaveLength(2);
+    expect(screen.queryByTestId('sidebar-empty')).toBeNull();
   });
 });

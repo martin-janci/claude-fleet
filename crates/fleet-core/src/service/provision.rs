@@ -90,7 +90,14 @@ pub async fn provision_one(
     provision_tmux_clipboard(ssh, host).await?;
     // 4. Stop / WorktreeCreate hooks. Required for safe-kill finalization on
     //    any host that runs Claude Code.
-    provision_hook(ssh, host, &base.hook_url(), token).await?;
+    provision_hook(
+        ssh,
+        host,
+        &base.hook_url(),
+        token,
+        base.session_start_context,
+    )
+    .await?;
     Ok(())
 }
 
@@ -107,10 +114,13 @@ pub async fn provision_hook(
     host: &str,
     hook_url: &str,
     token: &str,
+    sync_start: bool,
 ) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
     // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
-    let merged = super::hooks_install::merge_hook_into_settings_json(&existing, hook_url, token)?;
+    let merged = super::hooks_install::merge_hook_into_settings_json_with(
+        &existing, hook_url, token, sync_start,
+    )?;
     // The SessionStart command hook reads its bearer token from this file
     // (`curl -H @file`) rather than argv or the command string (SEC-3).
     // Written BEFORE settings.json: a hook installed ahead of its headers
@@ -276,6 +286,8 @@ pub async fn provision_host_with_token(
             ),
         ));
     }
+    // `work.session_start_context` (M4.5) decides how SessionStart installs.
+    let base = &base.with_start_context(&*lock(store)?);
     provision_one(ssh, host, base, &token).await?;
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the

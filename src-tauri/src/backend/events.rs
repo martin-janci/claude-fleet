@@ -575,8 +575,16 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         _ => Err(format!("`{key}` is missing or not a string")),
     };
     match name {
-        "session:created" | "session:updated" | "session:killed" | "project:updated"
-        | "worktree:updated" | "worktree:removed" | "task:updated" => integer("id"),
+        "session:created"
+        | "session:updated"
+        | "session:killed"
+        | "project:updated"
+        | "worktree:updated"
+        | "worktree:removed"
+        | "task:updated"
+        | "work:item"
+        | "work:tracker"
+        | "work:tracker_removed" => integer("id"),
         "host:added" | "host:probed" | "host:removed" => string("alias"),
         "session:event" | "session:conversations" => integer("session_id"),
         "account:upserted" => string("uuid"),

@@ -2,9 +2,11 @@
 // them, and the MRU list that puts recently opened sessions first.
 //
 // Rows are sessions (Enter attaches), projects (Enter opens the
-// new-session dialog for that project) and hosts (`host: <alias>`, Enter opens
-// the Hosts view on that host), like VS Code's quick open mixing "recently
-// opened" with "create new". Host rows always rank below every session row so
+// new-session dialog for that project), hosts (`host: <alias>`, Enter opens
+// the Hosts view on that host) and — with a tracker (work graph M3) — tickets
+// (Enter jumps to the live session, or opens the dialog prefilled; ⌘↵ starts
+// with the defaults) plus a lookup row for a pasted URL or an unknown exact
+// key, like VS Code's quick open mixing "recently opened" with "create new". Host rows always rank below every session row so
 // they never displace a session result. Ranking is `fuzzy.ts` over every
 // searchable facet (friendly name, tmux name, project, host, branch,
 // status) so `"blue mef"` finds the blue-sirius session on mefistos.
@@ -14,10 +16,25 @@ import type { ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
+import { displayKey, type TicketRow } from './trackers';
+import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
+
+/** A cached tracker ticket and the section it is listed under. */
+export interface SwitcherTicket {
+  ticket: TicketRow;
+  /** `My work` | `Current sprint` | `Recent`. */
+  section: string;
+}
+
+/** Section order for tickets on an empty query. */
+export const TICKET_SECTIONS = ['My work', 'Current sprint', 'Recent'] as const;
 
 export interface SwitcherEntry {
-  kind: 'session' | 'project' | 'host';
-  /** `session:<id>`, `project:<id>` or `host:<alias>`. */
+  /** `ticket`: a cached tracker ticket (work graph M3); `lookup`: resolve
+   *  the pasted URL / typed key through the tracker. */
+  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup';
+  /** `session:<id>`, `project:<id>`, `host:<alias>`, `ticket:<KEY>` or
+   *  `lookup:<query>`. */
   key: string;
   label: string;
   description: string;
@@ -27,6 +44,68 @@ export interface SwitcherEntry {
   session?: SessionRow;
   project?: ProjectTreeRow;
   host?: HostRow;
+  ticket?: TicketRow;
+  /** Tickets: the section heading. */
+  section?: string;
+  /** Lookup: what to resolve. */
+  lookup?: string;
+  /** Tickets: the tracker's provider badge (work graph M6). */
+  badge?: { icon: string; title: string };
+}
+
+const TICKET_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{1,9}-\d{1,7}$/;
+
+/** Ticket rows, one per key (the first section a key appears in wins). */
+export function ticketEntries(
+  tickets: readonly SwitcherTicket[],
+  /** tracker id → its provider badge, when badges are shown (M6). */
+  badges: ReadonlyMap<number, { icon: string; title: string }> = new Map(),
+): SwitcherEntry[] {
+  const seen = new Set<string>();
+  const out: SwitcherEntry[] = [];
+  for (const { ticket: t, section } of tickets) {
+    const key = t.key ?? `#${t.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const live = (t.live_session_ids ?? []).length;
+    const assignee = (t.assignees ?? []).join(', ');
+    const shown = displayKey(key);
+    out.push({
+      kind: 'ticket',
+      key: `ticket:${key}`,
+      label: t.title ? `${shown} ${t.title}` : shown,
+      description: [t.status_name, assignee, live > 0 ? `${live} live` : null]
+        .filter((x): x is string => !!x)
+        .join(' · '),
+      meta: live > 0 ? 'jump' : 'start',
+      fields: [key, t.title, t.status_name ?? '', assignee, ...(t.aliases ?? [])].filter(Boolean),
+      ticket: t,
+      section,
+      badge: t.tracker_id != null ? badges.get(t.tracker_id) : undefined,
+    });
+  }
+  return out;
+}
+
+/** A `lookup` row for a pasted ticket URL or an exact key the cache does
+ *  not hold; null otherwise. */
+export function lookupEntry(query: string, knownKeys: ReadonlySet<string>): SwitcherEntry | null {
+  const q = query.trim();
+  if (!q) return null;
+  const isUrl = /^https:\/\/\S+$/i.test(q);
+  // A ticket key, or a GitHub `owner/repo#n` (work graph M6).
+  const isKey = TICKET_KEY_RE.test(q) || /^[\w.-]+\/[\w.-]+#\d{1,9}$/.test(q);
+  if (!isUrl && !isKey) return null;
+  if (isKey && knownKeys.has(q.toUpperCase())) return null;
+  return {
+    kind: 'lookup',
+    key: `lookup:${q}`,
+    label: isUrl ? `Look up ${q}` : `Look up ${TICKET_KEY_RE.test(q) ? q.toUpperCase() : q}`,
+    description: 'fetch the ticket from its tracker',
+    meta: '↵',
+    fields: [q],
+    lookup: q,
+  };
 }
 
 /** Stable identity used for the MRU list (ids churn on re-discovery). */
@@ -132,6 +211,51 @@ export function buildEntries(
  * by fuzzy score, ties broken by the same recency order.
  */
 export function rankEntries(
+  entries: readonly SwitcherEntry[],
+  query: string,
+  recent: readonly string[],
+): SwitcherEntry[] {
+  const isTicket = (e: SwitcherEntry) => e.kind === 'ticket' || e.kind === 'lookup';
+  const base = rankBase(
+    entries.filter((e) => !isTicket(e)),
+    query,
+    recent,
+  );
+  const tickets = entries.filter(isTicket);
+  if (tickets.length === 0) return base;
+  // Tickets rank below sessions — except an exact key match (or the lookup
+  // row for what was typed or pasted), which ranks first.
+  const q = query.trim();
+  const exactKey = q.toUpperCase();
+  const sectionRank = (e: SwitcherEntry) => {
+    const i = (TICKET_SECTIONS as readonly string[]).indexOf(e.section ?? '');
+    return i === -1 ? TICKET_SECTIONS.length : i;
+  };
+  const scored = tickets
+    .map((e) => ({ e, score: e.kind === 'lookup' ? 0 : q ? fuzzyMatchFields(q, e.fields) : 0 }))
+    .filter((x): x is { e: SwitcherEntry; score: number } => x.score !== null);
+  const exact = scored.filter(
+    (x) =>
+      x.e.kind === 'lookup' ||
+      (x.e.ticket?.key ?? '').toUpperCase() === exactKey ||
+      (x.e.ticket?.aliases ?? []).includes(exactKey),
+  );
+  const rest = scored
+    .filter((x) => !exact.includes(x))
+    .sort((a, b) => b.score - a.score || sectionRank(a.e) - sectionRank(b.e));
+  let lastSession = -1;
+  base.forEach((e, i) => {
+    if (e.kind === 'session') lastSession = i;
+  });
+  return [
+    ...exact.map((x) => x.e),
+    ...base.slice(0, lastSession + 1),
+    ...rest.map((x) => x.e),
+    ...base.slice(lastSession + 1),
+  ];
+}
+
+function rankBase(
   entries: readonly SwitcherEntry[],
   query: string,
   recent: readonly string[],
@@ -243,4 +367,66 @@ export function isSwitcherChord(
 /** Human label for the open chord, for hints and docs. */
 export function chordLabel(isMac: boolean): string {
   return isMac ? '⌘K' : 'Ctrl+Shift+K';
+}
+
+/**
+ * Where a ticket's new session most likely belongs: the project and host of
+ * the most recently active session working on a key with the same prefix
+ * (`ABC-*`), else null — the dialog then falls back to `contextProject`. The
+ * hub's `start` makes the same choice from its links.
+ */
+export function placeForTicket(
+  key: string,
+  sessions: readonly SessionRow[],
+  projects: readonly ProjectTreeRow[],
+  keyOf: (s: SessionRow) => string | null,
+): { project: ProjectTreeRow; host: string } | null {
+  const prefix = key.split('-')[0]?.toUpperCase();
+  if (!prefix) return null;
+  const byId = new Map(projects.filter((p) => !p.project.system).map((p) => [p.project.id, p]));
+  const hits = sessions
+    .filter((s) => s.project_id != null && byId.has(s.project_id))
+    .filter((s) => keyOf(s)?.split('-')[0]?.toUpperCase() === prefix)
+    .sort((a, b) => (b.last_activity_at ?? 0) - (a.last_activity_at ?? 0));
+  const s = hits[0];
+  if (!s || s.project_id == null) return null;
+  return { project: byId.get(s.project_id)!, host: s.host_alias };
+}
+
+/** A ticket as a filter row (work graph M5.5): its tracker's org as its
+ *  scope, `*` for an unassigned tracker (no scope hides it). */
+export function ticketFilterRow(
+  t: TicketRow,
+  trackerOrg: ReadonlyMap<number, number | null | undefined>,
+): FilterRow {
+  const org = t.tracker_id != null ? trackerOrg.get(t.tracker_id) : undefined;
+  return {
+    host: null,
+    scope: org != null ? `org:${org}` : '*',
+    trackerId: t.tracker_id ?? null,
+    statusCategory: t.status_category ?? null,
+    assignees: t.assignees ?? [],
+    live: (t.live_session_ids ?? []).length > 0,
+    archived: false,
+  };
+}
+
+/** ⌘K under the sidebar's scope: sessions and tickets through the same
+ *  `rowMatches` the sidebar uses; hosts, projects and actions pass. */
+export function scopeEntries(
+  entries: readonly SwitcherEntry[],
+  scope: string,
+  sessionScope: (s: SessionRow) => string,
+  trackerOrg: ReadonlyMap<number, number | null | undefined>,
+): SwitcherEntry[] {
+  if (scope === 'all') return [...entries];
+  return entries.filter((e) => {
+    if (e.kind === 'session' && e.session) {
+      return rowMatches(sessionFilterRow(e.session, sessionScope), { scope });
+    }
+    if (e.kind === 'ticket' && e.ticket) {
+      return rowMatches(ticketFilterRow(e.ticket, trackerOrg), { scope });
+    }
+    return true;
+  });
 }

@@ -103,6 +103,25 @@ pub async fn refresh_context(store: Arc<Mutex<Store>>, ssh: Arc<SshClient>, sess
                 return;
             }
         };
+        // Work detection (M4.2): the live branch rides every transcript
+        // line, so this read carries it for free. A change re-resolves.
+        if attempt == 0 {
+            if let Some(branch) = crate::service::work::detect::branch_from_jsonl(&text) {
+                if let Ok(s) = lock(&store) {
+                    match s.set_current_branch(session_id, &branch) {
+                        Ok(true) => {
+                            if let Err(e) =
+                                crate::service::work::detect::resolve_session(&s, session_id)
+                            {
+                                tracing::debug!(error = %e.message, "[work] branch resolve failed");
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::debug!(error = %e.message, "[work] branch not stored"),
+                    }
+                }
+            }
+        }
         if let Some(u) = context_from_jsonl(&text) {
             if let Ok(s) = lock(&store) {
                 let _ = s.set_context(

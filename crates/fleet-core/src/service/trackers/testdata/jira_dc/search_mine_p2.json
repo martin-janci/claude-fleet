@@ -1,0 +1,101 @@
+{
+  "expand": "schema,names",
+  "startAt": 3,
+  "maxResults": 3,
+  "total": 6,
+  "issues": [
+    {
+      "id": "40004",
+      "key": "OPS-4",
+      "self": "https://jira.corp.example/jira/rest/api/2/issue/40004",
+      "fields": {
+        "summary": "Renew certificates",
+        "status": {
+          "name": "Closed",
+          "statusCategory": {
+            "key": "done"
+          }
+        },
+        "resolution": {
+          "name": "Fixed"
+        },
+        "issuetype": {
+          "name": "Task",
+          "subtask": false
+        },
+        "assignee": {
+          "name": "ddev",
+          "key": "JIRAUSER10100",
+          "displayName": "Dana Dev"
+        },
+        "updated": "2026-09-19T16:00:00.000+0200",
+        "project": {
+          "key": "OPS"
+        },
+        "description": null,
+        "customfield_10100": null,
+        "customfield_10101": null
+      }
+    },
+    {
+      "id": "40005",
+      "key": "OPS-5",
+      "self": "https://jira.corp.example/jira/rest/api/2/issue/40005",
+      "fields": {
+        "summary": "Migrate CI to v1",
+        "status": {
+          "name": "Closed",
+          "statusCategory": {
+            "key": "done"
+          }
+        },
+        "resolution": {
+          "name": "Won't Do"
+        },
+        "issuetype": {
+          "name": "Task",
+          "subtask": false
+        },
+        "assignee": {
+          "name": "ddev",
+          "key": "JIRAUSER10100",
+          "displayName": "Dana Dev"
+        },
+        "updated": "2026-09-18T10:00:00.000+0200",
+        "project": {
+          "key": "OPS"
+        },
+        "description": null,
+        "customfield_10100": null,
+        "customfield_10101": null
+      }
+    },
+    {
+      "id": "40006",
+      "key": "OPS-6",
+      "self": "https://jira.corp.example/jira/rest/api/2/issue/40006",
+      "fields": {
+        "summary": "Rotate backups",
+        "status": {
+          "name": "To Do",
+          "statusCategory": {
+            "key": "new"
+          }
+        },
+        "resolution": null,
+        "issuetype": {
+          "name": "Task",
+          "subtask": false
+        },
+        "assignee": null,
+        "updated": "2026-09-18T09:00:00.000+0200",
+        "project": {
+          "key": "OPS"
+        },
+        "description": null,
+        "customfield_10100": null,
+        "customfield_10101": null
+      }
+    }
+  ]
+}

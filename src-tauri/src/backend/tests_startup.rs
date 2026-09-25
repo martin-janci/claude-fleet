@@ -33,6 +33,9 @@ impl FleetTasks for Recorder {
     fn start_report_flusher(&self) {
         self.0.lock().unwrap().push("report_flusher");
     }
+    fn start_tracker_sync(&self) {
+        self.0.lock().unwrap().push("tracker_sync");
+    }
 }
 
 fn remote() -> Backend {
@@ -64,6 +67,22 @@ fn a_hub_client_starts_none_of_the_three() {
     );
 }
 
+/// Review C20, pinned on its own: a desktop paired with a hub never syncs
+/// trackers. The hub owns them; a second sync would write the hub's tickets
+/// into this machine's database with this machine's idea of the credential.
+#[test]
+fn a_paired_desktop_never_syncs_trackers() {
+    let recorder = Recorder::default();
+    start_background_tasks(&remote(), &recorder);
+    assert!(
+        !recorder.started().contains(&"tracker_sync"),
+        "a hub client started the tracker sync"
+    );
+    let standalone = Recorder::default();
+    start_background_tasks(&Backend::Local, &standalone);
+    assert!(standalone.started().contains(&"tracker_sync"));
+}
+
 #[test]
 fn the_report_flusher_is_off_with_the_env_var() {
     assert!(report_flusher_wanted(None));
@@ -82,7 +101,12 @@ fn a_standalone_app_starts_all_three() {
     start_background_tasks(&Backend::Local, &recorder);
     assert_eq!(
         recorder.started(),
-        vec!["control_api", "reconcile_tick", "account_usage_tick"],
+        vec![
+            "control_api",
+            "reconcile_tick",
+            "account_usage_tick",
+            "tracker_sync"
+        ],
         "standalone must keep its control API, its reconcile tick and its \
          usage poll — and must NOT start the hub event bridge, because there \
          is no hub and its own event bus already drives the stores"
@@ -111,6 +135,7 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
         "maybe_start_mcp(",
         "spawn_event_bridge(",
         "spawn_report_flusher(",
+        "spawn_tracker_sync(",
     ] {
         assert!(
             !lib.contains(forbidden),
@@ -143,6 +168,7 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
         ("maybe_start_mcp(", "the embedded control API"),
         ("spawn_event_bridge(", "the hub event bridge"),
         ("spawn_report_flusher(", "the error-report flusher"),
+        ("spawn_tracker_sync(", "the tracker sync"),
     ] {
         assert_eq!(
             tasks.matches(call).count(),
@@ -301,7 +327,12 @@ fn with_no_hub_configured_the_resolved_app_still_starts_all_three() {
             let (_dir, store) = store_with(settings);
             assert_eq!(
                 started_after_resolving(&store, &tokens),
-                vec!["control_api", "reconcile_tick", "account_usage_tick"],
+                vec![
+                    "control_api",
+                    "reconcile_tick",
+                    "account_usage_tick",
+                    "tracker_sync"
+                ],
                 "standalone behaviour must not change: settings {settings:?}"
             );
         }

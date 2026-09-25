@@ -87,6 +87,17 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
 }
 
 /// The twenty Assets commands that all refuse for the same reason.
+/// Organisations (work graph M5.2): the hub's `work_admin` is master-only.
+const ORGS_ARE_ADMIN: &str = "organisations, their rules and which org a host or tracker belongs \
+     to are the hosts' security boundary and fleet administration: the hub's work_admin is \
+     master-only, and a paired client is never the fleet's administrator; configure them on the \
+     hub with `fleet-hub org add|rule add|assign-host|assign-tracker`";
+
+/// Trackers (work graph M3.1): the hub's `work_admin` is master-only.
+const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration: the \
+     hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
+     configure them on the hub with `fleet-hub tracker add|set-credential|test`";
+
 const CATALOG_IS_A_CHECKOUT: &str =
     "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
      no tool for this; work on the catalog there";
@@ -244,6 +255,140 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "session_conversations",
         },
     ),
+    // Work links (roadmap M1b.2): four commands, two tools. Reads and link
+    // decisions route; tracker admin (M3.1, below) is the LocalOnly half (C17).
+    ("session_work_links", Verdict::Routed { tool: "work" }),
+    ("link_session_work", Verdict::Routed { tool: "work_link" }),
+    ("reject_session_work", Verdict::Routed { tool: "work_link" }),
+    ("unlink_session_work", Verdict::Routed { tool: "work_link" }),
+    // Work graph M4.4: decide a detected suggestion, and trust a project's
+    // branch keys — both actions of the existing `work_link`.
+    (
+        "confirm_session_work",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "set_work_project_trust",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    // Work graph M7.2: the self-cleaning lifecycle — two reads of `work`
+    // and six actions of the existing `work_link`.
+    ("work_tidy", Verdict::Routed { tool: "work" }),
+    ("work_reopened", Verdict::Routed { tool: "work" }),
+    (
+        "archive_session_work",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "unarchive_session_work",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("snooze_tidy", Verdict::Routed { tool: "work_link" }),
+    ("never_tidy", Verdict::Routed { tool: "work_link" }),
+    ("tidy_apply", Verdict::Routed { tool: "work_link" }),
+    ("dismiss_reopened", Verdict::Routed { tool: "work_link" }),
+    // Work graph M2.4: resume past work, and what a purge would strand.
+    ("work_resume_plan", Verdict::Routed { tool: "work" }),
+    ("resume_work", Verdict::Routed { tool: "work_link" }),
+    ("work_purge_impact", Verdict::Routed { tool: "work" }),
+    // Work graph M9.1: the Today view's digest.
+    ("work_today", Verdict::Routed { tool: "work" }),
+    // Work graph M9.2: the ticket context card, from the hub's cache.
+    ("work_ticket_card", Verdict::Routed { tool: "work" }),
+    // Work graph M9.3: ask a session for its hand-off (on demand, D9).
+    (
+        "request_work_handover",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    // Work graph M9.6: one ticket, one sibling session per repository.
+    ("start_work_multi", Verdict::Routed { tool: "work_link" }),
+    // Work graph M3.1: trackers and their credentials are fleet
+    // administration. The hub's `work_admin` is master-only, and a paired
+    // desktop is a client, never the master (review C17).
+    (
+        "add_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "update_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "set_tracker_credential",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "test_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    (
+        "remove_tracker",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    // Work graph M3.4: reading tickets and starting work route like every
+    // other work read and decision.
+    ("list_trackers", Verdict::Routed { tool: "work" }),
+    ("work_tickets", Verdict::Routed { tool: "work" }),
+    ("work_lookup", Verdict::Routed { tool: "work" }),
+    ("start_work", Verdict::Routed { tool: "work_link" }),
+    // Work graph M5: orgs are the per-host tokens' security boundary, so
+    // changing them is fleet administration (the hub's `work_admin`,
+    // master-only); reading them routes like every other work read.
+    (
+        "add_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "update_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "remove_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "add_org_rule",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "remove_org_rule",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "assign_host_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    (
+        "assign_tracker_org",
+        Verdict::LocalOnly {
+            instead: ORGS_ARE_ADMIN,
+        },
+    ),
+    ("work_scopes", Verdict::Routed { tool: "work" }),
+    ("list_orgs", Verdict::Routed { tool: "work" }),
+    ("org_suggestions", Verdict::Routed { tool: "work" }),
     (
         "session_conversation",
         Verdict::Routed {

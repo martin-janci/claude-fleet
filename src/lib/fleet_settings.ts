@@ -34,7 +34,41 @@ export const SETTING_KEYS = {
   usagePricesJson: 'usage.prices_json',
   reportsMaxRows: 'reports.max_rows',
   reportsMaxAgeSecs: 'reports.max_age_secs',
+  workJournalDays: 'work.journal_days',
+  workRecentDays: 'work.recent_days',
+  workSyncIntervalSecs: 'work.sync_interval_secs',
+  workTrustedBranchProjects: 'work.trusted_branch_projects',
+  workEvidenceSnippets: 'work.evidence_snippets',
+  workSessionStartContext: 'work.session_start_context',
+  workTidyDoneDays: 'work.tidy_done_days',
+  workTidyIdleHours: 'work.tidy_idle_hours',
+  workAutoTidy: 'work.auto_tidy',
+  workAutoTidyReasons: 'work.auto_tidy_reasons',
 } as const;
+
+/** Mirror of `settings::AUTO_TIDY_REASONS`: the tidy reasons auto-tidy may
+ *  act on (the ones whose action is a safe kill). */
+export const AUTO_TIDY_REASONS = ['done_idle', 'pr_merged_idle', 'not_planned'] as const;
+
+/** The `work.auto_tidy_reasons` comma list as a set of known reasons. */
+export function parseAutoTidyReasons(raw: string | undefined): Set<string> {
+  const known = new Set<string>(AUTO_TIDY_REASONS);
+  return new Set(
+    (raw ?? '')
+      .split(',')
+      .map((r) => r.trim())
+      .filter((r) => known.has(r)),
+  );
+}
+
+/** Toggle one reason in the `work.auto_tidy_reasons` comma list, keeping
+ *  the backend's order. */
+export function toggleAutoTidyReason(raw: string | undefined, reason: string): string {
+  const set = parseAutoTidyReasons(raw);
+  if (set.has(reason)) set.delete(reason);
+  else set.add(reason);
+  return AUTO_TIDY_REASONS.filter((r) => set.has(r)).join(',');
+}
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
  *  host alias → resolved projects root (setting → env var → default). */
@@ -105,6 +139,16 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'usage.prices_json': '{}',
   'reports.max_rows': '5000',
   'reports.max_age_secs': '604800',
+  'work.journal_days': '90',
+  'work.recent_days': '14',
+  'work.sync_interval_secs': '300',
+  'work.trusted_branch_projects': '[]',
+  'work.evidence_snippets': 'true',
+  'work.session_start_context': 'false',
+  'work.tidy_done_days': '2',
+  'work.tidy_idle_hours': '4',
+  'work.auto_tidy': 'false',
+  'work.auto_tidy_reasons': 'done_idle,pr_merged_idle',
 };
 
 export type FleetSettings = Record<string, string>;

@@ -380,6 +380,54 @@ pub(super) fn fetch_worktree(
     .map_err(missing_row("worktree", worktree_id))
 }
 
+/// Where work that ran in worktree `worktree_key` of `project_id` on `host`
+/// lives: `(project root, worktree dir)` (work graph M2: the handover's git
+/// probe and resume). The worktree dir is the host's recorded worktree row
+/// when there is one, else the layout's convention — it may no longer exist,
+/// which is what the probe finds out. A remote root is NOT expanded: it may
+/// start with `~/`, and the script that uses it expands that against the
+/// host's `$HOME`. `None` worktree for the project root itself (`main`).
+pub(crate) fn work_dirs(
+    s: &Store,
+    host: &str,
+    project_id: i64,
+    worktree_key: Option<&str>,
+) -> Result<(String, Option<String>), IpcError> {
+    let key = worktree_key.filter(|k| !k.is_empty() && *k != "main");
+    if let Some(fixed) = fetch_system_base_path(s, project_id)? {
+        return Ok((fixed, None));
+    }
+    let row_path = match key {
+        Some(k) => s
+            .list_worktrees_on_host(host)?
+            .into_iter()
+            .find(|w| w.project_id == project_id && w.name == k)
+            .map(|w| w.path),
+        None => None,
+    };
+    if host == crate::service::projects::LOCAL_HOST {
+        let base = fetch_base_path(s, project_id)?;
+        let wt = key.map(|k| {
+            row_path.clone().unwrap_or_else(|| {
+                worktree_path_on_disk(&base, k, |p| std::path::Path::new(p).exists())
+                    .unwrap_or_else(|| format!("{base}/.worktrees/{k}"))
+            })
+        });
+        return Ok((base, wt));
+    }
+    let (owner, repo) = fetch_owner_repo(s, project_id)?;
+    let root = crate::service::projects::project_base_for(s, host);
+    let (project_root, guess) = remote_project_path(
+        &root,
+        crate::service::projects::layout(s),
+        &owner,
+        &repo,
+        key,
+    );
+    let wt = key.map(|_| row_path.unwrap_or(guess));
+    Ok((project_root, wt))
+}
+
 /// Build the absolute path on the remote host where a project (and optional
 /// worktree) should live: `<root>/<owner>/<repo>` (`github` layout) or
 /// `<root>/<repo>` (`flat`) for the project root, plus

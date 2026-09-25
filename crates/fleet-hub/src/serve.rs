@@ -744,7 +744,8 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             nonce = %req.nonce,
             "confirmation requested but this hub has no approver; disable mcp.confirm_destructive"
         );
-    }));
+    }))
+    .without_approver();
 
     warn_if_confirm_destructive(&store);
 
@@ -834,6 +835,20 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Arc::new(fleet_core::http_client::TcpTransport),
         ticks_cancel.clone(),
     );
+    // Trackers (work graph M3.3): the hub owns its fleet, so it syncs them
+    // (`work.sync_interval_secs`, `0` = off). A paired desktop never does.
+    // `via_host` / `via_cli` trackers (M6) run `curl` / `gh` on a host over
+    // the hub's own SSH.
+    fleet_core::service::trackers::install_default_net(
+        fleet_core::service::trackers::TrackerNet::real(Some(
+            Arc::clone(&ssh) as Arc<dyn fleet_core::ssh::SshExec>
+        )),
+    );
+    let tracker_handle = fleet_core::service::trackers::sync::spawn_tracker_sync(
+        Arc::clone(&store),
+        fleet_core::service::trackers::default_net(),
+        ticks_cancel.clone(),
+    );
 
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
@@ -867,6 +882,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     }
     tick_handles.push(usage_handle);
     tick_handles.push(peer_handle);
+    if let Some(h) = tracker_handle {
+        tick_handles.push(h);
+    }
     await_ticks(tick_handles, TICK_SHUTDOWN_TIMEOUT).await;
     tunnels.stop_all();
     ssh.shutdown_all();

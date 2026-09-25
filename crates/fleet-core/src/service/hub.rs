@@ -36,14 +36,32 @@ pub struct HubBase {
     pub port: u16,
     /// True for a public URL: hooks post to it directly, no tunnel.
     pub public: bool,
+    /// Install the SessionStart hook synchronously so its answer (the
+    /// linked ticket's context) reaches Claude — the
+    /// `work.session_start_context` setting (work graph M4.5), off by
+    /// default. Set by the provisioning entry points from the store.
+    pub session_start_context: bool,
 }
 
 impl HubBase {
+    /// This base with the SessionStart context setting read from `store`
+    /// (`work.session_start_context`).
+    pub fn with_start_context(&self, store: &crate::store::Store) -> Self {
+        Self {
+            session_start_context: crate::service::settings::get_bool(
+                store,
+                crate::service::settings::WORK_SESSION_START_CONTEXT,
+            ),
+            ..self.clone()
+        }
+    }
+
     pub fn loopback(port: u16) -> Self {
         Self {
             url: format!("http://127.0.0.1:{port}"),
             port,
             public: false,
+            session_start_context: false,
         }
     }
 
@@ -107,6 +125,7 @@ impl HubBase {
             url: format!("{scheme}://{}", parsed.as_str()),
             port,
             public: true,
+            session_start_context: false,
         })
     }
 

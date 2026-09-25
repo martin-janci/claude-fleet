@@ -776,6 +776,27 @@ pub(super) fn reconcile_write_one_host(
                 // the prune is a normal no-op pass, per the plan's ruling.
                 skip_prune: marked_any,
             })?;
+            // Work detection (M4.2): the PR probe's signals, written outside
+            // the upsert (never in its `ON CONFLICT` list) and only for the
+            // few sessions probed this pass. A change re-resolves the
+            // session's links. Best-effort.
+            for (tmux_name, info) in &probe.pr_info {
+                let signals = match (&info.pr_url, &info.signals) {
+                    (None, _) => None,
+                    (Some(_), Some(sig)) => serde_json::to_string(sig).ok(),
+                    // Basic fields only (an older `gh`): nothing to say.
+                    (Some(_), None) => continue,
+                };
+                match s.set_pr_signals(&host.alias, tmux_name, signals.as_deref()) {
+                    Ok(Some(sid)) => {
+                        if let Err(e) = crate::service::work::detect::resolve_session(s, sid) {
+                            tracing::debug!(error = %e.message, "[work] PR resolve failed");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!(error = %e.message, "[work] PR signals not stored"),
+                }
+            }
             // Task G: the write has committed — read each known row back and
             // record a transition only where the STORED value changed.
             // Append-only and best-effort — a failed insert is logged and

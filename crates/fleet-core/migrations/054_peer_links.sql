@@ -42,4 +42,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_remote
 CREATE INDEX IF NOT EXISTS idx_session_messages_peer_pending
   ON session_messages(to_participant_id, id) WHERE peer_state = 'pending';
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (45);
+INSERT OR IGNORE INTO schema_version (version) VALUES (54);

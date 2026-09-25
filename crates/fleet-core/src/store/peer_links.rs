@@ -1,4 +1,4 @@
-//! Hub↔hub federation links (migration 045): one row per link per side, the
+//! Hub↔hub federation links (migration 054): one row per link per side, the
 //! remote participants that stand for a foreign session, the outbox, and the
 //! idempotent inbound insert. See
 //! `docs/superpowers/specs/2026-09-24-hub-federation-design.md`.
