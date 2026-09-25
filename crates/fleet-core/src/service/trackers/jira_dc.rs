@@ -31,8 +31,16 @@ use super::{
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// `s` with the old key `k` it was asked under recorded as an alias.
+fn with_alias(mut s: WorkItemSnapshot, k: &str) -> WorkItemSnapshot {
+    if !s.aliases.iter().any(|a| a == k) {
+        s.aliases.push(k.to_string());
+    }
+    s
+}
 
 /// Page size for `/search`.
 pub const PAGE_SIZE: usize = 100;
@@ -100,15 +108,15 @@ impl JiraDc {
         resp.parse_json::<Value>().map_err(TrackerError::Invalid)
     }
 
-    /// One `/search` page: `(issues, the next startAt)`.
-    async fn search(
+    /// One `/search` page, as answered.
+    async fn search_raw(
         &self,
         jql: &str,
         fields: Vec<String>,
         start_at: usize,
         warn: bool,
         call: CallKind,
-    ) -> Result<(Vec<Value>, Option<usize>), TrackerError> {
+    ) -> Result<Value, TrackerError> {
         let mut body = json!({
             "jql": jql,
             "startAt": start_at,
@@ -124,16 +132,87 @@ impl JiraDc {
                 call,
             )
             .await?;
-        let issues = v["issues"]
-            .as_array()
-            .cloned()
-            .ok_or_else(|| TrackerError::Invalid("a search answer without issues".into()))?;
+        if !v["issues"].is_array() {
+            return Err(TrackerError::Invalid(
+                "a search answer without issues".into(),
+            ));
+        }
+        Ok(v)
+    }
+
+    /// One `/search` page: `(issues, the next startAt)`.
+    async fn search(
+        &self,
+        jql: &str,
+        fields: Vec<String>,
+        start_at: usize,
+        warn: bool,
+        call: CallKind,
+    ) -> Result<(Vec<Value>, Option<usize>), TrackerError> {
+        let v = self.search_raw(jql, fields, start_at, warn, call).await?;
+        let issues = v["issues"].as_array().cloned().unwrap_or_default();
         let total = v["total"].as_u64().unwrap_or(0) as usize;
         let next = start_at + issues.len();
         Ok((
             issues.clone(),
             (!issues.is_empty() && next < total).then_some(next),
         ))
+    }
+
+    /// The issues `refs` (ids or keys) name, in one search with
+    /// `validateQuery: warn`, and the references the site's warnings say it
+    /// does not have (`An issue with key 'PLAT-999' does not exist…`),
+    /// upper-cased.
+    async fn by_reference(
+        &self,
+        refs: &[ItemRef],
+    ) -> Result<(Vec<WorkItemSnapshot>, HashSet<String>), TrackerError> {
+        let ids: Vec<String> = refs
+            .iter()
+            .filter_map(|r| match r {
+                ItemRef::Id(i) => Some(i.clone()),
+                _ => None,
+            })
+            .collect();
+        let keys: Vec<String> = refs
+            .iter()
+            .filter_map(|r| match r {
+                ItemRef::Key(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut clauses = Vec::new();
+        if !ids.is_empty() {
+            clauses.push(format!("id in ({})", ids.join(",")));
+        }
+        if !keys.is_empty() {
+            clauses.push(format!("key in ({})", keys.join(",")));
+        }
+        let v = self
+            .search_raw(
+                &clauses.join(" OR "),
+                self.fields(),
+                0,
+                true,
+                CallKind::Other,
+            )
+            .await?;
+        let issues = v["issues"].as_array().cloned().unwrap_or_default();
+        let missing: HashSet<String> = v["warningMessages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .flat_map(|m| {
+                // Every quoted value: the key or id the warning is about.
+                m.split('\'')
+                    .skip(1)
+                    .step_by(2)
+                    .map(str::to_ascii_uppercase)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        Ok((self.snapshots(&issues), missing))
     }
 
     /// Normalise one issue (v2 fields: a plain-text description, the Epic
@@ -424,61 +503,59 @@ impl TrackerProvider for JiraDc {
             .filter_map(|(i, r)| r.clone().map(|r| (i, r)))
             .collect();
         for chunk in askable.chunks(FETCH_MAX) {
-            let ids: Vec<String> = chunk
-                .iter()
-                .filter_map(|(_, r)| match r {
-                    ItemRef::Id(i) => Some(i.clone()),
-                    _ => None,
-                })
-                .collect();
-            let keys: Vec<String> = chunk
-                .iter()
-                .filter_map(|(_, r)| match r {
-                    ItemRef::Key(k) => Some(k.clone()),
-                    _ => None,
-                })
-                .collect();
-            let mut clauses = Vec::new();
-            if !ids.is_empty() {
-                clauses.push(format!("id in ({})", ids.join(",")));
-            }
-            if !keys.is_empty() {
-                clauses.push(format!("key in ({})", keys.join(",")));
-            }
-            let (issues, _) = self
-                .search(
-                    &clauses.join(" OR "),
-                    self.fields(),
-                    0,
-                    true,
-                    CallKind::Other,
-                )
-                .await?;
-            let items = self.snapshots(&issues);
+            let refs: Vec<ItemRef> = chunk.iter().map(|(_, r)| r.clone()).collect();
+            let (items, missing) = self.by_reference(&refs).await?;
             let by_id: HashMap<&str, &WorkItemSnapshot> =
                 items.iter().map(|s| (s.external_id.as_str(), s)).collect();
             let by_key: HashMap<&str, &WorkItemSnapshot> = items
                 .iter()
                 .filter_map(|s| Some((s.key.as_deref()?, s)))
                 .collect();
+            let mut used: HashSet<String> = HashSet::new();
+            // Keys the site neither answered under their own key nor warned
+            // about: asked under an old key, answered under the new (Jira
+            // resolves old keys in JQL).
+            let mut leftover: Vec<(usize, String)> = Vec::new();
             for (i, r) in chunk {
-                answers[*i] = match r {
-                    ItemRef::Id(id) => by_id.get(id.as_str()).map(|s| (*s).clone()),
-                    ItemRef::Key(k) => match by_key.get(k.as_str()) {
-                        Some(s) => Some((*s).clone()),
-                        // Asked for one key, answered under another: moved
-                        // (Jira resolves old keys in JQL).
-                        None if chunk.len() == 1 && items.len() == 1 => {
-                            let mut s = items[0].clone();
-                            if !s.aliases.contains(k) {
-                                s.aliases.push(k.clone());
-                            }
-                            Some(s)
+                let hit = match r {
+                    ItemRef::Id(id) => by_id.get(id.as_str()).copied(),
+                    ItemRef::Key(k) => {
+                        let hit = by_key.get(k.as_str()).copied();
+                        if hit.is_none() && !missing.contains(k) {
+                            leftover.push((*i, k.clone()));
                         }
-                        None => None,
-                    },
+                        hit
+                    }
                     _ => None,
                 };
+                if let Some(s) = hit {
+                    used.insert(s.external_id.clone());
+                    answers[*i] = Some(s.clone());
+                }
+            }
+            if leftover.is_empty() {
+                continue;
+            }
+            // The answers no asked reference matched are the moved issues.
+            // One of each pairs up; more than one is ambiguous, so those
+            // keys are searched for again one at a time.
+            let spare: Vec<&WorkItemSnapshot> = items
+                .iter()
+                .filter(|s| !used.contains(&s.external_id))
+                .collect();
+            if spare.is_empty() {
+                // Nothing came back for them: unavailable, no second ask.
+                continue;
+            }
+            if let ([(i, k)], [s]) = (leftover.as_slice(), spare.as_slice()) {
+                answers[*i] = Some(with_alias((*s).clone(), k));
+                continue;
+            }
+            for (i, k) in leftover {
+                let (one, _) = self.by_reference(&[ItemRef::Key(k.clone())]).await?;
+                if let (1, Some(s)) = (one.len(), one.into_iter().next()) {
+                    answers[i] = Some(with_alias(s, &k));
+                }
             }
         }
         Ok(refs

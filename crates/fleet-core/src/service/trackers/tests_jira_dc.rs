@@ -274,6 +274,101 @@ async fn the_dc_shapes_normalise_the_epic_link_legacy_sprints_and_plain_text() {
     assert_eq!(body["jql"], "id in (40002) OR key in (OPS-4,PLAT-999)");
 }
 
+/// A moved key is recognised when other references share its chunk: the
+/// one answer nothing asked for is its issue (`warningMessages` name the
+/// keys the site does not have), and two moved keys are searched for
+/// again one at a time.
+#[tokio::test]
+async fn a_moved_key_is_found_next_to_other_references() {
+    let plat7 = fixture("jira_dc", "fetch_moved.json")["issues"][0].clone();
+    let ops4 = fixture("jira_dc", "fetch_two.json")["issues"][1].clone();
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/rest/api/2/search",
+        Ok(Response::json(
+            200,
+            &json!({
+                "startAt": 0, "maxResults": 100, "total": 2,
+                "issues": [plat7, ops4],
+                "warningMessages": ["An issue with key 'PLAT-999' does not exist for field 'key'."]
+            }),
+        )),
+    );
+    let got = dc(&f)
+        .fetch(&[
+            ItemRef::Key("old-7".into()),
+            ItemRef::Key("OPS-4".into()),
+            ItemRef::Key("PLAT-999".into()),
+        ])
+        .await
+        .unwrap();
+    let Fetched::Found(s) = &got[0] else {
+        panic!("{got:?}")
+    };
+    assert_eq!(
+        (s.external_id.as_str(), s.key.as_deref()),
+        ("40007", Some("PLAT-7"))
+    );
+    assert_eq!(s.aliases, vec!["OLD-7"]);
+    assert!(matches!(&got[1], Fetched::Found(s) if s.external_id == "40004"));
+    assert!(
+        matches!(&got[2], Fetched::Unavailable { .. }),
+        "{:?}",
+        got[2]
+    );
+    assert_eq!(f.requests().len(), 1, "no second request");
+
+    // Two moved keys in one chunk: ambiguous, so each is searched alone.
+    let plat8 = {
+        let mut m = fixture("jira_dc", "fetch_moved.json")["issues"][0].clone();
+        m["id"] = json!("40008");
+        m["key"] = json!("PLAT-8");
+        m
+    };
+    let page = |issues: Vec<Value>| {
+        Ok(Response::json(
+            200,
+            &json!({"startAt": 0, "maxResults": 100, "total": issues.len(), "issues": issues}),
+        ))
+    };
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/rest/api/2/search",
+        page(vec![
+            fixture("jira_dc", "fetch_moved.json")["issues"][0].clone(),
+            plat8.clone(),
+        ]),
+    )
+    .once(
+        Method::Post,
+        "/rest/api/2/search",
+        page(vec![
+            fixture("jira_dc", "fetch_moved.json")["issues"][0].clone()
+        ]),
+    )
+    .once(Method::Post, "/rest/api/2/search", page(vec![plat8]));
+    let got = dc(&f)
+        .fetch(&[ItemRef::Key("OLD-7".into()), ItemRef::Key("OLD-8".into())])
+        .await
+        .unwrap();
+    assert!(
+        matches!(&got[0], Fetched::Found(s) if s.external_id == "40007" && s.aliases == vec!["OLD-7"]),
+        "{:?}",
+        got[0]
+    );
+    assert!(
+        matches!(&got[1], Fetched::Found(s) if s.external_id == "40008" && s.aliases == vec!["OLD-8"]),
+        "{:?}",
+        got[1]
+    );
+    let reqs = f.requests();
+    assert_eq!(reqs.len(), 3);
+    assert_eq!(reqs[1].json_body().unwrap()["jql"], "key in (OLD-7)");
+    assert_eq!(reqs[2].json_body().unwrap()["jql"], "key in (OLD-8)");
+}
+
 #[tokio::test]
 async fn a_captcha_lockout_is_its_own_state() {
     let f = FakeTransport::new();
