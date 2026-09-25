@@ -20,7 +20,7 @@
 //!   favourite filters, CAPTCHA — is Cloud's, through [`super::jira_common`].
 
 use super::jira_common::{
-    adf_excerpt, check, current_sprint, key_in_path, keys_in_prose, map_status_category,
+    adf_excerpt, check, current_sprint, is_key, key_in_path, keys_in_prose, map_status_category,
     normalize_resolution, EPIC_LINK_SCHEMA, SPRINT_FIELD_SCHEMA,
 };
 use super::{
@@ -255,7 +255,12 @@ impl JiraDc {
             Value::Number(n) => n.to_string(),
             _ => return None,
         };
-        let key = issue["key"].as_str().map(str::to_ascii_uppercase);
+        // Keys only in a key's shape: they are shown, and read by fleet,
+        // as its own text.
+        let key = issue["key"]
+            .as_str()
+            .map(str::to_ascii_uppercase)
+            .filter(|k| is_key(k));
         let status = &f["status"];
         let (iteration, iteration_active) = self
             .config
@@ -268,13 +273,17 @@ impl JiraDc {
             .epic_field
             .as_deref()
             .and_then(|ef| f[ef].as_str())
-            .map(str::to_ascii_uppercase);
+            .map(str::to_ascii_uppercase)
+            .filter(|k| is_key(k));
         let parent_id = match &f["parent"]["id"] {
             Value::String(s) => Some(s.clone()),
             Value::Number(n) => Some(n.to_string()),
             _ => None,
         };
-        let parent_key = f["parent"]["key"].as_str().map(str::to_ascii_uppercase);
+        let parent_key = f["parent"]["key"]
+            .as_str()
+            .map(str::to_ascii_uppercase)
+            .filter(|k| is_key(k));
         let level = f["issuetype"]["hierarchyLevel"].as_i64().or_else(|| {
             f["issuetype"]["subtask"]
                 .as_bool()
@@ -500,7 +509,6 @@ impl TrackerProvider for JiraDc {
     async fn fetch(&self, refs: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
         // Every reference as an id (digits) or a key; anything else, or a
         // URL on another site, is unavailable without asking.
-        let host = self.host().to_string();
         let norm: Vec<Option<ItemRef>> = refs
             .iter()
             .map(|r| match r {

@@ -28,7 +28,7 @@ pub use super::jira_common::{
     adf_excerpt, keys_in_prose, keys_in_text, map_status_category, normalize_resolution,
     SPRINT_FIELD_SCHEMA,
 };
-use super::jira_common::{check, current_sprint, key_in_path};
+use super::jira_common::{check, current_sprint, is_key, key_in_path};
 use super::{
     map_transport, CallKind as Call, Caps, Fetched, Incremental, ItemRef, Page, RefCtx,
     StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
@@ -244,7 +244,12 @@ impl JiraCloud {
             Value::Number(n) => n.to_string(),
             _ => return None,
         };
-        let key = issue["key"].as_str().map(str::to_ascii_uppercase);
+        // Keys only in a key's shape: they are shown, and read by fleet,
+        // as its own text.
+        let key = issue["key"]
+            .as_str()
+            .map(str::to_ascii_uppercase)
+            .filter(|k| is_key(k));
         let status = &f["status"];
         let resolution = f["resolution"]["name"].as_str().map(normalize_resolution);
         let (iteration, iteration_active) = self
@@ -271,7 +276,10 @@ impl JiraCloud {
                 Value::Number(n) => Some(n.to_string()),
                 _ => None,
             },
-            parent_key: f["parent"]["key"].as_str().map(str::to_ascii_uppercase),
+            parent_key: f["parent"]["key"]
+                .as_str()
+                .map(str::to_ascii_uppercase)
+                .filter(|k| is_key(k)),
             containers: f["project"]["key"]
                 .as_str()
                 .map(|k| vec![k.to_ascii_uppercase()])

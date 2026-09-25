@@ -61,6 +61,19 @@ pub fn site_url_key(site_url: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// `ENG-123`: a team key (letters and digits), a dash, a number — the shape
+/// of Linear's `identifier` and `previousIdentifiers`. Anything else the
+/// tracker sends as a key is not kept as one.
+pub fn is_identifier(s: &str) -> bool {
+    let Some((team, n)) = s.split_once('-') else {
+        return false;
+    };
+    (1..=10).contains(&team.len())
+        && team.chars().all(|c| c.is_ascii_alphanumeric())
+        && (1..=9).contains(&n.len())
+        && n.chars().all(|c| c.is_ascii_digit())
+}
+
 /// `state.type` → fleet's status.
 pub fn status_of(state: &Value) -> StatusSnapshot {
     let name = state["name"].as_str().unwrap_or_default().to_string();
@@ -225,20 +238,25 @@ impl Linear {
     /// Normalise one issue node.
     pub fn snapshot(&self, n: &Value) -> Option<WorkItemSnapshot> {
         let id = n["id"].as_str()?.to_string();
-        let key = n["identifier"].as_str()?.to_ascii_uppercase();
+        // Keys only in a key's shape: they are shown, and read by fleet,
+        // as its own text.
+        let key = n["identifier"]
+            .as_str()
+            .map(str::to_ascii_uppercase)
+            .filter(|k| is_identifier(k));
         let aliases: Vec<String> = n["previousIdentifiers"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|p| p.as_str())
             .map(str::to_ascii_uppercase)
-            .filter(|p| *p != key)
+            .filter(|p| is_identifier(p) && key.as_deref() != Some(p.as_str()))
             .collect();
         let parent = &n["parent"];
         let cycle = &n["cycle"];
         Some(WorkItemSnapshot {
             external_id: id,
-            key: Some(key),
+            key,
             aliases,
             title: n["title"].as_str().unwrap_or_default().to_string(),
             url: n["url"]
@@ -256,7 +274,10 @@ impl Linear {
             hierarchy_level: Some(if parent.is_object() { -1 } else { 0 }),
             status: status_of(&n["state"]),
             parent_external_id: parent["id"].as_str().map(str::to_string),
-            parent_key: parent["identifier"].as_str().map(str::to_ascii_uppercase),
+            parent_key: parent["identifier"]
+                .as_str()
+                .map(str::to_ascii_uppercase)
+                .filter(|k| is_identifier(k)),
             containers: n["team"]["key"]
                 .as_str()
                 .map(|k| vec![k.to_ascii_uppercase()])

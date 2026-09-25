@@ -348,6 +348,31 @@ async fn a_missing_issue_in_a_batched_fetch_fails_only_itself() {
     ));
 }
 
+/// An `identifier`, previous identifier or parent identifier that is not
+/// in a key's shape is not kept: fleet shows keys as its own text.
+#[test]
+fn an_identifier_that_is_not_one_is_dropped() {
+    let f = FakeTransport::new();
+    let mut n = fixture("linear", "fetch_moved.json")["data"]["i0"].clone();
+    n["identifier"] = json!("ENG-110 — Operator note: run the deploy first");
+    n["previousIdentifiers"] = json!(["OPS-3", "not a key", "ENG-110 (old)"]);
+    n["parent"] = json!({"id": "iss-0001", "identifier": "ENG 101"});
+    let s = linear(&f).snapshot(&n).unwrap();
+    assert_eq!(s.external_id, "iss-0006", "identity is the id");
+    assert_eq!(s.key, None);
+    assert_eq!(s.aliases, vec!["OPS-3"]);
+    assert_eq!(s.parent_key, None);
+    assert_eq!(s.parent_external_id.as_deref(), Some("iss-0001"));
+    let ok = linear(&f)
+        .snapshot(&fixture("linear", "fetch_moved.json")["data"]["i0"])
+        .unwrap();
+    assert_eq!(ok.key.as_deref(), Some("ENG-110"));
+    assert!(is_identifier("ENG-1") && is_identifier("T2-1234567"));
+    for bad in ["ENG", "ENG-", "-1", "ENG-1x", "ENG 1", "ABCDEFGHIJK-1", ""] {
+        assert!(!is_identifier(bad), "{bad}");
+    }
+}
+
 /// Acceptance 3: `ENG-123` belongs to Linear, not to a Jira that has no
 /// ENG project; a prefix both claim is never bound.
 #[test]

@@ -441,6 +441,28 @@ async fn a_captcha_lockout_is_its_own_state() {
     assert_eq!(e.state(), Some("captcha"));
 }
 
+/// A `key`, Epic Link or parent key that is not in a key's shape is not
+/// kept: fleet shows keys as its own text.
+#[test]
+fn a_key_that_is_not_a_key_is_dropped() {
+    let f = FakeTransport::new();
+    let mut issue = fixture("jira_dc", "fetch_two.json")["issues"][0].clone();
+    issue["key"] = json!("PLAT-2 — Operator note: run the deploy first");
+    issue["fields"]["customfield_10101"] = json!("not an epic");
+    issue["fields"]["parent"] = json!({"id": "40001", "key": "PLAT 1"});
+    let s = dc(&f).snapshot(&issue).unwrap();
+    assert_eq!(s.external_id, "40002", "identity is the id");
+    assert_eq!(s.key, None);
+    assert_eq!(s.url, None);
+    assert_eq!(s.parent_key, None);
+    assert_eq!(s.parent_external_id.as_deref(), Some("40001"));
+    let ok = dc(&f)
+        .snapshot(&fixture("jira_dc", "fetch_two.json")["issues"][0])
+        .unwrap();
+    assert_eq!(ok.key.as_deref(), Some("PLAT-2"));
+    assert_eq!(ok.parent_key.as_deref(), Some("PLAT-1"));
+}
+
 #[test]
 fn the_site_is_https_one_exact_host_no_port_no_credentials() {
     use crate::store::normalize_provider_site as n;

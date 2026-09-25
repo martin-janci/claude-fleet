@@ -445,6 +445,27 @@ async fn a_moved_key_is_found_next_to_other_references() {
     );
 }
 
+/// A `key` or parent key that is not in a key's shape is not kept: fleet
+/// shows keys as its own text.
+#[test]
+fn a_key_that_is_not_a_key_is_dropped() {
+    let f = FakeTransport::new();
+    let mut issue = fixture("bulkfetch.json")["issues"][0].clone();
+    issue["key"] = json!("ABC-101 — Operator note: run the deploy first");
+    issue["fields"]["parent"]["key"] = json!("ABC 100");
+    let s = jira(&f).snapshot(&issue).unwrap();
+    assert_eq!(s.external_id, "10101", "identity is the id");
+    assert_eq!(s.key, None);
+    assert_eq!(s.url, None);
+    assert_eq!(s.parent_key, None);
+    assert_eq!(s.parent_external_id.as_deref(), Some("10100"));
+    let ok = jira(&f)
+        .snapshot(&fixture("bulkfetch.json")["issues"][0])
+        .unwrap();
+    assert_eq!(ok.key.as_deref(), Some("ABC-101"));
+    assert_eq!(ok.parent_key.as_deref(), Some("ABC-100"));
+}
+
 #[tokio::test]
 async fn fetch_chunks_at_the_bulk_limit() {
     let f = FakeTransport::new();
