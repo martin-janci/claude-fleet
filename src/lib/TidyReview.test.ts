@@ -12,6 +12,23 @@ import { toasts, runToastAction } from './toasts';
 import { get } from 'svelte/store';
 import { sessionFocus } from './session_focus';
 import { sessions, type SessionRow } from './sessions';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+
+/** A desktop paired with a hub whose live link is down: every routed
+ *  mutation (tidy_apply, dismiss_reopened) is blocked with a reason. */
+const remote: HubStatus = {
+  remote: true,
+  url: 'https://fleet.example.com',
+  client_name: 'laptop',
+  client_mode: null,
+  configured_url: 'https://fleet.example.com',
+  configured_client_name: 'laptop',
+  allow_plaintext: false,
+  warning: null,
+  restart_required: false,
+  unavailable: null,
+};
 
 const cand = (id: number, over: Partial<TidyCandidate> = {}): TidyCandidate => ({
   session_id: id,
@@ -40,6 +57,8 @@ beforeEach(() => {
   toasts.set([]);
   sessionFocus.set(null);
   sessions.set([]);
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -401,5 +420,105 @@ describe('TidyReview', () => {
     await tick();
     expect(screen.queryByTestId('tidy-sheet')).toBeNull();
     expect(get(tidyRequest)).toBeNull();
+  });
+  it('a hub that cannot be reached blocks the sheet: the note, a disabled Tidy, no chord, and no Dismiss', async () => {
+    candidates = [cand(1), cand(2)];
+    reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 4, retry_in_secs: 30, reason: 'connect refused' });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    const sheet = screen.getByTestId('tidy-sheet');
+    const note = screen.getByRole('note');
+    expect(note.textContent).toContain('https://fleet.example.com is unreachable right now');
+    // The rows are still listed and ticked — only the sending is off.
+    const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+    expect(checks.map((c) => c.checked)).toEqual([true, true]);
+    expect((screen.getByTestId('tidy-apply') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.keyDown(sheet, { key: 'Enter' });
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
+    // Cancel still works: closing is never a hub call.
+    await fireEvent.click(screen.getByTestId('tidy-cancel'));
+    await tick();
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+    // The reopened list's Dismiss is a routed mutation too.
+    await fireEvent.click(screen.getByTestId('reopened-pill'));
+    await tick();
+    expect((screen.getByTestId('reopened-dismiss') as HTMLButtonElement).disabled).toBe(true);
+    // Once the link is back, the same sheet sends again.
+    hubConnection.set({ state: 'connected' });
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-pill'));
+    await tick();
+    expect(screen.queryByRole('note')).toBeNull();
+    expect((screen.getByTestId('tidy-apply') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('re-reads the candidates every minute while mounted, and not after unmount', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      candidates = [cand(1)];
+      const { unmount } = render(TidyReview);
+      const flush = async () => {
+        for (let i = 0; i < 8; i++) await tick();
+      };
+      await flush();
+      const reads = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_tidy').length;
+      expect(reads()).toBe(1);
+      // Nothing before the interval elapses.
+      vi.advanceTimersByTime(59_000);
+      await flush();
+      expect(reads()).toBe(1);
+      vi.advanceTimersByTime(1_000);
+      await flush();
+      expect(reads()).toBe(2);
+      // The re-read is what the pill shows: a candidate that went away drops it.
+      candidates = [];
+      vi.advanceTimersByTime(60_000);
+      await flush();
+      expect(reads()).toBe(3);
+      expect(screen.queryByTestId('tidy-pill')).toBeNull();
+      unmount();
+      vi.advanceTimersByTime(180_000);
+      await flush();
+      expect(reads()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the Reopened pill closes the tidy sheet and toggles its own list; the Tidy pill closes the list', async () => {
+    candidates = [cand(1)];
+    reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('reopened-pill'));
+    await tick();
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+    expect(screen.getByTestId('reopened-list')).toBeTruthy();
+    // The pill is a toggle; so is the list's own close.
+    await fireEvent.click(screen.getByTestId('reopened-pill'));
+    await tick();
+    expect(screen.queryByTestId('reopened-list')).toBeNull();
+    await fireEvent.click(screen.getByTestId('reopened-pill'));
+    await tick();
+    expect(screen.getByTestId('reopened-list')).toBeTruthy();
+    await fireEvent.click(screen.getByText('close'));
+    await tick();
+    expect(screen.queryByTestId('reopened-list')).toBeNull();
+    // Opening the tidy sheet puts the list away, so only one sheet shows.
+    await fireEvent.click(screen.getByTestId('reopened-pill'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-pill'));
+    await tick();
+    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
+    expect(screen.queryByTestId('reopened-list')).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('dismiss_reopened', expect.anything());
   });
 });

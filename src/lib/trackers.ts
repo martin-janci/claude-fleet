@@ -166,6 +166,8 @@ export interface StartWorkArgs {
   name?: string;
   /** The worktree name as edited. */
   worktree?: string;
+  /** Start across organisations anyway (work graph M5). */
+  force_cross_org?: boolean;
 }
 
 /** Start work on a ticket: one call, on the hub when paired. `E_EXISTS`

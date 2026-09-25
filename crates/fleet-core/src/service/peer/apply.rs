@@ -755,10 +755,7 @@ mod tests {
         }
         // And still the listed ones, which the heuristic also quotes.
         let text = neutralise_marker_lines(&format!("\u{200B}{}", guard::UNTRUSTED_END));
-        assert_eq!(
-            text,
-            format!("> \u{200B}(claude-fleet: end of untrusted input]")
-        );
+        assert_eq!(text, "> \u{200B}(claude-fleet: end of untrusted input]");
     }
 
     fn reply_item(id: i64, parent: WireRef) -> WireMessage {

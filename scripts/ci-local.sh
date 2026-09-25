@@ -28,7 +28,10 @@
 #                  pnpm audit --audit-level=high
 #   hub-e2e:       scripts/hub-e2e.sh, opt-in via --hub-e2e (mirrors the
 #                  hub-headless CI job's e2e step; see that script's own
-#                  header). Skipped with a message if tmux is missing.
+#                  header), plus its work-graph leg, which CI skips: that
+#                  needs a hub built with the test-only `e2e` feature, built
+#                  here into $CARGO_TARGET_DIR/e2e. Skipped with a message if
+#                  tmux is missing.
 #                  NOT part of the default run: it drives real fleet-hub /
 #                  fleet-agent processes and, for one of its three hubs,
 #                  manages this machine's own tmux server directly, which a
@@ -151,7 +154,11 @@ run_hub_e2e() {
     echo "ci-local: fleet-hub/fleet-agent not built at $target_dir/debug; run without --frontend-only, or build them first: cargo build -p fleet-hub -p fleet-agent --locked" >&2
     exit 1
   fi
-  BIN="$bin" ABIN="$abin" step bash scripts/hub-e2e.sh
+  # The work-graph leg needs a hub built with the test-only `e2e` feature
+  # (the fake-tracker override). Its own target dir, so the plain
+  # target/debug/fleet-hub that CI mirrors is never replaced by it.
+  step cargo build -p fleet-hub --features e2e --locked --target-dir "$target_dir/e2e"
+  BIN="$bin" ABIN="$abin" WBIN="$target_dir/e2e/debug/fleet-hub" step bash scripts/hub-e2e.sh
 }
 
 # --- frontend job ----------------------------------------------------------

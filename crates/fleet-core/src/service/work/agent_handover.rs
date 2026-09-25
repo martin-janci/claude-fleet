@@ -27,6 +27,13 @@
 //!   it — `handover_written`, or `handover_missing` when the reply had no
 //!   markers — and a request older than [`PENDING_TTL_SECS`] no longer
 //!   blocks a new one.
+//! * **Bound to its turn.** The request also records the session's
+//!   `prompt_submit_seq` before the prompt is typed; a Stop while that count
+//!   has not moved on ends a turn that began before the request (a late
+//!   Stop, a status that lagged), and leaves the request pending.
+//! * **The markers stay out of the timeline.** The Stop hook's `turn_done`
+//!   detail and `progress` journal row drop the marker block
+//!   ([`strip_markers`]); the hand-off itself is kept once, as the note.
 //! * **Never the operator's own session.**
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -89,12 +96,64 @@ pub fn extract(reply: &str, nonce: &str) -> Option<String> {
     Some(body)
 }
 
-/// The pending request's nonce, if the newest handover event is a request
-/// younger than [`PENDING_TTL_SECS`].
-fn pending(s: &Store, session_id: i64, now: i64) -> Result<Option<String>, IpcError> {
+/// PURE: `reply` without any handover marker block — each
+/// `WORK_HANDOVER_BEGIN_<nonce>` … `WORK_HANDOVER_END_<nonce>` span, and a
+/// stray marker of either kind — trimmed. What the Stop hook keeps as the
+/// turn's detail: the hand-off is stored once, as the note.
+pub fn strip_markers(reply: &str) -> String {
+    /// Past a marker's prefix: the nonce (hex) ends at the first other char.
+    fn after_token(s: &str) -> &str {
+        let end = s
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(s.len());
+        &s[end..]
+    }
+    let mut out = String::with_capacity(reply.len());
+    let mut rest = reply;
+    loop {
+        let next = [rest.find(BEGIN), rest.find(END)]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(at) = next else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        rest = match tail.strip_prefix(BEGIN) {
+            // A block: everything through its end marker goes.
+            Some(t) => match t.find(END) {
+                Some(e) => after_token(&t[e + END.len()..]),
+                None => after_token(t),
+            },
+            None => after_token(&tail[END.len()..]),
+        };
+    }
+    out.trim().to_string()
+}
+
+/// A request's timeline detail: the nonce, then the `prompt_submit_seq` the
+/// session had when it was made.
+fn request_detail(nonce: &str, submit_seq: i64) -> String {
+    format!("{nonce} {submit_seq}")
+}
+
+/// The pending request's nonce and the `prompt_submit_seq` it was made at
+/// (`None` for a request recorded before M10.1), if the newest handover
+/// event is a request younger than [`PENDING_TTL_SECS`].
+fn pending(
+    s: &Store,
+    session_id: i64,
+    now: i64,
+) -> Result<Option<(String, Option<i64>)>, IpcError> {
     Ok(s.newest_session_event_of(session_id, EV_KINDS)?
         .filter(|e| e.kind == EV_REQUESTED && e.at > now - PENDING_TTL_SECS)
-        .and_then(|e| e.detail))
+        .and_then(|e| e.detail)
+        .map(|d| match d.split_once(' ') {
+            Some((nonce, seq)) => (nonce.to_string(), seq.trim().parse().ok()),
+            None => (d, None),
+        }))
 }
 
 fn make_nonce() -> String {
@@ -222,11 +281,16 @@ pub async fn request(
             ));
         }
         let nonce = make_nonce();
+        // The turn this request starts is the first one submitted after it.
+        let submit_seq = s
+            .prompt_ack_state(row.id)?
+            .map(|a| a.prompt_submit_seq)
+            .unwrap_or(0);
         s.insert_session_event_for(
             row.id,
             row.claude_session_id.as_deref(),
             EV_REQUESTED,
-            Some(&nonce),
+            Some(&request_detail(&nonce, submit_seq)),
         )?;
         (row, nonce, key)
     };
@@ -254,7 +318,8 @@ pub async fn request(
 }
 
 /// The Stop hook's half, under its lock: settle a pending request from the
-/// turn's reply. Returns whether a hand-off was stored.
+/// turn's reply. A Stop of a turn submitted before the request leaves it
+/// pending. Returns whether a hand-off was stored.
 pub fn on_stop(
     s: &Store,
     session_id: i64,
@@ -262,9 +327,20 @@ pub fn on_stop(
     reply: Option<&str>,
 ) -> Result<bool, IpcError> {
     let now = crate::service::catalog::now_secs();
-    let Some(nonce) = pending(s, session_id, now)? else {
+    let Some((nonce, at_seq)) = pending(s, session_id, now)? else {
         return Ok(false);
     };
+    if let Some(at) = at_seq {
+        let seq = s
+            .prompt_ack_state(session_id)?
+            .map(|a| a.prompt_submit_seq)
+            .unwrap_or(0);
+        if seq <= at {
+            // No prompt was submitted since the request: this Stop ends an
+            // earlier turn, not the one asked for.
+            return Ok(false);
+        }
+    }
     let Some(text) = reply.and_then(|r| extract(r, &nonce)) else {
         s.insert_session_event_for(session_id, Some(claude_session_id), EV_MISSING, None)?;
         return Ok(false);
@@ -445,6 +521,42 @@ mod tests {
         assert!(!on_stop(&s, id, "conv-1", Some("I did something else")).unwrap());
         let newest = s.newest_session_event_of(id, EV_KINDS).unwrap().unwrap();
         assert_eq!(newest.kind, EV_MISSING);
+    }
+
+    #[test]
+    fn a_stop_of_an_earlier_turn_leaves_the_request_pending() {
+        let (st, id) = store();
+        let s = st.lock().unwrap();
+        // Asked at submit count 0: no prompt has been submitted since.
+        s.insert_session_event_for(id, Some("conv-1"), EV_REQUESTED, Some("n1 0"))
+            .unwrap();
+        // The turn that was running when fleet asked ends first, without
+        // markers: not the reply asked for, and not "missing".
+        assert!(!on_stop(&s, id, "conv-1", Some("earlier work done")).unwrap());
+        let newest = s.newest_session_event_of(id, EV_KINDS).unwrap().unwrap();
+        assert_eq!(newest.kind, EV_REQUESTED);
+        // The handover prompt is submitted, then its turn's Stop settles it.
+        s.record_prompt_submit_hook_for_row(id).unwrap();
+        let reply = format!("{BEGIN}n1\nLeft: docs.\n{END}n1");
+        assert!(on_stop(&s, id, "conv-1", Some(&reply)).unwrap());
+        let newest = s.newest_session_event_of(id, EV_KINDS).unwrap().unwrap();
+        assert_eq!(newest.kind, EV_WRITTEN);
+    }
+
+    #[test]
+    fn the_marker_block_is_stripped_from_a_reply() {
+        let n = "a1b2c3";
+        assert_eq!(
+            strip_markers(&format!(
+                "Sure.\n{BEGIN}{n}\nDone: x.\n{END}{n}\nAnything else?"
+            )),
+            "Sure.\n\nAnything else?"
+        );
+        assert_eq!(strip_markers(&format!("{BEGIN}{n}\nonly\n{END}{n}")), "");
+        // A stray marker of either kind, and a half block.
+        assert_eq!(strip_markers(&format!("a {END}{n} b")), "a  b");
+        assert_eq!(strip_markers(&format!("a\n{BEGIN}{n}\nb")), "a\n\nb");
+        assert_eq!(strip_markers("no markers here"), "no markers here");
     }
 
     #[tokio::test]

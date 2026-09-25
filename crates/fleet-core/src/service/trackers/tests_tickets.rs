@@ -698,7 +698,8 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
     .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
     // Its own ticket on another host, while ABC-2 has a live session (the
-    // link above): the duplicate refusal comes first.
+    // link above): the host fence answers first — a token asking for
+    // another host learns nothing about the sessions there.
     let abc2 = fx
         .store
         .lock()
@@ -713,10 +714,21 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
         host_alias: Some("hostb".into()),
         ..Default::default()
     };
+    let on_hosta = StartArgs {
+        host_alias: Some("hosta".into()),
+        ..on_hostb.clone()
+    };
     let e = plan_start(&fx.store, &on_hostb, &host_scope("hosta"), &fx.net())
         .await
         .unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN, "{}", e.message);
+    assert!(e.message.contains("own host (hosta)"), "{}", e.message);
+    // On its own host, the duplicate guard names the live session.
+    let e = plan_start(&fx.store, &on_hosta, &host_scope("hosta"), &fx.net())
+        .await
+        .unwrap_err();
     assert_eq!(e.code, codes::E_EXISTS);
+    assert_eq!(e.details.unwrap()["session_id"], sid);
     // The session ends: ABC-2 is host A's past work, so still its own
     // ticket — and host A's token starts it on host A only.
     fx.store
@@ -732,19 +744,9 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
         .await
         .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN, "{}", e.message);
-    assert!(e.message.contains("own host (hosta)"), "{}", e.message);
-    // The same start on its own host: the fence is the host, not the ticket.
-    let plan = plan_start(
-        &fx.store,
-        &StartArgs {
-            host_alias: Some("hosta".into()),
-            ..on_hostb.clone()
-        },
-        &host_scope("hosta"),
-        &fx.net(),
-    )
-    .await
-    .unwrap();
+    let plan = plan_start(&fx.store, &on_hosta, &host_scope("hosta"), &fx.net())
+        .await
+        .unwrap();
     assert_eq!(
         (plan.key.as_str(), plan.host_alias.as_str()),
         ("ABC-2", "hosta")
@@ -1111,6 +1113,34 @@ fn spawn_rec(
     }
 }
 
+/// [`start_many`] with an hour to spare: the result and the rows whose
+/// start prompt would be typed, in order.
+async fn many<F, Fut>(
+    fx: &Fx,
+    args: &StartArgs,
+    ids: &[i64],
+    scope: &OrgScope,
+    spawn: F,
+) -> Result<(MultiStart, Vec<SessionRow>), IpcError>
+where
+    F: FnMut(crate::service::sessions::NewSessionArgs) -> Fut,
+    Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+{
+    let mut typed = Vec::new();
+    let out = start_many(
+        &fx.store,
+        args,
+        ids,
+        scope,
+        &fx.net(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(3600),
+        spawn,
+        |row, _| typed.push(row.clone()),
+    )
+    .await?;
+    Ok((out, typed))
+}
+
 #[tokio::test]
 async fn a_multi_repo_start_makes_one_sibling_per_repo_on_one_branch() {
     let fx = Fx::new();
@@ -1127,12 +1157,11 @@ async fn a_multi_repo_start_makes_one_sibling_per_repo_on_one_branch() {
         ..Default::default()
     };
     let asked = Arc::new(Mutex::new(Vec::new()));
-    let (out, queued) = start_many(
-        &fx.store,
+    let (out, queued) = many(
+        &fx,
         &args,
         &[fx.pid, pid2, fx.pid],
         &OrgScope::All,
-        &fx.net(),
         spawn_rec(&fx.store, Arc::clone(&asked), None),
     )
     .await
@@ -1181,12 +1210,11 @@ async fn a_multi_repo_start_makes_one_sibling_per_repo_on_one_branch() {
     }
 
     // Again: the key runs in both repos now, so both are skipped by name.
-    let (again, _) = start_many(
-        &fx.store,
+    let (again, _) = many(
+        &fx,
         &args,
         &[fx.pid, pid2],
         &OrgScope::All,
-        &fx.net(),
         spawn_rec(&fx.store, Arc::new(Mutex::new(Vec::new())), None),
     )
     .await
@@ -1214,8 +1242,8 @@ async fn a_multi_repo_start_skips_a_repo_already_running_and_reports_a_failure()
         .unwrap()
         .link_session_work(live, WorkTarget::Key("ABC-1"), "manual")
         .unwrap();
-    let (out, _) = start_many(
-        &fx.store,
+    let (out, _) = many(
+        &fx,
         &StartArgs {
             reference: Some("ABC-1".into()),
             host_alias: Some("hosta".into()),
@@ -1223,7 +1251,6 @@ async fn a_multi_repo_start_skips_a_repo_already_running_and_reports_a_failure()
         },
         &[fx.pid, pid2, pid3],
         &OrgScope::All,
-        &fx.net(),
         spawn_rec(&fx.store, Arc::new(Mutex::new(Vec::new())), Some(pid3)),
     )
     .await
@@ -1262,19 +1289,343 @@ async fn a_multi_repo_start_skips_a_repo_already_running_and_reports_a_failure()
 async fn a_multi_repo_start_takes_one_to_eight_projects() {
     let fx = Fx::new();
     for ids in [vec![], (1..=9).collect::<Vec<i64>>()] {
-        let e = start_many(
-            &fx.store,
+        let e = many(
+            &fx,
             &StartArgs {
                 reference: Some("ABC-1".into()),
                 ..Default::default()
             },
             &ids,
             &OrgScope::All,
-            &fx.net(),
             spawn_rec(&fx.store, Arc::new(Mutex::new(Vec::new())), None),
         )
         .await
         .unwrap_err();
         assert_eq!(e.code, codes::E_INVALID);
     }
+}
+
+// --- M10.1: the M9.6 review's should-fix items --------------------------------
+
+#[tokio::test]
+async fn each_sibling_is_prompted_as_soon_as_it_starts() {
+    let fx = Fx::new();
+    let pid2 = fx
+        .store
+        .lock()
+        .unwrap()
+        .upsert_project("acme", "web", "/p/acme/web")
+        .unwrap();
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let mut inner = spawn_rec(&fx.store, Arc::clone(&asked), None);
+    let spawn_log = Arc::clone(&log);
+    let prompt_log = Arc::clone(&log);
+    let out = start_many(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-3".into()),
+            host_alias: Some("hosta".into()),
+            with_brief: true,
+            ..Default::default()
+        },
+        &[fx.pid, pid2],
+        &OrgScope::All,
+        &fx.net(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(3600),
+        move |a| {
+            spawn_log
+                .lock()
+                .unwrap()
+                .push(format!("spawn {}", a.project_id));
+            inner(a)
+        },
+        move |row, key| {
+            prompt_log
+                .lock()
+                .unwrap()
+                .push(format!("prompt {} {key}", row.project_id.unwrap()));
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.started.len(), 2);
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            format!("spawn {}", fx.pid),
+            format!("prompt {} ABC-3", fx.pid),
+            format!("spawn {pid2}"),
+            format!("prompt {pid2} ABC-3"),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn starts_past_the_budget_are_skipped_with_reason_deadline() {
+    let fx = Fx::new();
+    let (pid2, pid3) = {
+        let s = fx.store.lock().unwrap();
+        (
+            s.upsert_project("acme", "web", "/p/acme/web").unwrap(),
+            s.upsert_project("acme", "api", "/p/acme/api").unwrap(),
+        )
+    };
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    // Not even one start fits: nothing is spawned, all are itemised, and
+    // the key still comes back.
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let out = start_many(
+        &fx.store,
+        &args,
+        &[fx.pid, pid2],
+        &OrgScope::All,
+        &fx.net(),
+        tokio::time::Instant::now() + START_RESERVE - std::time::Duration::from_secs(1),
+        spawn_rec(&fx.store, Arc::clone(&asked), None),
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    assert!(asked.lock().unwrap().is_empty());
+    assert_eq!(out.key, "ABC-3");
+    assert!(out.started.is_empty());
+    let reasons: Vec<(i64, &str)> = out
+        .skipped
+        .iter()
+        .map(|s| (s.project_id, s.reason.as_str()))
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![(fx.pid, SKIP_DEADLINE), (pid2, SKIP_DEADLINE)]
+    );
+
+    // A slow first start eats the budget: the second is skipped, not begun.
+    let store = Arc::clone(&fx.store);
+    let n = Arc::new(Mutex::new(0));
+    let spawned = Arc::clone(&n);
+    let out = start_many(
+        &fx.store,
+        &args,
+        &[pid3, pid2],
+        &OrgScope::All,
+        &fx.net(),
+        tokio::time::Instant::now() + START_RESERVE + std::time::Duration::from_secs(10),
+        move |a| {
+            *spawned.lock().unwrap() += 1;
+            let store = Arc::clone(&store);
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let s = store.lock().unwrap();
+                let id = s
+                    .upsert_session(
+                        "slow",
+                        &a.host_alias,
+                        Some(a.project_id),
+                        None,
+                        1,
+                        1,
+                        "running",
+                        None,
+                    )
+                    .unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            }
+        },
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(*n.lock().unwrap(), 1);
+    assert_eq!(out.started.len(), 1);
+    assert_eq!(out.started[0].project_id, Some(pid3));
+    assert_eq!(out.skipped.len(), 1);
+    assert_eq!(
+        (out.skipped[0].project_id, out.skipped[0].reason.as_str()),
+        (pid2, SKIP_DEADLINE)
+    );
+}
+
+#[tokio::test]
+async fn a_sibling_that_spawned_but_did_not_link_is_started_with_a_warning() {
+    let fx = Fx::new();
+    let pid2 = fx
+        .store
+        .lock()
+        .unwrap()
+        .upsert_project("acme", "web", "/p/acme/web")
+        .unwrap();
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let branch = branch_slug("ABC-3", "ABC-3 title");
+    // The first repo's session comes up on the branch, but the row handed
+    // back names a session the store does not have, so its link fails.
+    let store = Arc::clone(&fx.store);
+    let first = fx.pid;
+    let wt = branch.clone();
+    let spawn = move |a: crate::service::sessions::NewSessionArgs| {
+        let s = store.lock().unwrap();
+        let id = s
+            .upsert_session(
+                &format!("sib-{}", a.project_id),
+                &a.host_alias,
+                Some(a.project_id),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET worktree_key = ?1 WHERE id = ?2",
+                rusqlite::params![wt, id],
+            )
+            .unwrap();
+        let mut row = s.get_session_by_id(id).unwrap().unwrap();
+        if a.project_id == first {
+            row.id = 999_999;
+        }
+        std::future::ready(Ok(row))
+    };
+    let (out, _) = many(&fx, &args, &[fx.pid, pid2], &OrgScope::All, spawn)
+        .await
+        .unwrap();
+    assert!(out.failed.is_empty(), "{out:?}");
+    assert_eq!(out.started.len(), 2, "{out:?}");
+    assert_eq!(out.warnings.len(), 1, "{out:?}");
+    assert_eq!(out.warnings[0].project_id, fx.pid);
+
+    // A retry starts no duplicate: the unlinked session on the branch in
+    // that repo counts as the key running there.
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (again, _) = many(
+        &fx,
+        &args,
+        &[fx.pid, pid2],
+        &OrgScope::All,
+        spawn_rec(&fx.store, Arc::clone(&asked), None),
+    )
+    .await
+    .unwrap();
+    assert!(asked.lock().unwrap().is_empty(), "{again:?}");
+    assert!(again.started.is_empty());
+    let skipped: Vec<i64> = again.skipped.iter().map(|x| x.project_id).collect();
+    assert_eq!(skipped, vec![fx.pid, pid2]);
+    assert!(
+        again.skipped[0]
+            .reason
+            .contains(&format!("on branch {branch}")),
+        "{again:?}"
+    );
+}
+
+#[tokio::test]
+async fn when_every_repo_fails_the_reply_still_names_the_key() {
+    let fx = Fx::new();
+    let (pid2, pid3) = {
+        let s = fx.store.lock().unwrap();
+        (
+            s.upsert_project("acme", "web", "/p/acme/web").unwrap(),
+            s.upsert_project("acme", "api", "/p/acme/api").unwrap(),
+        )
+    };
+    // hosta's token can read ABC-3 (it runs there), but may not start on
+    // hostb: every repo fails on the host fence.
+    let live = fx.session_on("hosta", "live");
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(live, WorkTarget::Key("ABC-3"), "manual")
+        .unwrap();
+    let (out, _) = many(
+        &fx,
+        &StartArgs {
+            reference: Some("ABC-3".into()),
+            host_alias: Some("hostb".into()),
+            ..Default::default()
+        },
+        &[pid2, pid3],
+        &host_scope("hosta"),
+        spawn_rec(&fx.store, Arc::new(Mutex::new(Vec::new())), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.key, "ABC-3");
+    assert!(out.started.is_empty());
+    let failed: Vec<(i64, &str)> = out
+        .failed
+        .iter()
+        .map(|f| (f.project_id, f.code.as_str()))
+        .collect();
+    assert_eq!(
+        failed,
+        vec![(pid2, codes::E_FORBIDDEN), (pid3, codes::E_FORBIDDEN)]
+    );
+}
+
+#[tokio::test]
+async fn the_ticket_is_resolved_once_for_every_repo() {
+    let fx = Fx::new();
+    let pid2 = fx
+        .store
+        .lock()
+        .unwrap()
+        .upsert_project("acme", "web", "/p/acme/web")
+        .unwrap();
+    // ABC-9 is not cached: one live fetch answers it for every repo.
+    fx.fake.once(
+        Method::Post,
+        "/issue/bulkfetch",
+        Ok(Response::json(
+            200,
+            &json!({"issues": [{"id": "9", "key": "ABC-9", "fields": {
+                "summary": "Nine", "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+                "issuetype": {"name": "Task", "hierarchyLevel": 0}, "project": {"key": "ABC"}}}]}),
+        )),
+    );
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (out, _) = many(
+        &fx,
+        &StartArgs {
+            reference: Some("ABC-9".into()),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &[fx.pid, pid2],
+        &OrgScope::All,
+        spawn_rec(&fx.store, Arc::clone(&asked), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.started.len(), 2, "{out:?}");
+    assert_eq!(fx.fake.count("/issue/bulkfetch"), 1);
+    let branches: Vec<Option<String>> = asked.lock().unwrap().iter().map(|a| a.1.clone()).collect();
+    assert_eq!(branches[0], branches[1]);
+    assert_eq!(branches[0].as_deref(), Some("abc-9-nine"));
+}
+
+#[test]
+fn multi_start_arguments_are_checked_on_their_own() {
+    for (pid, ids) in [
+        (Some(1), vec![2]),
+        (None, vec![]),
+        (None, (1..=9).collect::<Vec<i64>>()),
+    ] {
+        let e = multi_start_ids(pid, &ids).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{pid:?} {ids:?}");
+    }
+    assert_eq!(multi_start_ids(None, &[3, 1, 3]).unwrap(), vec![3, 1]);
+    // Nine ids with a repeat are eight projects.
+    let mut eight: Vec<i64> = (1..=8).collect();
+    eight.push(1);
+    assert_eq!(multi_start_ids(None, &eight).unwrap().len(), 8);
 }

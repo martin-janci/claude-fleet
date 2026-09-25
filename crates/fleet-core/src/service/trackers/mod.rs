@@ -19,6 +19,9 @@ pub mod jira_dc;
 pub mod linear;
 pub mod sync;
 #[cfg(test)]
+#[path = "tests_e2e_override.rs"]
+mod tests_e2e_override;
+#[cfg(test)]
 #[path = "tests_isolation_providers.rs"]
 mod tests_isolation_providers;
 pub mod tickets;
@@ -438,20 +441,27 @@ pub struct TrackerNet {
     /// Every request goes here instead (tests).
     fake: Option<Arc<dyn HttpTransport>>,
     ssh: Option<Arc<dyn crate::ssh::SshExec>>,
+    /// The e2e fake tracker's port (test-only; see [`e2e_loopback_port`]):
+    /// a `direct` Jira Cloud tracker's requests go there, fenced as usual.
+    #[cfg(feature = "e2e")]
+    e2e_loopback: Option<u16>,
 }
 
 impl TrackerNet {
     /// The real thing: direct HTTPS fenced per provider, and `ssh` (when
     /// this process has hosts) for `via_host` / `via_cli`.
     pub fn real(ssh: Option<Arc<dyn crate::ssh::SshExec>>) -> Self {
-        TrackerNet { fake: None, ssh }
+        TrackerNet {
+            ssh,
+            ..TrackerNet::default()
+        }
     }
 
     /// Every tracker, whatever its transport, talks to `t` (tests).
     pub fn fake(t: Arc<dyn HttpTransport>) -> Self {
         TrackerNet {
             fake: Some(t),
-            ssh: None,
+            ..TrackerNet::default()
         }
     }
 
@@ -459,8 +469,28 @@ impl TrackerNet {
     /// `via_cli`).
     pub fn with_ssh(ssh: Arc<dyn crate::ssh::SshExec>) -> Self {
         TrackerNet {
-            fake: None,
             ssh: Some(ssh),
+            ..TrackerNet::default()
+        }
+    }
+
+    /// Apply the e2e fake-tracker override `raw` (the value of
+    /// [`E2E_TRACKER_PORT_ENV`], if set). `Err` — the process must not start
+    /// — whenever it is set in a build that may not honour it (see
+    /// [`e2e_loopback_port`]); unset, this is `self` unchanged.
+    pub fn with_e2e_override(self, raw: Option<&str>) -> Result<TrackerNet, String> {
+        let port = e2e_loopback_port(raw)?;
+        #[cfg(feature = "e2e")]
+        {
+            Ok(TrackerNet {
+                e2e_loopback: port,
+                ..self
+            })
+        }
+        #[cfg(not(feature = "e2e"))]
+        {
+            debug_assert!(port.is_none(), "refused above without the feature");
+            Ok(self)
         }
     }
 
@@ -470,6 +500,19 @@ impl TrackerNet {
             return Ok(Arc::clone(f));
         }
         let policy = host_policy(row);
+        // The e2e fake tracker (test-only): a direct Jira Cloud tracker
+        // only, its host policy kept. Everything else — Data Center's
+        // loopback refusal included — takes the real path below.
+        #[cfg(feature = "e2e")]
+        if let Some(port) = self.e2e_loopback {
+            if row.provider == "jira"
+                && TransportKind::parse(&row.transport)? == TransportKind::Direct
+            {
+                return Ok(Arc::new(crate::net::e2e_loopback::LoopbackTransport::new(
+                    policy, port,
+                )));
+            }
+        }
         let ssh = |h: &str| {
             self.ssh.clone().ok_or_else(|| {
                 TrackerError::Unreachable(format!("this process has no SSH to reach {h} with"))
@@ -500,6 +543,51 @@ impl TrackerNet {
                 policy,
             ))),
         }
+    }
+}
+
+/// The environment variable that points Jira Cloud at a loopback fake
+/// tracker in `scripts/hub-e2e.sh` (work graph M10.2): a TCP port on
+/// `127.0.0.1`.
+pub const E2E_TRACKER_PORT_ENV: &str = "FLEET_E2E_TRACKER_PORT";
+
+/// The e2e fake tracker's port from [`E2E_TRACKER_PORT_ENV`]'s value.
+/// Unset or blank: `Ok(None)`. Set: honoured only by a build with the
+/// test-only `e2e` cargo feature AND debug assertions; every other build —
+/// the shipped hub and desktop, and any `--release` build — refuses it with
+/// `Err`, so a stray variable can never quietly send a tracker's credential
+/// to this machine. The fences of every real tracker are untouched.
+pub fn e2e_loopback_port(raw: Option<&str>) -> Result<Option<u16>, String> {
+    e2e_loopback_port_in(raw, cfg!(feature = "e2e"), cfg!(debug_assertions))
+}
+
+/// [`e2e_loopback_port`] for a build with (or without) the feature and
+/// debug assertions: pure, so every combination is tested in one build.
+fn e2e_loopback_port_in(
+    raw: Option<&str>,
+    feature: bool,
+    debug: bool,
+) -> Result<Option<u16>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    if !feature {
+        return Err(format!(
+            "{E2E_TRACKER_PORT_ENV} is set, but this build has no fake-tracker override \
+             (it exists only with the test-only `e2e` cargo feature); unset it"
+        ));
+    }
+    if !debug {
+        return Err(format!(
+            "{E2E_TRACKER_PORT_ENV} is set, but a release build never honours the \
+             fake-tracker override; unset it"
+        ));
+    }
+    match raw.parse::<u16>() {
+        Ok(p) if p != 0 => Ok(Some(p)),
+        _ => Err(format!(
+            "{E2E_TRACKER_PORT_ENV}={raw:?} is not a TCP port on 127.0.0.1"
+        )),
     }
 }
 

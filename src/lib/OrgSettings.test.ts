@@ -10,7 +10,8 @@ import OrgSettings from './OrgSettings.svelte';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { orgs, type OrgDetail } from './orgs';
 import { hosts } from './hosts';
-import { trackers } from './trackers';
+import { host } from './hosts_fixture';
+import { trackers, type TrackerRow } from './trackers';
 import { toasts } from './toasts';
 import { get } from 'svelte/store';
 
@@ -40,6 +41,9 @@ const remote: HubStatus = {
   restart_required: false,
   unavailable: null,
 };
+
+const tracker = (id: number, name: string, org_id: number | null): TrackerRow =>
+  ({ id, provider: 'jira_cloud', name, site_url: `https://${id}.example.com`, state: 'ok', created_at: 1, org_id }) as TrackerRow;
 
 function route(extra: Record<string, unknown> = {}) {
   const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -174,5 +178,77 @@ describe('Settings → Organisations', () => {
     expect(screen.queryByTestId('org-remove')).toBeNull();
     expect(screen.queryByTestId('org-suggestions')).toBeNull();
     expect(screen.getByTestId('org-remote').textContent).toContain('fleet-hub org add');
+  });
+  it('standalone: the colour picker recolours the org and re-reads the list', async () => {
+    const inv = route({ update_org: { ...acme, color: '#00ff00' } });
+    render(OrgSettings);
+    const picker = (await screen.findByLabelText('Colour of Company A')) as HTMLInputElement;
+    expect(picker.value).toBe('#ff0000');
+    const before = inv.mock.calls.filter((c) => c[0] === 'list_orgs').length;
+    await fireEvent.change(picker, { target: { value: '#00ff00' } });
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('update_org', { args: { org_id: 1, color: '#00ff00' } }));
+    await waitFor(() =>
+      expect(inv.mock.calls.filter((c) => c[0] === 'list_orgs').length).toBeGreaterThanOrEqual(before + 1),
+    );
+    // The colour is the only field sent: no accidental isolation or auto-tidy change.
+    const upd = inv.mock.calls.find((c) => c[0] === 'update_org')![1] as { args: Record<string, unknown> };
+    expect(Object.keys(upd.args).sort()).toEqual(['color', 'org_id']);
+  });
+
+  it('standalone: the host select puts a host in the org, offering only hosts outside it', async () => {
+    hosts.set([host('hetzner-a', { org_id: 1 }), host('hetzner-b'), host('local', { org_id: 2 })]);
+    const inv = route();
+    render(OrgSettings);
+    const sel = (await screen.findByTestId('org-assign-host')) as HTMLSelectElement;
+    expect(Array.from(sel.options, (o) => o.value)).toEqual(['', 'hetzner-b', 'local']);
+    // The placeholder is not a choice.
+    await fireEvent.change(sel, { target: { value: '' } });
+    expect(inv).not.toHaveBeenCalledWith('assign_host_org', expect.anything());
+    await fireEvent.change(sel, { target: { value: 'hetzner-b' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('assign_host_org', { args: { host_alias: 'hetzner-b', org_id: 1 } }),
+    );
+    expect(inv.mock.calls.filter((c) => c[0] === 'assign_host_org')).toHaveLength(1);
+  });
+
+  it('standalone: the tracker select puts a tracker in the org, offering only trackers outside it', async () => {
+    trackers.set([tracker(2, 'Acme Jira', 1), tracker(5, 'Beta Linear', null), tracker(6, 'Other Jira', 3)]);
+    const inv = route({ list_trackers: [tracker(2, 'Acme Jira', 1), tracker(5, 'Beta Linear', 1), tracker(6, 'Other Jira', 3)] });
+    render(OrgSettings);
+    const sel = (await screen.findByTestId('org-assign-tracker')) as HTMLSelectElement;
+    expect(Array.from(sel.options, (o) => o.textContent)).toEqual(['+ tracker…', 'Beta Linear', 'Other Jira']);
+    await fireEvent.change(sel, { target: { value: '' } });
+    expect(inv).not.toHaveBeenCalledWith('assign_tracker_org', expect.anything());
+    await fireEvent.change(sel, { target: { value: '5' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('assign_tracker_org', { args: { tracker_id: 5, org_id: 1 } }),
+    );
+    // The tracker id is a number, never the select's string.
+    const call = inv.mock.calls.find((c) => c[0] === 'assign_tracker_org')![1] as { args: { tracker_id: unknown } };
+    expect(typeof call.args.tracker_id).toBe('number');
+    // Trackers are re-read too: the moved one leaves the offer.
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'list_trackers')).toBe(true));
+    await waitFor(() =>
+      expect(Array.from(screen.getByTestId('org-assign-tracker').querySelectorAll('option'), (o) => o.textContent)).toEqual([
+        '+ tracker…',
+        'Other Jira',
+      ]),
+    );
+  });
+
+  it('standalone: a tracker suggestion is one click — the org, then its tracker', async () => {
+    const inv = route({
+      org_suggestions: [{ name: 'Beta', tracker_id: 5, sessions: 0, reason: 'a tracker named Beta' }],
+      add_org: { id: 9, name: 'Beta', created_at: 1 },
+      assign_tracker_org: null,
+    });
+    render(OrgSettings);
+    const btn = await screen.findByTestId('org-suggestion');
+    expect(btn.textContent).toBe('Create org Beta with its tracker');
+    await fireEvent.click(btn);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('assign_tracker_org', { args: { tracker_id: 5, org_id: 9 } }),
+    );
+    expect(inv).not.toHaveBeenCalledWith('add_org_rule', expect.anything());
   });
 });
