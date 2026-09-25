@@ -4,6 +4,9 @@
 //!   request body goes to `gh` on **stdin** (`--input -`), and `gh` adds the
 //!   host's own GitHub login: fleet never reads, stores or sends a GitHub
 //!   token, and a request that carries an `Authorization` header is refused.
+//!   For a GitHub Enterprise Server tracker (M11.4) `gh` gets
+//!   `--hostname <that instance>`, `shell::quote`d, and the only URL it
+//!   accepts is that instance's `https://<host>/api/graphql`.
 //!
 //! * [`CurlTransport`] (`via_host:<alias>`, M6.3): `curl` on the host, for a
 //!   tracker only that host can reach (a VPN, an internal network) or when
@@ -38,6 +41,9 @@ pub const GITHUB_API_HOST: &str = "api.github.com";
 pub struct GhCliTransport {
     ssh: Arc<dyn SshExec>,
     host: String,
+    /// A GitHub Enterprise Server instance (`host[:port]`, already fenced by
+    /// `store::validate_ghes_hostname`); `None` is github.com.
+    enterprise: Option<String>,
     max_body: u64,
 }
 
@@ -46,18 +52,33 @@ impl GhCliTransport {
         GhCliTransport {
             ssh,
             host: host.into(),
+            enterprise: None,
             max_body: super::https::DEFAULT_MAX_BODY,
         }
     }
 
+    /// Point `gh` at a GitHub Enterprise Server instance instead of
+    /// github.com (M11.4). `hostname` must already have passed
+    /// `store::validate_ghes_hostname`; it is checked again here, and a
+    /// value that fails refuses every request rather than reaching `gh`.
+    pub fn with_enterprise(mut self, hostname: Option<String>) -> Self {
+        self.enterprise = hostname;
+        self
+    }
+
     /// The script run on the host for `path` (the request target, already
-    /// fenced). Built from constants and one `shell::quote`d value.
-    pub fn script(method: Method, path: &str, has_body: bool) -> String {
+    /// fenced) against `hostname` (`github.com`, or an enterprise host
+    /// already fenced). Built from constants and `shell::quote`d values.
+    pub fn script(method: Method, path: &str, has_body: bool, hostname: Option<&str>) -> String {
+        let hostname = match hostname {
+            Some(h) => crate::shell::quote(h),
+            None => "github.com".to_string(),
+        };
         let mut s = format!(
             "command -v gh >/dev/null 2>&1 || {{ printf '%s\\n' {NO_GH}; exit 0; }}\n\
              export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 GH_SPINNER_DISABLED=1 \
              NO_COLOR=1 GH_PAGER=cat\n\
-             exec gh api --include --hostname github.com --method {} {}",
+             exec gh api --include --hostname {hostname} --method {} {}",
             method.as_str(),
             crate::shell::quote(path)
         );
@@ -66,6 +87,39 @@ impl GhCliTransport {
         }
         s
     }
+}
+
+/// The `gh api` endpoint for a request to an enterprise instance (M11.4):
+/// only `https://<hostname>/api/graphql` — the one API the GitHub provider
+/// speaks — on exactly the configured host and port, which becomes `gh api
+/// --hostname <hostname> graphql` (gh adds the instance's own API root).
+/// Anything else is refused before anything runs. `(endpoint, the hostname
+/// as validated)`: only the validated value ever reaches the script.
+fn enterprise_path(
+    hostname: &str,
+    at: &super::https::Target,
+) -> Result<(String, String), TransportError> {
+    let refused = || {
+        TransportError::Refused(format!(
+            "gh is only ever pointed at https://{hostname}/api/graphql for this tracker"
+        ))
+    };
+    let valid = crate::store::validate_ghes_hostname(hostname).map_err(|_| refused())?;
+    let port = match valid.split_once(':') {
+        Some((_, p)) => p.parse::<u16>().map_err(|_| refused())?,
+        None => 443,
+    };
+    if !at.endpoint.is_tls()
+        || !at
+            .endpoint
+            .host()
+            .eq_ignore_ascii_case(crate::store::ghes_host_part(&valid))
+        || at.endpoint.port() != port
+        || at.target != "/api/graphql"
+    {
+        return Err(refused());
+    }
+    Ok(("graphql".into(), valid))
 }
 
 /// `gh`'s exit code for "you are not logged in".
@@ -130,17 +184,26 @@ pub(crate) fn first_line(stderr: &[u8]) -> String {
 impl HttpTransport for GhCliTransport {
     async fn send(&self, req: Request) -> Result<Response, TransportError> {
         let at = parse_target(&req.url)?;
-        if !at.endpoint.is_tls() || at.endpoint.host() != GITHUB_API_HOST {
-            return Err(TransportError::Refused(format!(
-                "gh is only ever pointed at https://{GITHUB_API_HOST}"
-            )));
-        }
+        let (path, hostname) = match &self.enterprise {
+            None => {
+                if !at.endpoint.is_tls() || at.endpoint.host() != GITHUB_API_HOST {
+                    return Err(TransportError::Refused(format!(
+                        "gh is only ever pointed at https://{GITHUB_API_HOST}"
+                    )));
+                }
+                (at.target.clone(), None)
+            }
+            Some(h) => {
+                let (path, valid) = enterprise_path(h, &at)?;
+                (path, Some(valid))
+            }
+        };
         if req.header_value("Authorization").is_some() {
             return Err(TransportError::Refused(
                 "gh uses the host's own login; fleet never sends it a token".into(),
             ));
         }
-        let script = Self::script(req.method, &at.target, req.body.is_some());
+        let script = Self::script(req.method, &path, req.body.is_some(), hostname.as_deref());
         let quoted = crate::shell::quote(&script);
         let args = ["bash", "-lc", quoted.as_str()];
         let cap = (self.max_body as usize) + HEAD_MAX;
@@ -502,6 +565,96 @@ mod tests {
             !call.command().contains("rm -rf"),
             "the body is never in argv"
         );
+    }
+
+    fn ghe(f: &FakeSsh, hostname: &str) -> GhCliTransport {
+        GhCliTransport::new(Arc::new(f.clone()), "devbox").with_enterprise(Some(hostname.into()))
+    }
+
+    /// GitHub Enterprise Server (M11.4): `--hostname` is the instance,
+    /// quoted; the only URL is its `/api/graphql`.
+    #[tokio::test]
+    async fn an_enterprise_transport_names_its_instance_and_nothing_else() {
+        let f = FakeSsh::new();
+        f.on(
+            Match::contains("gh api"),
+            Reply::ok("HTTP/2.0 200 OK\nContent-Type: application/json\n\n{\"data\":{}}"),
+        );
+        let body = json!({"query": "{ viewer { login } }"});
+        let r = ghe(&f, "ghe.corp.example:8443")
+            .send(Request::post_json(
+                "https://ghe.corp.example:8443/api/graphql",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        let script = f.calls()[0].script().unwrap();
+        assert!(
+            script.contains(
+                "exec gh api --include --hostname 'ghe.corp.example:8443' --method POST 'graphql' --input -"
+            ),
+            "{script}"
+        );
+        // Default port.
+        ghe(&f, "ghe.corp.example")
+            .send(Request::post_json(
+                "https://ghe.corp.example/api/graphql",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert!(f.calls()[1]
+            .script()
+            .unwrap()
+            .contains("--hostname 'ghe.corp.example' --method POST 'graphql'"));
+        let before = f.calls().len();
+        for url in [
+            "https://api.github.com/graphql",
+            "https://ghe.corp.example/api/graphql",
+            "https://ghe.corp.example:9443/api/graphql",
+            "http://ghe.corp.example:8443/api/graphql",
+            "https://ghe.corp.example:8443/graphql",
+            "https://ghe.corp.example:8443/api/v3/user",
+            "https://ghe.corp.example:8443/api/graphql?x=1",
+            "https://evil.example:8443/api/graphql",
+            "https://ghe.corp.example.evil.example:8443/api/graphql",
+        ] {
+            let e = ghe(&f, "ghe.corp.example:8443")
+                .send(Request::post_json(url, &body))
+                .await
+                .unwrap_err();
+            assert!(matches!(e, TransportError::Refused(_)), "{url}: {e}");
+        }
+        // A hostname that never passed the fence reaches no shell.
+        for bad in [
+            "a;b",
+            "$(id).example",
+            "ghe.example\nid",
+            "localhost",
+            "127.0.0.1",
+        ] {
+            let e = ghe(&f, bad)
+                .send(Request::post_json(
+                    format!("https://{bad}/api/graphql"),
+                    &body,
+                ))
+                .await
+                .unwrap_err();
+            assert!(matches!(e, TransportError::Refused(_)), "{bad:?}: {e}");
+        }
+        assert_eq!(f.calls().len(), before, "refused before anything ran");
+    }
+
+    #[test]
+    fn the_hostname_is_one_quoted_word_in_the_script() {
+        let s = GhCliTransport::script(Method::Post, "graphql", true, Some("x.example'; id; '"));
+        assert!(
+            s.contains("--hostname 'x.example'\\''; id; '\\''' --method"),
+            "{s}"
+        );
+        let s = GhCliTransport::script(Method::Post, "/graphql", true, None);
+        assert!(s.contains("--hostname github.com --method POST '/graphql' --input -"));
     }
 
     #[tokio::test]

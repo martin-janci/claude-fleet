@@ -559,5 +559,188 @@
   "text": "long_snake_ABC-1",
   "ctx": {},
   "expect": []
+ },
+ {
+  "name": "ghes: an issue URL of a configured GitHub Enterprise host",
+  "text": "see https://ghe.corp.example/Acme/API/issues/12 now",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "url",
+    "key": "ghe.corp.example/acme/api#12",
+    "tracker_id": 7,
+    "provider": "github",
+    "text": "https://ghe.corp.example/Acme/API/issues/12",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "ghes: the same URL on a host no tracker has is nothing",
+  "text": "see https://ghe.corp.example/Acme/API/issues/12 now",
+  "ctx": {},
+  "expect": []
+ },
+ {
+  "name": "ghes: a host only a non-GitHub tracker has is not GitHub",
+  "text": "https://ghe.corp.example/acme/api/issues/12",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 3,
+     "host": "ghe.corp.example",
+     "provider": "jira_dc"
+    }
+   ]
+  },
+  "expect": []
+ },
+ {
+  "name": "ghes: a port in the URL still names the host",
+  "text": "https://ghe.corp.example:8443/acme/api/issues/3",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "url",
+    "key": "ghe.corp.example/acme/api#3",
+    "tracker_id": 7,
+    "provider": "github",
+    "text": "https://ghe.corp.example:8443/acme/api/issues/3",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "ghes: a pull request URL is not an issue",
+  "text": "https://ghe.corp.example/acme/api/pull/3",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": []
+ },
+ {
+  "name": "ghes: github.com stays owner/repo#n beside an enterprise tracker",
+  "text": "https://github.com/acme/api/issues/4",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "url",
+    "key": "acme/api#4",
+    "tracker_id": null,
+    "provider": "github",
+    "text": "https://github.com/acme/api/issues/4",
+    "upper_written": true
+   }
+  ]
+ },
+ {
+  "name": "ghes: a written-out host/owner/repo#n of a configured host",
+  "text": "fixes ghe.corp.example/acme/api#7, see also other.example/acme/api#8",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "repo_issue",
+    "key": "ghe.corp.example/acme/api#7",
+    "tracker_id": 7,
+    "provider": "github",
+    "text": "ghe.corp.example/acme/api#7",
+    "upper_written": false
+   }
+  ]
+ },
+ {
+  "name": "ghes: the host written in any case",
+  "text": "GHE.Corp.Example/Acme/Api#9.",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": [
+   {
+    "kind": "repo_issue",
+    "key": "ghe.corp.example/acme/api#9",
+    "tracker_id": 7,
+    "provider": "github",
+    "text": "GHE.Corp.Example/Acme/Api#9",
+    "upper_written": false
+   }
+  ]
+ },
+ {
+  "name": "ghes: a longer host that ends in a configured one is not it",
+  "text": "evilghe.corp.example/a/b#1 x.ghe.corp.example/a/b#2 u@ghe.corp.example/a/b#3",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": []
+ },
+ {
+  "name": "ghes: an owner starting with a dot, or a number run into a word, is not a ref",
+  "text": "ghe.corp.example/.hidden/api#1 ghe.corp.example/acme/api#2x",
+  "ctx": {
+   "trackers": [
+    {
+     "id": 7,
+     "host": "ghe.corp.example",
+     "provider": "github"
+    }
+   ]
+  },
+  "expect": []
+ },
+ {
+  "name": "ghes: a written-out ref without any GitHub tracker is nothing",
+  "text": "ghe.corp.example/acme/api#7",
+  "ctx": {},
+  "expect": []
  }
 ]

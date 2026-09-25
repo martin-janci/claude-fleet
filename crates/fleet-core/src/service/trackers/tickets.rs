@@ -225,16 +225,21 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
         }
         // Any other tracker URL the recogniser knows (GitHub, Asana,
         // Linear): its reference, answered by the trackers that claim it.
+        // The configured trackers' hosts, so an enterprise GitHub URL is
+        // recognised for exactly the instances fleet has (M11.4).
         let m = crate::service::work::recognize::recognize(
             r,
-            &crate::service::work::recognize::RecognizeCtx::default(),
+            &crate::service::work::recognize::RecognizeCtx {
+                trackers: crate::service::work::detect::tracker_hosts(&trackers),
+                ..Default::default()
+            },
         )
         .into_iter()
         .find(|m| m.kind == crate::service::work::recognize::MatchKind::Url)
         .ok_or_else(|| {
             IpcError::new(
                 codes::E_INVALID,
-                "not a ticket URL fleet recognises (Jira, GitHub, Asana or Linear)",
+                "not a ticket URL fleet recognises (Jira, GitHub, GitHub Enterprise, Asana or Linear)",
             )
         })?;
         let key = crate::store::canonical_key(&m.key);

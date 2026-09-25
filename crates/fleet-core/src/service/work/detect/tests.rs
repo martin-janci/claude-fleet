@@ -396,6 +396,75 @@ fn an_untracked_closing_ref_is_only_suggested_in_a_trusted_project() {
     );
 }
 
+/// R3u per GitHub instance (M11.4): an enterprise tracker does not make
+/// github.com's `owner/repo#n` resolvable, nor the other way round — each
+/// stays a pre-selected suggestion until a tracker of ITS instance exists.
+#[test]
+fn a_closing_ref_is_untracked_until_a_tracker_of_its_own_instance_exists() {
+    for (tracker_site, closing, untracked) in [
+        ("https://ghe.corp.example/acme", "acme/api#42", true),
+        (
+            "https://github.com/acme",
+            "ghe.corp.example/acme/api#42",
+            true,
+        ),
+        (
+            "https://ghe.other.example/acme",
+            "ghe.corp.example/acme/api#42",
+            true,
+        ),
+        ("https://github.com/acme", "acme/api#42", false),
+        (
+            "https://ghe.corp.example/acme",
+            "ghe.corp.example/acme/api#42",
+            false,
+        ),
+    ] {
+        let f = fx();
+        trust(&f);
+        f.s.add_tracker("github", "gh", tracker_site).unwrap();
+        let sid = session(&f, "dev", "c1");
+        f.s.set_pr_signals(
+            "h",
+            "dev",
+            Some(&serde_json::json!({ "closing": [closing] }).to_string()),
+        )
+        .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+        let rule = row
+            .work
+            .as_ref()
+            .and_then(|w| w.rule.clone())
+            .or(row.work_suggested.as_ref().and_then(|s| s.rule.clone()));
+        assert_eq!(
+            rule.as_deref() == Some("R3u"),
+            untracked,
+            "{tracker_site} / {closing}: {rule:?}"
+        );
+    }
+}
+
+#[test]
+fn an_enterprise_closing_ref_carries_its_host() {
+    let v = serde_json::json!({
+        "headRefName": "fix",
+        "closingIssuesReferences": [
+            {"number": 42, "url": "https://GHE.corp.example/Acme/API/issues/42",
+             "repository": {"name": "API", "owner": {"login": "Acme"}}},
+            {"number": 7, "url": "https://github.com/acme/web/issues/7",
+             "repository": {"name": "web", "owner": {"login": "acme"}}},
+            {"number": 8, "url": "https://127.0.0.1/acme/web/issues/8",
+             "repository": {"name": "web", "owner": {"login": "acme"}}}
+        ]
+    });
+    let sig = PrSignals::from_gh_json(&v);
+    assert_eq!(
+        sig.closing,
+        vec!["ghe.corp.example/acme/api#42", "acme/web#7", "acme/web#8"]
+    );
+}
+
 #[test]
 fn pr_json_and_trailers_parse_without_keeping_the_body() {
     let v = serde_json::json!({

@@ -58,14 +58,15 @@ pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use trackers::{
-    is_allowed_tracker_host, normalize_dc_site, normalize_provider_site, normalize_site_url,
-    validate_credential_ref, validate_tracker_settings, validate_tracker_transport, Secret,
-    TrackerConfig, TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow,
-    TRACKER_AUTH_KINDS, TRACKER_PROVIDERS, TRACKER_STATES,
+    ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
+    normalize_provider_site, normalize_site_url, validate_credential_ref, validate_ghes_hostname,
+    validate_tracker_settings, validate_tracker_transport, Secret, TrackerConfig,
+    TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, TRACKER_AUTH_KINDS,
+    TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
-    canonical_key, github_ref, normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary,
-    WorkTarget, WORK_LINK_SOURCES,
+    canonical_key, github_ref, normalize_work_ref, split_github_repo, WorkItemRow, WorkLinkRow,
+    WorkSummary, WorkTarget, WORK_LINK_SOURCES,
 };
 pub use work_detect::DetectionState;
 pub use work_journal::{
@@ -103,6 +104,9 @@ pub struct Store {
 struct StoreBus {
     inner: Arc<dyn EventBus>,
     held: std::sync::Mutex<Option<Vec<RowChange>>>,
+    /// Frames delivered to `inner` so far (work graph M11.4's sync metrics
+    /// count a pass's frames as the difference). Process-local, never reset.
+    delivered: std::sync::atomic::AtomicU64,
 }
 
 impl StoreBus {
@@ -110,7 +114,15 @@ impl StoreBus {
         Self {
             inner,
             held: std::sync::Mutex::new(None),
+            delivered: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Hand one frame to the real bus, counted.
+    fn deliver(&self, e: &RowChange) {
+        self.delivered
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.emit(e);
     }
 
     /// Start holding emits. Returns false when already holding (nested).
@@ -139,7 +151,7 @@ impl EventBus for StoreBus {
             held.push(e.clone());
             return;
         }
-        self.inner.emit(e);
+        self.deliver(e);
     }
 }
 
@@ -370,11 +382,20 @@ impl Store {
             let held = self.bus.release();
             if result.is_ok() {
                 for e in &held {
-                    self.bus.inner.emit(e);
+                    self.bus.deliver(e);
                 }
             }
         }
         result
+    }
+
+    /// Frames this store has handed to its event bus since it was opened
+    /// (a held frame counts once it is released; one a rollback dropped
+    /// never counts). Callers measure a span of work as the difference.
+    pub fn frames_emitted(&self) -> u64 {
+        self.bus
+            .delivered
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

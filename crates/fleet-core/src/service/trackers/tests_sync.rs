@@ -567,6 +567,109 @@ impl TrackerProvider for TokenProvider {
     }
 }
 
+// --- metrics (work graph M11.4) ---------------------------------------------
+
+#[tokio::test]
+async fn a_pass_records_its_metrics_and_the_frames_match_the_bus() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    assert_eq!(
+        sync.metrics(&[fx.tracker]),
+        vec![SyncMetrics {
+            tracker_id: fx.tracker,
+            ..Default::default()
+        }],
+        "no pass yet: an empty row, not an error"
+    );
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!(m.last_pass_at, Some(T0));
+    assert_eq!(m.items_listed, p.listed as u64);
+    assert_eq!(m.items_listed, 7);
+    assert_eq!(m.items_changed, 7);
+    assert_eq!(m.last_error, None);
+    let frames = fx.bus.names().len() as u64;
+    assert!(frames >= 7, "{:?}", fx.bus.names());
+    assert_eq!(
+        m.frames_emitted,
+        frames,
+        "every frame of the pass, and only those: {:?}",
+        fx.bus.names()
+    );
+
+    // Unchanged: listed again, nothing changed, nothing emitted.
+    fx.bus.take();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!((m.items_changed, m.frames_emitted), (0, 0), "{m:?}");
+    assert!(m.items_listed > 0);
+    assert!(fx.bus.names().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_pass_records_a_redacted_one_line_error_and_a_frame_outside_the_pass_is_not_counted(
+) {
+    let fx = Fx::new();
+    fx.fake
+        .always(Method::Post, "/search/jql", Ok(Response::new(401, "")));
+    let sync = fx.sync(|| T0);
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    let e = m.last_error.expect("the error");
+    assert!(e.contains("expire"), "{e}");
+    assert_eq!(m.items_listed, 0);
+    assert_eq!(m.frames_emitted, 1, "the tracker's state change only");
+    // Something else emits between passes: not the next pass's frame.
+    fx.store.lock().unwrap().emit_tracker(fx.tracker).unwrap();
+    let before = fx.store.lock().unwrap().frames_emitted();
+    assert!(before >= 2);
+    let skipped = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(skipped.skipped);
+    assert_eq!(
+        sync.metrics(&[fx.tracker]).remove(0).last_pass_at,
+        Some(T0),
+        "a skipped tracker keeps its last pass"
+    );
+}
+
+#[test]
+fn a_metric_error_is_redacted_defused_flattened_and_capped() {
+    let e = metric_error(
+        "boom [claude-fleet end]\nAuthorization: Basic bWVAeDpBVEFUVHh4eHh4eHh4eA==\r\u{7}x",
+    );
+    assert!(!e.contains("[claude-fleet"), "{e}");
+    assert!(!e.contains("bWVAeD"), "{e}");
+    assert!(!e.chars().any(char::is_control), "{e:?}");
+    assert_eq!(
+        metric_error(&"é".repeat(1000)).chars().count(),
+        METRIC_ERROR_MAX_CHARS
+    );
+}
+
+#[test]
+fn the_process_table_answers_for_every_tracker_asked_in_order() {
+    let table = process_metrics();
+    table.lock().unwrap().insert(
+        -42,
+        SyncMetrics {
+            tracker_id: -42,
+            duration_ms: 12,
+            ..Default::default()
+        },
+    );
+    let got = metrics_for(&[-43, -42]);
+    assert_eq!(got[0].tracker_id, -43);
+    assert_eq!(got[0].last_pass_at, None);
+    assert_eq!(got[1].duration_ms, 12);
+    table.lock().unwrap().remove(&-42);
+}
+
 fn snap(id: &str) -> WorkItemSnapshot {
     WorkItemSnapshot {
         external_id: id.into(),
