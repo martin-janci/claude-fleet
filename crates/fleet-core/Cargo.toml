@@ -12,6 +12,15 @@ authors = ["martin-janci"]
 edition = "2021"
 license = "MIT"
 
+[features]
+default = []
+# Test-only (work graph M10.2): lets `scripts/hub-e2e.sh` point the Jira Cloud
+# provider at a loopback fake tracker (`FLEET_E2E_TRACKER_PORT`, see
+# `service::trackers::e2e_loopback_port`). Off in every shipped build; even
+# with it on, a build without debug assertions (`--release`) refuses the
+# override. Never add it to `default`.
+e2e = []
+
 [dependencies]
 sysinfo = "0.33"
 serde = { version = "1", features = ["derive"] }

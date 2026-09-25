@@ -651,6 +651,17 @@ impl Store {
         Ok(())
     }
 
+    /// Link a session to its worktree row (`sessions.worktree_id`), which
+    /// reconcile never sets. Emits `session_updated`.
+    pub fn link_session_worktree(&self, id: i64, worktree_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET worktree_id = ?1 WHERE id = ?2",
+            rusqlite::params![worktree_id, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
     /// Set a session's portable worktree key (derived from its cwd by reconcile).
     /// Emits `session_updated` so the frontend patches in place.
     pub fn set_worktree_key(&self, id: i64, key: Option<&str>) -> Result<(), rusqlite::Error> {
