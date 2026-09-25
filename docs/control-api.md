@@ -613,6 +613,11 @@ other's deltas. Pass the id `list_sessions`/`whoami` gave the session about
 itself, never a token or host identifier. An id that names no session gets a
 full read with `cursor_reset: "reader_unknown"` — nothing is stored, so the
 next call with the same bad id behaves identically rather than compounding.
+The reader is fenced like a target: a per-host token may only name a session
+on its own host (and inside its org scope), else `E_FORBIDDEN` before any
+read and no cursor is written — a token on host A can never advance a host-B
+session's watermark and blind it to its deltas. The master and a paired
+client are unbound.
 
 **Two answer shapes.** `session_history`, `inbox`, `repo_diff` and
 `list_sessions` answer with a JSON envelope `{unchanged, cursor_reset, more,

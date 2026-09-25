@@ -223,10 +223,7 @@ impl FleetTools {
         let resource_key = p.session_id.to_string();
         let payload = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let reader_exists = s
-                .get_session_by_id(reader)
-                .map_err(|e| to_mcp_err(e.into()))?
-                .is_some();
+            let reader_exists = resolve_reader(&s, &caller, reader)?;
             let stored = s
                 .get_read_cursor(reader, "session_history", &resource_key)
                 .map_err(to_mcp_err)?;
@@ -540,10 +537,7 @@ impl FleetTools {
         let resource_key = format!("{}:{}", p.session_id, p.unread_only);
         let payload = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let reader_exists = s
-                .get_session_by_id(reader)
-                .map_err(|e| to_mcp_err(e.into()))?
-                .is_some();
+            let reader_exists = resolve_reader(&s, &caller, reader)?;
             let stored = s
                 .get_read_cursor(reader, "inbox", &resource_key)
                 .map_err(to_mcp_err)?;
