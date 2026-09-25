@@ -3,7 +3,7 @@
 //! ADF → text, and key recognition. Everything else — the API version,
 //! paging, bulk fetch, the epic — is each adapter's own.
 
-use super::{CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS};
+use super::{CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS, MAX_RETRY_AFTER_SECS};
 use crate::net::https::Response;
 use serde_json::Value;
 
@@ -22,7 +22,8 @@ pub(crate) fn check(resp: &Response, call: Call) -> Result<(), TrackerError> {
         .is_some_and(|r| r.contains("AUTHENTICATION_DENIED"));
     let retry_after = resp
         .header("Retry-After")
-        .and_then(|v| v.trim().parse::<u64>().ok());
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|s| s.min(MAX_RETRY_AFTER_SECS));
     Err(match resp.status {
         401 | 403 if captcha => TrackerError::Captcha,
         401 => TrackerError::Auth("401 Unauthorized".into()),
@@ -258,10 +259,52 @@ pub fn keys_in_text(text: &str, prefixes: &[String]) -> Vec<String> {
     out
 }
 
+/// [`keys_in_text`] over the words of `text` that are not URLs: a key in
+/// another site's URL is not this tracker's. (Each adapter's `recognize`
+/// reads its own site's URLs first, by host.)
+pub fn keys_in_prose(text: &str, prefixes: &[String]) -> Vec<String> {
+    let prose: String = text
+        .split_whitespace()
+        .filter(|w| !w.contains("://"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    keys_in_text(&prose, prefixes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn retry_after_is_bounded_for_jira_too() {
+        let r = Response::new(429, "").with_header("Retry-After", "4000000000000000000");
+        assert_eq!(
+            check(&r, Call::Other),
+            Err(TrackerError::RateLimited {
+                retry_after_secs: Some(MAX_RETRY_AFTER_SECS)
+            })
+        );
+        let r = Response::new(503, "").with_header("Retry-After", "7200");
+        assert_eq!(
+            check(&r, Call::View),
+            Err(TrackerError::RateLimited {
+                retry_after_secs: Some(MAX_RETRY_AFTER_SECS)
+            })
+        );
+    }
+
+    #[test]
+    fn a_key_inside_a_url_is_not_prose() {
+        let p = vec!["ABC".to_string()];
+        assert_eq!(
+            keys_in_prose(
+                "ABC-1 then https://partner.atlassian.net/browse/ABC-9 and (https://x.example/b?selectedIssue=ABC-8) abc-2",
+                &p
+            ),
+            vec!["ABC-1", "ABC-2"]
+        );
+    }
 
     #[test]
     fn a_legacy_sprint_string_reads_like_an_object() {
