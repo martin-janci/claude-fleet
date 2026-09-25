@@ -343,20 +343,29 @@ fn the_site_is_https_one_exact_host_no_port_no_credentials() {
 /// The admin's settings reach the transport: a site that resolves to
 /// loopback is refused unless `allow_private_network`, and an internal CA
 /// is trusted through `extra_ca`. Over a real TLS server on 127.0.0.1 with a
-/// CA generated here (skipped without `openssl`).
+/// CA generated here by `openssl`, which the test needs on PATH (CI has
+/// it): without it the test FAILS, saying so, rather than passing having
+/// proved nothing.
 #[tokio::test]
 async fn a_self_signed_ca_is_trusted_only_through_extra_ca_and_loopback_needs_the_opt_in() {
     use crate::net::https::{DirectTransport, HttpTransport, Request};
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        std::process::Command::new("openssl")
+        let out = std::process::Command::new("openssl")
             .args(args)
             .current_dir(dir.path())
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .unwrap_or_else(|e| {
+                panic!("this test needs `openssl` on PATH to make its CA (CI has it): {e}")
+            });
+        assert!(
+            out.status.success(),
+            "openssl {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
-    let made = run(&[
+    run(&[
         "req",
         "-x509",
         "-newkey",
@@ -376,7 +385,8 @@ async fn a_self_signed_ca_is_trusted_only_through_extra_ca_and_loopback_needs_th
         "basicConstraints=critical,CA:TRUE",
         "-addext",
         "keyUsage=critical,keyCertSign",
-    ]) && run(&[
+    ]);
+    run(&[
         "req",
         "-newkey",
         "ec",
@@ -389,34 +399,29 @@ async fn a_self_signed_ca_is_trusted_only_through_extra_ca_and_loopback_needs_th
         "leaf.csr",
         "-subj",
         "/CN=localhost",
-    ]) && {
-        std::fs::write(
-            dir.path().join("ext.cnf"),
-            "subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n",
-        )
-        .unwrap();
-        run(&[
-            "x509",
-            "-req",
-            "-in",
-            "leaf.csr",
-            "-CA",
-            "ca.pem",
-            "-CAkey",
-            "ca.key",
-            "-CAcreateserial",
-            "-out",
-            "leaf.pem",
-            "-days",
-            "2",
-            "-extfile",
-            "ext.cnf",
-        ])
-    };
-    if !made {
-        // No openssl here: nothing to handshake against (CI has it).
-        return;
-    }
+    ]);
+    std::fs::write(
+        dir.path().join("ext.cnf"),
+        "subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n",
+    )
+    .unwrap();
+    run(&[
+        "x509",
+        "-req",
+        "-in",
+        "leaf.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-out",
+        "leaf.pem",
+        "-days",
+        "2",
+        "-extfile",
+        "ext.cnf",
+    ]);
     let read = |f: &str| std::fs::read_to_string(dir.path().join(f)).unwrap();
     let (ca, leaf, key) = (read("ca.pem"), read("leaf.pem"), read("leaf.key"));
 

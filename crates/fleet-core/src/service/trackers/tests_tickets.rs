@@ -458,7 +458,8 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
     .await
     .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
-    // Another host: forbidden.
+    // Its own ticket on another host, while ABC-2 has a live session (the
+    // link above): the duplicate refusal comes first.
     let abc2 = fx
         .store
         .lock()
@@ -467,20 +468,56 @@ async fn a_host_token_starts_only_its_own_tickets_on_its_own_host() {
         .unwrap()
         .unwrap()
         .id;
-    let e = plan_start(
+    let on_hostb = StartArgs {
+        item_id: Some(abc2),
+        project_id: Some(fx.pid),
+        host_alias: Some("hostb".into()),
+        ..Default::default()
+    };
+    let e = plan_start(&fx.store, &on_hostb, &host_scope("hosta"), &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    // The session ends: ABC-2 is host A's past work, so still its own
+    // ticket — and host A's token starts it on host A only.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "UPDATE participants SET retired_at = 9 WHERE session_id = ?1",
+            [sid],
+        )
+        .unwrap();
+    let e = plan_start(&fx.store, &on_hostb, &host_scope("hosta"), &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN, "{}", e.message);
+    assert!(e.message.contains("own host (hosta)"), "{}", e.message);
+    // The same start on its own host: the fence is the host, not the ticket.
+    let plan = plan_start(
         &fx.store,
         &StartArgs {
-            item_id: Some(abc2),
-            project_id: Some(fx.pid),
-            host_alias: Some("hostb".into()),
-            ..Default::default()
+            host_alias: Some("hosta".into()),
+            ..on_hostb.clone()
         },
         &host_scope("hosta"),
         &fx.net(),
     )
-    .await;
-    // ABC-2 has a live session (the link above): E_EXISTS comes first.
-    assert_eq!(e.unwrap_err().code, codes::E_EXISTS);
+    .await
+    .unwrap();
+    assert_eq!(
+        (plan.key.as_str(), plan.host_alias.as_str()),
+        ("ABC-2", "hosta")
+    );
+    // And the master starts it on host B.
+    let plan = plan_start(&fx.store, &on_hostb, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    assert_eq!(
+        (plan.key.as_str(), plan.host_alias.as_str()),
+        ("ABC-2", "hostb")
+    );
 }
 
 #[tokio::test]

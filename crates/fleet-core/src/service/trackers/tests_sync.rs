@@ -420,33 +420,67 @@ async fn a_401_stops_polling_until_a_person_acts() {
     assert_eq!(fx.fake.count("/search/jql"), 1, "polling stopped");
 }
 
-#[tokio::test]
-async fn a_429_waits_out_retry_after_then_resumes() {
+/// One 429 answered by `once`, then success; the ONE sync's clock is the
+/// test's, advanced by `wait` seconds after the 429. Asserts the wait is
+/// kept in the same instance: skipped (and the tracker not asked) right up
+/// to `secs`, run once `secs` plus the largest jitter has passed, and the
+/// wait cleared after that.
+async fn a_429_is_waited_out(retry_after: Option<&str>, secs: u64) {
+    use std::sync::atomic::{AtomicI64, Ordering};
     let fx = Fx::new();
+    let mut limited = Response::new(429, "");
+    if let Some(v) = retry_after {
+        limited = limited.with_header("Retry-After", v);
+    }
     fx.fake
-        .once(
-            Method::Post,
-            "/search/jql",
-            Ok(Response::new(429, "").with_header("Retry-After", "30")),
-        )
+        .once(Method::Post, "/search/jql", Ok(limited))
         .always(
             Method::Post,
             "/search/jql",
             Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
         );
-    let early = fx.sync(|| T0);
-    early.run_pass(&fx.store).await.unwrap();
+    let clock = Arc::new(AtomicI64::new(T0));
+    let sync = {
+        let clock = Arc::clone(&clock);
+        TrackerSync::new(TrackerNet::fake(Arc::new(fx.fake.clone())))
+            .with_clock(move || clock.load(Ordering::SeqCst))
+    };
+    let at = |after: u64| clock.store(T0 + after as i64, Ordering::SeqCst);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_some(), "{p:?}");
     assert_eq!(fx.row().state, "rate_limited");
-    // Still inside Retry-After: skipped.
-    assert!(early.run_pass(&fx.store).await.unwrap()[0].skipped);
-    // Past it (and past any jitter): runs, and the tracker is ok again.
-    let later =
-        TrackerSync::new(TrackerNet::fake(Arc::new(fx.fake.clone()))).with_clock(|| T0 + 3600);
-    // A new sync has no memory of the wait; carry it over as a restart would
-    // lose it anyway — what matters is that a pass after the wait succeeds.
-    let p = later.run_pass(&fx.store).await.unwrap().remove(0);
+    // Inside the wait: skipped, and the tracker is not asked.
+    for after in [1, secs - 1] {
+        at(after);
+        let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+        assert!(p.skipped, "{after} s after the 429: {p:?}");
+        assert_eq!(fx.row().state, "rate_limited");
+    }
+    assert_eq!(
+        fx.fake.count("/search/jql"),
+        1,
+        "a skipped pass asks nothing"
+    );
+    // Past the wait and the most jitter it can carry (a quarter, at least
+    // 5 s): the SAME sync runs, and the tracker is ok again.
+    at(secs + (secs / 4).max(5) + 1);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
     assert!(!p.skipped && p.error.is_none(), "{p:?}");
     assert_eq!(fx.row().state, "ok");
+    assert_eq!(fx.fake.count("/search/jql"), 2);
+    // The wait is cleared, not merely elapsed: the pass after runs too.
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped, "{p:?}");
+}
+
+#[tokio::test]
+async fn a_429_waits_out_retry_after_then_resumes() {
+    a_429_is_waited_out(Some("30"), 30).await;
+}
+
+#[tokio::test]
+async fn a_429_without_retry_after_waits_the_default() {
+    a_429_is_waited_out(None, DEFAULT_RETRY_SECS).await;
 }
 
 #[tokio::test]

@@ -21,7 +21,7 @@ use super::*;
 use crate::service::orgs::OrgScope;
 use crate::service::trackers::admin::AdminAction;
 use crate::service::work::{WORK_ACTIONS, WORK_LINK_ACTIONS};
-use crate::store::{TrackerItemWrite, WorkTarget};
+use crate::store::{TrackerConfig, TrackerItemWrite, WorkTarget};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -102,8 +102,7 @@ struct Fx {
     tracker_a: i64,
     tracker_b: i64,
     pid_beta: i64,
-    /// s_b's live link to BB-1, and s_x's forced link to BB-1.
-    link_b: i64,
+    /// s_x's forced link to BB-1.
     link_x: i64,
 }
 
@@ -154,6 +153,20 @@ fn fixture(isolate_b: bool) -> Fx {
         .unwrap();
     s.set_tracker_org(ta.id, Some(a.id)).unwrap();
     s.set_tracker_org(tb.id, Some(b.id)).unwrap();
+    // Each tracker claims its org's keys: without a prefix no bare key
+    // would ever bind, and the bind fence below would have nothing to
+    // refuse.
+    for (t, prefix) in [(ta.id, "AA"), (tb.id, "BB")] {
+        s.set_tracker_probe(
+            t,
+            None,
+            &TrackerConfig {
+                key_prefixes: vec![prefix.into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
     let item_a = item(
         &s,
         ta.id,
@@ -187,10 +200,8 @@ fn fixture(isolate_b: bool) -> Fx {
     let s_x = sess("s-x", "h-a", Some(pid_acme), "conv-x");
     s.link_session_work(s_a, WorkTarget::Item(item_a), "manual")
         .unwrap();
-    let link_b = s
-        .link_session_work(s_b, WorkTarget::Item(item_b), "manual")
-        .unwrap()
-        .id;
+    s.link_session_work(s_b, WorkTarget::Item(item_b), "manual")
+        .unwrap();
     s.link_session_work(s_n, WorkTarget::Key("LOC-1"), "manual")
         .unwrap();
     // A person forced B's ticket onto an A session (the store takes it; the
@@ -239,7 +250,6 @@ fn fixture(isolate_b: bool) -> Fx {
         tracker_a: ta.id,
         tracker_b: tb.id,
         pid_beta,
-        link_b,
         link_x,
     }
 }
@@ -342,6 +352,27 @@ fn own(fx: &Fx, who: Who) -> i64 {
         Who::HostNone => fx.s_n,
         _ => fx.s_a,
     }
+}
+
+/// `session_id`'s live link to `item`, made through the store (which takes
+/// a cross-org link, as the fixture's forced link was) when an earlier row
+/// removed it; the id of the live link either way.
+fn relink(fx: &Fx, session_id: i64, item: i64) -> i64 {
+    fx.t.store
+        .lock()
+        .unwrap()
+        .link_session_work(session_id, WorkTarget::Item(item), "manual")
+        .unwrap()
+        .id
+}
+
+fn link_is_live(fx: &Fx, link_id: i64) -> bool {
+    fx.t.store
+        .lock()
+        .unwrap()
+        .get_work_link(link_id)
+        .unwrap()
+        .is_some_and(|l| l.ended_at.is_none())
 }
 
 /// Run one matrix row for every caller: the leak check, then `expect`.
@@ -943,25 +974,39 @@ async fn run_matrix(isolate: bool) {
     // and never make the other org's tracker fetch them.
     {
         let s = fx.t.store.lock().unwrap();
-        for (tracker, key) in [(fx.tracker_b, "BB-1"), (fx.tracker_a, "AA-1")] {
-            s.bind_tracker_refs(tracker).unwrap();
-            let bare: i64 = s
-                .conn_for_test()
+        // The bare links the row just made: host A's BB-1 on s_a, host B's
+        // AA-1 on s_b, and the no-org host's BB-1 on s_n.
+        let bare_link = |sid: i64, key: &str| -> i64 {
+            s.conn_for_test()
                 .query_row(
-                    "SELECT COUNT(*) FROM work_links WHERE ref_key = ?1 AND item_id IS NULL",
-                    [key],
+                    "SELECT l.id FROM work_links l JOIN participants p ON p.id = l.participant_id \
+                     WHERE p.session_id = ?1 AND l.ref_key = ?2 AND l.item_id IS NULL \
+                       AND l.ended_at IS NULL",
+                    rusqlite::params![sid, key],
                     |r| r.get(0),
                 )
-                .unwrap();
-            assert!(bare >= 1, "{key}: the host's bare link stays bare");
+                .unwrap_or_else(|e| panic!("session {sid} has no bare link to {key}: {e}"))
+        };
+        let item_of = |link: i64| s.get_work_link(link).unwrap().unwrap().item_id;
+        let (a_bb1, b_aa1, n_bb1) = (
+            bare_link(fx.s_a, "BB-1"),
+            bare_link(fx.s_b, "AA-1"),
+            bare_link(fx.s_n, "BB-1"),
+        );
+        for tracker in [fx.tracker_b, fx.tracker_a] {
+            s.bind_tracker_refs(tracker).unwrap();
         }
+        // The control: the prefix claims the key and the unassigned host's
+        // link binds — so the other two stay bare by the org fence alone.
+        assert_eq!(item_of(n_bb1), Some(fx.item_b), "h-n's BB-1 binds");
+        assert_eq!(item_of(a_bb1), None, "h-a's BB-1 stays bare");
+        assert_eq!(item_of(b_aa1), None, "h-b's AA-1 stays bare");
         // Undo them, so later rows read the fixture as it was.
-        s.conn_for_test()
-            .execute(
-                "DELETE FROM work_links WHERE item_id IS NULL AND ref_key IN ('BB-1', 'AA-1')",
-                [],
-            )
-            .unwrap();
+        for link in [a_bb1, b_aa1, n_bb1] {
+            s.conn_for_test()
+                .execute("DELETE FROM work_links WHERE id = ?1", [link])
+                .unwrap();
+        }
         for sid in [fx.s_a, fx.s_b, fx.s_n] {
             crate::service::work::detect::resolve_session(&s, sid).unwrap();
         }
@@ -1097,51 +1142,85 @@ async fn run_matrix(isolate: bool) {
     )
     .await;
     // Link id guessing: s_x's forced link (host A's own session) and s_b's.
+    // The oracle comparison comes FIRST, while link_x is live: a live link
+    // the org fence hides must answer exactly as an id that does not exist
+    // (compared against a missing id, both sides would read as missing and
+    // the fence's own sentence would never be compared), and a refusal
+    // deletes nothing.
+    for action in ["confirm", "unlink"] {
+        let guessed = call(
+            &fx,
+            Who::HostA,
+            "work_link",
+            json!({ "action": action, "session_id": fx.s_x, "link_id": fx.link_x }),
+        )
+        .await;
+        let unknown = call(
+            &fx,
+            Who::HostA,
+            "work_link",
+            json!({ "action": action, "session_id": fx.s_x, "link_id": 999_999 }),
+        )
+        .await;
+        is_code(Who::HostA, &guessed, "E_NOTFOUND", action);
+        same_as_unknown(&guessed, &unknown, &fx.link_x.to_string(), "999999");
+        assert!(
+            link_is_live(&fx, fx.link_x),
+            "{action}: a refusal deletes nothing"
+        );
+    }
+    // The rows. An `unlink` a caller is allowed deletes the link, and the
+    // callers run master first, so the link is re-made for every caller
+    // (`cur` is its id for this call): each host is refused a LIVE link,
+    // and every deletion is asserted rather than left to happen.
     for pick in [0, 1] {
         for action in ["confirm", "unlink"] {
+            let cur = std::cell::Cell::new(0_i64);
+            let cur = &cur;
             m.row(
                 "work_link",
                 action,
                 move |fx, who| {
                     let (sid, link) = if pick == 0 {
-                        (fx.s_x, fx.link_x)
+                        let link = relink(fx, fx.s_x, fx.item_b);
+                        let sid = if who.is_host() && who != Who::HostA {
+                            own(fx, who)
+                        } else {
+                            fx.s_x
+                        };
+                        (sid, link)
                     } else {
-                        (own(fx, who), fx.link_b)
+                        (own(fx, who), relink(fx, fx.s_b, fx.item_b))
                     };
-                    let sid = if who.is_host() && pick == 0 && who != Who::HostA {
-                        own(fx, who)
-                    } else {
-                        sid
-                    };
+                    cur.set(link);
                     json!({ "action": action, "session_id": sid, "link_id": link })
                 },
-                move |_, who, a| {
+                move |fx, who, a| {
                     if readonly_refused(who, a) {
                         return;
                     }
+                    let link = cur.get();
                     if who.is_host() && !(who == Who::HostB && pick == 1) {
                         is_code(who, a, "E_NOTFOUND", "another org's link id");
+                        assert!(link_is_live(fx, link), "{who:?}: a refusal deletes nothing");
+                    } else if action == "unlink" {
+                        // The link's own session: s_x for the master and the
+                        // full client (pick 0), s_b for host B (pick 1). The
+                        // master's and the client's pick 1 is s_a, whose
+                        // links do not include link_b.
+                        if pick == 0 || who == Who::HostB {
+                            is_ok(who, a, "unlink");
+                            assert!(!link_is_live(fx, link), "{who:?}: unlinked");
+                        } else {
+                            is_code(who, a, "E_NOTFOUND", "not this session's link");
+                            assert!(link_is_live(fx, link), "{who:?}: not deleted");
+                        }
                     }
                 },
             )
             .await;
         }
     }
-    let guessed = call(
-        &fx,
-        Who::HostA,
-        "work_link",
-        json!({ "action": "confirm", "session_id": fx.s_x, "link_id": fx.link_x }),
-    )
-    .await;
-    let unknown = call(
-        &fx,
-        Who::HostA,
-        "work_link",
-        json!({ "action": "confirm", "session_id": fx.s_x, "link_id": 999_999 }),
-    )
-    .await;
-    same_as_unknown(&guessed, &unknown, &fx.link_x.to_string(), "999999");
     m.row(
         "work_link",
         "trust_project",
@@ -1246,6 +1325,11 @@ async fn run_matrix(isolate: bool) {
     }
 
     // ── sessions (D7) ───────────────────────────────────────────────────
+    // The rows below check what a host reads of another org's work ON A
+    // SESSION ROW, so s_x (A's session carrying B's ticket) and s_b must
+    // carry that work: earlier rows unlinked and re-made them.
+    relink(&fx, fx.s_x, fx.item_b);
+    relink(&fx, fx.s_b, fx.item_b);
     let isolated = isolate;
     m.row(
         "list_sessions",
@@ -1266,14 +1350,43 @@ async fn run_matrix(isolate: bool) {
                 }
                 _ => assert!(sees_b && sees_a, "{who:?}"),
             }
-            // Nobody but the master and clients reads B's work on a row.
-            for r in &rows {
-                if who == Who::HostA && r["id"] == fx.s_x {
-                    assert!(r.get("work").is_none(), "{r}");
+            // The work on a row: the master and the clients read all of it,
+            // a host only its own org's — B's ticket on A's own s_x is
+            // stripped for host A, and every row is bare to the no-org host.
+            let work_key = |id: i64| {
+                let r = rows
+                    .iter()
+                    .find(|r| r["id"] == id)
+                    .unwrap_or_else(|| panic!("{who:?} lists session {id}"));
+                r["work"]["key"].as_str().map(str::to_string)
+            };
+            match who {
+                Who::HostA => {
+                    assert_eq!(work_key(fx.s_a).as_deref(), Some("AA-1"));
+                    assert_eq!(work_key(fx.s_x), None, "B's ticket on A's session");
+                    if !isolated {
+                        assert_eq!(work_key(fx.s_b), None);
+                    }
                 }
-            }
-            if !who.is_host() {
-                assert!(text(a).contains("BB-1"));
+                Who::HostB => {
+                    assert_eq!(work_key(fx.s_b).as_deref(), Some("BB-1"));
+                    if !isolated {
+                        assert_eq!(work_key(fx.s_a), None);
+                        assert_eq!(work_key(fx.s_x), None);
+                    }
+                }
+                Who::HostNone => {
+                    assert_eq!(work_key(fx.s_a), None);
+                    assert_eq!(work_key(fx.s_x), None);
+                    if !isolated {
+                        assert_eq!(work_key(fx.s_b), None);
+                    }
+                }
+                _ => {
+                    assert_eq!(work_key(fx.s_a).as_deref(), Some("AA-1"));
+                    assert_eq!(work_key(fx.s_x).as_deref(), Some("BB-1"));
+                    assert_eq!(work_key(fx.s_b).as_deref(), Some("BB-1"));
+                }
             }
         },
     )
@@ -1364,7 +1477,11 @@ async fn run_matrix(isolate: bool) {
     is_ok(Who::HostA, &within, "within org A");
 
     // Session-addressed reads a host token may make of ANY host's session:
-    // an isolated org's session reads as missing.
+    // an isolated org's session reads as missing. `whoami` answers the row
+    // itself, so B's work on it is read by the master, the full client
+    // (whoami is not a readonly tool) and B's own host — and by nobody else
+    // (the leak check above).
+    assert!(link_is_live(&fx, relink(&fx, fx.s_b, fx.item_b)));
     for (tool, args) in [
         ("session_history", json!({ "session_id": fx.s_b })),
         ("repo_changes", json!({ "session_id": fx.s_b })),
@@ -1378,6 +1495,11 @@ async fn run_matrix(isolate: bool) {
             if isolate && matches!(who, Who::HostA | Who::HostNone) {
                 is_code(who, &a, "E_NOTFOUND", tool);
             }
+            if tool == "whoami" && matches!(who, Who::Master | Who::ClientFull | Who::HostB) {
+                is_ok(who, &a, tool);
+                let row: Value = serde_json::from_str(text(&a)).unwrap();
+                assert_eq!(row["work"]["key"], "BB-1", "{who:?}: {a:?}");
+            }
         }
     }
 
@@ -1389,6 +1511,13 @@ async fn run_matrix(isolate: bool) {
             .map(|id| s.get_session_by_id(*id).unwrap().unwrap())
             .collect()
     };
+    // The frames carry the work the fence must strip: s_x's and s_b's is
+    // B's, s_a's is A's.
+    let key_of = |r: &crate::store::SessionRow| r.work.as_ref().and_then(|w| w.key.clone());
+    for (id, key) in [(fx.s_x, "BB-1"), (fx.s_b, "BB-1"), (fx.s_a, "AA-1")] {
+        let r = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(key_of(r).as_deref(), Some(key), "fixture: session {id}");
+    }
     for &who in EVERYONE {
         let c = who.caller();
         let scope = {
@@ -1438,7 +1567,26 @@ async fn run_matrix(isolate: bool) {
                 assert!(out.is_none(), "{who:?} got an isolated frame of {}", row.id);
                 continue;
             }
-            let out = out.expect("frame kept").to_string();
+            let kept = out.expect("frame kept");
+            // The row's work in the frame: whole for the master and the
+            // clients, B's for B's host, stripped from A's session for A's
+            // host, stripped everywhere for the no-org host.
+            let own_key = key_of(row);
+            let expected: Option<&str> = match (who, row.id) {
+                (Who::HostA, id) if id == fx.s_a => Some("AA-1"),
+                (Who::HostB, id) if id == fx.s_b => Some("BB-1"),
+                (Who::HostA | Who::HostB | Who::HostNone, _) => None,
+                _ => own_key.as_deref(),
+            };
+            if row.id != fx.s_n {
+                assert_eq!(
+                    kept["work"]["key"].as_str(),
+                    expected,
+                    "{who:?} on session {}",
+                    row.id
+                );
+            }
+            let out = kept.to_string();
             for m in who.forbidden_markers() {
                 assert!(
                     !out.contains(m),
