@@ -507,6 +507,14 @@ fn cap_list(v: Vec<String>, max: usize) -> Vec<String> {
     v.into_iter().take(LIST_MAX).map(|s| cap(s, max)).collect()
 }
 
+/// A key is dropped, never cut: a truncated key is a well-formed, reachable
+/// key that can be another item's (a GitHub `owner/repo#123` cut to
+/// `…#12`), while one over `KEY_MAX_CHARS` was unreachable by key anyway
+/// (`WORK_REF_MAX_CHARS`).
+fn key_or_drop(k: String) -> Option<String> {
+    (k.chars().count() <= KEY_MAX_CHARS).then_some(k)
+}
+
 /// A provider snapshot → the store's write shape. The one place every
 /// snapshot passes (the sync's and `fetch_one`'s) before it is stored, so
 /// every field is bounded here: the tracker — or a host forging its
@@ -515,8 +523,13 @@ fn cap_list(v: Vec<String>, max: usize) -> Vec<String> {
 pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
     TrackerItemWrite {
         external_id: cap(s.external_id, ID_MAX_CHARS),
-        key: s.key.map(|k| cap(k, KEY_MAX_CHARS)),
-        aliases: cap_list(s.aliases, KEY_MAX_CHARS),
+        key: s.key.and_then(key_or_drop),
+        aliases: s
+            .aliases
+            .into_iter()
+            .filter_map(key_or_drop)
+            .take(LIST_MAX)
+            .collect(),
         title: cap(s.title, TITLE_MAX_CHARS),
         url: s.url.map(|u| cap(u, URL_MAX_CHARS)),
         kind: s.kind.map(|k| cap(k, FIELD_MAX_CHARS)),

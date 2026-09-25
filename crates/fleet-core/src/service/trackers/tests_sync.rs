@@ -531,6 +531,35 @@ async fn oversized_tracker_fields_are_capped_before_they_are_stored() {
         .all(|a| a.chars().count() == FIELD_MAX_CHARS));
 }
 
+/// A key over `KEY_MAX_CHARS` is dropped, not cut: `owner/repo#123` cut in
+/// its number is issue #12's own key. The row keeps its identity (the id)
+/// and everything else; an over-long alias goes the same way, the rest of
+/// the aliases stay.
+#[test]
+fn an_over_long_key_is_dropped_not_truncated() {
+    let repo = format!("some-org/{}", "r".repeat(57));
+    let key = format!("{repo}#123");
+    assert_eq!(key.chars().count(), 70);
+    let w = to_write(WorkItemSnapshot {
+        external_id: "I_1".into(),
+        key: Some(key.clone()),
+        aliases: vec![format!("{repo}#12"), "ABC-12".into()],
+        url: Some(format!("https://github.com/{repo}/issues/123")),
+        title: "long repo".into(),
+        ..Default::default()
+    });
+    assert_eq!(w.key, None, "no `…#12` minted from #123");
+    assert_eq!(w.aliases, vec!["ABC-12"]);
+    assert_eq!(w.external_id, "I_1");
+    assert!(w.url.is_some());
+    let w = to_write(WorkItemSnapshot {
+        external_id: "1".into(),
+        key: Some("x".repeat(KEY_MAX_CHARS)),
+        ..Default::default()
+    });
+    assert_eq!(w.key.map(|k| k.chars().count()), Some(KEY_MAX_CHARS));
+}
+
 /// The 429 deadline is on the row too: a sync with no memory of it (a
 /// restart) still waits it out, and a pass after it clears the row.
 #[tokio::test]
