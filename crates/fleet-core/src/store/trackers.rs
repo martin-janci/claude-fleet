@@ -1182,6 +1182,18 @@ impl Store {
         )?;
         Ok(n > 0)
     }
+
+    /// Enable every view of the tracker again: a view the sync disabled on
+    /// a 403 gets another chance after a successful `test` (a permission
+    /// hiccup or an SSO re-auth window must not stop it for good). `true`
+    /// when any was disabled.
+    pub fn enable_tracker_views(&self, tracker_id: i64) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE tracker_views SET enabled = 1 WHERE tracker_id = ?1 AND enabled = 0",
+            rusqlite::params![tracker_id],
+        )?;
+        Ok(n > 0)
+    }
 }
 
 #[cfg(test)]

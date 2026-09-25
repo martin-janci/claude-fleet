@@ -454,6 +454,9 @@ pub async fn test_tracker(
                     .map(|v| (v.id.clone(), v.label.clone(), v.query.clone()))
                     .collect::<Vec<_>>(),
             )?;
+            // A view the sync disabled on a 403 runs again after a person
+            // tests the tracker: nothing else ever re-enables it.
+            changed |= s.enable_tracker_views(id)?;
             changed |= s.set_tracker_state(id, "ok", None)?;
             if changed {
                 s.emit_tracker(id)?;
@@ -623,10 +626,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_stores_the_probe_and_views_and_marks_the_tracker_ok() {
-        let (st, id) = added();
-        let f = FakeTransport::new();
+    /// One successful Jira Cloud probe: identity, tenant, projects, fields,
+    /// sprint check, favourite filters.
+    fn probe_ok(f: &FakeTransport) {
         f.once(
             Method::Get,
             "/myself",
@@ -657,6 +659,13 @@ mod tests {
             "/filter/favourite",
             Ok(Response::json(200, &fixture("filter_favourite.json"))),
         );
+    }
+
+    #[tokio::test]
+    async fn test_stores_the_probe_and_views_and_marks_the_tracker_ok() {
+        let (st, id) = added();
+        let f = FakeTransport::new();
+        probe_ok(&f);
         let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f.clone())))
             .await
             .unwrap();
@@ -669,6 +678,54 @@ mod tests {
             "no project has an open sprint: no sprint view"
         );
         assert_eq!(st.lock().unwrap().list_tracker_views(id).unwrap().len(), 4);
+    }
+
+    /// A view the sync disabled on a 403 is not disabled for good: a
+    /// successful test enables it again (a failed one leaves it alone).
+    #[tokio::test]
+    async fn a_successful_test_enables_the_views_a_403_disabled() {
+        let (st, id) = added();
+        {
+            let s = st.lock().unwrap();
+            s.sync_tracker_views(
+                id,
+                &[
+                    ("mine".into(), "My work".into(), "assignee = me".into()),
+                    ("filter:9".into(), "Secret".into(), "filter = 9".into()),
+                ],
+            )
+            .unwrap();
+            assert!(s.set_tracker_view_enabled(id, "mine", false).unwrap());
+        }
+        let disabled = |st: &Mutex<Store>| -> Vec<String> {
+            st.lock()
+                .unwrap()
+                .list_tracker_views(id)
+                .unwrap()
+                .into_iter()
+                .filter(|v| !v.enabled)
+                .map(|v| v.view_id)
+                .collect()
+        };
+        let f = FakeTransport::new();
+        f.once(Method::Get, "/myself", Ok(Response::new(401, "")));
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f)))
+            .await
+            .unwrap();
+        assert!(!r.ok);
+        assert_eq!(disabled(&st), vec!["mine"], "a failed test changes nothing");
+        let f = FakeTransport::new();
+        probe_ok(&f);
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f)))
+            .await
+            .unwrap();
+        assert!(r.ok, "{:?}", r.error);
+        let views = st.lock().unwrap().list_tracker_views(id).unwrap();
+        assert!(
+            views.iter().any(|v| v.view_id == "mine" && v.enabled),
+            "{views:?}"
+        );
+        assert!(disabled(&st).is_empty(), "every view runs again");
     }
 
     #[tokio::test]
