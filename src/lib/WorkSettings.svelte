@@ -84,22 +84,35 @@
     busy = true;
     error = null;
     const existing = $trackers.find((t) => t.provider === provider && t.site_url === site);
+    const transport = info.needs === 'host_with_gh' ? `via_cli:${ghHost}` : undefined;
+    const settings =
+      provider === 'jira_dc' && (extraCa.trim() || allowPrivate)
+        ? { extra_ca: extraCa.trim() || null, allow_private_network: allowPrivate }
+        : undefined;
     let row: TrackerRow | null = existing ?? null;
     if (!row) {
-      const a = await addTracker(url.trim(), {
-        provider,
-        transport: info.needs === 'host_with_gh' ? `via_cli:${ghHost}` : undefined,
-        settings:
-          provider === 'jira_dc' && (extraCa.trim() || allowPrivate)
-            ? { extra_ca: extraCa.trim() || null, allow_private_network: allowPrivate }
-            : undefined,
-      });
+      const a = await addTracker(url.trim(), { provider, transport, settings });
       if (!a.ok) {
         busy = false;
         error = a.error.message;
         return;
       }
       row = a.value;
+    } else if ((transport && transport !== row.transport) || settings) {
+      // Re-connecting a site that is already a row (say, after a failed test):
+      // what the form carries beyond the credential — the `gh` host, the
+      // Data Center CA and private-network flag — lives on that row, so it is
+      // updated there rather than dropped.
+      const u = await updateTracker(row.id, {
+        transport: transport !== row.transport ? transport : undefined,
+        settings: settings ? { ...(row.settings ?? {}), ...settings } : undefined,
+      });
+      if (!u.ok) {
+        busy = false;
+        error = u.error.message;
+        return;
+      }
+      row = u.value;
     }
     if (info.needs !== 'host_with_gh') {
       const c = await setTrackerCredential(
