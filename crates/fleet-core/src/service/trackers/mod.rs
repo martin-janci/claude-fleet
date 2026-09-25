@@ -19,6 +19,9 @@ pub mod jira_dc;
 pub mod linear;
 pub mod sync;
 #[cfg(test)]
+#[path = "tests_e2e_override.rs"]
+mod tests_e2e_override;
+#[cfg(test)]
 #[path = "tests_isolation_providers.rs"]
 mod tests_isolation_providers;
 pub mod tickets;
@@ -438,20 +441,27 @@ pub struct TrackerNet {
     /// Every request goes here instead (tests).
     fake: Option<Arc<dyn HttpTransport>>,
     ssh: Option<Arc<dyn crate::ssh::SshExec>>,
+    /// The e2e fake tracker's port (test-only; see [`e2e_loopback_port`]):
+    /// a `direct` Jira Cloud tracker's requests go there, fenced as usual.
+    #[cfg(feature = "e2e")]
+    e2e_loopback: Option<u16>,
 }
 
 impl TrackerNet {
     /// The real thing: direct HTTPS fenced per provider, and `ssh` (when
     /// this process has hosts) for `via_host` / `via_cli`.
     pub fn real(ssh: Option<Arc<dyn crate::ssh::SshExec>>) -> Self {
-        TrackerNet { fake: None, ssh }
+        TrackerNet {
+            ssh,
+            ..TrackerNet::default()
+        }
     }
 
     /// Every tracker, whatever its transport, talks to `t` (tests).
     pub fn fake(t: Arc<dyn HttpTransport>) -> Self {
         TrackerNet {
             fake: Some(t),
-            ssh: None,
+            ..TrackerNet::default()
         }
     }
 
@@ -459,8 +469,28 @@ impl TrackerNet {
     /// `via_cli`).
     pub fn with_ssh(ssh: Arc<dyn crate::ssh::SshExec>) -> Self {
         TrackerNet {
-            fake: None,
             ssh: Some(ssh),
+            ..TrackerNet::default()
+        }
+    }
+
+    /// Apply the e2e fake-tracker override `raw` (the value of
+    /// [`E2E_TRACKER_PORT_ENV`], if set). `Err` — the process must not start
+    /// — whenever it is set in a build that may not honour it (see
+    /// [`e2e_loopback_port`]); unset, this is `self` unchanged.
+    pub fn with_e2e_override(self, raw: Option<&str>) -> Result<TrackerNet, String> {
+        let port = e2e_loopback_port(raw)?;
+        #[cfg(feature = "e2e")]
+        {
+            Ok(TrackerNet {
+                e2e_loopback: port,
+                ..self
+            })
+        }
+        #[cfg(not(feature = "e2e"))]
+        {
+            debug_assert!(port.is_none(), "refused above without the feature");
+            Ok(self)
         }
     }
 
@@ -470,6 +500,19 @@ impl TrackerNet {
             return Ok(Arc::clone(f));
         }
         let policy = host_policy(row);
+        // The e2e fake tracker (test-only): a direct Jira Cloud tracker
+        // only, its host policy kept. Everything else — Data Center's
+        // loopback refusal included — takes the real path below.
+        #[cfg(feature = "e2e")]
+        if let Some(port) = self.e2e_loopback {
+            if row.provider == "jira"
+                && TransportKind::parse(&row.transport)? == TransportKind::Direct
+            {
+                return Ok(Arc::new(crate::net::e2e_loopback::LoopbackTransport::new(
+                    policy, port,
+                )));
+            }
+        }
         let ssh = |h: &str| {
             self.ssh.clone().ok_or_else(|| {
                 TrackerError::Unreachable(format!("this process has no SSH to reach {h} with"))
@@ -500,6 +543,51 @@ impl TrackerNet {
                 policy,
             ))),
         }
+    }
+}
+
+/// The environment variable that points Jira Cloud at a loopback fake
+/// tracker in `scripts/hub-e2e.sh` (work graph M10.2): a TCP port on
+/// `127.0.0.1`.
+pub const E2E_TRACKER_PORT_ENV: &str = "FLEET_E2E_TRACKER_PORT";
+
+/// The e2e fake tracker's port from [`E2E_TRACKER_PORT_ENV`]'s value.
+/// Unset or blank: `Ok(None)`. Set: honoured only by a build with the
+/// test-only `e2e` cargo feature AND debug assertions; every other build —
+/// the shipped hub and desktop, and any `--release` build — refuses it with
+/// `Err`, so a stray variable can never quietly send a tracker's credential
+/// to this machine. The fences of every real tracker are untouched.
+pub fn e2e_loopback_port(raw: Option<&str>) -> Result<Option<u16>, String> {
+    e2e_loopback_port_in(raw, cfg!(feature = "e2e"), cfg!(debug_assertions))
+}
+
+/// [`e2e_loopback_port`] for a build with (or without) the feature and
+/// debug assertions: pure, so every combination is tested in one build.
+fn e2e_loopback_port_in(
+    raw: Option<&str>,
+    feature: bool,
+    debug: bool,
+) -> Result<Option<u16>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    if !feature {
+        return Err(format!(
+            "{E2E_TRACKER_PORT_ENV} is set, but this build has no fake-tracker override \
+             (it exists only with the test-only `e2e` cargo feature); unset it"
+        ));
+    }
+    if !debug {
+        return Err(format!(
+            "{E2E_TRACKER_PORT_ENV} is set, but a release build never honours the \
+             fake-tracker override; unset it"
+        ));
+    }
+    match raw.parse::<u16>() {
+        Ok(p) if p != 0 => Ok(Some(p)),
+        _ => Err(format!(
+            "{E2E_TRACKER_PORT_ENV}={raw:?} is not a TCP port on 127.0.0.1"
+        )),
     }
 }
 
@@ -561,14 +649,19 @@ pub(crate) fn map_transport(e: crate::net::https::TransportError) -> TrackerErro
     }
 }
 
+/// The longest wait a tracker's `Retry-After` or reset header can ask for:
+/// anything longer would park the tracker's sync until a restart.
+pub const MAX_RETRY_AFTER_SECS: u64 = 3600;
+
 /// `Retry-After` in seconds, else the seconds until `X-RateLimit-Reset`
-/// (a unix time: GitHub, Linear) when the quota is spent.
+/// (a unix time: GitHub, Linear) when the quota is spent; never more than
+/// [`MAX_RETRY_AFTER_SECS`].
 pub(crate) fn retry_after(resp: &crate::net::https::Response) -> Option<u64> {
     if let Some(s) = resp
         .header("Retry-After")
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
-        return Some(s);
+        return Some(s.min(MAX_RETRY_AFTER_SECS));
     }
     let spent = resp
         .header("X-RateLimit-Remaining")
@@ -587,7 +680,7 @@ pub(crate) fn retry_after(resp: &crate::net::https::Response) -> Option<u64> {
     } else {
         reset
     };
-    Some((reset - crate::service::catalog::now_secs()).clamp(1, 3600) as u64)
+    Some((reset - crate::service::catalog::now_secs()).clamp(1, MAX_RETRY_AFTER_SECS as i64) as u64)
 }
 
 /// Map a non-2xx answer for the providers after Jira (GitHub, Asana,
@@ -751,6 +844,27 @@ mod tests {
             assert_eq!(parse_timestamp(&format_timestamp(t)), Some(t));
         }
         assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
+    }
+
+    /// An unbounded `Retry-After` (or reset) would park a tracker's sync
+    /// until a restart: the wait is capped.
+    #[test]
+    fn retry_after_is_bounded() {
+        use crate::net::https::Response;
+        let r = Response::new(429, "").with_header("Retry-After", "4000000000000000000");
+        assert_eq!(retry_after(&r), Some(MAX_RETRY_AFTER_SECS));
+        assert_eq!(
+            check_http(&r, CallKind::Other),
+            Err(TrackerError::RateLimited {
+                retry_after_secs: Some(MAX_RETRY_AFTER_SECS)
+            })
+        );
+        let r = Response::new(429, "").with_header("Retry-After", "30");
+        assert_eq!(retry_after(&r), Some(30));
+        let r = Response::new(403, "")
+            .with_header("X-RateLimit-Remaining", "0")
+            .with_header("X-RateLimit-Reset", "9999999999");
+        assert_eq!(retry_after(&r), Some(MAX_RETRY_AFTER_SECS));
     }
 
     #[test]
