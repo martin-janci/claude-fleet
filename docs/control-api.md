@@ -429,6 +429,17 @@ Index by area (names only; see the reference for details):
   sessions from other orgs' hosts (lists, `whoami`, `peer_status`,
   `session_history`, repo reads, messages, `session:*` frames). See
   [hub.md](hub.md) → *Organisations and isolation*.
+  Work graph M9: `work { action: "today", since? }` is the Today view's
+  digest — live sessions grouped by primary work into `waiting` (someone
+  is needed), `stale` (idle three days, or the ticket is done while a
+  session runs) and `in_progress`, plus what `shipped` since `since` (unix
+  seconds; default the last 24 h): tickets that moved to done and work that
+  ended with a PR. `work { action: "card", key }` is a ticket's context
+  card from the tracker cache (never a fetch): title, status, url, the
+  `acceptance` criteria parsed from the description (else an `excerpt`),
+  and `composer_text` — the ticket text fenced as untrusted, for inserting
+  into a prompt. A per-host token reads only its own host's day and cards
+  for its own work, and gets `composer_text` without the plain fields.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

@@ -492,6 +492,26 @@ The ideas the review ranked, for when M1–M8 have settled.
 - **Webhook nudges** for a hub with a public URL. A webhook only triggers a
   targeted fetch.
 
+**Status (2026-09-25): M9.1 and M9.2 landed** on
+`claude/cloud-fleet-work-graph-m9`, per
+`plans/2026-09-24-work-graph-m9-beyond.md` (its *Revisions* list every
+deviation). Verified with `cargo fmt`, `clippy -D warnings` (workspace),
+`cargo test` (fleet-core, claude-fleet, fleet-hub; only the four chmod tests
+that fail as root on `main` fail) and `pnpm check` / `pnpm test`; the manual
+acceptance is still to do.
+
+- **M9.1 Today view**: `work { action: today, since }` (the digest, scoped
+  by `OrgScope`), the Routed `work_today`, the Today view as Details' empty
+  state and on ⌘⇧T, the scope-aware plain-text **Copy standup**.
+- **M9.2 ticket context card**: `work { action: card, key }` (cache only,
+  acceptance criteria parsed in Rust, `composer_text` fenced by
+  `fence_untrusted`), the Routed `work_ticket_card`, the card in Details and
+  **Insert into composer** (inserts, never sends).
+- **Planned, waiting on a decision:** agent-written handover (D9),
+  dead-session summaries (D10), write-back (D3), multi-repo start (D11),
+  operator work commands (D12), webhook nudges (D13) — each is designed in
+  the plan. Today's **Stale** links to M7's Tidy-up sheet once M7 merges.
+
 ## Critical path and parallelism
 
 ```
@@ -516,6 +536,11 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 | D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub |
 | D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide |
 | D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only |
+| D9 | May fleet spend a turn of a session's model to write its handover (M9.3)? | on demand · also at safe kill · never | On demand only |
+| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | Off |
+| D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | Same name; projects the key ran in before |
+| D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | Yes |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | No |
 
 ## Risks to watch
 
@@ -567,3 +592,10 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   `work_suggested` on the phone view, the `work` / `work_link` action enums
   (+72 B on top of M5; generated from M5's action tables), the client
   tool-list gate test. No new tool, no contract bump.
+- 2026-09-25: M9 planned (`plans/2026-09-24-work-graph-m9-beyond.md`) and
+  M9.1 (Today view, Copy standup) and M9.2 (ticket context card) landed on
+  `claude/cloud-fleet-work-graph-m9`: two `work` actions (`today`, `card`)
+  and one parameter (`since`), two Routed commands (163). The tool budget
+  grew by 113 B (94 raised the constant to 69,365; `card`'s 19 fit the
+  headroom); no new tool, no contract bump. The other six M9 items wait on
+  the new decisions D9–D13 and on D3.

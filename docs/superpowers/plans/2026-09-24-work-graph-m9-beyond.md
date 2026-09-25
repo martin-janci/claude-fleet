@@ -201,3 +201,42 @@ Commit and push before code.
 ## Revisions
 
 - 2026-09-24: first version.
+- **2026-09-25, M9.1 and M9.2 landed** on `claude/cloud-fleet-work-graph-m9`
+  (from `main` 6fbd26f). Verified with `cargo fmt`, `clippy -D warnings`
+  (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub; only the
+  four chmod tests that fail as root on `main` fail) and `pnpm check` /
+  `pnpm test`. Deviations and choices:
+  1. **Budget.** `today` + `since` measured 69,265 (+94); `BUDGET_BYTES`
+     raised to 69,365. `card` measured 69,284 (+19), inside the headroom, so
+     the constant was not raised again (the measurement is recorded beside
+     it).
+  2. **Who counts for Today.** Shell and external sessions and the
+     operator session are left out (no Claude of the fleet's to wait on or
+     ship). A done ticket's time is `status_changed_at`, else its
+     `updated_at`; a `since` in the future is clamped to now.
+  3. **Scope on the desktop.** Sessions are cut by the sidebar's own
+     `scopeOf(row)`; a shipped entry has no project owner, so an owner scope
+     or *unassigned* keeps only shipped entries without an org, and an org
+     scope those of that org. Groups left empty are dropped and re-bucketed
+     with the hub's rule (`bucketOf`).
+  4. **Refresh.** The view reloads on open and 2 s after the last row event
+     (the sessions store), besides the Refresh button.
+  5. **Ctrl+Shift+T** is taken by the app's capture-phase chord handler on
+     Linux/Windows, like Ctrl+Shift+H/J/E; the terminal no longer receives
+     it.
+  6. **A key with no cached item** (a bare branch key, a local item) gets a
+     card with `cached: false` and `composer_text` `Ticket KEY` — not an
+     error — so Details still shows the key and the link from the row's
+     `work`. For a per-host token the tickets fence is applied to tracker
+     items; a local item is covered by `orgs::require_key`.
+  7. **Insert into composer** is disabled on a session with no
+     conversation composer (no pane, or no Claude conversation yet). The
+     panel adopts an insert only while the stored draft still equals it, so
+     a later remount never replays an old insert over what was typed since.
+     App switches to the Conversation view and closes Today.
+  8. **Helpers.** `Store::linked_work_item_ids` (new, one query);
+     `tickets::allowed` is now `pub(crate)` so Today and the card share the
+     M3/M5 fence rather than re-deriving it.
+  9. No `CONTRACT_REVISION` bump, no new tool, no migration; every new wire
+     struct's optional fields are `#[serde(default)]`.
+

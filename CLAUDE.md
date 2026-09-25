@@ -199,6 +199,13 @@ per-host ticket fence is kept (composed with the org). Cross-org links need
 `force_cross_org` for every caller; `isolate_sessions` (D7) is per org, off.
 Any new `work` / `work_link` / `work_admin` action needs a row in the
 isolation matrix (`mcp/tools/tests_isolation.rs`), which fails otherwise.
+Work graph M9.1 / M9.2 are landed: the Today view (`work { action: today }`,
+Details' empty state and ⌘⇧T, a plain-text Copy standup) and the ticket
+context card (`work { action: card }`, acceptance criteria from the cache,
+Insert into composer with the hub-fenced `composer_text` — never sent). The
+rest of M9 (write-back D3, handover, summaries, multi-repo, operator,
+webhooks) is planned in `docs/superpowers/plans/2026-09-24-work-graph-m9-beyond.md`
+and waits on the user's decisions.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
