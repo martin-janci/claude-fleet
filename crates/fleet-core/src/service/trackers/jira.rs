@@ -25,7 +25,8 @@
 //! * **Descriptions** are ADF; only a plain-text excerpt is kept.
 
 pub use super::jira_common::{
-    adf_excerpt, keys_in_text, map_status_category, normalize_resolution, SPRINT_FIELD_SCHEMA,
+    adf_excerpt, keys_in_prose, keys_in_text, map_status_category, normalize_resolution,
+    SPRINT_FIELD_SCHEMA,
 };
 use super::jira_common::{check, current_sprint, key_in_path};
 use super::{
@@ -537,7 +538,8 @@ impl TrackerProvider for JiraCloud {
                 }
             }
         }
-        for k in keys_in_text(text, &self.config.key_prefixes) {
+        // Keys outside URLs only: a key in another site's URL is not ours.
+        for k in keys_in_prose(text, &self.config.key_prefixes) {
             let r = ItemRef::Key(k);
             if !out.contains(&r) {
                 out.push(r);

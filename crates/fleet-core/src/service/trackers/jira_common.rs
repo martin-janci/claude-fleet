@@ -258,10 +258,34 @@ pub fn keys_in_text(text: &str, prefixes: &[String]) -> Vec<String> {
     out
 }
 
+/// [`keys_in_text`] over the words of `text` that are not URLs: a key in
+/// another site's URL is not this tracker's. (Each adapter's `recognize`
+/// reads its own site's URLs first, by host.)
+pub fn keys_in_prose(text: &str, prefixes: &[String]) -> Vec<String> {
+    let prose: String = text
+        .split_whitespace()
+        .filter(|w| !w.contains("://"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    keys_in_text(&prose, prefixes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_key_inside_a_url_is_not_prose() {
+        let p = vec!["ABC".to_string()];
+        assert_eq!(
+            keys_in_prose(
+                "ABC-1 then https://partner.atlassian.net/browse/ABC-9 and (https://x.example/b?selectedIssue=ABC-8) abc-2",
+                &p
+            ),
+            vec!["ABC-1", "ABC-2"]
+        );
+    }
 
     #[test]
     fn a_legacy_sprint_string_reads_like_an_object() {

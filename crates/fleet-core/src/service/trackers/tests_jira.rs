@@ -566,7 +566,8 @@ fn keys_are_recognised_only_with_known_prefixes_and_boundaries() {
     assert!(keys_in_text("ABC-1", &[]).is_empty());
     let f = FakeTransport::new();
     let refs = jira(&f).recognize(
-        "see https://acme.atlassian.net/browse/ABC-101 and https://other.atlassian.net/browse/ZED-1 and team-8",
+        "see https://acme.atlassian.net/browse/ABC-101 and https://other.atlassian.net/browse/ZED-1 and team-8, \
+         not https://partner.atlassian.net/browse/ABC-9 (another site's ABC)",
         RefCtx::default(),
     );
     assert_eq!(
@@ -653,7 +654,7 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
                     ],
                 ),
                 (
-                    "ZZZ-1 and https://other.atlassian.net/browse/ZED-1",
+                    "ZZZ-1 and https://other.atlassian.net/browse/ZED-1 and https://partner.atlassian.net/browse/ABC-9",
                     None,
                     vec![],
                 ),

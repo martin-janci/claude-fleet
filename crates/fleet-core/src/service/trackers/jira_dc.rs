@@ -20,7 +20,7 @@
 //!   favourite filters, CAPTCHA — is Cloud's, through [`super::jira_common`].
 
 use super::jira_common::{
-    adf_excerpt, check, current_sprint, key_in_path, keys_in_text, map_status_category,
+    adf_excerpt, check, current_sprint, key_in_path, keys_in_prose, map_status_category,
     normalize_resolution, EPIC_LINK_SCHEMA, SPRINT_FIELD_SCHEMA,
 };
 use super::{
@@ -596,12 +596,7 @@ impl TrackerProvider for JiraDc {
             }
         }
         // Keys outside URLs only: a key in another site's URL is not ours.
-        let prose: String = text
-            .split_whitespace()
-            .filter(|w| !w.contains("://"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        for k in keys_in_text(&prose, &self.config.key_prefixes) {
+        for k in keys_in_prose(text, &self.config.key_prefixes) {
             let r = ItemRef::Key(k);
             if !out.contains(&r) {
                 out.push(r);
