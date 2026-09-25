@@ -32,6 +32,8 @@ use crate::store::{SessionRow, Store};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+pub mod tidy;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcConfig {
     pub enabled: bool,
@@ -256,6 +258,11 @@ pub struct GcReport {
     /// for the same wire reason.
     #[serde(default)]
     pub swept_journal: usize,
+    /// Sessions auto-tidy acted on this sweep (work graph M7: only with
+    /// `work.auto_tidy` on; safe kill or archive of the allowed reasons).
+    /// `#[serde(default)]` for the same wire reason.
+    #[serde(default)]
+    pub tidied: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -268,6 +275,8 @@ pub async fn sweep_with(
     now: i64,
 ) -> GcReport {
     let mut report = GcReport::default();
+    // Sessions the idle killer acted on: auto-tidy (below) leaves them be.
+    let mut acted: HashSet<i64> = HashSet::new();
     // The session-idle killer stays opt-in (`cfg.enabled`, default off): it
     // is a destructive action against a live session. The mail-retention
     // sweep below is NOT gated on it — it only ever touches participants
@@ -293,6 +302,7 @@ pub async fn sweep_with(
             }
         };
         for p in plan(&rows, cfg, controller.as_ref(), &reachable, now) {
+            acted.insert(p.session_id);
             let via_claude = match p.action {
                 GcAction::Kill => false,
                 GcAction::InspectThenKill => {
@@ -349,6 +359,10 @@ pub async fn sweep_with(
             }
         }
     }
+    // Auto-tidy (work graph M7): its own opt-in, `work.auto_tidy` (off by
+    // default); with it off this reads one setting and does nothing, so the
+    // idle killer above behaves exactly as before.
+    report.tidied = crate::service::work::tidy::auto_tidy(store, exec, &acted, now).await;
     // `sweep_retired_participants` returns `Result<usize, IpcError>`, but
     // this function returns a plain `GcReport` (not a `Result`), so a
     // failed sweep contributes 0 and the pass still completes — the same
@@ -437,6 +451,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             swept_participants = report.swept_participants,
             swept_read_cursors = report.swept_read_cursors,
             swept_journal = report.swept_journal,
+            tidied = report.tidied,
             "[gc] sweep"
         );
     }
@@ -455,7 +470,12 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn row(id: i64, kind: &str, idle_since: Option<i64>, last_activity_at: i64) -> SessionRow {
+    pub(super) fn row(
+        id: i64,
+        kind: &str,
+        idle_since: Option<i64>,
+        last_activity_at: i64,
+    ) -> SessionRow {
         SessionRow {
             id,
             row_version: 0,
@@ -743,6 +763,7 @@ mod tests {
                 swept_participants: 0,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                tidied: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -768,6 +789,7 @@ mod tests {
                 swept_participants: 0,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                tidied: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -823,6 +845,7 @@ mod tests {
                 swept_participants: 1,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                tidied: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -879,6 +902,7 @@ mod tests {
                 swept_participants: 1,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                tidied: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );

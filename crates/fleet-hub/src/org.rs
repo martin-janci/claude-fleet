@@ -28,6 +28,24 @@ impl OnOff {
     }
 }
 
+/// An org's auto-tidy override (work graph M7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AutoTidy {
+    On,
+    Off,
+    Inherit,
+}
+
+impl AutoTidy {
+    fn as_str(self) -> &'static str {
+        match self {
+            AutoTidy::On => "on",
+            AutoTidy::Off => "off",
+            AutoTidy::Inherit => "inherit",
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum OrgCmd {
     /// Print the orgs with their rules, hosts and trackers.
@@ -53,6 +71,10 @@ pub enum OrgCmd {
         color: Option<String>,
         #[arg(long, value_enum)]
         isolate_sessions: Option<OnOff>,
+        /// This org's auto-tidy (work graph M7): on / off override
+        /// `work.auto_tidy` for its sessions, inherit follows it.
+        #[arg(long, value_enum)]
+        auto_tidy: Option<AutoTidy>,
     },
     /// Remove an org: its rules go, its hosts become unassigned. Refused
     /// while a tracker belongs to it.
@@ -129,9 +151,17 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             name,
             color,
             isolate_sessions,
+            auto_tidy,
         } => {
-            if name.is_none() && color.is_none() && isolate_sessions.is_none() {
-                return Err("nothing to set: pass --name, --color or --isolate-sessions".into());
+            if name.is_none()
+                && color.is_none()
+                && isolate_sessions.is_none()
+                && auto_tidy.is_none()
+            {
+                return Err(
+                    "nothing to set: pass --name, --color, --isolate-sessions or --auto-tidy"
+                        .into(),
+                );
             }
             let mut a = json!({ "action": "update_org", "org_id": id });
             if let Some(n) = name {
@@ -142,6 +172,9 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             }
             if let Some(i) = isolate_sessions {
                 a["isolate_sessions"] = json!(i.on());
+            }
+            if let Some(t) = auto_tidy {
+                a["auto_tidy"] = json!(t.as_str());
             }
             a
         }
@@ -219,11 +252,19 @@ fn org_lines(o: &Value) -> Vec<String> {
                 .as_str()
                 .map(|c| format!("  {c}"))
                 .unwrap_or_default(),
-            if o["isolate_sessions"].as_bool().unwrap_or(false) {
-                "  [isolates sessions]"
-            } else {
-                ""
-            }
+            format!(
+                "{}{}",
+                if o["isolate_sessions"].as_bool().unwrap_or(false) {
+                    "  [isolates sessions]"
+                } else {
+                    ""
+                },
+                match o["auto_tidy"].as_bool() {
+                    Some(true) => "  [auto-tidy on]",
+                    Some(false) => "  [auto-tidy off]",
+                    None => "",
+                }
+            )
         ),
         format!("      rules:    {}", names("rules", &rule_chip)),
         format!(
@@ -337,6 +378,10 @@ mod tests {
         assert_eq!(
             args(&["set", "2", "--isolate-sessions", "off"]),
             json!({ "action": "update_org", "org_id": 2, "isolate_sessions": false })
+        );
+        assert_eq!(
+            args(&["set", "2", "--auto-tidy", "inherit"]),
+            json!({ "action": "update_org", "org_id": 2, "auto_tidy": "inherit" })
         );
         assert_eq!(
             args(&["rm", "2"]),

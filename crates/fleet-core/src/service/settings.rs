@@ -17,6 +17,9 @@ use std::collections::BTreeMap;
 pub enum Kind {
     /// `"true"` / `"false"`.
     Bool,
+    /// A comma-separated subset of a fixed set of strings (`""` = none),
+    /// stored in the set's order without duplicates.
+    ChoiceSet(&'static [&'static str]),
     /// Integer seconds in `0..=MAX_SECS` (`0` usually means "disabled" /
     /// "never").
     Secs,
@@ -182,6 +185,23 @@ pub const WORK_EVIDENCE_SNIPPETS: &str = "work.evidence_snippets";
 /// hook synchronous, which can add up to ~2 s to a start when the hub is
 /// down. Takes effect when the hooks are next installed.
 pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
+
+/// Tidy-up (work graph M7): a session whose linked item has been done at
+/// least this many days (and that is idle, below) is suggested for tidying.
+pub const WORK_TIDY_DONE_DAYS: &str = "work.tidy_done_days";
+/// Tidy-up: how long a session must have been idle before any reason
+/// suggests it.
+pub const WORK_TIDY_IDLE_HOURS: &str = "work.tidy_idle_hours";
+/// Auto-tidy: the GC sweep acts on the tidy candidates of the allowed
+/// reasons (below) by itself — safe kill or archive only, never a plain
+/// kill. Off by default: tidy-up only suggests.
+pub const WORK_AUTO_TIDY: &str = "work.auto_tidy";
+/// The reasons auto-tidy may act on.
+pub const WORK_AUTO_TIDY_REASONS: &str = "work.auto_tidy_reasons";
+/// What [`WORK_AUTO_TIDY_REASONS`] may name: the reasons whose action is a
+/// safe kill. A duplicate worktree is only ever plain-killed and a ghost is
+/// never killed, so neither is automatic.
+pub const AUTO_TIDY_REASONS: &[&str] = &["done_idle", "pr_merged_idle", "not_planned"];
 
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
@@ -371,7 +391,50 @@ pub const SPECS: &[Spec] = &[
         default: "false",
         kind: Kind::Bool,
     },
+    Spec {
+        key: WORK_TIDY_DONE_DAYS,
+        default: "2",
+        kind: Kind::Int { min: 1, max: 365 },
+    },
+    Spec {
+        key: WORK_TIDY_IDLE_HOURS,
+        default: "4",
+        kind: Kind::Int { min: 1, max: 720 },
+    },
+    Spec {
+        key: WORK_AUTO_TIDY,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: WORK_AUTO_TIDY_REASONS,
+        default: "done_idle,pr_merged_idle",
+        kind: Kind::ChoiceSet(AUTO_TIDY_REASONS),
+    },
 ];
+
+/// Parse + validate a `Kind::ChoiceSet` value into the chosen options, in
+/// the set's order, without duplicates.
+pub fn parse_choice_set(
+    key: &str,
+    options: &'static [&'static str],
+    raw: &str,
+) -> Result<Vec<&'static str>, IpcError> {
+    let mut chosen = std::collections::BTreeSet::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let idx = options.iter().position(|o| *o == part).ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{key} takes a comma-separated subset of: {}",
+                    options.join(", ")
+                ),
+            )
+        })?;
+        chosen.insert(idx);
+    }
+    Ok(chosen.into_iter().map(|i| options[i]).collect())
+}
 
 /// Most ids one `Kind::IdSet` holds.
 pub const ID_SET_MAX: usize = 1000;
@@ -479,6 +542,7 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             codes::E_INVALID,
             format!("{key} must be an integer between {min} and {max}"),
         )),
+        Kind::ChoiceSet(options) => parse_choice_set(key, options, v).map(|_| ()),
         Kind::Choice(options) if options.contains(&v) => Ok(()),
         Kind::Choice(options) => Err(IpcError::new(
             codes::E_INVALID,
@@ -550,6 +614,7 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
     let stored = match spec(key).map(|sp| sp.kind) {
         Some(Kind::PathMap) => serde_json::to_string(&parse_path_map(key, v)?)
             .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?,
+        Some(Kind::ChoiceSet(options)) => parse_choice_set(key, options, v)?.join(","),
         Some(Kind::IdSet) => serde_json::to_string(&parse_id_set(v)?)
             .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?,
         Some(Kind::PriceMap) => {
@@ -664,6 +729,38 @@ mod tests {
                 spec.key
             );
         }
+    }
+
+    #[test]
+    fn tidy_settings_default_to_suggest_only_with_safe_reasons() {
+        assert_eq!(resolve(WORK_AUTO_TIDY, None), "false");
+        assert_eq!(resolve(WORK_TIDY_DONE_DAYS, None), "2");
+        assert_eq!(resolve(WORK_TIDY_IDLE_HOURS, None), "4");
+        assert_eq!(
+            resolve(WORK_AUTO_TIDY_REASONS, None),
+            "done_idle,pr_merged_idle"
+        );
+        assert!(validate(WORK_AUTO_TIDY_REASONS, "").is_ok(), "none");
+        assert!(validate(WORK_AUTO_TIDY_REASONS, " not_planned , done_idle").is_ok());
+        for bad in ["duplicate_worktree", "ghost_expiring", "done_idle,kill"] {
+            assert_eq!(
+                validate(WORK_AUTO_TIDY_REASONS, bad).unwrap_err().code,
+                codes::E_INVALID,
+                "{bad}"
+            );
+        }
+        assert!(validate(WORK_TIDY_DONE_DAYS, "0").is_err());
+        let s = Store::open_in_memory().unwrap();
+        set(
+            &s,
+            WORK_AUTO_TIDY_REASONS,
+            "not_planned,done_idle,done_idle",
+        )
+        .unwrap();
+        assert_eq!(
+            get_string(&s, WORK_AUTO_TIDY_REASONS),
+            "done_idle,not_planned"
+        );
     }
 
     #[test]

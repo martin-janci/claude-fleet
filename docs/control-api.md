@@ -447,6 +447,33 @@ Index by area (names only; see the reference for details):
   sessions from other orgs' hosts (lists, `whoami`, `peer_status`,
   `session_history`, repo reads, messages, `session:*` frames). See
   [hub.md](hub.md) → *Organisations and isolation*.
+  Lifecycle (roadmap M7): `work { action: "tidy" }` returns the tidy-up
+  candidates — each with `session_id`, `link_id`, a primary `reason`
+  (`done_idle` | `pr_merged_idle` | `not_planned` | `duplicate_worktree` |
+  `ghost_expiring`), `secondary` reasons, the preselected `action`
+  (`safe_kill` | `kill` | `archive` | `resume_or_expire`), a preview (host,
+  branch, key, item status, PR, idle time) and `auto` (auto-tidy would act
+  on it) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,
+  `idle_hours`). `work { action: "reopened" }` lists work moved out of done
+  that has past sessions. `work_link { action: "tidy_apply", items: [{
+  session_id, action, link_id?, days? }] }` applies a batch (`safe_kill`,
+  `kill`, `archive`, `snooze`, `never`) and reports every item: one failing
+  never stops the rest, a protected session is refused per item, a kill of a
+  session's own worktree always inspects it first (dirty or unpushed ⇒ the
+  safe-kill path), and a worktree another live session shares is only
+  plain-killed. With `mcp.confirm_destructive` on, a batch containing a kill
+  needs the desktop's confirmation (`confirm_nonce`), like `kill_session`.
+  `work_link { session_id, action: "archive" | "unarchive" }` collapses a
+  live session into its group's Done (UI only; tmux keeps running) or brings
+  it back — a prompt or an attach does too; `{ action: "snooze", days? }`
+  (default 7) and `{ action: "never" }` flag the session's primary link (or
+  `link_id`); `{ action: "dismiss", item_id }` clears a reopened entry
+  (refused to a per-host token). A per-host token sees and applies only its
+  own host's candidates of its org (a session outside answers as an unknown
+  one), and reads reopened work only when its newest past session ran there
+  and its item is in the token's org. `work_admin { add_org | update_org,
+  auto_tidy: "on" | "off" | "inherit" }` overrides `work.auto_tidy` for one
+  org (master only).
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

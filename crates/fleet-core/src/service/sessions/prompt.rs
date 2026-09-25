@@ -226,6 +226,12 @@ pub(super) async fn send_prompt_inner(
             Some(truncated)
         });
         record_prompt_outcome(store, host_alias, tmux_name, &body, label);
+        // A prompt is a touch (work graph M7), also where no hook reports it.
+        if let Ok(s) = lock(store) {
+            if let Err(e) = s.touch_session_by_name(host_alias, tmux_name) {
+                tracing::debug!(error = %e.message, "[work] touch after a prompt failed");
+            }
+        }
     }
     Ok(())
 }

@@ -336,6 +336,7 @@ fn pr_signals_link_the_closing_ref_and_a_closed_pr_withdraws_its_suggestions() {
         closing: vec!["acme/api#42".into()],
         text: vec!["ABC-5".into()],
         trailers: vec!["#9".into()],
+        state: None,
     };
     f.s.set_pr_signals("h", "dev", Some(&serde_json::to_string(&sig).unwrap()))
         .unwrap();

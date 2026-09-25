@@ -92,6 +92,17 @@ describe('Settings → Organisations', () => {
     expect(upd.args).toEqual({ org_id: 1, isolate_sessions: true });
   });
 
+  it('standalone: per-org auto-tidy is on / off / inherit (work graph M7)', async () => {
+    const inv = route({ update_org: { ...acme, auto_tidy: true } });
+    render(OrgSettings);
+    const sel = (await screen.findByTestId('org-auto-tidy')) as HTMLSelectElement;
+    expect(sel.value).toBe('inherit');
+    await fireEvent.change(sel, { target: { value: 'on' } });
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_org')).toBe(true));
+    const upd = inv.mock.calls.find((c) => c[0] === 'update_org')![1] as { args: unknown };
+    expect(upd.args).toEqual({ org_id: 1, auto_tidy: 'on' });
+  });
+
   it('on a paired desktop it is read-only and names the hub CLI', async () => {
     hubStatus.set(remote);
     route();
@@ -99,6 +110,7 @@ describe('Settings → Organisations', () => {
     await waitFor(() => expect(screen.getAllByTestId('org-row')).toHaveLength(1));
     expect(screen.queryByTestId('org-add-form')).toBeNull();
     expect(screen.queryByTestId('org-isolate')).toBeNull();
+    expect(screen.queryByTestId('org-auto-tidy')).toBeNull();
     expect(screen.queryByTestId('org-remove')).toBeNull();
     expect(screen.queryByTestId('org-suggestions')).toBeNull();
     expect(screen.getByTestId('org-remote').textContent).toContain('fleet-hub org add');

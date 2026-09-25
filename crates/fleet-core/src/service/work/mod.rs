@@ -9,6 +9,7 @@ pub mod harvest;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
+pub mod tidy;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -112,6 +113,32 @@ pub struct WorkLinkArgs {
     /// Link across orgs anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_cross_org: Option<bool>,
+    /// Snooze (7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u32>,
+    /// tidy_apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<tidy::TidyApplyItem>>,
+    /// Approved nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
+/// `work_link { action: dismiss, item_id }`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dismissed {
+    #[serde(default)]
+    pub dismissed: bool,
+}
+
+/// `work_link { action: dismiss, item_id }`: clear an item's "reopened".
+pub fn dismiss_reopened(args: &WorkLinkArgs, store: &Mutex<Store>) -> Result<Dismissed, IpcError> {
+    let item = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "dismiss needs item_id"))?;
+    Ok(Dismissed {
+        dismissed: lock(store)?.dismiss_reopened(item)?,
+    })
 }
 
 /// `work_link { action: trust_project }`: the projects whose branch keys
@@ -173,6 +200,10 @@ pub enum WorkAction {
     Orgs,
     /// Proposed orgs from owners and tracker sites (never applied).
     OrgSuggestions,
+    /// Tidy-up candidates (work graph M7).
+    Tidy,
+    /// Work open again that has past sessions (work graph M7).
+    Reopened,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -189,6 +220,8 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("scopes", WorkAction::Scopes),
     ("orgs", WorkAction::Orgs),
     ("org_suggestions", WorkAction::OrgSuggestions),
+    ("tidy", WorkAction::Tidy),
+    ("reopened", WorkAction::Reopened),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -202,6 +235,12 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "trust_project",
     "resume",
     "start",
+    "archive",
+    "unarchive",
+    "snooze",
+    "never",
+    "dismiss",
+    "tidy_apply",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -224,6 +263,14 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
+    ("work_tidy", "work", "tidy"),
+    ("work_reopened", "work", "reopened"),
+    ("archive_session_work", "work_link", "archive"),
+    ("unarchive_session_work", "work_link", "unarchive"),
+    ("snooze_tidy", "work_link", "snooze"),
+    ("never_tidy", "work_link", "never"),
+    ("tidy_apply", "work_link", "tidy_apply"),
+    ("dismiss_reopened", "work_link", "dismiss"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -442,7 +489,10 @@ pub fn work_link<'a>(
     store: &Mutex<Store>,
     scope: &OrgScope,
 ) -> Result<SessionRow, IpcError> {
-    if matches!(args.action.as_str(), "resume" | "start" | "trust_project") {
+    if matches!(
+        args.action.as_str(),
+        "resume" | "start" | "trust_project" | "dismiss" | "tidy_apply"
+    ) {
         return Err(IpcError::new(
             codes::E_INVALID,
             format!("{} has its own entry point", args.action),
@@ -493,6 +543,47 @@ pub fn work_link<'a>(
         }
         Ok(l)
     };
+    // The lifecycle actions (work graph M7) write flags, not decisions: no
+    // resolver run after them.
+    match args.action.as_str() {
+        "archive" => {
+            s.archive_session_work(session_id)?;
+            return lifecycle_row(&s, session_id);
+        }
+        // A click, or an attach: a person's touch un-archives.
+        "unarchive" => {
+            if !s.touch_session(session_id)? {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {session_id} not found"),
+                ));
+            }
+            return lifecycle_row(&s, session_id);
+        }
+        "snooze" => {
+            if let Some(l) = args.link_id {
+                visible_link(l)?;
+            }
+            let days = args.days.unwrap_or(tidy::SNOOZE_DEFAULT_DAYS);
+            if !(1..=tidy::SNOOZE_MAX_DAYS).contains(&days) {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("snooze days must be 1..={}", tidy::SNOOZE_MAX_DAYS),
+                ));
+            }
+            let until = crate::service::catalog::now_secs() + i64::from(days) * 86_400;
+            s.snooze_tidy(session_id, args.link_id, until)?;
+            return lifecycle_row(&s, session_id);
+        }
+        "never" => {
+            if let Some(l) = args.link_id {
+                visible_link(l)?;
+            }
+            s.never_tidy(session_id, args.link_id)?;
+            return lifecycle_row(&s, session_id);
+        }
+        _ => {}
+    }
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
             (Some(id), None) => Ok(WorkTarget::Item(id)),
@@ -560,7 +651,8 @@ pub fn work_link<'a>(
                 codes::E_INVALID,
                 format!(
                     "unknown work_link action {other:?}; one of link, reject, unlink, confirm, \
-                     trust_project, resume, start"
+                     trust_project, resume, start, archive, unarchive, snooze, never, dismiss, \
+                     tidy_apply"
                 ),
             ))
         }
@@ -569,6 +661,11 @@ pub fn work_link<'a>(
     if let Err(e) = detect::resolve_session(&s, session_id) {
         tracing::debug!(error = %e.message, "[work] resolve after a decision failed");
     }
+    s.get_session_by_id(session_id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
 }
@@ -759,6 +856,68 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(missing.code, codes::E_NOTFOUND);
+    }
+
+    /// Work graph M7.2: archive / unarchive / snooze / never through the one
+    /// entry both transports share; dismiss has its own.
+    #[test]
+    fn lifecycle_actions_answer_the_row() {
+        let (st, sid) = store();
+        assert_eq!(
+            work_link(&link(sid, "archive"), &st, &OrgScope::All)
+                .unwrap_err()
+                .code,
+            codes::E_INVALID,
+            "nothing to archive under"
+        );
+        work_link(
+            &WorkLinkArgs {
+                key: Some("abc-1".into()),
+                ..link(sid, "link")
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        let row = work_link(&link(sid, "archive"), &st, &OrgScope::All).unwrap();
+        assert!(row.work.unwrap().archived_at.is_some());
+        let row = work_link(&link(sid, "unarchive"), &st, &OrgScope::All).unwrap();
+        assert_eq!(row.work.unwrap().archived_at, None);
+        work_link(
+            &WorkLinkArgs {
+                days: Some(3),
+                ..link(sid, "snooze")
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        let bad = WorkLinkArgs {
+            days: Some(0),
+            ..link(sid, "snooze")
+        };
+        assert_eq!(
+            work_link(&bad, &st, &OrgScope::All).unwrap_err().code,
+            codes::E_INVALID
+        );
+        work_link(&link(sid, "never"), &st, &OrgScope::All).unwrap();
+        for own_entry in ["dismiss", "tidy_apply"] {
+            assert_eq!(
+                work_link(&link(sid, own_entry), &st, &OrgScope::All)
+                    .unwrap_err()
+                    .code,
+                codes::E_INVALID
+            );
+        }
+        let d = dismiss_reopened(
+            &WorkLinkArgs {
+                action: "dismiss".into(),
+                item_id: Some(1),
+                ..Default::default()
+            },
+            &st,
+        );
+        assert_eq!(d.unwrap_err().code, codes::E_NOTFOUND);
     }
 
     #[test]

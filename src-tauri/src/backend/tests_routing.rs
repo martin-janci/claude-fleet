@@ -594,6 +594,20 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "work_tidy",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "tidy" }),
+            r#"{"candidates":[],"auto_tidy":false,"auto_reasons":[],"done_days":2,"idle_hours":4}"#,
+            Box::new(|b, s, _| block_on(commands::work::routed::work_tidy(b, s)).map(|_| ())),
+        ),
+        (
+            "work_reopened",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "reopened" }),
+            r#"[{"item_id":3,"key":"ABC-1","title":"Login","reopened_at":5,"past_sessions":2}]"#,
+            Box::new(|b, s, _| block_on(commands::work::routed::work_reopened(b, s)).map(|_| ())),
+        ),
+        (
             "session_history",
             "session_history",
             // The clamp runs on this side, so the hub is asked for the same
@@ -1110,6 +1124,112 @@ fn routed_mutation_cases() -> Vec<Case> {
                         link_id: 5,
                         force_cross_org: false,
                     },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "archive_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "archive", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::archive_session_work(
+                    b,
+                    commands::work::SessionLifecycleArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unarchive_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "unarchive", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::unarchive_session_work(
+                    b,
+                    commands::work::SessionLifecycleArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "snooze_tidy",
+            "work_link",
+            json!({ "session_id": 7, "action": "snooze", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "days": 3 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::snooze_tidy(
+                    b,
+                    commands::work::TidyFlagArgs {
+                        session_id: 7,
+                        link_id: Some(5),
+                        days: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "never_tidy",
+            "work_link",
+            json!({ "session_id": 7, "action": "never", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::never_tidy(
+                    b,
+                    commands::work::TidyFlagArgs {
+                        session_id: 7,
+                        link_id: None,
+                        days: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "tidy_apply",
+            "work_link",
+            json!({ "session_id": null, "action": "tidy_apply", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "items": [{ "session_id": 7, "action": "safe_kill" }] }),
+            r#"{"results":[{"session_id":7,"action":"safe_kill","ok":true,"outcome":"safe_kill_requested"}]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::work::routed::tidy_apply(
+                    b,
+                    commands::work::TidyApplyArgs {
+                        items: vec![fleet_core::service::work::tidy::TidyApplyItem {
+                            session_id: 7,
+                            action: "safe_kill".into(),
+                            ..Default::default()
+                        }],
+                    },
+                    s,
+                    ssh,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "dismiss_reopened",
+            "work_link",
+            json!({ "session_id": null, "action": "dismiss", "key": null, "item_id": 3,
+                    "link_id": null, "source": null }),
+            r#"{"dismissed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::dismiss_reopened(
+                    b,
+                    commands::work::DismissReopenedArgs { item_id: 3 },
                     s,
                 ))
                 .map(|_| ())

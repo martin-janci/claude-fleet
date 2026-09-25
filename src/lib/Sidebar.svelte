@@ -72,6 +72,13 @@
   import SessionRowItem from './SessionRowItem.svelte';
   import ResumeButton from './ResumeButton.svelte';
   import {
+    reopenedBadge,
+    reopenedByKey,
+    reopenedWork,
+    splitArchived,
+    unarchiveSession,
+  } from './tidy';
+  import {
     loadPastWork,
     pastWork,
     pastWorkSummary,
@@ -469,6 +476,19 @@
     }
     return out.sort((a, b) => (b.links[0].ended_at ?? 0) - (a.links[0].ended_at ?? 0));
   });
+  // ── Lifecycle (work graph M7.3) ──
+  // Archived live sessions collapse into their group's Done (tmux keeps
+  // running; one click brings them back); reopened work carries a badge.
+  const reopenedKeys = $derived(reopenedByKey($reopenedWork));
+  let unarchiving: Set<number> = $state(new Set());
+  async function unarchive(id: number, e?: Event) {
+    e?.stopPropagation();
+    if (unarchiving.has(id)) return;
+    unarchiving = new Set([...unarchiving, id]);
+    const r = await unarchiveSession(id);
+    unarchiving = new Set([...unarchiving].filter((x) => x !== id));
+    if (!r.ok) pushError(r.error, 'Un-archive failed');
+  }
   /** A past (ended) link as a filter row: its snapshot's host, and its
    *  org — else its snapshot project's owner — as its scope. */
   function pastFilterRow(l: WorkLink): FilterRow {
@@ -959,6 +979,8 @@
           {@const isCollapsed = collapsedWork.has(g.key)}
           {@const pr = workGroupPrSummary(g.sessions)}
           {@const ticket = workGroupTicket(g.key, g.sessions)}
+          {@const split = splitArchived(g.sessions, (s) => needsYou(s, attentionOpts))}
+          {@const reopened = reopenedKeys.get(g.key)}
           {@const groupColor = orgColorOf(
             { org_id: g.sessions[0]?.work?.org_id ?? g.sessions[0]?.org_id ?? null },
             $orgColorById,
@@ -966,6 +988,7 @@
           <li class="proj">
             <div
               class="proj-row work-row"
+              class:work-done={ticket?.status?.category === 'done'}
               data-testid="work-row"
               data-org-color={groupColor ?? undefined}
               style:box-shadow={groupColor ? `inset 3px 0 0 ${groupColor}` : undefined}
@@ -1004,15 +1027,19 @@
                       style="color: {ciStatusColor(pr.ci)};"> {ciStatusLabel(pr.ci)}</span
                     >{/if}</span>
               {/if}
-              <span class="count">{g.sessions.length}</span>
+              {#if reopened}
+                <span class="work-reopened" data-testid="work-reopened-badge">{reopenedBadge(reopened)}</span>
+                <ResumeButton workKey={g.key} />
+              {/if}
+              <span class="count">{split.live.length}</span>
             </div>
 
             {#if !isCollapsed}
-              {#each g.sessions as sess (sess.id)}
+              {#each split.live as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
               {/each}
               {@const past = $pastWork.get(g.key) ?? []}
-              {#if past.length > 0}
+              {#if past.length + split.archived.length > 0}
                 <div
                   class="done-row"
                   data-testid="work-done"
@@ -1024,9 +1051,21 @@
                   }}
                 >
                   <span class="caret" class:collapsed={!openDone.has(g.key)}>▾</span>
-                  Done · {past.length}
+                  Done · {past.length + split.archived.length}
                 </div>
                 {#if openDone.has(g.key)}
+                  {#each split.archived as sess (sess.id)}
+                    <div class="archived-wrap" data-testid="archived-session">
+                      {@render sessionRow(sess, false, true)}
+                      <button
+                        class="archived-chip"
+                        data-testid="archived-chip"
+                        disabled={unarchiving.has(sess.id)}
+                        title="Archived: collapsed here, tmux still running. Click to bring it back (a prompt or an attach does too)"
+                        onclick={(e) => void unarchive(sess.id, e)}>archived · show</button
+                      >
+                    </div>
+                  {/each}
                   {#each past as l (l.id)}{@render pastRow(g.key, l)}{/each}
                 {/if}
               {/if}
@@ -1050,7 +1089,13 @@
             >
               <span class="caret" class:collapsed={!isOpen}>▾</span>
               <span class="label"><span class="work-key">{pg.key}</span></span>
-              <span class="past-note">{pastWorkSummary(pg.links, nowSec * 1000)}</span>
+              {#if reopenedKeys.get(pg.key)}
+                <span class="work-reopened" data-testid="work-reopened-badge"
+                  >{reopenedBadge(reopenedKeys.get(pg.key)!)}</span
+                >
+              {:else}
+                <span class="past-note">{pastWorkSummary(pg.links, nowSec * 1000)}</span>
+              {/if}
               <ResumeButton workKey={pg.key} link={pg.links[0]} />
             </div>
             {#if isOpen}
@@ -1434,6 +1479,32 @@
     gap: 0.3rem;
     padding: 0.1rem 0.5rem 0.1rem 1.6rem;
     font-size: 0.72rem;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  /* Work graph M7.3: a done item's group reads as finished; an archived live
+     session sits in Done with a chip that brings it back. */
+  .work-row.work-done {
+    opacity: 0.6;
+  }
+  .work-reopened {
+    font-size: 0.68rem;
+    color: var(--accent, #3b82f6);
+    white-space: nowrap;
+  }
+  .archived-wrap {
+    position: relative;
+    opacity: 0.75;
+  }
+  .archived-chip {
+    position: absolute;
+    right: 0.5rem;
+    top: 0.15rem;
+    font-size: 0.62rem;
+    padding: 0 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
     color: var(--fg-muted);
     cursor: pointer;
   }

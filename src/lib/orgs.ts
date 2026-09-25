@@ -24,6 +24,16 @@ export interface OrgRow {
   color?: string | null;
   isolate_sessions?: boolean;
   created_at: number;
+  /** Work graph M7: this org's auto-tidy override; absent = inherit
+   *  `work.auto_tidy`. */
+  auto_tidy?: boolean | null;
+}
+
+/** An org's auto-tidy setting as the select shows it. */
+export type OrgAutoTidy = 'on' | 'off' | 'inherit';
+
+export function orgAutoTidy(o: Pick<OrgRow, 'auto_tidy'>): OrgAutoTidy {
+  return o.auto_tidy == null ? 'inherit' : o.auto_tidy ? 'on' : 'off';
 }
 
 export interface OrgRuleRow {
@@ -217,7 +227,7 @@ export function addOrg(name: string, color: string | null, isolateSessions: bool
 
 export function updateOrg(
   orgId: number,
-  patch: { name?: string; color?: string; isolate_sessions?: boolean },
+  patch: { name?: string; color?: string; isolate_sessions?: boolean; auto_tidy?: OrgAutoTidy },
 ) {
   return thenReload(invokeCmd<OrgRow>('update_org', { args: { org_id: orgId, ...patch } }));
 }

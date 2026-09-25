@@ -466,6 +466,37 @@ still to do.
 
 **Value:** the sidebar stays clean, and nothing useful is lost.
 
+**Status (2026-09-24): landed** on `claude/cloud-fleet-work-graph-m7`
+(stacked on M4), per `plans/2026-09-24-work-graph-m7-self-cleaning-lifecycle.md`
+(its *Revisions* list every deviation). Verified with `cargo fmt`, `clippy -D
+warnings` (workspace), `cargo test` (fleet-core, claude-fleet, fleet-hub;
+only the four chmod tests that fail as root fail), `pnpm check` / `pnpm
+test` and `scripts/hub-e2e.sh` (102/102); the manual acceptance on a real
+fleet is still to do.
+
+- **M7.1** (1c9c2e2, the pure planner): `plan_tidy` in `service/gc/tidy.rs` — five
+  reasons, ranked secondary reasons, hard-coded protections each with its
+  own test, snooze / never, and what auto-tidy may act on.
+- **M7.2** (6932b72, storage and API): migration 052 after the M5 and M6 merges (`work_links.archived_at` /
+  `tidy_snoozed_until` / `tidy_never`, `sessions.last_touch_at`,
+  `work_items.reopened_at`); archive UI-only and undone by the next prompt
+  or attach; reopen as an event (`reopened` journal row); `state` in the PR
+  probe; four `work.*` settings; `work { tidy | reopened }` and `work_link {
+  archive | unarchive | snooze | never | dismiss | tidy_apply }` (+639 B, no
+  new tool, `work_link` confirm-gated for tidy_apply's kills); auto-tidy in
+  the GC sweep behind `work.auto_tidy` (off); eight Routed commands (159).
+- **M7.3** (e7b4be9, UI): "Tidy up · n" and "Reopened · n" in the attention strip,
+  the Tidy-up sheet, archived sessions in their group's Done, the reopened
+  badge and Resume, Settings → Work → Lifecycle with a dry run.
+- **M7.4**: `docs/concepts.md` → *Lifecycle*, `docs/hub.md` → *Tidy-up and
+  auto-tidy*, `docs/control-api.md`.
+- **After M5 merged:** migration 051 (M5 took 050; 052 once M6 took 051), the per-org override
+  `orgs.auto_tidy` (migration 052; 053 after M6), and org-scoped candidates / apply / reopened for a
+  per-host token.
+- **Not done:** `idle_unlinked`
+  (an unlinked session has no link to archive under); the phone (M8); the
+  manual acceptance.
+
 ### M8: phone
 
 - **Hub side:** `SessionRow.work` in `PHONE_SESSION_FIELDS`.
@@ -586,6 +617,12 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   off). The tool budget grew by 172 B for `work_link`'s confirm / reject by
   id / trust_project; no new tool, no contract bump. M4.6 is not done.
   Deviations are in the M4 plan's *Revisions*.
+- 2026-09-24: M7 landed on `claude/cloud-fleet-work-graph-m7` (stacked on
+  M4; built in parallel with M5 and M6): tidy-up suggestions, UI-only
+  archive, snooze / never, reopened work, auto-tidy off by default. The tool
+  budget grew by 639 B (three parameters on `work_link`, two read actions on
+  `work`); no new tool, no contract bump. The per-org auto-tidy override
+  waits for M5. Deviations are in the M7 plan's *Revisions*.
 - 2026-09-24: M5 landed on `claude/cloud-fleet-work-graph-m5` (orgs, the
   org boundary for per-host tokens, D7 `isolate_sessions` per org, default
   off, the scope selector and Organisations settings, one `rowMatches`).
@@ -593,6 +630,10 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   actions, 87 for `force_cross_org`); no new tool, no contract bump. M3's
   per-host ticket fence was kept and composed with the org fence rather
   than removed. Deviations are in the M5 plan's *Revisions*.
+- 2026-09-24: M5 merged into M7 (no rebase). M7's migration became 051, plus 052;
+  `orgs.auto_tidy` (on / off / inherit) overrides `work.auto_tidy` per org,
+  and tidy candidates, tidy_apply and reopened work respect the org scope
+  of a per-host token. Details in the M7 plan's *Revisions*.
 - 2026-09-24: M6 landed on `claude/cloud-fleet-work-graph-m6` (GitHub
   through `gh`, Asana, `via_host`, Linear, Jira Data Center — built because
   the M6 brief asked, overriding D6's default — and the Connect / badge /
@@ -603,3 +644,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   `work_suggested` on the phone view, the `work` / `work_link` action enums
   (+72 B on top of M5; generated from M5's action tables), the client
   tool-list gate test. No new tool, no contract bump.
+- 2026-09-25: M6 (main, #266) merged into M7 (no rebase). M6 kept 051; M7's
+  migrations were renumbered to 052 (`work_lifecycle`) and 053
+  (`org_auto_tidy`), and a database that already ran M6's 051 gets both.
+  `work_admin` carries M6's `transport` / `settings` and M7's `auto_tidy`.

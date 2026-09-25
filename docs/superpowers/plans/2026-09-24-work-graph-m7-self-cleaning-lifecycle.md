@@ -220,3 +220,145 @@ checks.
 | D2 | Can "done" ever kill a live session automatically? | Only with `work.auto_tidy` on (per org), for `done_idle` and `pr_merged_idle`, via safe kill; off by default |
 | new | What does archiving a live session mean? | UI-only (collapse); tmux keeps running; a prompt or attach un-archives |
 | new | Default thresholds | done ≥ 2 days + idle ≥ 4 hours |
+
+## Revisions
+
+- **2026-09-24, M7 landed** on `claude/cloud-fleet-work-graph-m7` (stacked
+  on M4, built in parallel with M5 and M6): M7.1 (the planner), M7.2
+  (storage and API), M7.3 (UI), M7.4 (docs). Verified with `cargo fmt`,
+  `clippy -D warnings` (workspace), `cargo test` (fleet-core, claude-fleet,
+  fleet-hub; only the four chmod tests that fail as root fail), `pnpm check`
+  / `pnpm test` and `scripts/hub-e2e.sh` (102/102). Deviations, and why:
+  1. **Where the code lives.** The planner is `service/gc/tidy.rs` (a child
+     of `gc`, reusing its idle reference) with its table in
+     `gc/tidy/tests.rs`; the storage `store/work_tidy.rs`; the one entry
+     both transports and the sweep share `service/work/tidy.rs`.
+  2. **Auto-tidy execution moved to M7.2.** It needs the snooze / never
+     flags and the gathered input, which are storage. M7.1 is the pure
+     planner plus `auto_selection` (safe kill / archive of an allowed
+     reason, only with auto-tidy on). The sweep runs it after the idle
+     killer, skipping what the killer acted on; off, it reads one setting
+     and returns (regression test: the killer's behaviour and report are
+     unchanged). `GcReport` gained `tidied` (`serde(default)`).
+  3. **`idle_unlinked` is not a reason.** Archive is a flag on a work link
+     (§0.6); an unlinked session has none to carry it, and a session-level
+     archive would be the flag design §H argues against. The idle killer
+     (`gc.enabled`) still covers idle unlinked sessions.
+  4. **`ghost_expiring` is for linked, resumable ghosts only** (a snooze
+     needs a link to live on; the host's restore list covers the rest), and
+     never kills. The sheet offers Resume, Snooze or Never for it.
+  5. **Kills.** `kill` and `safe_kill` both inspect a work session's own
+     worktree (dirty, unpushed or uninspectable ⇒ the safe-kill path), so a
+     person's plain "Kill" never bypasses it. A worktree another live work
+     session shares is only plain-killed — a safe-remove would delete a tree
+     in use; a plain tmux kill leaves every file — and the planner
+     downgrades such a candidate's action to `kill`. `bg` / `shell` /
+     `review` rows are plain-killed, as the idle killer does; a review is
+     never a duplicate of its source. A work row with no tracked worktree
+     is offered Archive only.
+  6. **Protections, as built:** in-progress (any live confirmed link, not
+     only the primary), `working` / `blocked` / `failed` (a needs-you
+     bucket), any `stuck_kind` (incl. `trust_prompt`), a pending dialog,
+     the controller, the operator, a touch within the hour, a `bg` agent
+     that is the worker or requester of a queued / running task; also a
+     safe kill in flight and `external` rows. Each has a planner test, and
+     `tidy_apply` re-checks them at apply time for every destructive item.
+  7. **The touch is `sessions.last_touch_at`** (migration 050, outside
+     reconcile's `ON CONFLICT`), stamped by the UserPromptSubmit hook, a
+     prompt sent through fleet, and an attach. `pty_open` reads no
+     `state.db` (it is `SameInBoth`), so the desktop sends the attach as
+     `work_link { action: unarchive }` (Tauri `unarchive_session_work`),
+     which stamps the touch and un-archives; an automatic reconnect is not a
+     touch. Any prompt counts, fleet-dispatched ones too: over-protection
+     is the safe side.
+  8. **Reopen.** `work_items.reopened_at` plus a `reopened` journal kind
+     (instead of `status_change` with `reopened: true`; M3's `status_change`
+     rows are still written): on the live sessions' conversations, else on
+     the newest past session's last conversation. Only a transition from
+     `done` to `todo` / `in_progress` counts, once; done again clears it.
+     `work { reopened }` lists open-again items with past sessions until a
+     session links to the item after the reopen (resumed), it is done again,
+     or `work_link { action: dismiss, item_id }` (a new action) clears it.
+     Local items have no status edit yet, so only tracker transitions
+     reopen.
+  9. **Merged PRs**: `state` joined the probe's full field list and
+     `PrSignals.state`; a host whose `gh` answers only the basic fields
+     gives no merged signal (no guess).
+  10. **`tidy_apply` is tested against the injectable `GcExec`** (the idle
+      killer's executor) rather than `FakeSsh`: `kill_session` and
+      `safe_kill_session` take a concrete `SshClient`. The batch test covers
+      a dirty tree (safe path), a clean one (killed), a failing kill
+      (reported, the batch goes on), a protected session (refused, never
+      touched), a snooze and an unknown session.
+  11. **Confirmation.** `work_link` is now `confirm: true` in the policy
+      table (its annotation says `destructiveHint`); the gate runs only for
+      a `tidy_apply` batch that contains a kill, as `work_admin` gates only
+      `remove`. `confirm_nonce` is the new parameter for it.
+  12. **API and budget.** `work { tidy | reopened }`, `work_link { archive |
+      unarchive | snooze | never | dismiss | tidy_apply }`; three new
+      parameters (`days`, `items`, `confirm_nonce`); the action field docs
+      now point at the description. `BUDGET_BYTES` 68,485 → 69,124
+      (measured 69,024, +639). Wire enums have `Unknown`; new fields are
+      `serde(default)`; no contract bump. Eight Tauri commands, all
+      `Routed` (159 in the verdict table). A per-host token sees and
+      applies only its own host's candidates, reads reopened work only when
+      its newest past session ran there, and cannot dismiss.
+  13. **Settings.** `work.auto_tidy_reasons` needed a new `Kind::ChoiceSet`
+      (a comma-separated subset, stored in the set's order); it may name
+      only `done_idle`, `pr_merged_idle` and `not_planned` — a duplicate is
+      only ever plain-killed and a ghost never killed, so neither can be
+      automatic. `work.tidy_done_days` is 1–365, `work.tidy_idle_hours`
+      1–720.
+  14. **UI.** The two entries are pills in the attention strip under the
+      sidebar filters (as M4's link review; `Attention.svelte` is a watcher
+      with no entries). The sheet is inline, not a modal. "Reopened · n"
+      opens a list with the badge, Resume and Dismiss rather than scrolling
+      to the group; the group header carries the same badge and Resume. An
+      archived session that needs you stays in the live list. The sheet
+      does not show a dirty / unpushed warning per row: nothing probes that
+      ahead of the inspection; each safe-kill row says "commits & pushes
+      first" instead. `selectedIds` / the bulk bar were not reused: the
+      sheet's rows are candidates, not sidebar rows.
+  15. **Not done:** the phone (M8) and the manual acceptance on a real
+      fleet. (The per-org override landed after M5, below.)
+- **2026-09-24, M5 merged into M7** (a merge, no rebase; the user's call:
+  "add the per-org override once M5 lands"). Changes:
+  1. **Migrations renumbered.** M5 took 050 (`050_orgs.sql`), so M7's is
+     `051_work_lifecycle.sql` (same content, same guard), and the org column
+     is its own `052_org_auto_tidy.sql` with its own guard: a database
+     that already has 051's columns but an `orgs` table made later (M5's
+     own "existing rows" test rebuilds it) still gets the column.
+  2. **Per-org override.** `orgs.auto_tidy` (NULL inherit, 0 off, 1 on),
+     set by `work_admin { add_org | update_org, auto_tidy: on | off |
+     inherit }` (master only), `fleet-hub org set <id> --auto-tidy …`, and
+     the Organisations settings' select (read-only when paired). The
+     planner decides per session (`TidyConfig::auto_for(row.org_id)`); the
+     sweep runs when auto-tidy is on globally or for any org. Reasons and
+     thresholds stay fleet-wide. `BUDGET_BYTES` 69,859 (measured 69,759:
+     M5's 69,099 plus M7's 639 plus the `auto_tidy` parameter).
+  3. **Org scope.** `work { tidy }`, `work_link { tidy_apply }` and
+     `work { reopened }` run under M5's `OrgScope`: a per-host token sees
+     and applies only its own host's candidates of an org it sees (a
+     session outside reads as `session N not found`, per item); a
+     candidate of its own session linked to another org's ticket loses its
+     key, item status and link id; snooze / never cannot reach another
+     org's link (through `tidy_apply` or `work_link`); reopened work needs
+     its newest past session on the token's host and its item in the
+     token's org. The eight actions have isolation-matrix rows (M5's rule),
+     and `WORK_ACTIONS` / `WORK_LINK_ACTIONS` / `ROUTED_WORK_COMMANDS` list
+     them. `SessionRow.work` carries both `org_id` and `archived_at`.
+  4. **UI.** The Tidy-up pill and sheet follow the sidebar's scope
+     selector (a candidate shows when its session is in the chosen scope);
+     169 commands in the verdict table.
+  Verified again: `cargo fmt`, `clippy -D warnings` (workspace), `cargo
+  test` (fleet-core, claude-fleet, fleet-hub; only the four root chmod
+  tests fail), `pnpm check` / `pnpm test` (2779), `scripts/hub-e2e.sh`
+  (102/102).
+- **2026-09-25, M6 (main, #266) merged into M7** (a merge, no rebase). M6's
+  `051_tracker_providers.sql` stays 051; M7's migrations are renumbered to
+  `052_work_lifecycle.sql` and `053_org_auto_tidy.sql` (same content and
+  guards, their `schema_version` rows 52 and 53). A store at 51 with M6's
+  schema migrates up to 53
+  (`migrations_052_053_add_lifecycle_columns_after_051_and_rerun_safely`).
+  `work_admin`'s audit line carries both M6's `transport` / `settings` and
+  M7's `auto_tidy`; the tool budget was re-measured.

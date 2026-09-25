@@ -176,6 +176,29 @@ fn trackers_has_settings(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 052: `work_links` already has its
+/// `archived_at` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'archived_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 053: `orgs` already has its
+/// `auto_tidy` column.
+fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'auto_tidy'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -483,6 +506,21 @@ const MIGRATIONS: &[Migration] = &[
         version: 51,
         sql: include_str!("../../migrations/051_tracker_providers.sql"),
         already_applied: Some(trackers_has_settings),
+    },
+    // Work graph M7: archive / snooze / never on `work_links`, the last
+    // touch on `sessions`, `work_items.reopened_at` — ADD COLUMNs, so the
+    // same guard. (Written as 051 and 052 on the M7 branch; renumbered when
+    // M6, which took 051, was merged.)
+    Migration {
+        version: 52,
+        sql: include_str!("../../migrations/052_work_lifecycle.sql"),
+        already_applied: Some(work_links_has_archived_at),
+    },
+    // Work graph M7 on M5: `orgs.auto_tidy` — one ADD COLUMN, its own guard.
+    Migration {
+        version: 53,
+        sql: include_str!("../../migrations/053_org_auto_tidy.sql"),
+        already_applied: Some(orgs_has_auto_tidy),
     },
 ];
 
@@ -2246,6 +2284,7 @@ mod tests {
             .unwrap();
         assert_eq!(branch.as_deref(), Some("abc-2-x"));
     }
+
     /// Migration 051 (work graph M6): a tracker with views keeps them and
     /// its watermark, gains an empty sync mark and settings, and a re-run
     /// (the guard) keeps what was written since.
@@ -2279,5 +2318,78 @@ mod tests {
             old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),
             Some("tok-1")
         );
+    }
+
+    /// Migrations 052 and 053 (work graph M7) on a database that already ran
+    /// M6's 051: the lifecycle columns land on a database with a live link, a
+    /// done item and a tracker with M6's sync mark and settings; nothing is
+    /// archived, snoozed or reopened by the migration itself, M6's columns
+    /// are untouched, and a re-run (the guards) keeps what was written since.
+    #[test]
+    fn migrations_052_053_add_lifecycle_columns_after_051_and_rerun_safely() {
+        let old = store_at_version(51);
+        assert_eq!(old.schema_version().unwrap(), 51);
+        old.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h'); \
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status) \
+                 VALUES ('dev', 'h', 1, 1, 'running'); \
+                 INSERT INTO work_items (source, key, title, status_category, created_at, updated_at) \
+                 VALUES ('local', 'ABC-1', 't', 'done', 1, 1); \
+                 INSERT INTO work_links (item_id, participant_id, state, source, is_primary, created_at) \
+                 SELECT 1, id, 'confirmed', 'manual', 1, 1 FROM participants; \
+                 INSERT INTO trackers (id, provider, name, site_url, created_at) \
+                 VALUES (3, 'jira', 'Acme', 'https://acme.atlassian.net', 1); \
+                 INSERT INTO tracker_views (tracker_id, view_id, label, query, sync_mark) \
+                 VALUES (3, 'mine', 'My work', 'q', 'tok-0');",
+            )
+            .unwrap();
+        let sid: i64 = old
+            .conn
+            .query_row("SELECT id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        old.migrate().expect("052 and 053 on a database at 051");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            old.list_tracker_views(3).unwrap()[0].sync_mark.as_deref(),
+            Some("tok-0")
+        );
+        let (archived, snoozed, never): (Option<i64>, Option<i64>, i64) = old
+            .conn
+            .query_row(
+                "SELECT archived_at, tidy_snoozed_until, tidy_never FROM work_links",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((archived, snoozed, never), (None, None, 0));
+        let row = old.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().archived_at, None);
+        old.conn
+            .execute_batch(
+                "UPDATE work_links SET archived_at = 7; UPDATE sessions SET last_touch_at = 9;",
+            )
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 52;")
+            .unwrap();
+        old.migrate().expect("re-running 052 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = old.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.work.unwrap().archived_at, Some(7));
+        let reopened: Option<i64> = old
+            .conn
+            .query_row("SELECT reopened_at FROM work_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reopened, None);
+        // 053: an org's override, NULL (inherit) on existing orgs.
+        old.conn
+            .execute_batch(
+                "INSERT INTO orgs (name, created_at) VALUES ('A', 1); \
+                 DELETE FROM schema_version WHERE version >= 53;",
+            )
+            .unwrap();
+        old.migrate().expect("re-running 053 is safe");
+        assert_eq!(old.list_orgs().unwrap()[0].auto_tidy, None);
     }
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/svelte';
+import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { readPref } from './prefs';
@@ -1936,6 +1936,50 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(within(liveGroup as HTMLElement).getByTestId('past-work-row')).toHaveTextContent('old pay');
     // PAY-7 is live: it never shows up as a past-only group as well.
     expect(screen.getAllByTestId('past-work-group')).toHaveLength(1);
+  });
+
+  it('archived sessions sit in Done, one click un-archives; reopened and done headers (M7.3)', async () => {
+    const work = (archived: number | null) => ({
+      link_id: 5, item_id: 9, key: 'PAY-7', title: 'Retry', source: 'manual',
+      status_category: 'done', status_name: 'Done', archived_at: archived,
+    });
+    const live = { ...sessionFor(1, 'dev-live'), work: work(null) };
+    const parked = { ...sessionFor(1, 'dev-parked'), work: work(1_700_000_000) };
+    mockBackend(workProjects, [live, parked]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'work_reopened')
+        return [{ item_id: 9, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+      if (cmd === 'unarchive_session_work') return { ...parked, work: work(null) };
+      return base(cmd, args);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const group = await screen.findByTestId('work-groups');
+    // Only the live one is listed; the archived one is under Done.
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(1);
+    const header = screen.getByTestId('work-row');
+    expect(header.classList.contains('work-done')).toBe(true);
+    const badge = await screen.findByTestId('work-reopened-badge');
+    expect(badge).toHaveTextContent('reopened · 2 past sessions');
+    expect(within(header).getByTestId('resume-button')).toBeTruthy();
+    const done = screen.getByTestId('work-done');
+    expect(done).toHaveTextContent('Done · 1');
+    await fireEvent.click(done);
+    await tick();
+    const archived = screen.getByTestId('archived-session');
+    expect(archived).toHaveTextContent('dev-parked');
+    await fireEvent.click(within(archived).getByTestId('archived-chip'));
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
+        args: { session_id: parked.id },
+      }),
+    );
+    await tick();
+    expect(within(group).getAllByTestId('sess-row').length).toBeGreaterThanOrEqual(2);
   });
 
   it('the purge confirmation names the work that loses its conversations (M2.5)', async () => {

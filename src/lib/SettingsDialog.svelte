@@ -44,9 +44,13 @@
     basePathError,
     projectPathPreview,
     projectsDefaultRoot,
+    AUTO_TIDY_REASONS,
+    parseAutoTidyReasons,
+    toggleAutoTidyReason,
     type SettingKey,
     type ProjectsLayout,
   } from './fleet_settings';
+  import { TIDY_REASON_LABELS, autoTidyPreview, refreshTidy, tidyReport, tidyReasonLabel, formatIdle, type TidyCandidate } from './tidy';
   import { refreshProjects } from './projects';
   import {
     hubStatus,
@@ -263,6 +267,19 @@
     } catch {
       return 0;
     }
+  }
+  // Work graph M7.3: "Show what auto-tidy would do" — the current
+  // candidates auto-tidy would act on with the ticked reasons.
+  let dryRun = $state<TidyCandidate[] | null>(null);
+  let dryRunBusy = $state(false);
+  async function showDryRun() {
+    dryRunBusy = true;
+    await refreshTidy();
+    dryRunBusy = false;
+    dryRun = autoTidyPreview(
+      $tidyReport.candidates,
+      parseAutoTidyReasons($fleetSettings[SETTING_KEYS.workAutoTidyReasons]),
+    );
   }
   function toggleSetting(key: SettingKey) {
     void applySetting(key, settingBool($fleetSettings, key) ? 'false' : 'true');
@@ -1080,6 +1097,80 @@
           onchange={() => toggleSetting(SETTING_KEYS.workSessionStartContext)} />
         Give Claude the linked ticket at session start (makes the start hook wait up to 2 s when the hub is down; applies when hooks are reinstalled)
       </label>
+      <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
+      <div class="mcp-field">
+        <label class="lbl" for="work-tidy-done-days">tidy: done for</label>
+        <input class="port" id="work-tidy-done-days" type="number" min="1" max="365" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workTidyDoneDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-tidy-done-days-desc"
+          data-testid="work-tidy-done-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workTidyDoneDays, 'Tidy: done for', e)} />
+        <span class="hook-desc" id="work-tidy-done-days-desc">days a linked ticket must be done before Tidy up suggests its session</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-tidy-idle-hours">tidy: idle for</label>
+        <input class="port" id="work-tidy-idle-hours" type="number" min="1" max="720" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workTidyIdleHours)}
+          disabled={limitsBusy}
+          aria-describedby="work-tidy-idle-hours-desc"
+          data-testid="work-tidy-idle-hours"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workTidyIdleHours, 'Tidy: idle for', e)} />
+        <span class="hook-desc" id="work-tidy-idle-hours-desc">hours a session must be idle before any reason suggests it</span>
+      </div>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.workAutoTidy)}
+          disabled={automationBusy}
+          data-testid="work-auto-tidy"
+          onchange={() => toggleSetting(SETTING_KEYS.workAutoTidy)} />
+        Auto-tidy: let the sweep act on the reasons below by itself
+      </label>
+      <p class="hook-desc warn" data-testid="work-auto-tidy-warning">
+        Off, Tidy up only suggests. On, the sweep safe-kills finished sessions without asking:
+        Claude is asked to commit and push first, and a session that is working, waiting on you,
+        linked to in-progress work or used in the last hour is never touched.
+        An organisation can turn it on or off for its own sessions (Organisations).
+      </p>
+      <div class="mcp-field" data-testid="work-auto-tidy-reasons">
+        <span class="lbl">auto-tidy reasons</span>
+        {#each AUTO_TIDY_REASONS as reason (reason)}
+          <label class="toggle inline">
+            <input
+              type="checkbox"
+              checked={parseAutoTidyReasons($fleetSettings[SETTING_KEYS.workAutoTidyReasons]).has(reason)}
+              disabled={automationBusy}
+              data-testid={`work-auto-tidy-reason-${reason}`}
+              onchange={() =>
+                void applySetting(
+                  SETTING_KEYS.workAutoTidyReasons,
+                  toggleAutoTidyReason($fleetSettings[SETTING_KEYS.workAutoTidyReasons], reason),
+                )} />
+            {TIDY_REASON_LABELS[reason]}
+          </label>
+        {/each}
+      </div>
+      <div class="mcp-field">
+        <button class="btn" type="button" data-testid="work-auto-tidy-dry-run" disabled={dryRunBusy}
+          onclick={() => void showDryRun()}>Show what auto-tidy would do</button>
+      </div>
+      {#if dryRun !== null}
+        <div class="hook-desc" data-testid="work-auto-tidy-preview">
+          {#if dryRun.length === 0}
+            Nothing right now.
+          {:else}
+            Auto-tidy would {settingBool($fleetSettings, SETTING_KEYS.workAutoTidy) ? '' : '(once turned on) '}safe-kill or archive:
+            <ul>
+              {#each dryRun as c (c.session_id)}
+                <li data-testid="work-auto-tidy-preview-row">
+                  {c.label || c.tmux_name} on {c.host_alias}{c.key ? ` · ${c.key}` : ''} — {tidyReasonLabel(c.reason)}, idle {formatIdle(c.idle_secs)}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
       <div class="mcp-field">
         <span class="lbl">trusted branch keys</span>
         <span class="hook-desc" data-testid="work-trusted-projects">

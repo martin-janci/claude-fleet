@@ -84,6 +84,10 @@ pub struct OrgRow {
     #[serde(default)]
     pub isolate_sessions: bool,
     pub created_at: i64,
+    /// Work graph M7: this org's auto-tidy override; `None` inherits
+    /// `work.auto_tidy`. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_tidy: Option<bool>,
 }
 
 /// One placement rule. At least one of `owner`, `path_prefix`, `host_alias`
@@ -260,7 +264,7 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
     Ok(r)
 }
 
-const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at";
+const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -270,6 +274,7 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         color: r.get(2)?,
         isolate_sessions: r.get::<_, i64>(3)? != 0,
         created_at: r.get(4)?,
+        auto_tidy: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
     })
 }
 
@@ -374,6 +379,30 @@ impl Store {
             rusqlite::params![id, name, color, isolate as i64],
         )?;
         self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// Set (or, with `None`, clear) an org's auto-tidy override (work graph
+    /// M7): `None` inherits `work.auto_tidy`.
+    pub fn set_org_auto_tidy(&self, id: i64, on: Option<bool>) -> Result<OrgRow, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE orgs SET auto_tidy = ?2 WHERE id = ?1",
+            rusqlite::params![id, on.map(|b| b as i64)],
+        )?;
+        if n == 0 {
+            return Err(org_not_found(id));
+        }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// org id → its auto-tidy override, for the orgs that set one.
+    pub fn org_auto_tidy_overrides(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, bool>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, auto_tidy FROM orgs WHERE auto_tidy IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Delete an org: its rules go with it, its hosts become unassigned.

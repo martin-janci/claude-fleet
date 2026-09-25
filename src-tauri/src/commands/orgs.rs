@@ -38,6 +38,9 @@ pub struct UpdateOrgArgs {
     pub color: Option<String>,
     #[serde(default)]
     pub isolate_sessions: Option<bool>,
+    /// Work graph M7: `on` | `off` | `inherit` (`work.auto_tidy`).
+    #[serde(default)]
+    pub auto_tidy: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -123,6 +126,7 @@ pub fn update_org(
             name: args.name,
             color: args.color,
             isolate_sessions: args.isolate_sessions,
+            auto_tidy: args.auto_tidy,
             ..Default::default()
         },
         &store,

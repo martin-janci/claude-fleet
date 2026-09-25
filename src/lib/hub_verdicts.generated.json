@@ -83,11 +83,13 @@
     "update_tracker"
   ],
   "routed": [
+    "archive_session_work",
     "cancel_task",
     "confirm_session_work",
     "delete_worktree",
     "discover_lost_sessions",
     "dismiss_ghost_session",
+    "dismiss_reopened",
     "ensure_operator",
     "health_check",
     "kill_session",
@@ -102,6 +104,7 @@
     "list_trackers",
     "list_worktrees",
     "move_session",
+    "never_tidy",
     "new_bg_session",
     "new_session",
     "operator_status",
@@ -133,14 +136,19 @@
     "session_work_links",
     "set_session_friendly_name",
     "set_work_project_trust",
+    "snooze_tidy",
     "spawn_review",
     "start_work",
+    "tidy_apply",
+    "unarchive_session_work",
     "unlink_session_work",
     "work_lookup",
     "work_purge_impact",
+    "work_reopened",
     "work_resume_plan",
     "work_scopes",
-    "work_tickets"
+    "work_tickets",
+    "work_tidy"
   ],
   "routed_unless": [
     {

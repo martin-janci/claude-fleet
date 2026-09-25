@@ -24,6 +24,8 @@
     ruleChip,
     type OrgDetail,
     type OrgSuggestion,
+    orgAutoTidy,
+    type OrgAutoTidy,
   } from './orgs';
   import { hosts } from './hosts';
   import { trackers, loadTrackers } from './trackers';
@@ -111,6 +113,7 @@
         <span class="swatch" style:background={o.color ?? 'transparent'}></span>
         <strong>{o.name}</strong>
         {#if o.isolate_sessions}<span class="badge" data-testid="org-isolated">isolates sessions</span>{/if}
+        {#if o.auto_tidy != null}<span class="badge" data-testid="org-auto-tidy-badge">auto-tidy {o.auto_tidy ? 'on' : 'off'}</span>{/if}
         {#if owns}
           <input
             type="color"
@@ -215,6 +218,24 @@
                 )}
             />
             isolate sessions
+          </label>
+          <label class="isolate" title="Auto-tidy for this org's sessions: on or off regardless of the fleet-wide setting, or inherit it (Settings → Work → Lifecycle). Safe kill only, never a session in use.">
+            auto-tidy
+            <select
+              data-testid="org-auto-tidy"
+              value={orgAutoTidy(o)}
+              onchange={(e) =>
+                void run(
+                  updateOrg(o.id, {
+                    auto_tidy: (e.currentTarget as HTMLSelectElement).value as OrgAutoTidy,
+                  }),
+                  'Update failed',
+                )}
+            >
+              <option value="inherit">inherit</option>
+              <option value="on">on</option>
+              <option value="off">off</option>
+            </select>
           </label>
         </div>
         {#if o.isolate_sessions}

@@ -79,6 +79,9 @@ pub struct WorkAdminArgs {
     /// Rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<i64>,
+    /// on|off|inherit
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_tidy: Option<String>,
 }
 
 impl fmt::Debug for WorkAdminArgs {
@@ -106,6 +109,7 @@ impl fmt::Debug for WorkAdminArgs {
             .field("path_prefix", &self.path_prefix)
             .field("host_alias", &self.host_alias)
             .field("rule_id", &self.rule_id)
+            .field("auto_tidy", &self.auto_tidy)
             .finish()
     }
 }
@@ -117,7 +121,7 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?}",
+             isolate_sessions={:?} auto_tidy={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -142,6 +146,7 @@ impl WorkAdminArgs {
             self.repo,
             self.path_prefix,
             self.isolate_sessions,
+            self.auto_tidy,
         )
     }
 

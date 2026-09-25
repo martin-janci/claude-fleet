@@ -50,6 +50,10 @@ pub struct PrSignals {
     /// References in commit trailers (`Refs:`, `Fixes`, `Jira:`, `Closes #n`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trailers: Vec<String>,
+    /// `state`: OPEN | CLOSED | MERGED (work graph M7: a merged PR's idle
+    /// session is a tidy-up candidate). Absent from rows probed before M7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// Most references of one kind a PR keeps.
@@ -65,6 +69,11 @@ impl PrSignals {
                 .get("headRefName")
                 .and_then(|h| h.as_str())
                 .map(|h| h.chars().take(255).collect()),
+            state: v
+                .get("state")
+                .and_then(|s| s.as_str())
+                .filter(|s| s.len() <= 16)
+                .map(str::to_ascii_uppercase),
             ..Default::default()
         };
         for r in v
@@ -148,6 +157,11 @@ impl PrSignals {
                 }
             }
         }
+    }
+
+    /// The probe saw the PR merged.
+    pub fn is_merged(&self) -> bool {
+        self.state.as_deref() == Some("MERGED")
     }
 
     pub fn is_empty(&self) -> bool {
