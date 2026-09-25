@@ -263,7 +263,7 @@ fi
 printf '__fleet_head__=%s
 ' "$(wc -c < "$d/rh" | tr -d ' ')"
 cat "$d/rh"
-head -c @@CAP@@ "$d/rb"
+head -c $((@@CAP@@ + 1)) "$d/rb"
 "#;
 
 /// `curl` on a host (see the module docs). Where the credential is, and is
@@ -279,7 +279,7 @@ head -c @@CAP@@ "$d/rb"
 ///   no argv (`ps` shows only the file names), no variable and no
 ///   environment.
 /// - Nothing prints headers that were SENT; the script prints the answer's
-///   status and curl's exit code, then either the headers and at most the
+///   status and curl's exit code, then either the headers and one byte past the
 ///   cap of its body (exit 0) or at most two `curl: (N) …` lines (any other
 ///   exit — a status is known as soon as the head arrived, so it never
 ///   vouches for the body on its own).
@@ -434,6 +434,18 @@ fn parse_curl(host: &str, raw: &[u8], max_body: u64) -> Result<Response, Transpo
         )));
     }
     let (head, body) = rest.split_at(head_len);
+    // The script prints one byte MORE than the cap, so "over the cap" is
+    // distinguishable from "exactly the cap" — the same rule as
+    // `conn::speak`. A chunked answer (no size for `--max-filesize` to
+    // refuse up front, on a curl older than 8.4) is caught here.
+    if body.len() as u64 > max_body {
+        return Err(TransportError::TooLarge(format!(
+            "curl on {host} answered more than {} MiB; refusing to buffer it \
+             (silently truncating at the cap surfaced as unreadable JSON, \
+             which names the wrong problem)",
+            max_body / (1024 * 1024)
+        )));
+    }
     // A proxy's `200 Connection established` (or a `100 Continue`) comes
     // first: the answer is the LAST header block.
     let text = String::from_utf8_lossy(head);
@@ -474,7 +486,10 @@ impl HttpTransport for CurlTransport {
         );
         let quoted = crate::shell::quote(&script);
         let args = ["bash", "-lc", quoted.as_str()];
-        let cap = (self.max_body as usize) + HEAD_MAX + 256;
+        // Room for the body's one byte past the cap, the answer's headers,
+        // the script's own lines, and a login profile's chatter before the
+        // start marker; the body cap itself is `parse_curl`'s.
+        let cap = (self.max_body as usize) + HEAD_MAX + 4096;
         let out = self
             .ssh
             .run_with_stdin(
@@ -916,6 +931,48 @@ mod curl_tests {
             .await
             .unwrap_err();
         assert!(matches!(e, TransportError::Protocol(_)), "{e}");
+    }
+
+    /// The script prints one byte past the cap; a body over it is
+    /// TooLarge, one exactly at it is a response — never a 2xx cut
+    /// mid-token that the provider reports as unreadable JSON.
+    #[tokio::test]
+    async fn a_body_over_the_cap_is_too_large_and_one_at_the_cap_is_not() {
+        let head = "HTTP/2 200 \r\ncontent-type: application/json\r\n\r\n";
+        let f = FakeSsh::new();
+        f.on(Match::Any, answer("200", head, &"x".repeat(1025)));
+        let mut t = curl(&f);
+        t.max_body = 1024;
+        let e = t
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TransportError::TooLarge(m) if m.contains("more than 0 MiB")),
+            "{e}"
+        );
+
+        let f = FakeSsh::new();
+        f.on(Match::Any, answer("200", head, &"x".repeat(1024)));
+        let mut t = curl(&f);
+        t.max_body = 1024;
+        let r = t
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap();
+        assert_eq!(r.body.len(), 1024);
+        let script = CurlTransport::script(
+            Method::Get,
+            "https://jira.corp.example/x",
+            1,
+            false,
+            1,
+            1024,
+        );
+        assert!(
+            script.contains("head -c $((1024 + 1)) \"$d/rb\""),
+            "one byte past the cap: {script}"
+        );
     }
 
     #[tokio::test]
