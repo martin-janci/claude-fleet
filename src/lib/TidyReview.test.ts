@@ -7,8 +7,8 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import TidyReview from './TidyReview.svelte';
-import { EMPTY_REPORT, reopenedLoads, reopenedWork, requestTidy, tidyReport, tidyRequest, type TidyCandidate } from './tidy';
-import { toasts } from './toasts';
+import { EMPTY_REPORT, refreshTidy, reopenedLoads, reopenedWork, requestTidy, tidyReport, tidyRequest, type TidyCandidate } from './tidy';
+import { toasts, runToastAction } from './toasts';
 import { get } from 'svelte/store';
 import { sessionFocus } from './session_focus';
 import { sessions, type SessionRow } from './sessions';
@@ -233,6 +233,73 @@ describe('TidyReview', () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith('dismiss_reopened', { args: { item_id: 7 } }),
     );
+  });
+
+  it('a newly reopened item toasts once, and Show opens the list', async () => {
+    await mount();
+    await waitFor(() => expect(get(reopenedLoads)).toBe(1));
+    // The first read is the baseline (nothing reopened); the next brings one.
+    reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+    await refreshTidy();
+    await tick();
+    const t = get(toasts);
+    expect(t.map((x) => x.message)).toEqual(['PAY-7 reopened · 2 past sessions']);
+    expect(t[0].action?.label).toBe('Show');
+    runToastAction(t[0].id);
+    await tick();
+    expect(screen.getByTestId('reopened-list')).toBeTruthy();
+    expect(screen.getByTestId('reopened-row')).toHaveTextContent('PAY-7');
+    // The same item is not announced again on the next read.
+    await refreshTidy();
+    await tick();
+    expect(get(toasts)).toEqual([]);
+  });
+
+  it('a tidy that partly failed says which, and the sheet closes', async () => {
+    candidates = [cand(1), cand(2)];
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tidy') return { ...EMPTY_REPORT, candidates };
+      if (cmd === 'work_reopened') return reopened;
+      if (cmd === 'tidy_apply')
+        return {
+          results: [
+            { session_id: 1, action: 'safe_kill', ok: true, outcome: 'killed' },
+            { session_id: 2, action: 'safe_kill', ok: false, error: 'the tree is dirty' },
+          ],
+        };
+      return null;
+    });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() => expect(screen.queryByTestId('tidy-sheet')).toBeNull());
+    expect(get(toasts).map((x) => [x.kind, x.message])).toEqual([
+      ['error', 'Tidied 1; 1 failed: the tree is dirty'],
+    ]);
+  });
+
+  it('a tidy the hub refuses is a toast, and the sheet stays open with its ticks', async () => {
+    candidates = [cand(1), cand(2)];
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tidy') return { ...EMPTY_REPORT, candidates };
+      if (cmd === 'work_reopened') return reopened;
+      if (cmd === 'tidy_apply') throw { code: 'E_HUB', message: 'hub unreachable' };
+      return null;
+    });
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() =>
+      expect(get(toasts).map((x) => x.message)).toEqual([
+        expect.stringMatching(/^Tidy up failed: hub unreachable/),
+      ]),
+    );
+    expect(screen.getByTestId('tidy-sheet')).toBeTruthy();
+    const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+    expect(checks.map((c) => c.checked)).toEqual([true, true]);
+    expect((screen.getByTestId('tidy-apply') as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('a request from the Today view opens the sheet with just those sessions ticked (M9)', async () => {
