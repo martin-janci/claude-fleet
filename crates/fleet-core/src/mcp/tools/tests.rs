@@ -7020,16 +7020,16 @@ async fn an_approved_work_start_is_bound_to_force_cross_org_and_the_rest() {
             .unwrap_err();
         assert_ne!(confirm_nonce_of(&e), nonce);
     }
-    // The approved arguments go through once (each repo then fails on the
-    // unknown item), then never again.
-    let out = t
+    // The approved arguments go through once (the ticket, resolved once for
+    // every repo, is then unknown), then never again.
+    let ran = t
         .work_link(
             Extension(op.clone()),
             Parameters(start(Some(nonce.clone()), &|_| {})),
         )
         .await
-        .expect("approved: the start runs");
-    assert_eq!(result_json(&out)["failed"][0]["code"], "E_NOTFOUND");
+        .unwrap_err();
+    assert!(ran.message.starts_with("E_NOTFOUND"), "{}", ran.message);
     let e = t
         .work_link(
             Extension(op),
@@ -7038,6 +7038,47 @@ async fn an_approved_work_start_is_bound_to_force_cross_org_and_the_rest() {
         .await
         .unwrap_err();
     assert_ne!(confirm_nonce_of(&e), nonce);
+}
+
+/// M10.1: a multi-repo start's projects are checked before the operator's
+/// confirmation — a request that can only be refused is never put to a
+/// person — and `project_ids: []` is refused, never a silent single start.
+#[tokio::test]
+async fn a_bad_multi_start_is_refused_before_the_confirmation() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    for (project_id, ids) in [
+        (None, vec![]),
+        (Some(pid), vec![pid]),
+        (None, (1..=9).collect::<Vec<i64>>()),
+    ] {
+        for who in [operator(), Caller::master()] {
+            let e = t
+                .work_link(
+                    Extension(who),
+                    Parameters(WorkLinkArgs {
+                        action: "start".into(),
+                        key: Some("ABC-1".into()),
+                        project_id,
+                        project_ids: Some(ids.clone()),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                e.message.starts_with("E_INVALID"),
+                "{project_id:?} {ids:?}: {}",
+                e.message
+            );
+        }
+    }
+    // The multi-start's own clock stops short of the call's.
+    assert!(
+        crate::service::trackers::tickets::MULTI_START_BUDGET + std::time::Duration::from_secs(15)
+            <= super::support::LIFECYCLE_CAP
+    );
 }
 
 /// M9.7 review fix: every other path that starts or restarts a session is
