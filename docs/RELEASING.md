@@ -58,6 +58,40 @@ generated from it.
    into the notes if you want them inline, and **Publish**. See
    [GitHub release job](#github-release-job) below.
 
+6. Release the phone app under the same version:
+
+   ```bash
+   scripts/release-mobile.sh 0.3.0
+   ```
+
+   It tags [fleet-mobile](https://github.com/martin-janci/fleet-mobile)'s
+   `main` head `v0.3.0` — refusing if claude-fleet's own `v0.3.0` is not on
+   GitHub yet, if fleet-mobile's CI has not passed on that commit, or if
+   fleet-mobile already has `v0.3.0` somewhere else — and that tag starts
+   fleet-mobile's `release.yml`: test, build, sign with the release key,
+   publish a release with the APK. The claude-fleet release body already
+   links to it. See [The phone app](#the-phone-app) below.
+
+## The phone app
+
+The Android app lives in its own repository and is built there, never here.
+What ties the two together is the version: every claude-fleet `vX.Y.Z` has a
+fleet-mobile `vX.Y.Z` cut from whatever fleet-mobile `main` was at the time,
+and the app reports that version in its Settings screen.
+
+- **Signing.** fleet-mobile's `release.yml` signs with a dedicated release
+  key held in its four `ANDROID_*` Actions secrets and refuses to build
+  without them. The keystore and its password are also in the owner's macOS
+  keychain (`fleet-mobile-release-keystore-base64`,
+  `fleet-mobile-release-keystore-password`) — the only other copy. Lose both
+  and no future APK can update an installed one.
+- **Debug builds** install as a separate app, `dev.claudefleet.mobile.debug`
+  ("fleet-mobile debug"), because they carry the building machine's debug key
+  and Android will not update a release-signed app with it.
+- **versionCode** is fleet-mobile's release-workflow run number, so it only
+  grows; `versionName` is the tag without the `v`.
+- **iOS** is not released: there is no signing identity for it yet.
+
 ## GitHub release job
 
 `.github/workflows/release.yml` runs on `push` of any `v*` tag — i.e. the tag
