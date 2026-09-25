@@ -73,11 +73,12 @@
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
+  import NameWorkDialog from './NameWorkDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
   import SessionRowItem from './SessionRowItem.svelte';
@@ -913,6 +914,17 @@
   let bgModalError = $state<string | null>(null);
   let bgModalLoading = $state(false);
 
+  // --- Name this work… (work graph M11.1) ---
+  // In work mode a project group holds the sessions no work group took: its
+  // header names one piece of work for them (each session chosen in the
+  // dialog; every one by default).
+  const nameWorkBlocked = $derived(hubActionBlocked('name_session_work', $hubStatus, $hubConnection));
+  let nameWorkFor: { id: number; label: string }[] | null = $state(null);
+  function openNameWork(list: readonly SessionRow[], e: Event) {
+    e.stopPropagation();
+    nameWorkFor = list.map((s) => ({ id: s.id, label: s.friendly_name || s.tmux_name }));
+  }
+
   // --- Purge Project ---
   let pendingPurge: ProjectRow | null = $state(null);
 
@@ -1182,6 +1194,17 @@
                   >{/if}<span class="repo">{row.project.repo}</span>
               </span>
               <span class="count">{projectSessions.length}</span>
+              {#if $sidebarGroupBy === 'work' && projectSessions.length > 0}
+                <button
+                  class="icon-btn small"
+                  data-testid="name-work-group"
+                  disabled={nameWorkBlocked !== null}
+                  title={nameWorkBlocked ??
+                    `Name this work… (${projectSessions.length} session${projectSessions.length === 1 ? '' : 's'} with no work)`}
+                  aria-label="Name this work"
+                  onclick={(e) => openNameWork(projectSessions, e)}
+                >#</button>
+              {/if}
               <button
                 class="icon-btn"
                 onclick={(e) => openNew(row, e)}
@@ -1384,6 +1407,12 @@
   </Modal>
 {/if}
 
+{#if nameWorkFor}
+  <NameWorkDialog
+    target={{ mode: 'name', sessions: nameWorkFor }}
+    onclose={() => (nameWorkFor = null)}
+  />
+{/if}
 {#if pendingPurge}
   <ConfirmDialog
     title="Purge project?"

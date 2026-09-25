@@ -1899,6 +1899,165 @@ async fn run_matrix(isolate: bool) {
             .unwrap();
     }
 
+    // ── local work items (work graph M11.1) ────────────────────────────
+    // Name new work on the caller's own session: everyone but the readonly
+    // client (its mode refuses `work_link`).
+    m.row(
+        "work_link",
+        "name",
+        |fx, who| {
+            json!({ "action": "name", "session_id": own(fx, who),
+                    "title": format!("named-{who:?}") })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_ok(who, a, "name own session's work");
+        },
+    )
+    .await;
+    // Another host's session reads as a session that does not exist.
+    let unknown_session = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "name", "session_id": 999_999, "title": "t" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "name",
+        |fx, _| json!({ "action": "name", "session_id": fx.s_b, "title": "t" }),
+        |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone => {
+                    same_as_unknown(a, &unknown_session, &fx.s_b.to_string(), "999999")
+                }
+                _ => is_ok(who, a, "name s_b's work"),
+            }
+        },
+    )
+    .await;
+    // Local keys the rows below named, taken out again so a later row's
+    // leak check does not read host A's own key as B's.
+    let drop_local = |keys: &str| {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute_batch(&format!(
+                "DELETE FROM work_links WHERE item_id IN (SELECT id FROM work_items \
+                   WHERE source = 'local' AND key IN ({keys})); \
+                 DELETE FROM work_items WHERE source = 'local' AND key IN ({keys});"
+            ))
+            .unwrap();
+    };
+    // A key B's tracker carries is no oracle for host A: it names work as
+    // an unknown key does.
+    for key in ["BB-1", "ZZ-77"] {
+        let named = call(
+            &fx,
+            Who::HostA,
+            "work_link",
+            json!({ "action": "name", "session_id": fx.s_a, "title": "a-local", "key": key }),
+        )
+        .await;
+        is_ok(Who::HostA, &named, key);
+    }
+    drop_local("'BB-1', 'ZZ-77'");
+    // A taken key: refused for whoever sees B's ticket; host A names its
+    // own work under it (as above), and then host N meets that local item
+    // (local keys are one fleet-wide namespace).
+    m.row(
+        "work_link",
+        "name",
+        |fx, who| {
+            json!({ "action": "name", "session_id": own(fx, who), "title": "dup",
+                    "key": "BB-1" })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA => is_ok(who, a, "an invisible ticket's key"),
+                _ => is_code(who, a, "E_EXISTS", "a taken key"),
+            }
+        },
+    )
+    .await;
+    drop_local("'BB-1'");
+    // Rename: host A's local item, hidden from the other hosts.
+    let local_a = {
+        let s = fx.t.store.lock().unwrap();
+        s.name_session_work(fx.s_a, Some("LOC-A"), "local-a")
+            .unwrap()
+            .0
+            .id
+    };
+    let unknown_item = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "name", "item_id": 999_999, "title": "t" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "name",
+        move |_, who| json!({ "action": "name", "item_id": local_a, "title": format!("renamed-{who:?}") }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone => {
+                    same_as_unknown(a, &unknown_item, &local_a.to_string(), "999999")
+                }
+                _ => assert!(text(a).contains(&format!("renamed-{who:?}")), "{who:?}: {a:?}"),
+            }
+        },
+    )
+    .await;
+    // A ticket is never renamed: refused for who sees it, unknown otherwise.
+    m.row(
+        "work_link",
+        "name",
+        |fx, _| json!({ "action": "name", "item_id": fx.item_b, "title": "t" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone => is_code(who, a, "E_NOTFOUND", "another org's ticket"),
+                _ => is_code(who, a, "E_INVALID", "a ticket"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "local_items",
+        |_, _| json!({ "action": "local_items" }),
+        move |_, who, a| {
+            is_ok(who, a, "local_items");
+            let t = text(a);
+            let lists_a = t.contains(&format!("\"id\":{local_a},"));
+            match who {
+                Who::HostB => {
+                    assert!(!lists_a && t.contains("named-HostB"), "{t}");
+                    assert!(!t.contains("named-HostA"), "{t}");
+                }
+                Who::HostNone => assert!(!lists_a && !t.contains("named-HostA"), "{t}"),
+                Who::HostA => assert!(lists_a && !t.contains("named-HostB"), "{t}"),
+                _ => assert!(lists_a && t.contains("named-HostB"), "{who:?}: {t}"),
+            }
+        },
+    )
+    .await;
+
     // Coverage: every action of the three tools has a row.
     let want: BTreeSet<(String, String)> = WORK_ACTIONS
         .iter()
