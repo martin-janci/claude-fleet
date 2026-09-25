@@ -243,4 +243,35 @@ Commit and push before code.
   D3 at none: M9.3 (on demand only), M9.6 and M9.7 are now to be built;
   M9.4 (summaries off), M9.5 (no write-back) and M9.8 (no webhooks) stay
   planned and are not built. `main` (M6) was merged into the branch first.
+- **2026-09-25, M9.7, M9.3 and M9.6 landed** (same branch, after merging
+  `main`'s M6). Verified as above. Deviations and choices:
+  1. **M9.7 covers more than the task text.** Besides `work_link` start /
+     resume and every kill, the operator's `new_session` and
+     `new_shell_session` are gated too — otherwise "start ABC-123" would
+     simply bypass the rule through `new_session` — and every
+     `confirm: true` tool (`delete_worktree`, `broadcast_prompt`, …) is
+     always gated for it. The operator is its client token (`ux-agent`,
+     `Caller::is_operator`). A hub has no approver
+     (`McpGuards::without_approver`), so there those calls are refused
+     `E_FORBIDDEN` rather than handed a nonce nobody can approve: an
+     operator on a hub cannot start or kill sessions. Its CLAUDE.md now
+     names starting a session among the confirmed actions.
+  2. **M9.3 reads the reply, not the pane.** The Stop hook's
+     `last_assistant_message` carries the turn's reply alone, so the
+     prompt echo (which names the markers) can never be mistaken for it —
+     simpler and safer than the safe-kill pane scan. The pending request is
+     a timeline event (`handover_requested` and its settlements), not a new
+     column; the hand-off is a journal `note` from the `agent` (both
+     already allowed values), so no migration. Every Stop after a request
+     settles it: a reply without markers is `handover_missing`. "One per
+     conversation" became "one pending at a time" (30 min): the person asks
+     on purpose, so a second ask is allowed once the first settled.
+  3. **M9.6's duplicate guard** is per repository only for a multi start
+     (`StartArgs::per_project`); a plain start still refuses a second live
+     session anywhere. Sibling friendly names stay `KEY title` (the
+     sidebar's project grouping tells them apart). An edited brief gets the
+     sibling line prepended; a built brief carries it inside the budget via
+     `ticket_brief_with`, so the fence's end always survives.
+  4. **Budget:** M9.7 +328 (69,801, `BUDGET_BYTES` 69,901), M9.3 +64
+     (inside), M9.6 +133 (69,998, `BUDGET_BYTES` 70,098).
 

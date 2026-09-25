@@ -537,10 +537,20 @@ acceptance is still to do.
   acceptance criteria parsed in Rust, `composer_text` fenced by
   `fence_untrusted`), the Routed `work_ticket_card`, the card in Details and
   **Insert into composer** (inserts, never sends).
-- **Planned, waiting on a decision:** agent-written handover (D9),
-  dead-session summaries (D10), write-back (D3), multi-repo start (D11),
-  operator work commands (D12), webhook nudges (D13) — each is designed in
-  the plan. Today's **Stale** links to M7's Tidy-up sheet once M7 merges.
+- **M9.7 operator confirmation** (D12): the operator's session starts
+  (`new_session`, `new_shell_session`, `work_link` start / resume) and kills
+  always need a person's approval, whatever `mcp.confirm_destructive` says;
+  a hub (no approver) refuses them. "Tidy up done tickets" waits for M7.
+- **M9.3 agent-written handover** (D9, on demand): `work_link { action:
+  handover }`, marker-delimited reply read by the Stop hook, kept as an
+  agent `note`, shown first (fenced) in briefs; the card's *Ask for a
+  handover*.
+- **M9.6 multi-repo start** (D11): `work_link start { project_ids }`, one
+  sibling per repo on one branch, per-repo duplicate guard; *Also start in*
+  in the New-session dialog.
+- **Not built, by decision:** write-back (D3 none), dead-session summaries
+  (D10 off), webhook nudges (D13 no). Today's **Stale** links to M7's
+  Tidy-up sheet once M7 merges.
 
 ## Critical path and parallelism
 
@@ -635,3 +645,10 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   grew by 113 B (94 raised the constant to 69,365; `card`'s 19 fit the
   headroom); no new tool, no contract bump. The other six M9 items wait on
   the new decisions D9–D13 and on D3.
+- 2026-09-25: decisions D3 (none) and D9–D13 (defaults) recorded; `main`
+  (M6) merged into the M9 branch; M9.7, M9.3 and M9.6 landed. Two
+  `work_link` things (the `handover` action, the `project_ids` parameter)
+  and `confirm_nonce` on four tools; two more Routed commands (165). The
+  tool budget is 70,098 (measured 69,998). No new tool, no migration, no
+  contract bump.
+
