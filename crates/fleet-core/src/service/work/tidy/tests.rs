@@ -224,6 +224,45 @@ async fn a_shared_worktree_is_plain_killed_and_archive_keeps_tmux() {
     assert!(row.work.unwrap().archived_at.is_some());
 }
 
+/// A review session runs in its source's worktree: the source is only ever
+/// plain-killed while the review lives, never safe-killed (whose completion
+/// removes the tree the review is using).
+#[tokio::test]
+async fn a_tree_a_live_review_uses_is_only_plain_killed() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let a = seed(&store, "a", "done");
+    {
+        let s = store.lock().unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let review = s
+            .upsert_session("a-review", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET kind = 'review', worktree_key = 'a' WHERE id = ?1",
+                [review],
+            )
+            .unwrap();
+    }
+    let exec = FakeExec {
+        dirty: vec!["a".into()],
+        ..Default::default()
+    };
+    let plan = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = plan
+        .candidates
+        .iter()
+        .find(|c| c.session_id == a)
+        .expect("the done source is still a candidate");
+    assert_eq!(c.action, TidyAction::Kill);
+    let report = tidy_apply(&store, &exec, &[item(a, "safe_kill")], &OrgScope::All, NOW)
+        .await
+        .unwrap();
+    assert!(report.results[0].ok, "{report:?}");
+    assert_eq!(exec.calls(), vec!["kill a"]);
+    assert_eq!(exec.inspects.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn host_scope_and_bad_requests_are_per_item_or_refused() {
     let store = Mutex::new(Store::open_in_memory().unwrap());

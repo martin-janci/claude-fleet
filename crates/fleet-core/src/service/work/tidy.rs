@@ -141,7 +141,9 @@ impl Snapshot {
         planner::plan_tidy(&self.sessions, &self.cfg, &self.ctx(now))
     }
 
-    /// Another live work session shares this one's worktree.
+    /// Another live session shares this one's worktree: a work session, or a
+    /// review running in its source's tree (any kind but a shell, which has
+    /// no tree of its own). Such a tree is never safe-removed.
     fn shares_worktree(&self, s: &TidySession) -> bool {
         let r = &s.row;
         r.kind == "work"
@@ -149,7 +151,7 @@ impl Snapshot {
             && self.sessions.iter().any(|o| {
                 o.row.id != r.id
                     && o.row.status == "running"
-                    && o.row.kind == "work"
+                    && o.row.kind != "shell"
                     && o.row.host_alias == r.host_alias
                     && o.row.project_id == r.project_id
                     && o.row.worktree_key == r.worktree_key

@@ -313,6 +313,31 @@ fn reviews_are_not_duplicates_of_their_source() {
     assert!(run(&[session(1, DAY), review], &cfg()).is_empty());
 }
 
+/// A review running in its source's worktree keeps that tree in use: the
+/// done source is offered a plain kill, never a safe kill (which would
+/// remove the tree under the review). A shell in the same key does not.
+#[test]
+fn a_review_sibling_keeps_the_tree_shared_but_is_no_duplicate() {
+    let source = done_session(1);
+    let mut review = session(2, DAY);
+    review.row.kind = "review".into();
+    review.row.worktree_key = Some("wt1".into());
+    let got = run(&[source.clone(), review], &cfg());
+    assert_eq!(
+        reasons(&got),
+        vec![(1, TidyReason::DoneIdle, TidyAction::Kill)]
+    );
+    assert!(got[0].secondary.is_empty(), "a review is not a duplicate");
+    let mut shell = session(3, DAY);
+    shell.row.kind = "shell".into();
+    shell.row.worktree_key = Some("wt1".into());
+    let got = run(&[source, shell], &cfg());
+    assert_eq!(
+        reasons(&got),
+        vec![(1, TidyReason::DoneIdle, TidyAction::SafeKill)]
+    );
+}
+
 #[test]
 fn a_work_row_without_a_tracked_worktree_is_only_archived() {
     let mut s = done_session(1);
