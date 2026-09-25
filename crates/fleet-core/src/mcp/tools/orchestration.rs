@@ -5,15 +5,14 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = orchestration_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Block until a session reaches a state, or time out. \
-        until=\"idle\": claude_status is idle | completed | stopped | failed \
-        (true even for a session that never started a turn). \
-        until=\"turn_gt\": turn_seq > `turn` — pass the turn_seq_before that \
-        send_prompt returned to wait for the reply to YOUR prompt. Polls the \
-        store every 500 ms for up to timeout_s (default 120, max 600). \
-        Returns JSON { status: satisfied | timeout, claude_status, turn_seq, \
-        last_stop_at, stuck_kind }. Read-only. A per-host token may only \
-        wait on sessions on its own host.")]
+    #[tool(description = "Block until a session reaches a state, or \
+        timeout_s. until=\"idle\": claude_status is idle | completed | \
+        stopped | failed (true even before a first turn). until=\"turn_gt\": \
+        turn_seq > `turn`; pass send_prompt's turn_seq_before to wait for \
+        the reply to YOUR prompt. Polls every 500 ms. Returns { status: \
+        satisfied | timeout, claude_status, turn_seq, last_stop_at, \
+        stuck_kind }. Read-only; a per-host token only for sessions on its \
+        own host.")]
     pub(super) async fn wait_for_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -43,16 +42,12 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Read a session's Claude Code transcript (the JSONL \
-        Claude writes, not the pane) and return the last assistant turn as \
-        plain text — text blocks verbatim, one summary line per tool call, \
-        no thinking. since_turn returns every turn after that turn_seq \
-        (use send_prompt's turn_seq_before). max_chars caps the text \
-        (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE \
-        (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). \
-        Read-only; prefer it over capture_session for the reply text. fresh_for \
-        returns only what is new since your last read. unchanged costs no \
-        transcript read.")]
+    #[tool(description = "Read a session's Claude Code transcript (the \
+        JSONL, not the pane): the last assistant turn as plain text, text \
+        blocks verbatim, one line per tool call, no thinking. Errors: \
+        E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing \
+        written yet). Read-only; prefer it over capture_session for the \
+        reply. unchanged costs no transcript read.")]
     pub(super) async fn session_transcript(
         &self,
         Extension(caller): Extension<Caller>,
@@ -87,10 +82,7 @@ impl FleetTools {
         let resource_key = row.id.to_string();
         let (decision, generation, stored_anchor, stored_watermark) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let reader_exists = s
-                .get_session_by_id(reader)
-                .map_err(|e| to_mcp_err(e.into()))?
-                .is_some();
+            let reader_exists = resolve_reader(&s, &caller, reader)?;
             let stored = s
                 .get_read_cursor(reader, "session_transcript", &resource_key)
                 .map_err(to_mcp_err)?;
@@ -218,20 +210,13 @@ impl FleetTools {
         )]))
     }
 
-    #[tool(
-        description = "Read a session conversation as structured turns — the shape of the \
-        exchange, where session_transcript gives one flat blob. Each turn carries \
-        the prompt, its timestamps, and items by kind: text, tool, subagent, \
-        compact, command, interrupt (tool inputs and results are never included). \
-        Also returns events (this conversation timeline, newest events_limit: \
-        default 50, max 200, 0 for none) and context (context-window usage, or \
-        null). turns \
-        defaults to 10, max 100; the character budget scales with it. Pass \
-        claude_session_id (from session_conversations) for an earlier \
-        conversation. since_turn narrows the window to what came after that \
-        turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, \
-        E_NO_TRANSCRIPT."
-    )]
+    #[tool(description = "Read a session conversation as structured turns \
+        (session_transcript is one flat blob): each turn's prompt, \
+        timestamps and items by kind (text, tool, subagent, compact, \
+        command, interrupt; tool inputs and results are never included), \
+        plus events (the conversation timeline) and context (context-window \
+        usage, or null). Read-only. Errors: E_INVALID, E_INVALID_STATE, \
+        E_NO_TRANSCRIPT.")]
     pub(super) async fn session_conversation(
         &self,
         Extension(caller): Extension<Caller>,
@@ -266,12 +251,10 @@ impl FleetTools {
     }
 
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
-        session_transcript in one call: deliver the prompt, wait up to \
-        timeout_s (default 120, max 600) for the turn to complete, and return \
-        JSON { turn_seq, status: satisfied | timeout, transcript } where \
-        transcript is the reply as plain text (null with transcript_error \
-        when it cannot be read). Marked as untrusted unless raw=true (master \
-        token only). Address the session with session_id.")]
+        session_transcript in one call. Returns { turn_seq, status: \
+        satisfied | timeout, transcript } (the reply as plain text; null \
+        with transcript_error when unreadable). Marked untrusted unless \
+        raw=true (master token only).")]
     pub(super) async fn run_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -319,17 +302,14 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Dispatch a unit of work to a worker session and \
-        track it as a task. Pass worker_session_id (an existing session) OR \
-        new_worker { host_alias, project_id, name? } (spawns one via \
-        new_session). The prompt is delivered with an appended instruction to \
-        print FLEET_TASK_DONE_<nonce> on its own line followed by a \
-        one-paragraph result; fleet detects the marker on the worker's next \
-        Stop and flips the task to done with that paragraph as `result` \
-        (also delivered to requester_session_id's inbox as kind=task_result). \
-        Returns the task row (id, state=running, worker_session_id, …); \
-        follow with wait_for_task. A per-host token must name a requester on \
-        its own host. Marked as untrusted unless raw=true (master only).")]
+    #[tool(description = "Dispatch work to a worker session and track it as \
+        a task. The prompt gets an appended instruction to print \
+        FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph \
+        result; on the worker's next Stop fleet flips the task to done with \
+        that paragraph as `result` (also sent to the requester's inbox as \
+        kind=task_result). Returns the task row; follow with wait_for_task. \
+        A per-host token must name a requester on its own host. Marked \
+        untrusted unless raw=true (master only).")]
     pub(super) async fn dispatch_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -442,12 +422,11 @@ impl FleetTools {
         ok_json(&started)
     }
 
-    #[tool(description = "Block until a task reaches done | failed | cancelled \
-        or timeout_s elapses (default 120, max 600; polls every 500 ms). \
-        Returns JSON { status: satisfied | timeout, task } — task.result \
-        holds the worker's paragraph when done. Read-only. A per-host token \
-        may only wait on tasks it requested or whose worker is on its host \
-        (E_FORBIDDEN).")]
+    #[tool(description = "Block until a task is done | failed | cancelled, \
+        or timeout_s (polls every 500 ms). Returns { status: satisfied | \
+        timeout, task }; task.result holds the worker's paragraph. \
+        Read-only. A per-host token may only wait on tasks it requested or \
+        whose worker is on its host (E_FORBIDDEN).")]
     pub(super) async fn wait_for_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -472,10 +451,9 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "List tasks, newest-first (default 50 rows). Filters: \
-        requester_session_id, state (queued | running | done | failed | \
-        cancelled). Read-only. A per-host token sees only tasks it requested \
-        from its host or whose worker is on its host.")]
+    #[tool(description = "Tasks, newest first. Read-only. A per-host token \
+        sees only tasks it requested from its host or whose worker is on its \
+        host.")]
     pub(super) async fn list_tasks(
         &self,
         Extension(caller): Extension<Caller>,
@@ -505,11 +483,11 @@ impl FleetTools {
         ok_json_compact(&rows)
     }
 
-    #[tool(description = "Cancel a queued or running task: marks it cancelled \
-        (E_TASK_TERMINAL if it already finished). The worker session keeps \
-        running — kill or re-prompt it separately if needed. May return \
-        E_CONFIRM_REQUIRED when desktop confirmation is on. A per-host token \
-        may only cancel tasks it can see (E_FORBIDDEN).")]
+    #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
+        if it already finished). The worker session keeps running: kill or \
+        re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop \
+        confirmation is on. A per-host token may only cancel tasks it can \
+        see (E_FORBIDDEN).")]
     pub(super) async fn cancel_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -530,10 +508,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Replace a session's tags (short labels such as \
-        `review`, `infra`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]; \
-        an empty list clears). Tags show in list_sessions rows and \
-        list_sessions { tag } filters on them. Returns the updated row. \
-        Address the session with session_id OR host_alias + tmux_name.")]
+        `review`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]), shown \
+        and filterable in list_sessions. Returns the updated row.")]
     pub(super) async fn set_session_tags(
         &self,
         Extension(caller): Extension<Caller>,

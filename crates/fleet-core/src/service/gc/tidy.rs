@@ -222,6 +222,11 @@ pub struct TidySession {
     pub link: Option<TidyLink>,
     /// Any live confirmed link of the session is to an `in_progress` item.
     pub in_progress: bool,
+    /// The latest snooze across ALL the session's live confirmed links (a
+    /// flag written to a secondary link counts as much as the primary's).
+    pub snoozed_until: Option<i64>,
+    /// Some live confirmed link of the session is marked never.
+    pub never: bool,
     /// The PR probe saw the branch's PR merged.
     pub pr_merged: bool,
     /// Last prompt or attach (`sessions.last_touch_at`).
@@ -390,10 +395,12 @@ fn idle_unlinked_since(s: &TidySession, cfg: &TidyConfig, now: i64) -> Option<i6
     (now - last_use >= cfg.unlinked_idle_secs).then_some(last_use)
 }
 
-/// Live `work` sessions grouped by worktree: `(host, project, worktree_key)`.
-/// Reviews share their source's worktree by design and are not duplicates.
+/// Live sessions grouped by worktree: `(host, project, worktree_key)`. Every
+/// kind but `shell` counts as using the tree — a review runs in its source's
+/// worktree by design (and is not a duplicate of it, see `plan_tidy`); a
+/// shell has no tree of its own.
 fn worktree_group(r: &SessionRow) -> Option<(String, Option<i64>, String)> {
-    (r.status == "running" && r.kind == "work")
+    (r.status == "running" && r.kind != "shell")
         .then(|| r.worktree_key.clone())
         .flatten()
         .map(|k| (r.host_alias.clone(), r.project_id, k))
@@ -421,8 +428,8 @@ pub fn plan_tidy(
     ctx: &TidyContext<'_>,
 ) -> Vec<TidyCandidate> {
     let now = ctx.now;
-    // Shared worktrees: every live work session counts, protected or not —
-    // a protected sibling is still using the tree.
+    // Shared worktrees: every live session in the tree counts, protected or
+    // not — a protected sibling, or a review, is still using the tree.
     let mut groups: HashMap<(String, Option<i64>, String), Vec<usize>> = HashMap::new();
     for (i, s) in sessions.iter().enumerate() {
         if let Some(g) = worktree_group(&s.row) {
@@ -433,12 +440,22 @@ pub fn plan_tidy(
     let mut duplicate: HashSet<usize> = HashSet::new();
     for members in groups.values().filter(|m| m.len() >= 2) {
         shared.extend(members.iter().copied());
-        let keep = members
+        // Duplicates are work sessions of one tree; a review sharing its
+        // source's tree is there by design.
+        let work: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&i| sessions[i].row.kind == "work")
+            .collect();
+        if work.len() < 2 {
+            continue;
+        }
+        let keep = work
             .iter()
             .copied()
             .max_by_key(|&i| (recency(&sessions[i], now), sessions[i].row.id))
-            .unwrap_or(members[0]);
-        duplicate.extend(members.iter().copied().filter(|&i| i != keep));
+            .unwrap_or(work[0]);
+        duplicate.extend(work.iter().copied().filter(|&i| i != keep));
     }
 
     let mut out = Vec::new();
@@ -447,8 +464,15 @@ pub fn plan_tidy(
         if protection(s, ctx).is_some() {
             continue;
         }
+        // A snooze or never on ANY live confirmed link of the session, not
+        // only its primary: `work_link { snooze | never, link_id }` accepts
+        // a secondary link, and a flag accepted must be honoured.
+        let snoozed = |t: Option<i64>| t.is_some_and(|t| t > now);
+        if s.never || snoozed(s.snoozed_until) {
+            continue;
+        }
         if let Some(l) = &s.link {
-            if l.never || l.snoozed_until.is_some_and(|t| t > now) {
+            if l.never || snoozed(l.snoozed_until) {
                 continue;
             }
         }

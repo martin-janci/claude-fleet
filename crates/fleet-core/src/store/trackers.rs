@@ -657,6 +657,10 @@ fn secret_hint(value: &str) -> Option<String> {
     Some(format!("…{tail}"))
 }
 
+/// The key in `trackers.settings` that holds the sync's 429 deadline (see
+/// [`Store::set_tracker_not_before`]).
+const NOT_BEFORE_KEY: &str = "not_before";
+
 const TRACKER_COLUMNS: &str = "t.id, t.provider, t.name, t.instance_id, t.site_url, t.transport, \
      t.config, t.state, t.last_sync_at, t.last_error, t.created_at, \
      s.auth_kind, s.username, s.value, s.credential_ref, t.org_id, t.settings";
@@ -1151,22 +1155,88 @@ impl Store {
         Ok(())
     }
 
-    /// Replace what the admin set. `true` when it changed.
+    /// The `settings` JSON as stored: the admin's fields and, beside them,
+    /// the sync's deadline ([`NOT_BEFORE_KEY`]).
+    fn settings_json(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, IpcError> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT settings FROM trackers WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(raw
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+            .and_then(|v| match v {
+                serde_json::Value::Object(m) => Some(m),
+                _ => None,
+            })
+            .unwrap_or_default())
+    }
+
+    /// Write the `settings` JSON (`NULL` when empty). `true` when it changed.
+    fn write_settings_json(
+        &self,
+        id: i64,
+        m: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<bool, IpcError> {
+        let json = (!m.is_empty()).then(|| serde_json::Value::Object(m).to_string());
+        let n = self.conn.execute(
+            "UPDATE trackers SET settings = ?1 WHERE id = ?2 AND settings IS NOT ?1",
+            rusqlite::params![json, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Replace what the admin set (the sync's deadline beside it is kept).
+    /// `true` when it changed.
     pub fn set_tracker_settings(
         &self,
         id: i64,
         settings: &TrackerSettings,
     ) -> Result<bool, IpcError> {
         self.require_tracker(id)?;
-        let json = (!settings.is_default())
-            .then(|| serde_json::to_string(settings))
-            .transpose()
-            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
-        let n = self.conn.execute(
-            "UPDATE trackers SET settings = ?1 WHERE id = ?2 AND settings IS NOT ?1",
-            rusqlite::params![json, id],
-        )?;
-        Ok(n > 0)
+        let mut m = match serde_json::to_value(settings) {
+            Ok(serde_json::Value::Object(m)) => m,
+            Ok(_) => serde_json::Map::new(),
+            Err(e) => return Err(IpcError::new(codes::E_SERIALIZE, e.to_string())),
+        };
+        if let Some(nb) = self.settings_json(id)?.remove(NOT_BEFORE_KEY) {
+            m.insert(NOT_BEFORE_KEY.into(), nb);
+        }
+        self.write_settings_json(id, m)
+    }
+
+    /// Record (or clear) the moment a rate-limited tracker may be asked
+    /// again: the sync's 429 deadline, unix seconds. It lives in the
+    /// `settings` JSON beside the admin's fields — no schema change — where
+    /// [`TrackerSettings`] never sees it (unknown fields are ignored) and
+    /// [`Store::set_tracker_settings`] keeps it.
+    pub fn set_tracker_not_before(&self, id: i64, at: Option<i64>) -> Result<(), IpcError> {
+        let mut m = self.settings_json(id)?;
+        match at {
+            Some(t) => {
+                m.insert(NOT_BEFORE_KEY.into(), t.into());
+            }
+            None => {
+                m.remove(NOT_BEFORE_KEY);
+            }
+        }
+        self.write_settings_json(id, m)?;
+        Ok(())
+    }
+
+    /// [`Store::set_tracker_not_before`]'s value, if any.
+    pub fn tracker_not_before(&self, id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self
+            .settings_json(id)?
+            .get(NOT_BEFORE_KEY)
+            .and_then(serde_json::Value::as_i64))
     }
 
     pub fn set_tracker_view_enabled(
@@ -1179,6 +1249,18 @@ impl Store {
             "UPDATE tracker_views SET enabled = ?3 \
              WHERE tracker_id = ?1 AND view_id = ?2 AND enabled IS NOT ?3",
             rusqlite::params![tracker_id, view_id, enabled as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Enable every view of the tracker again: a view the sync disabled on
+    /// a 403 gets another chance after a successful `test` (a permission
+    /// hiccup or an SSO re-auth window must not stop it for good). `true`
+    /// when any was disabled.
+    pub fn enable_tracker_views(&self, tracker_id: i64) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE tracker_views SET enabled = 1 WHERE tracker_id = ?1 AND enabled = 0",
+            rusqlite::params![tracker_id],
         )?;
         Ok(n > 0)
     }
@@ -1232,6 +1314,33 @@ mod tests {
         assert!(is_allowed_tracker_host("acme.atlassian.net"));
         assert!(!is_allowed_tracker_host("acme.atlassian.net.evil.com"));
         assert!(!is_allowed_tracker_host("10.0.0.1"));
+    }
+
+    /// The sync's 429 deadline rides in the settings JSON: the row's
+    /// `settings` never shows it, an admin write keeps it, and clearing it
+    /// keeps the admin's fields.
+    #[test]
+    fn the_sync_deadline_rides_in_the_settings_json_unseen_and_survives_an_admin_write() {
+        let (s, id) = with_tracker();
+        assert_eq!(s.tracker_not_before(id).unwrap(), None);
+        s.set_tracker_not_before(id, Some(1234)).unwrap();
+        assert_eq!(s.tracker_not_before(id).unwrap(), Some(1234));
+        assert!(s.require_tracker(id).unwrap().settings.is_default());
+        let st = TrackerSettings {
+            repos: vec!["acme/api".into()],
+            ..Default::default()
+        };
+        assert!(s.set_tracker_settings(id, &st).unwrap());
+        assert_eq!(s.require_tracker(id).unwrap().settings, st);
+        assert_eq!(s.tracker_not_before(id).unwrap(), Some(1234));
+        assert!(!s.set_tracker_settings(id, &st).unwrap(), "unchanged");
+        s.set_tracker_not_before(id, None).unwrap();
+        assert_eq!(s.tracker_not_before(id).unwrap(), None);
+        assert_eq!(s.require_tracker(id).unwrap().settings, st);
+        assert!(s
+            .set_tracker_settings(id, &TrackerSettings::default())
+            .unwrap());
+        assert!(s.require_tracker(id).unwrap().settings.is_default());
     }
 
     #[test]

@@ -51,6 +51,7 @@ import type { MovePreview, MoveReport } from './moveSession';
 import type { IpcError } from './result';
 import { sessions, type SessionRow } from './sessions';
 import { hosts, type HostRow } from './hosts';
+import { orgs, type OrgDetail } from './orgs';
 import { selectedSession, selectSession } from './selection';
 import { toasts, clearToasts } from './toasts';
 import { hubConnection } from './hub_connection';
@@ -393,6 +394,10 @@ describe('TransferSheet: recovery actions', () => {
     return render(TransferSheet);
   }
 
+  function orgDetail(id: number, name: string): OrgDetail {
+    return { id, name, created_at: 1, rules: [], hosts: [], trackers: [] };
+  }
+
   function failedRun(err: { code: string; message?: string; details?: unknown }): MoveRun {
     return {
       sessionId: 7,
@@ -409,6 +414,7 @@ describe('TransferSheet: recovery actions', () => {
       startedAt: Date.now(),
       settledAt: Date.now(),
       cleanTarget: false,
+      forceCrossOrg: false,
       attempt: 1,
       resolving: false,
       awaitingStart: false,
@@ -446,6 +452,7 @@ describe('TransferSheet: recovery actions', () => {
       startedAt: Date.now(),
       settledAt: Date.now(),
       cleanTarget: false,
+      forceCrossOrg: false,
       attempt: 1,
       resolving: false,
       awaitingStart: false,
@@ -480,6 +487,7 @@ describe('TransferSheet: recovery actions', () => {
       startedAt: Date.now(),
       settledAt: Date.now(),
       cleanTarget: false,
+      forceCrossOrg: false,
       attempt: 1,
       resolving: opts.resolving ?? false,
       awaitingStart: false,
@@ -506,6 +514,26 @@ describe('TransferSheet: recovery actions', () => {
     );
     await fireEvent.click(getByTestId('transfer-retry'));
     expect(retryMove).toHaveBeenCalledWith(7, { cleanTarget: false });
+  });
+
+  // Work graph M5: the org-boundary refusal gets one click to carry the
+  // links anyway; nothing was copied, so no cleanup is on offer.
+  it('offers Move anyway on the cross-org refusal and retries with force_cross_org', async () => {
+    orgs.set([orgDetail(1, 'Company A'), orgDetail(2, 'Company B')]);
+    const { getByTestId, queryByTestId } = renderSheet(
+      failedRun({
+        code: 'E_FORBIDDEN',
+        details: { cross_org: true, work_org_id: 1, session_org_id: 2 },
+      }),
+    );
+    const body = getByTestId('transfer-failure').textContent ?? '';
+    expect(body).toContain('Company A');
+    expect(body).toContain('Company B');
+    expect(queryByTestId('transfer-retry')).toBeNull();
+    expect(queryByTestId('transfer-clean')).toBeNull();
+    await fireEvent.click(getByTestId('transfer-force-cross-org'));
+    expect(retryMove).toHaveBeenCalledWith(7, { forceCrossOrg: true });
+    orgs.set([]);
   });
 
   it('offers a cleanup that names what it would replace, and needs two clicks', async () => {
@@ -731,6 +759,7 @@ describe('TransferSheet: waiting', () => {
       startedAt: Date.now(),
       settledAt: null,
       cleanTarget: false,
+      forceCrossOrg: false,
       attempt: 1,
       resolving: false,
       awaitingStart: false,

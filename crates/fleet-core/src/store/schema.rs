@@ -561,6 +561,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/056_classify_nudge.sql"),
         already_applied: Some(conversations_have_nudge_stamp),
     },
+    // Re-issues 044's `trg_read_cursors_on_session_delete` for a database
+    // migrated by an intermediate build of 044 that lacked it:
+    // `CREATE TRIGGER IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        57,
+        include_str!("../../migrations/057_read_cursors_trigger.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -838,6 +845,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         };
         assert!(store.has_table("handoffs").unwrap());
         assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
@@ -906,6 +914,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         };
         store.migrate().unwrap();
         let (n, src, started): (i64, String, i64) = store
@@ -1134,6 +1143,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         }
     }
 
@@ -2044,6 +2054,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         };
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());
@@ -2622,6 +2633,67 @@ mod tests {
         let sql = sql.unwrap_or_default();
         assert!(sql.contains("peer_link_id"), "{sql}");
         assert!(sql.contains(" WHERE "), "partial: {sql}");
+    }
+
+    /// Migration 044 was rewritten after it landed; a database whose 044
+    /// ran without `trg_read_cursors_on_session_delete` recorded 44 all the
+    /// same and never got the trigger. Migration 057 re-issues it: such a
+    /// database gains it on the next open, and a session's cursors then die
+    /// with its row as designed.
+    #[test]
+    fn migration_057_restores_the_read_cursor_trigger_a_rewritten_044_left_out() {
+        let trigger_exists = |s: &Store| -> bool {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                      WHERE type = 'trigger' AND name = 'trg_read_cursors_on_session_delete'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        };
+        let s = store_at_version(56);
+        // The intermediate 044: table and indexes, no trigger.
+        s.conn
+            .execute_batch("DROP TRIGGER trg_read_cursors_on_session_delete;")
+            .unwrap();
+        assert!(!trigger_exists(&s));
+        assert_eq!(s.schema_version().unwrap(), 56);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(trigger_exists(&s), "057 re-issued the trigger");
+        // And it does its job: a deleted session takes its cursors with it,
+        // as the reader and as the target.
+        s.conn
+            .execute_batch(
+                "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+                 INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+                   VALUES (1, 'a1', 'local', 1, 1, 'running'),
+                          (2, 'a2', 'local', 1, 1, 'running');
+                 INSERT INTO read_cursors (reader_session_id, tool, resource_key, target_session_id, watermark, updated_at)
+                   VALUES (1, 'inbox', '2:false', 2, 5, 1),
+                          (2, 'inbox', '1:false', 1, 5, 1),
+                          (2, 'list_sessions', '', NULL, NULL, 1);
+                 DELETE FROM sessions WHERE id = 1;",
+            )
+            .unwrap();
+        let left: Vec<(i64, String)> = s
+            .conn
+            .prepare("SELECT reader_session_id, tool FROM read_cursors ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec![(2, "list_sessions".to_string())]);
+        // A database that has the trigger already is untouched by a re-run.
+        s.conn
+            .execute_batch(include_str!(
+                "../../migrations/057_read_cursors_trigger.sql"
+            ))
+            .unwrap();
+        assert!(trigger_exists(&s));
     }
 
     /// Migration 055 on a database that already has migration 054 and rows

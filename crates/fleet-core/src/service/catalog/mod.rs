@@ -237,9 +237,9 @@ pub struct AssetDetail {
 #[derive(Debug, Clone, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "ImportAssetsParams")]
 pub struct ImportArgs {
-    /// Host to import from. Only `local` (the fleet controller) is supported.
+    /// Only `local` (the fleet controller).
     pub host_alias: String,
-    /// Report what would be created without writing anything. Default false.
+    /// Report, write nothing.
     #[serde(default)]
     pub dry_run: bool,
 }

@@ -273,7 +273,11 @@ Index by area (names only; see the reference for details):
   hosts; `dry_run: true` previews instead — writes nothing to either host,
   needs no confirmation, and answers what would travel plus `unknowns`, or
   the same refusal the real move would raise; the result is tagged
-  `kind: "moved"` (the move report) or `kind: "preview"`),
+  `kind: "moved"` (the move report) or `kind: "preview"`; a live work link
+  that the target host's org would put across the org boundary is
+  `E_FORBIDDEN` with details `cross_org: true` — the same shape as a refused
+  link — unless `force_cross_org: true`, which carries it as it is and names
+  the crossing in the report's `warnings`),
   `resolve_move` (finish or undo a partial move left with both sessions
   alive),
   `restore_host_sessions` (batch resume a host's sessions lost to a reboot or
@@ -447,8 +451,9 @@ Index by area (names only; see the reference for details):
   an unknown id, a key outside links as the bare key it typed, and every
   session row it receives has other orgs' work taken out. Linking,
   confirming, starting or resuming work of one org on a session of another
-  is `E_FORBIDDEN` for every caller (details `cross_org: true`) unless
-  `force_cross_org: true`. An org with `isolate_sessions` also hides its
+  — or moving a session (`move_session`) to a host whose org its live links
+  are not in — is `E_FORBIDDEN` for every caller (details `cross_org: true`)
+  unless `force_cross_org: true`. An org with `isolate_sessions` also hides its
   sessions from other orgs' hosts (lists, `whoami`, `peer_status`,
   `session_history`, repo reads, messages, `session:*` frames). See
   [hub.md](hub.md) → *Organisations and isolation*.
@@ -613,6 +618,11 @@ other's deltas. Pass the id `list_sessions`/`whoami` gave the session about
 itself, never a token or host identifier. An id that names no session gets a
 full read with `cursor_reset: "reader_unknown"` — nothing is stored, so the
 next call with the same bad id behaves identically rather than compounding.
+The reader is fenced like a target: a per-host token may only name a session
+on its own host (and inside its org scope), else `E_FORBIDDEN` before any
+read and no cursor is written — a token on host A can never advance a host-B
+session's watermark and blind it to its deltas. The master and a paired
+client are unbound.
 
 **Two answer shapes.** `session_history`, `inbox`, `repo_diff` and
 `list_sessions` answer with a JSON envelope `{unchanged, cursor_reset, more,
@@ -987,7 +997,12 @@ via `curl -H @"$HOME/.claude/fleet-hook.headers"` (a single `Authorization:
 Bearer <host-token>` line, mode `0600`, written by the same provisioning /
 local-install code path as `settings.json`) so the token never appears in the
 command string itself, plus `-H "X-Fleet-Pane: ${TMUX_PANE:-}"` so `resolve_hook_row`
-can match the row by pane directly. Hosts pick up the `SessionStart` /
+can match the row by pane directly. With `work.session_start_context` on,
+the hooks are instead installed as the synchronous form, which also sends
+`X-Fleet-Sync: 1`: only a SessionStart carrying that header can have its
+answer read by Claude, so only then does fleet include a pending handover
+brief in it and stamp the brief delivered — the async form gets the work
+context alone and the brief waits for the next `UserPromptSubmit`. Hosts pick up the `SessionStart` /
 `PreCompact` / `PostCompact` entries only once re-provisioned —
 `provision_hosts` refreshes them on its next run; the local host installs them
 automatically on app start.

@@ -12,8 +12,12 @@
 //!   real [`https::DirectTransport`] and the scripted [`https::FakeTransport`].
 //! * [`via_host`] — transports that run on a fleet host over SSH: `gh`
 //!   (M6.1) and `curl` (M6.3).
+//! * `e2e_loopback` — the e2e fake tracker's transport; only with the
+//!   test-only `e2e` feature (work graph M10.2).
 
 pub mod conn;
+#[cfg(feature = "e2e")]
+pub mod e2e_loopback;
 pub mod http1;
 pub mod https;
 pub mod tls;

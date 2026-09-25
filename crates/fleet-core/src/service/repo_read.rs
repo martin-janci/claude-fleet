@@ -417,7 +417,7 @@ pub async fn repo_tree(
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RepoPathParams")]
 pub struct RepoFileArgs {
-    /// Fleet session id (from list_sessions).
+    /// Fleet session id.
     pub session_id: i64,
     /// Worktree-relative file path.
     pub path: String,

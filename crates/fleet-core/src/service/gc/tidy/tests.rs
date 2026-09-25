@@ -23,6 +23,8 @@ fn session(id: i64, idle: i64) -> TidySession {
         row,
         link: None,
         in_progress: false,
+        snoozed_until: None,
+        never: false,
         pr_merged: false,
         last_touch_at: None,
         open_tasks: false,
@@ -314,6 +316,31 @@ fn reviews_are_not_duplicates_of_their_source() {
     assert!(run(&[session(1, DAY), review], &cfg()).is_empty());
 }
 
+/// A review running in its source's worktree keeps that tree in use: the
+/// done source is offered a plain kill, never a safe kill (which would
+/// remove the tree under the review). A shell in the same key does not.
+#[test]
+fn a_review_sibling_keeps_the_tree_shared_but_is_no_duplicate() {
+    let source = done_session(1);
+    let mut review = session(2, DAY);
+    review.row.kind = "review".into();
+    review.row.worktree_key = Some("wt1".into());
+    let got = run(&[source.clone(), review], &cfg());
+    assert_eq!(
+        reasons(&got),
+        vec![(1, TidyReason::DoneIdle, TidyAction::Kill)]
+    );
+    assert!(got[0].secondary.is_empty(), "a review is not a duplicate");
+    let mut shell = session(3, DAY);
+    shell.row.kind = "shell".into();
+    shell.row.worktree_key = Some("wt1".into());
+    let got = run(&[source, shell], &cfg());
+    assert_eq!(
+        reasons(&got),
+        vec![(1, TidyReason::DoneIdle, TidyAction::SafeKill)]
+    );
+}
+
 #[test]
 fn a_work_row_without_a_tracked_worktree_is_only_archived() {
     let mut s = done_session(1);
@@ -326,9 +353,24 @@ fn a_work_row_without_a_tracked_worktree_is_only_archived() {
 
 #[test]
 fn unreachable_hosts_and_offline_rows_are_skipped() {
-    let mut s = done_session(1);
-    s.row.host_alias = "remote".into();
-    assert!(run(&[s], &cfg()).is_empty());
+    // The control: this row on the reachable host is the candidate.
+    assert_eq!(
+        reasons(&run(&[done_session(1)], &cfg())),
+        vec![(1, TidyReason::DoneIdle, TidyAction::SafeKill)]
+    );
+    let mut remote = done_session(1);
+    remote.row.host_alias = "remote".into();
+    // Offline rows on the reachable host: one stopped, and one lost — a
+    // ghost with no Claude session to resume, which the ghost arm has no
+    // suggestion for either.
+    let mut stopped = done_session(2);
+    stopped.row.status = "stopped".into();
+    let mut lost = done_session(3);
+    lost.row.status = "ghost".into();
+    lost.row.lost_at = Some(NOW - (14 * DAY - 2 * HOUR));
+    lost.row.claude_session_id = None;
+    let got = run(&[remote, stopped, lost], &cfg());
+    assert!(got.is_empty(), "{:?}", reasons(&got));
 }
 
 #[test]
@@ -354,6 +396,29 @@ fn snooze_and_never_are_idempotent() {
         }),
         pr_merged: true,
         ..session(1, 30 * DAY)
+    };
+    assert!(run(&[never], &cfg()).is_empty());
+}
+
+/// A snooze or never accepted on a secondary confirmed link (the session's
+/// own flags, gathered over every live link) holds the session back exactly
+/// as one on its primary.
+#[test]
+fn a_flag_on_any_live_link_is_honoured() {
+    let snoozed = TidySession {
+        snoozed_until: Some(NOW + DAY),
+        ..done_session(1)
+    };
+    assert!(run(&[snoozed], &cfg()).is_empty());
+    let expired = TidySession {
+        snoozed_until: Some(NOW - 1),
+        ..done_session(1)
+    };
+    assert_eq!(run(&[expired], &cfg()).len(), 1);
+    let never = TidySession {
+        never: true,
+        pr_merged: true,
+        ..done_session(1)
     };
     assert!(run(&[never], &cfg()).is_empty());
 }

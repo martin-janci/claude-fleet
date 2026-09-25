@@ -565,11 +565,43 @@ pub fn work_link<'a>(
         }
         Ok(l)
     };
+    // The live link a tidy flag goes to — `link_id`, else the primary —
+    // resolved BEFORE the visibility check, so that omitting `link_id` never
+    // reaches a primary the scope does not see (a forced cross-org link on
+    // the caller's own session). Such a session answers as one with no
+    // linked work, as the store does for a session without any.
+    let tidy_target = || -> Result<i64, IpcError> {
+        let link_id = s.tidy_link(session_id, args.link_id)?;
+        if !scope.is_all() && visible_link(link_id).is_err() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                match args.link_id {
+                    Some(l) => format!("session {session_id} has no live work link {l}"),
+                    None => format!("session {session_id} has no linked work"),
+                },
+            ));
+        }
+        Ok(link_id)
+    };
     // The lifecycle actions (work graph M7) write flags, not decisions: no
     // resolver run after them.
     match args.action.as_str() {
         "archive" => {
-            s.archive_session_work(session_id)?;
+            // A per-host token stamps only the links it sees.
+            let only = if scope.is_all() {
+                None
+            } else {
+                let mut links = s.session_work_links(session_id)?;
+                s.fill_link_orgs(&mut links)?;
+                Some(
+                    links
+                        .iter()
+                        .filter(|l| scope.sees_link(l))
+                        .map(|l| l.id)
+                        .collect::<Vec<i64>>(),
+                )
+            };
+            s.archive_session_links(session_id, only.as_deref())?;
             return lifecycle_row(&s, session_id);
         }
         // A click, or an attach: a person's touch un-archives.
@@ -583,9 +615,7 @@ pub fn work_link<'a>(
             return lifecycle_row(&s, session_id);
         }
         "snooze" => {
-            if let Some(l) = args.link_id {
-                visible_link(l)?;
-            }
+            let link_id = tidy_target()?;
             let days = args.days.unwrap_or(tidy::SNOOZE_DEFAULT_DAYS);
             if !(1..=tidy::SNOOZE_MAX_DAYS).contains(&days) {
                 return Err(IpcError::new(
@@ -594,14 +624,12 @@ pub fn work_link<'a>(
                 ));
             }
             let until = crate::service::catalog::now_secs() + i64::from(days) * 86_400;
-            s.snooze_tidy(session_id, args.link_id, until)?;
+            s.snooze_tidy(session_id, Some(link_id), until)?;
             return lifecycle_row(&s, session_id);
         }
         "never" => {
-            if let Some(l) = args.link_id {
-                visible_link(l)?;
-            }
-            s.never_tidy(session_id, args.link_id)?;
+            let link_id = tidy_target()?;
+            s.never_tidy(session_id, Some(link_id))?;
             return lifecycle_row(&s, session_id);
         }
         _ => {}

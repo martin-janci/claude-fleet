@@ -154,7 +154,9 @@ impl Snapshot {
         planner::plan_tidy(&self.sessions, &self.cfg, &self.ctx(now))
     }
 
-    /// Another live work session shares this one's worktree.
+    /// Another live session shares this one's worktree: a work session, or a
+    /// review running in its source's tree (any kind but a shell, which has
+    /// no tree of its own). Such a tree is never safe-removed.
     fn shares_worktree(&self, s: &TidySession) -> bool {
         let r = &s.row;
         r.kind == "work"
@@ -162,7 +164,7 @@ impl Snapshot {
             && self.sessions.iter().any(|o| {
                 o.row.id != r.id
                     && o.row.status == "running"
-                    && o.row.kind == "work"
+                    && o.row.kind != "shell"
                     && o.row.host_alias == r.host_alias
                     && o.row.project_id == r.project_id
                     && o.row.worktree_key == r.worktree_key
@@ -317,31 +319,48 @@ async fn tidy_kill(
     Ok(outcome)
 }
 
-/// Apply one item against a fresh snapshot.
-#[allow(clippy::too_many_arguments)]
+/// The item's session under the caller's scope. Outside it (or unknown)
+/// reads exactly as a session that does not exist (no existence oracle, as
+/// M5's fence) — and, the id being caller-supplied, nothing is ever written
+/// to it: [`tidy_apply`] records a failure only once this has succeeded.
+fn resolve<'a>(
+    snap: &'a Snapshot,
+    scope: &OrgScope,
+    session_id: i64,
+) -> Result<&'a TidySession, IpcError> {
+    snap.sessions
+        .iter()
+        .find(|s| s.row.id == session_id)
+        .filter(|s| in_scope(scope, &s.row.host_alias, s.row.org_id))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+/// Who applies an item (its scope), what the timeline calls it (`manual`,
+/// `auto:<reason>`), when, and the fresh plan (M11.3's unlinked kills).
+#[derive(Clone, Copy)]
+struct ApplyCtx<'a> {
+    scope: &'a OrgScope,
+    source: &'a str,
+    now: i64,
+    plan: &'a [TidyCandidate],
+}
+
+/// Apply one item to a session [`resolve`] found in the caller's scope,
+/// against a fresh snapshot.
 async fn apply_one(
     store: &Mutex<Store>,
     exec: &dyn GcExec,
     snap: &Snapshot,
-    plan: &[TidyCandidate],
+    s: &TidySession,
     item: &TidyApplyItem,
-    scope: &OrgScope,
-    source: &str,
-    now: i64,
+    ctx: ApplyCtx<'_>,
 ) -> Result<&'static str, IpcError> {
-    // Outside the caller's scope reads exactly as a session that does not
-    // exist (no existence oracle, as M5's fence).
-    let s = snap
-        .sessions
-        .iter()
-        .find(|s| s.row.id == item.session_id)
-        .filter(|s| in_scope(scope, &s.row.host_alias, s.row.org_id))
-        .ok_or_else(|| {
-            IpcError::new(
-                codes::E_NOTFOUND,
-                format!("session {} not found", item.session_id),
-            )
-        })?;
+    let ApplyCtx {
+        scope,
+        source,
+        now,
+        plan,
+    } = ctx;
     let action = item.action.as_str();
     let destructive = matches!(action, "safe_kill" | "kill" | "archive");
     if destructive {
@@ -389,8 +408,23 @@ async fn apply_one(
             .await
         }
         "archive" => {
+            // A per-host token stamps only the links it sees (work graph M5).
+            let only = if scope.is_all() {
+                None
+            } else {
+                let st = lock(store)?;
+                let mut links = st.session_work_links(s.row.id)?;
+                st.fill_link_orgs(&mut links)?;
+                Some(
+                    links
+                        .iter()
+                        .filter(|l| scope.sees_link(l))
+                        .map(|l| l.id)
+                        .collect::<Vec<i64>>(),
+                )
+            };
             record(store, s, &format!("{source}:archive:archived"));
-            lock(store)?.archive_session_work(s.row.id)?;
+            lock(store)?.archive_session_links(s.row.id, only.as_deref())?;
             Ok("archived")
         }
         "snooze" | "never" if !scope.is_all() && !link_visible(scope, s, item.link_id) => {
@@ -461,13 +495,28 @@ pub async fn tidy_apply(
     let plan = snap.plan(now);
     let mut report = TidyApplyReport::default();
     for item in items {
-        let result = apply_one(store, exec, &snap, &plan, item, scope, "manual", now).await;
-        if let Err(e) = &result {
-            tracing::info!(session_id = item.session_id, action = %item.action, error = %e.message, "[tidy] item failed");
-            if let Ok(s) = store.lock() {
-                let _ = s.insert_session_event(item.session_id, "gc_failed", Some(&e.message));
+        let result = match resolve(&snap, scope, item.session_id) {
+            // Not visible: refused in the report only. An id outside the
+            // caller's scope never gets a timeline row (a per-host token
+            // could otherwise flood, and so evict, any session's history).
+            Err(e) => Err(e),
+            Ok(s) => {
+                let ctx = ApplyCtx {
+                    scope,
+                    source: "manual",
+                    now,
+                    plan: &plan,
+                };
+                let result = apply_one(store, exec, &snap, s, item, ctx).await;
+                if let Err(e) = &result {
+                    tracing::info!(session_id = s.row.id, action = %item.action, error = %e.message, "[tidy] item failed");
+                    if let Ok(st) = store.lock() {
+                        let _ = st.insert_session_event(s.row.id, "gc_failed", Some(&e.message));
+                    }
+                }
+                result
             }
-        }
+        };
         report.results.push(TidyApplyResult {
             session_id: item.session_id,
             action: item.action.clone(),
@@ -523,18 +572,16 @@ pub async fn auto_tidy(
             days: None,
         };
         let source = format!("auto:{}", c.reason.as_str());
-        match apply_one(
-            store,
-            exec,
-            &snap,
-            &plan,
-            &item,
-            &OrgScope::All,
-            &source,
+        let Ok(s) = resolve(&snap, &OrgScope::All, c.session_id) else {
+            continue;
+        };
+        let ctx = ApplyCtx {
+            scope: &OrgScope::All,
+            source: &source,
             now,
-        )
-        .await
-        {
+            plan: &plan,
+        };
+        match apply_one(store, exec, &snap, s, &item, ctx).await {
             Ok(_) => acted += 1,
             Err(e) => {
                 tracing::warn!(session_id = c.session_id, error = %e.message, "[tidy] auto-tidy failed");

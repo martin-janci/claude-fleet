@@ -23,6 +23,11 @@ use std::sync::{Arc, Mutex};
 const READY_PREFIX: &str = "SAFE_REMOVE_READY_";
 const FAILED_PREFIX: &str = "SAFE_REMOVE_FAILED_";
 
+/// The FAILED line's placeholder in the prompt. The scan anchors on it: the
+/// echoed prompt's FAILED line is its last marker line, so a marker counts as
+/// Claude's only below it.
+const FAILED_PLACEHOLDER: &str = "<one-line reason>";
+
 /// Pane scrollback depth (lines) consulted when scanning for the marker. Big
 /// enough to cover a multi-step push-and-PR turn without dragging in unrelated
 /// history.
@@ -116,13 +121,14 @@ pub fn build_safe_kill_prompt(nonce: &str) -> String {
          literal line:\n  {ready}{nonce}\n\
          - If you CANNOT safely persist (merge conflict, push rejected, \
          dirty state you can't resolve, etc.), end your reply with:\n  \
-         {failed}{nonce}: <one-line reason>\n\
+         {failed}{nonce}: {placeholder}\n\
          \n\
          Do not emit either marker until you are fully done. Do not include \
          the markers in code blocks or quoted text.",
         ready = READY_PREFIX,
         failed = FAILED_PREFIX,
-        nonce = nonce
+        nonce = nonce,
+        placeholder = FAILED_PLACEHOLDER
     )
 }
 
@@ -452,41 +458,49 @@ pub enum MarkerOutcome {
     NotYet,
 }
 
-/// Scan a pane capture for the nonce-tagged marker. We look at the LAST
-/// occurrence: the prompt also contains the marker text, so the first hit is
-/// almost certainly the echoed prompt. Returns `NotYet` when only one
-/// occurrence is visible (i.e., just the prompt — assistant hasn't replied
-/// yet).
+/// Scan a pane capture for the nonce-tagged marker Claude emitted.
+///
+/// The prompt itself carries both markers, one per line, so its echo in the
+/// pane is not a reply. The echo's FAILED line (the one with the
+/// placeholder, the prompt's last marker line) anchors the scan: only marker
+/// lines below the last such line count, and the last of those wins. With no
+/// echo in the capture (scrolled out, or folded into `[Pasted text …]` by
+/// Claude Code), every marker line is a reply. `NotYet` when there is none.
 pub fn scan_pane_for_marker(pane: &str, nonce: &str) -> MarkerOutcome {
     let ready_tag = format!("{READY_PREFIX}{nonce}");
     let failed_tag = format!("{FAILED_PREFIX}{nonce}");
-    let mut hits: Vec<&str> = pane
-        .lines()
-        .filter(|l| l.contains(&ready_tag) || l.contains(&failed_tag))
-        .collect();
-    if hits.len() < 2 {
-        // 0 = neither prompt nor reply visible; 1 = only the prompt echo.
+    let failed_rest = |l: &str| {
+        l.find(&failed_tag).map(|i| {
+            l[i + failed_tag.len()..]
+                .trim_start_matches(':')
+                .trim()
+                .to_string()
+        })
+    };
+    let lines: Vec<&str> = pane.lines().collect();
+    // The placeholder may be cut by the pane's wrap (capture has no -J), so
+    // a FAILED line whose reason opens with `<` is the echo.
+    let after_echo = lines
+        .iter()
+        .rposition(|l| failed_rest(l).is_some_and(|r| r.starts_with('<')))
+        .map_or(0, |i| i + 1);
+    let Some(last) = lines[after_echo..]
+        .iter()
+        .rev()
+        .find(|l| l.contains(&ready_tag) || l.contains(&failed_tag))
+    else {
         return MarkerOutcome::NotYet;
-    }
-    let last = hits.pop().unwrap();
-    if let Some(idx) = last.find(&failed_tag) {
-        let after = &last[idx + failed_tag.len()..];
-        let reason = after
-            .trim_start_matches(':')
-            .trim()
-            .chars()
-            .take(200)
-            .collect::<String>();
-        let detail = if reason.is_empty() {
-            "(no reason given)".to_string()
-        } else {
-            reason
-        };
-        MarkerOutcome::Failed(detail)
-    } else if last.contains(&ready_tag) {
-        MarkerOutcome::Ready
-    } else {
-        MarkerOutcome::NotYet
+    };
+    match failed_rest(last) {
+        Some(reason) => {
+            let reason: String = reason.chars().take(200).collect();
+            MarkerOutcome::Failed(if reason.is_empty() {
+                "(no reason given)".to_string()
+            } else {
+                reason
+            })
+        }
+        None => MarkerOutcome::Ready,
     }
 }
 
@@ -817,6 +831,77 @@ SAFE_REMOVE_FAILED_n1: tried once
 ... retried successfully ...
 SAFE_REMOVE_READY_n1";
         assert_eq!(scan_pane_for_marker(pane, "n1"), MarkerOutcome::Ready);
+    }
+
+    /// The pane as tmux shows the pasted prompt, each line prefixed the way
+    /// a TUI indents it.
+    fn echoed_prompt(nonce: &str) -> String {
+        build_safe_kill_prompt(nonce)
+            .lines()
+            .map(|l| format!("  {l}\n"))
+            .collect()
+    }
+
+    #[test]
+    fn the_real_prompt_echo_alone_is_not_a_reply() {
+        // Its READY and FAILED lines are two hits; the last is the
+        // placeholder, which once read as a failure with "<one-line reason>".
+        let pane = format!(
+            "? for shortcuts\n{}\n● Working…\n",
+            echoed_prompt("0badf00d")
+        );
+        assert_eq!(
+            scan_pane_for_marker(&pane, "0badf00d"),
+            MarkerOutcome::NotYet
+        );
+    }
+
+    #[test]
+    fn a_reply_below_the_real_prompt_echo_is_read() {
+        let echo = echoed_prompt("0badf00d");
+        let ready = format!("{echo}● Pushed; main is up to date.\n  SAFE_REMOVE_READY_0badf00d\n");
+        assert_eq!(
+            scan_pane_for_marker(&ready, "0badf00d"),
+            MarkerOutcome::Ready
+        );
+        let failed = format!("{echo}● SAFE_REMOVE_FAILED_0badf00d: push rejected\n");
+        assert_eq!(
+            scan_pane_for_marker(&failed, "0badf00d"),
+            MarkerOutcome::Failed("push rejected".into())
+        );
+    }
+
+    #[test]
+    fn an_echo_wrapped_by_a_narrow_pane_is_still_the_echo() {
+        let pane =
+            "  SAFE_REMOVE_READY_0badf00d\n  SAFE_REMOVE_FAILED_0badf00d: <one-line\n reason>\n";
+        assert_eq!(
+            scan_pane_for_marker(pane, "0badf00d"),
+            MarkerOutcome::NotYet
+        );
+    }
+
+    #[test]
+    fn a_reply_with_no_echo_in_the_pane_is_read() {
+        // Claude Code folds a long paste into one line, so the reply's
+        // marker is the only one in the capture.
+        let pane = "> [Pasted text #1 +12 lines]\n● Done.\n  SAFE_REMOVE_READY_0badf00d\n";
+        assert_eq!(scan_pane_for_marker(pane, "0badf00d"), MarkerOutcome::Ready);
+    }
+
+    #[test]
+    fn an_earlier_request_echo_does_not_anchor_this_one() {
+        // A retry: the first request's echo and failure are above, with
+        // another nonce; only this nonce's echo anchors.
+        let pane = format!(
+            "{}SAFE_REMOVE_FAILED_11111111: conflict\n{}",
+            echoed_prompt("11111111"),
+            echoed_prompt("22222222")
+        );
+        assert_eq!(
+            scan_pane_for_marker(&pane, "22222222"),
+            MarkerOutcome::NotYet
+        );
     }
 
     #[test]

@@ -9,8 +9,13 @@
 //!   tracker only that host can reach (a VPN, an internal network) or when
 //!   the operator wants requests to leave from there. The request's headers
 //!   — the credential among them — and its body are piped on **stdin** into
-//!   private temp files (`umask 077`, removed on exit), never in argv or
-//!   the environment; curl reads them with `-H @file` / `--data-binary @file`.
+//!   a private temp directory (`umask 077`, on `$XDG_RUNTIME_DIR` when there
+//!   is one), never in argv or the environment. The header file is unlinked
+//!   as soon as the script holds it open and curl reads it through
+//!   `-H @/dev/fd/3`, so the credential is on disk only for the moment
+//!   between `dd` and `rm`; the directory goes with an EXIT trap, and one a
+//!   killed shell (SIGKILL, OOM, a crash) left behind is swept by the next
+//!   request after ten minutes.
 //!
 //! Both halves of the SSRF fence hold here as they do for
 //! [`super::https::DirectTransport`]: https only, and only the hosts the
@@ -31,6 +36,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEAD_MAX: usize = 64 * 1024;
 /// The marker the script prints when the host has no `gh`.
 const NO_GH: &str = "__fleet_no_gh__";
+/// The line each script prints before anything else of its own. Both run
+/// under `bash -lc`, and a login profile (`~/.bash_profile`, `/etc/profile.d`)
+/// that prints to stdout — a greeting, an nvm / conda notice — lands BEFORE
+/// the script's output, so the parsers anchor on this marker, never on byte
+/// 0.
+const BEGIN: &str = "__fleet_begin__";
+
+/// The script's own output: what follows the first [`BEGIN`] line. Searched
+/// as `marker + '\n'` anywhere, since a profile's last line may lack its
+/// newline and glue itself to the marker. The whole of `raw` when the marker
+/// is missing (the script never ran): the callers' error paths then read the
+/// exit code and stderr, exactly as before.
+pub(crate) fn after_begin(raw: &[u8]) -> &[u8] {
+    let needle = format!("{BEGIN}\n");
+    match super::http1::find(raw, needle.as_bytes()) {
+        Some(i) => &raw[i + needle.len()..],
+        None => raw,
+    }
+}
 /// The only API host `gh` is pointed at.
 pub const GITHUB_API_HOST: &str = "api.github.com";
 
@@ -54,7 +78,8 @@ impl GhCliTransport {
     /// fenced). Built from constants and one `shell::quote`d value.
     pub fn script(method: Method, path: &str, has_body: bool) -> String {
         let mut s = format!(
-            "command -v gh >/dev/null 2>&1 || {{ printf '%s\\n' {NO_GH}; exit 0; }}\n\
+            "printf '%s\\n' {BEGIN}\n\
+             command -v gh >/dev/null 2>&1 || {{ printf '%s\\n' {NO_GH}; exit 0; }}\n\
              export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 GH_SPINNER_DISABLED=1 \
              NO_COLOR=1 GH_PAGER=cat\n\
              exec gh api --include --hostname github.com --method {} {}",
@@ -143,7 +168,11 @@ impl HttpTransport for GhCliTransport {
         let script = Self::script(req.method, &at.target, req.body.is_some());
         let quoted = crate::shell::quote(&script);
         let args = ["bash", "-lc", quoted.as_str()];
-        let cap = (self.max_body as usize) + HEAD_MAX;
+        // Room for the answer's headers and a login profile's chatter before
+        // the start marker, above the body cap — the same headroom as curl's
+        // below, so a body exactly at `max_body` is never TooLarge for what
+        // rode along with it.
+        let cap = (self.max_body as usize) + HEAD_MAX + 4096;
         let out = self
             .ssh
             .run_with_stdin(
@@ -171,13 +200,14 @@ impl HttpTransport for GhCliTransport {
                 first_line(&out.stderr)
             )));
         }
-        if out.stdout.starts_with(NO_GH.as_bytes()) {
+        let stdout = after_begin(&out.stdout);
+        if stdout.starts_with(NO_GH.as_bytes()) {
             return Err(TransportError::Connect(format!(
                 "gh is not installed on {}; install the GitHub CLI there and run `gh auth login`",
                 self.host
             )));
         }
-        if let Some(resp) = parse_included(&out.stdout) {
+        if let Some(resp) = parse_included(stdout) {
             return Ok(resp);
         }
         let err = first_line(&out.stderr);
@@ -208,11 +238,13 @@ const P_URL: &str = "@@URL@@";
 /// The script `via_host` runs. Read the notes on [`CurlTransport`] before
 /// changing a line.
 const CURL_SCRIPT: &str = r#"builtin unalias -a 2>/dev/null
-builtin unset -f unset unalias builtin command set trap umask exit printf test [ curl rm mktemp cat head dd wc grep sed 2>/dev/null
+builtin unset -f unset unalias builtin command set trap umask exit exec printf test [ curl rm mktemp find cat head dd wc grep sed tr break continue 2>/dev/null
 set +x
 umask 077
 trap '' PIPE
 unset SSLKEYLOGFILE CURL_HOME
+printf '%s
+' __fleet_begin__
 if ! command -v curl >/dev/null 2>&1; then printf '%s
 ' __fleet_no_curl__; exit 0; fi
 cv=$(curl -q --version 2>/dev/null | sed -n '1s/^curl \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')
@@ -222,25 +254,34 @@ case "$cmaj" in ''|*[!0-9]*) cmaj=0 ;; esac
 case "$cmin" in ''|*[!0-9]*) cmin=0 ;; esac
 if [ "$cmaj" -lt 7 ] || { [ "$cmaj" -eq 7 ] && [ "$cmin" -lt 55 ]; }; then printf '%s
 ' __fleet_old_curl__; exit 0; fi
-d=$(mktemp -d "${TMPDIR:-/tmp}/fleet-tracker.XXXXXX") || { printf '%s
+d=
+for base in "$XDG_RUNTIME_DIR" "$TMPDIR" /tmp; do
+  [ -n "$base" ] && [ -d "$base" ] || continue
+  find "$base" -maxdepth 1 -name 'fleet-tracker.*' -type d -mmin +10 -exec rm -rf {} + 2>/dev/null
+  d=$(mktemp -d "$base/fleet-tracker.XXXXXX" 2>/dev/null) && break
+  d=
+done
+[ -n "$d" ] || { printf '%s
 ' __fleet_no_tmp__; exit 0; }
 trap 'rm -rf "$d"' EXIT HUP INT TERM
 dd bs=1 count=@@HLEN@@ of="$d/h" 2>/dev/null
+exec 3<"$d/h"
+rm -f "$d/h"
 cat > "$d/b"
-code=$(curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time @@TIME@@ --max-filesize @@CAP@@ -X @@METHOD@@ -H @"$d/h" @@DATA@@ -D "$d/rh" -o "$d/rb" -w '%{http_code}' @@URL@@ 2>"$d/err")
+code=$(curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time @@TIME@@ --max-filesize @@CAP@@ -X @@METHOD@@ -H @/dev/fd/3 @@DATA@@ -D "$d/rh" -o "$d/rb" -w '%{http_code}' @@URL@@ 2>"$d/err")
 rc=$?
 printf '__fleet_status__=%s
 ' "$code"
-if [ "$code" = 000 ]; then
-  printf '__fleet_curl_exit__=%s
+printf '__fleet_curl_exit__=%s
 ' "$rc"
+if [ "$code" = 000 ] || [ "$rc" -ne 0 ]; then
   grep -a '^curl: (' "$d/err" 2>/dev/null | head -n 2
   exit 0
 fi
 printf '__fleet_head__=%s
 ' "$(wc -c < "$d/rh" | tr -d ' ')"
 cat "$d/rh"
-head -c @@CAP@@ "$d/rb"
+head -c $((@@CAP@@ + 1)) "$d/rb"
 "#;
 
 /// `curl` on a host (see the module docs). Where the credential is, and is
@@ -249,15 +290,25 @@ head -c @@CAP@@ "$d/rb"
 /// - It is one of the request's headers, which fleet writes to **stdin**
 ///   ahead of the body; the script copies exactly that many bytes (`dd
 ///   bs=1`, which never reads past its count) into `$d/h` and the rest into
-///   `$d/b`, both in a `mktemp -d` directory under `umask 077`, removed by
-///   an EXIT trap whatever happens.
+///   `$d/b`, both in a `mktemp -d` directory under `umask 077` — on
+///   `$XDG_RUNTIME_DIR` (a tmpfs cleared at logout / reboot on most Linux
+///   hosts) when it is there, else `$TMPDIR`, else `/tmp`.
+/// - `$d/h` is opened on fd 3 and unlinked at once, BEFORE curl runs: the
+///   credential is a file for the moment between `dd` and `rm` only. The
+///   directory (body, answer) goes with an EXIT/HUP/INT/TERM trap; a trap
+///   does not run on SIGKILL, an OOM kill or a crash, so every request
+///   first sweeps `fleet-tracker.*` directories older than ten minutes
+///   from the same base, and a dir such a death leaves holds no credential.
 /// - `curl -q` (first, so `~/.curlrc` cannot add `--verbose` / `--trace`)
-///   reads them with `-H @"$d/h"` / `--data-binary @"$d/b"`: the token is in
-///   no argv (`ps` shows only the file names), no variable and no
-///   environment.
+///   reads them with `-H @/dev/fd/3` (a fresh open of the unlinked inode:
+///   verified against curl 8.5 — the header arrives) / `--data-binary
+///   @"$d/b"`: the token is in no argv (`ps` shows only `/dev/fd/3` and a
+///   file name), no variable and no environment.
 /// - Nothing prints headers that were SENT; the script prints the answer's
-///   status, headers and at most the cap of its body, or curl's exit code
-///   and at most two `curl: (N) …` lines.
+///   status and curl's exit code, then either the headers and one byte past the
+///   cap of its body (exit 0) or at most two `curl: (N) …` lines (any other
+///   exit — a status is known as soon as the head arrived, so it never
+///   vouches for the body on its own).
 /// - https only, no redirect followed, bounded by `--max-time`, and the
 ///   host fence was checked before anything ran.
 pub struct CurlTransport {
@@ -333,8 +384,9 @@ impl CurlTransport {
     }
 }
 
-/// Split the script's output into a [`Response`].
-fn parse_curl(host: &str, raw: &[u8]) -> Result<Response, TransportError> {
+/// Split the script's output into a [`Response`]; `max_body` names the cap
+/// in the [`TransportError::TooLarge`] a size-aborted answer becomes.
+fn parse_curl(host: &str, raw: &[u8], max_body: u64) -> Result<Response, TransportError> {
     if raw.starts_with(b"__fleet_no_curl__") {
         return Err(TransportError::Connect(format!(
             "curl is not installed on {host}"
@@ -358,12 +410,21 @@ fn parse_curl(host: &str, raw: &[u8]) -> Result<Response, TransportError> {
         .ok_or_else(|| TransportError::Protocol(format!("unexpected output from {host}")))?
         .trim()
         .to_string();
-    if code == "000" {
-        let exit = String::from_utf8_lossy(raw)
-            .lines()
-            .find_map(|l| l.strip_prefix("__fleet_curl_exit__=").map(str::to_string))
-            .unwrap_or_default();
-        let why: String = String::from_utf8_lossy(raw)
+    // curl's exit code is the second line, always: `%{http_code}` reports
+    // the status as soon as the head arrived, so a body cut by `--max-time`
+    // (28), refused by `--max-filesize` (63) or lost to a recv error (56) /
+    // partial transfer (18) still comes with the real status. Only exit 0
+    // vouches for the body.
+    let rest = &raw[status_line_end + 1..];
+    let exit_line_end = super::http1::find(rest, b"\n")
+        .ok_or_else(|| TransportError::Protocol(format!("a truncated answer from {host}")))?;
+    let exit: i32 = String::from_utf8_lossy(&rest[..exit_line_end])
+        .strip_prefix("__fleet_curl_exit__=")
+        .and_then(|n| n.trim().parse().ok())
+        .ok_or_else(|| TransportError::Protocol(format!("a truncated answer from {host}")))?;
+    let rest = &rest[exit_line_end + 1..];
+    if code == "000" || exit != 0 {
+        let why: String = String::from_utf8_lossy(rest)
             .lines()
             .filter(|l| l.starts_with("curl: ("))
             .map(|l| crate::logging::redact(l).into_owned())
@@ -372,13 +433,20 @@ fn parse_curl(host: &str, raw: &[u8]) -> Result<Response, TransportError> {
             .chars()
             .take(300)
             .collect();
-        return Err(if exit.trim() == "28" {
-            TransportError::Timeout
-        } else {
-            TransportError::Connect(format!("curl on {host} (exit {}): {why}", exit.trim()))
+        return Err(match exit {
+            28 => TransportError::Timeout,
+            63 => TransportError::TooLarge(format!(
+                "curl on {host} refused a body over {} MiB (status {code}): {why}",
+                max_body / (1024 * 1024)
+            )),
+            _ if code == "000" => {
+                TransportError::Connect(format!("curl on {host} (exit {exit}): {why}"))
+            }
+            _ => TransportError::Protocol(format!(
+                "curl on {host} cut the answer short (exit {exit}, status {code}): {why}"
+            )),
         });
     }
-    let rest = &raw[status_line_end + 1..];
     let head_line_end = super::http1::find(rest, b"\n")
         .ok_or_else(|| TransportError::Protocol(format!("a truncated answer from {host}")))?;
     let head_len: usize = String::from_utf8_lossy(&rest[..head_line_end])
@@ -392,6 +460,18 @@ fn parse_curl(host: &str, raw: &[u8]) -> Result<Response, TransportError> {
         )));
     }
     let (head, body) = rest.split_at(head_len);
+    // The script prints one byte MORE than the cap, so "over the cap" is
+    // distinguishable from "exactly the cap" — the same rule as
+    // `conn::speak`. A chunked answer (no size for `--max-filesize` to
+    // refuse up front, on a curl older than 8.4) is caught here.
+    if body.len() as u64 > max_body {
+        return Err(TransportError::TooLarge(format!(
+            "curl on {host} answered more than {} MiB; refusing to buffer it \
+             (silently truncating at the cap surfaced as unreadable JSON, \
+             which names the wrong problem)",
+            max_body / (1024 * 1024)
+        )));
+    }
     // A proxy's `200 Connection established` (or a `100 Continue`) comes
     // first: the answer is the LAST header block.
     let text = String::from_utf8_lossy(head);
@@ -432,7 +512,10 @@ impl HttpTransport for CurlTransport {
         );
         let quoted = crate::shell::quote(&script);
         let args = ["bash", "-lc", quoted.as_str()];
-        let cap = (self.max_body as usize) + HEAD_MAX + 256;
+        // Room for the body's one byte past the cap, the answer's headers,
+        // the script's own lines, and a login profile's chatter before the
+        // start marker; the body cap itself is `parse_curl`'s.
+        let cap = (self.max_body as usize) + HEAD_MAX + 4096;
         let out = self
             .ssh
             .run_with_stdin(
@@ -459,7 +542,7 @@ impl HttpTransport for CurlTransport {
                 self.max_body / (1024 * 1024)
             )));
         }
-        parse_curl(&self.host, &out.stdout)
+        parse_curl(&self.host, after_begin(&out.stdout), self.max_body)
     }
 }
 
@@ -565,6 +648,42 @@ mod tests {
         assert!(e.is_unreachable(), "{e}");
     }
 
+    /// `bash -lc` sources the login profile; a greeting it prints lands
+    /// before `gh`'s output and must not hide the status line, the "no gh"
+    /// marker included.
+    #[tokio::test]
+    async fn login_profile_noise_before_the_marker_is_ignored() {
+        for noise in ["Welcome bob\n", "welcome"] {
+            let f = FakeSsh::new();
+            f.on(
+                Match::Any,
+                Reply::ok(&format!(
+                    "{noise}__fleet_begin__\nHTTP/2.0 200 OK\nContent-Type: application/json\n\n{{\"data\":{{}}}}"
+                )),
+            );
+            let r = gh(&f)
+                .send(Request::get("https://api.github.com/user"))
+                .await
+                .unwrap_or_else(|e| panic!("{noise:?}: {e}"));
+            assert_eq!((r.status, r.text().as_str()), (200, "{\"data\":{}}"));
+            let script = f.calls()[0].script().unwrap();
+            assert!(
+                script.starts_with("printf '%s\\n' __fleet_begin__\n"),
+                "the script prints the marker first: {script}"
+            );
+        }
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok("Welcome bob\n__fleet_begin__\n__fleet_no_gh__\n"),
+        );
+        let e = gh(&f)
+            .send(Request::get("https://api.github.com/user"))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("install the GitHub CLI"), "{e}");
+    }
+
     #[tokio::test]
     async fn an_http_error_comes_back_as_a_response_and_output_is_capped() {
         let f = FakeSsh::new();
@@ -584,11 +703,40 @@ mod tests {
         assert!(r.text().contains("Bad credentials"));
 
         let f = FakeSsh::new();
-        f.on(Match::Any, Reply::ok(&"x".repeat(HEAD_MAX + 4096)));
+        f.on(
+            Match::Any,
+            Reply::ok(&"x".repeat(1024 + HEAD_MAX + 4096 + 1)),
+        );
         let mut t = gh(&f);
         t.max_body = 1024;
         let e = t.send(Request::get("https://api.github.com/user")).await;
         assert!(matches!(e, Err(TransportError::TooLarge(_))), "{e:?}");
+    }
+
+    /// The cap has the same headroom as curl's: a login profile's chatter
+    /// before the start marker and the answer's headers ride above
+    /// `max_body`, so a body exactly at the cap behind `HEAD_MAX` of
+    /// chatter is still a response — before the headroom it was TooLarge.
+    #[tokio::test]
+    async fn profile_chatter_and_headers_do_not_eat_the_body_cap() {
+        let noise = "Welcome bob\n".repeat(HEAD_MAX / 12 + 1);
+        assert!(noise.len() > HEAD_MAX);
+        let body = "x".repeat(1024);
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(&format!(
+                "{noise}__fleet_begin__\nHTTP/2.0 200 OK\nContent-Type: text/plain\n\n{body}"
+            )),
+        );
+        let mut t = gh(&f);
+        t.max_body = 1024;
+        let r = t
+            .send(Request::get("https://api.github.com/user"))
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body.len(), 1024);
     }
 }
 
@@ -609,9 +757,46 @@ mod curl_tests {
 
     fn answer(status: &str, head: &str, body: &str) -> Reply {
         Reply::ok(&format!(
-            "__fleet_status__={status}\n__fleet_head__={}\n{head}{body}",
+            "__fleet_begin__\n__fleet_status__={status}\n__fleet_curl_exit__=0\n__fleet_head__={}\n{head}{body}",
             head.len()
         ))
+    }
+
+    /// `bash -lc` sources the login profile; whatever it prints to stdout
+    /// comes before the script's output and must not be where the status
+    /// line is expected — with or without a trailing newline.
+    #[tokio::test]
+    async fn login_profile_noise_before_the_marker_is_ignored() {
+        for noise in ["Welcome bob\nnvm: using node v20\n", "welcome"] {
+            let f = FakeSsh::new();
+            f.on(
+                Match::Any,
+                Reply::ok(&format!(
+                    "{noise}__fleet_begin__\n__fleet_status__=200\n__fleet_curl_exit__=0\n__fleet_head__=15\nHTTP/2 200 \r\n\r\n{{\"ok\":true}}"
+                )),
+            );
+            let r = curl(&f)
+                .send(Request::get("https://jira.corp.example/x"))
+                .await
+                .unwrap_or_else(|e| panic!("{noise:?}: {e}"));
+            assert_eq!((r.status, r.text().as_str()), (200, "{\"ok\":true}"));
+        }
+        // The marker precedes every outcome, the "no curl" one included.
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok("Welcome bob\n__fleet_begin__\n__fleet_no_curl__\n"),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("curl is not installed"), "{e}");
+        assert!(
+            CurlTransport::script(Method::Get, "https://jira.corp.example/x", 1, false, 1, 1)
+                .contains("\n' __fleet_begin__\n"),
+            "the script prints the marker"
+        );
     }
 
     #[tokio::test]
@@ -649,7 +834,7 @@ mod curl_tests {
             head.len() + "Expect:\n".len()
         )));
         assert!(script.contains("curl -q -sS --proto =https --proto-redir =https --max-redirs 0"));
-        assert!(script.contains("-X POST -H @\"$d/h\" --data-binary @\"$d/b\""));
+        assert!(script.contains("-X POST -H @/dev/fd/3 --data-binary @\"$d/b\""));
         assert!(script.contains("'https://jira.corp.example/rest/api/2/search?x=1'"));
         assert!(!script.contains(TOKEN));
     }
@@ -740,6 +925,111 @@ mod curl_tests {
         assert!(e.is_unreachable() && e.to_string().contains("curl is not installed"));
     }
 
+    /// `%{http_code}` is known as soon as the head arrived; only exit 0
+    /// vouches for the body. A status with a non-zero exit is the failure
+    /// the exit names, never a 2xx with a cut body.
+    #[tokio::test]
+    async fn a_non_zero_curl_exit_is_never_a_response_even_with_a_status() {
+        // 63: `--max-filesize` refused the body before writing it.
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=200\n__fleet_curl_exit__=63\ncurl: (63) Maximum file size exceeded\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TransportError::TooLarge(m) if m.contains("Maximum file size")),
+            "{e}"
+        );
+
+        // 28: `--max-time` fired mid-body; half a document is on disk.
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=200\n__fleet_curl_exit__=28\ncurl: (28) Operation timed out after 20000 milliseconds with 120000 bytes received\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert_eq!(e, TransportError::Timeout);
+
+        // 18: a partial transfer (the peer closed early).
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=200\n__fleet_curl_exit__=18\ncurl: (18) transfer closed with 3000 bytes remaining to read\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TransportError::Protocol(m) if m.contains("exit 18") && m.contains("bytes remaining")),
+            "{e}"
+        );
+
+        // An answer that stops before the exit line is truncated, not a 200.
+        let f = FakeSsh::new();
+        f.on(Match::Any, Reply::ok("__fleet_status__=200\n"));
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, TransportError::Protocol(_)), "{e}");
+    }
+
+    /// The script prints one byte past the cap; a body over it is
+    /// TooLarge, one exactly at it is a response — never a 2xx cut
+    /// mid-token that the provider reports as unreadable JSON.
+    #[tokio::test]
+    async fn a_body_over_the_cap_is_too_large_and_one_at_the_cap_is_not() {
+        let head = "HTTP/2 200 \r\ncontent-type: application/json\r\n\r\n";
+        let f = FakeSsh::new();
+        f.on(Match::Any, answer("200", head, &"x".repeat(1025)));
+        let mut t = curl(&f);
+        t.max_body = 1024;
+        let e = t
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TransportError::TooLarge(m) if m.contains("more than 0 MiB")),
+            "{e}"
+        );
+
+        let f = FakeSsh::new();
+        f.on(Match::Any, answer("200", head, &"x".repeat(1024)));
+        let mut t = curl(&f);
+        t.max_body = 1024;
+        let r = t
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap();
+        assert_eq!(r.body.len(), 1024);
+        let script = CurlTransport::script(
+            Method::Get,
+            "https://jira.corp.example/x",
+            1,
+            false,
+            1,
+            1024,
+        );
+        assert!(
+            script.contains("head -c $((1024 + 1)) \"$d/rb\""),
+            "one byte past the cap: {script}"
+        );
+    }
+
     #[tokio::test]
     async fn an_http_error_is_a_response_for_the_provider_to_map() {
         let f = FakeSsh::new();
@@ -798,6 +1088,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 cp "$hdr" {log}/headers
+if [ -e "$(dirname "$out")/h" ]; then echo present; else echo absent; fi > {log}/h_state
 [ -n "$body" ] && cp "$body" {log}/body
 printf 'HTTP/1.1 201 Created\r\nX-Seen: yes\r\n\r\n' > "$dump"
 printf '{{"id":7}}' > "$out"
@@ -809,6 +1100,20 @@ printf '201'
         std::fs::write(&curl, fake).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // What a shell killed mid-request (SIGKILL, OOM) leaves behind: a
+        // stale directory is swept at the next request, a fresh one (a
+        // request in flight) is left alone.
+        let stale = tmp.join("fleet-tracker.stale00");
+        let fresh = tmp.join("fleet-tracker.fresh00");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("h"), "Authorization: Bearer leftover\n").unwrap();
+        std::fs::create_dir(&fresh).unwrap();
+        let twenty_minutes_ago = std::time::SystemTime::now() - Duration::from_secs(20 * 60);
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(twenty_minutes_ago))
+            .unwrap();
 
         let token = "tok-stdin-only-0123456789abcdef";
         let req = Request::post_json(
@@ -830,6 +1135,8 @@ printf '201'
                 ),
             )
             .env("TMPDIR", &tmp)
+            // Unset, so `$TMPDIR` is the base under test (it would win).
+            .env_remove("XDG_RUNTIME_DIR")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -841,7 +1148,12 @@ printf '201'
             pipe.write_all(&stdin).await.unwrap();
         }
         let out = child.wait_with_output().await.unwrap();
-        let resp = parse_curl("local", &out.stdout)
+        assert!(
+            out.stdout.starts_with(b"__fleet_begin__\n"),
+            "the script's first line is the start marker: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let resp = parse_curl("local", after_begin(&out.stdout), 4096)
             .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
         assert_eq!(resp.status, 201);
         assert_eq!(resp.header("x-seen"), Some("yes"));
@@ -858,10 +1170,28 @@ printf '201'
             std::fs::read_to_string(log.join("body")).unwrap(),
             "{\"a\":1}"
         );
+        assert!(
+            argv.contains("-H\n@/dev/fd/3\n"),
+            "the header is read through the held-open fd: {argv}"
+        );
         assert_eq!(
-            std::fs::read_dir(&tmp).unwrap().count(),
-            0,
-            "the private temp directory is removed on exit"
+            std::fs::read_to_string(log.join("h_state")).unwrap().trim(),
+            "absent",
+            "the header file is unlinked before curl runs"
+        );
+        assert!(!stale.exists(), "a stale directory is swept");
+        assert!(
+            fresh.exists(),
+            "a fresh directory (a request in flight) is kept"
+        );
+        let left: Vec<_> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            left,
+            vec!["fleet-tracker.fresh00".to_string()],
+            "the request's own directory is removed on exit"
         );
         assert!(!String::from_utf8_lossy(&out.stdout).contains(token));
     }
