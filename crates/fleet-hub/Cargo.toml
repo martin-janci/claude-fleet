@@ -10,6 +10,13 @@ license = "MIT"
 name = "fleet-hub"
 path = "src/main.rs"
 
+[features]
+default = []
+# Test-only: the loopback fake-tracker override for `scripts/hub-e2e.sh`'s
+# work-graph leg (see fleet-core's `e2e` feature). The CI hub build
+# (`cargo build -p fleet-hub --locked`) never enables it.
+e2e = ["fleet-core/e2e"]
+
 [dependencies]
 fleet-core = { path = "../fleet-core" }
 # Directly, not through `fleet-core`, for one function: the loopback rule the
