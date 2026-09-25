@@ -474,6 +474,34 @@ Index by area (names only; see the reference for details):
   and its item is in the token's org. `work_admin { add_org | update_org,
   auto_tidy: "on" | "off" | "inherit" }` overrides `work.auto_tidy` for one
   org (master only).
+  Work graph M9: `work { action: "today", since? }` is the Today view's
+  digest — live sessions grouped by primary work into `waiting` (someone
+  is needed), `stale` (idle three days, or the ticket is done while a
+  session runs) and `in_progress`, plus what `shipped` since `since` (unix
+  seconds; default the last 24 h): tickets that moved to done and work that
+  ended with a PR. `work { action: "card", key }` is a ticket's context
+  card from the tracker cache (never a fetch): title, status, url, the
+  `acceptance` criteria parsed from the description (else an `excerpt`),
+  and `composer_text` — the ticket text fenced as untrusted, for inserting
+  into a prompt. A per-host token reads only its own host's day and cards
+  for its own work, and gets `composer_text` without the plain fields.
+  `work_link { action: "handover", session_id }` (M9.3, on demand only)
+  asks a live, idle Claude session linked to work to write the hand-off the
+  next session will need: fleet types one prompt asking for it between two
+  nonce-tagged marker lines, and the next Stop hook keeps the text between
+  them as a work-journal `note` from the `agent`. The resume brief and
+  `work { action: "context" }` show the newest one first, fenced as
+  untrusted. Refused while the session is busy, waiting on a dialog or
+  stuck, without work, when a request is already pending (30 min), and for
+  the operator's own session. Timeline: `handover_requested`,
+  `handover_written`, `handover_missing`, `handover_send_failed`.
+  `work_link { action: "start", …, project_ids: [..] }` (M9.6) starts one
+  ticket in several repositories at once — up to 8 — one sibling session
+  per project, all on the same branch name (`slug(key + title)`, or the
+  `worktree` given), each linked `started`, each brief naming the others.
+  A repository where the key already runs is skipped (naming the session)
+  rather than refusing the whole start; the reply is `{ key, started,
+  skipped, failed }`. `project_id` and `project_ids` are exclusive.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
@@ -982,7 +1010,12 @@ automatically on app start.
   approve the request in the desktop dialog, then retry the call with that
   nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
   `broadcast_prompt` including a digest of the content / prompt — so an
-  approval cannot be replayed with different text.
+  approval cannot be replayed with different text. **The operator** (the UX
+  agent's own client token, `ux-agent`) is gated whatever the toggle says
+  (work graph M9.7, decision D12): its `new_session`, `new_shell_session`,
+  `safe_kill_session`, `work_link` `start` / `resume` and every tool above
+  return `E_CONFIRM_REQUIRED` until a person approves them on the desktop;
+  on a hub, which has no approver, they are refused with `E_FORBIDDEN`.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

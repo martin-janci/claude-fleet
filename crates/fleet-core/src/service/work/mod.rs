@@ -3,6 +3,8 @@
 //! agnostic entry the MCP tools `work` / `work_link` and the desktop commands
 //! share, so a paired desktop and a local one answer the same way.
 
+pub mod agent_handover;
+pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
@@ -10,6 +12,7 @@ pub mod recognize;
 pub mod resolve;
 pub mod resume;
 pub mod tidy;
+pub mod today;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -60,6 +63,9 @@ pub struct WorkArgs {
     /// Lookup: a ticket URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Today: unix start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -98,6 +104,9 @@ pub struct WorkLinkArgs {
     /// Start: the project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
+    /// Start: several repos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<i64>>,
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
@@ -200,6 +209,10 @@ pub enum WorkAction {
     Orgs,
     /// Proposed orgs from owners and tracker sites (never applied).
     OrgSuggestions,
+    /// The Today view's digest (work graph M9.1).
+    Today,
+    /// A ticket's context card from the cache (work graph M9.2).
+    Card,
     /// Tidy-up candidates (work graph M7).
     Tidy,
     /// Work open again that has past sessions (work graph M7).
@@ -220,6 +233,8 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("scopes", WorkAction::Scopes),
     ("orgs", WorkAction::Orgs),
     ("org_suggestions", WorkAction::OrgSuggestions),
+    ("today", WorkAction::Today),
+    ("card", WorkAction::Card),
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
 ];
@@ -235,6 +250,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "trust_project",
     "resume",
     "start",
+    "handover",
     "archive",
     "unarchive",
     "snooze",
@@ -256,6 +272,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("work_scopes", "work", "scopes"),
     ("list_orgs", "work", "orgs"),
     ("org_suggestions", "work", "org_suggestions"),
+    ("work_today", "work", "today"),
+    ("work_ticket_card", "work", "card"),
     ("link_session_work", "work_link", "link"),
     ("reject_session_work", "work_link", "reject"),
     ("unlink_session_work", "work_link", "unlink"),
@@ -263,6 +281,8 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
+    ("request_work_handover", "work_link", "handover"),
+    ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),
     ("work_reopened", "work", "reopened"),
     ("archive_session_work", "work_link", "archive"),
@@ -414,6 +434,7 @@ pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::Sta
         name: args.name.clone(),
         worktree: args.worktree.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
+        per_project: false,
     }
 }
 
@@ -491,7 +512,7 @@ pub fn work_link<'a>(
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "dismiss" | "tidy_apply"
+        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -650,9 +671,8 @@ pub fn work_link<'a>(
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "unknown work_link action {other:?}; one of link, reject, unlink, confirm, \
-                     trust_project, resume, start, archive, unarchive, snooze, never, dismiss, \
-                     tidy_apply"
+                    "unknown work_link action {other:?}; one of {}",
+                    WORK_LINK_ACTIONS.join(", ")
                 ),
             ))
         }

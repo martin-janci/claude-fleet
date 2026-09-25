@@ -14,7 +14,7 @@
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
   import type { PickerItem } from './PickerList.svelte';
   import {
     fleetSettings,
@@ -28,6 +28,7 @@
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
+  import { startWorkMulti, siblingCandidates, multiStartNote } from './multi_start';
 
   let {
     project,
@@ -670,6 +671,57 @@
   }
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
 
+  // ── Multi-repo start (work graph M9.6) ──
+  // One ticket, one sibling session per repository, all on the same branch
+  // name (D11). Offered: the projects this key ran in before.
+  let ticketPast = $state<WorkLink[]>([]);
+  $effect(() => {
+    const key = ticket?.key;
+    if (!key) return;
+    void endedWorkLinks(key).then((r) => {
+      if (ticket?.key === key && r.ok && Array.isArray(r.value)) ticketPast = r.value;
+    });
+  });
+  const siblings = $derived(
+    ticket?.key ? siblingCandidates(ticket.key, projectId, ticketPast, $sessions, $projects) : [],
+  );
+  let alsoIn = $state<number[]>([]);
+  function toggleAlso(id: number, on: boolean) {
+    alsoIn = on ? [...alsoIn.filter((x) => x !== id), id] : alsoIn.filter((x) => x !== id);
+  }
+  const multiBlocked = $derived(hubActionBlocked('start_work_multi', $hubStatus, $hubConnection));
+
+  async function submitMulti(t: TicketRow, host: string) {
+    if (multiBlocked) return;
+    busy = true;
+    error = null;
+    const r = await startWorkMulti({
+      ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
+      project_ids: [projectId, ...alsoIn],
+      host_alias: host,
+      worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
+      with_brief: briefOn,
+    });
+    busy = false;
+    if (!r.ok) {
+      if (destroyed) pushError(r.error, 'Start work failed');
+      else error = r.error.message;
+      return;
+    }
+    const labelOf = (id: number) => {
+      const p = $projects.find((x) => x.project.id === id)?.project;
+      return p ? `${p.owner}/${p.repo}` : `project ${id}`;
+    };
+    const note = multiStartNote(r.value, labelOf);
+    const first = r.value.started[0];
+    if (!first) {
+      error = note ?? 'Nothing was started';
+      return;
+    }
+    if (note) push({ kind: 'info', message: note });
+    onCreate(first);
+  }
+
   async function submitTicket(t: TicketRow) {
     if (startBlocked) return;
     if (inNewMode) {
@@ -682,6 +734,11 @@
     }
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
+    if (alsoIn.length > 0) {
+      await submitMulti(t, submittedHost);
+      if (!error) remember(submittedHost, submittedWorktreeId);
+      return;
+    }
     busy = true;
     error = null;
     const r = await startWork({
@@ -886,6 +943,22 @@
               Delivered with the first prompt (never typed into the pane). The description is
               the ticket author's text and stays fenced as untrusted.
             </p>
+          {/if}
+          {#if siblings.length > 0}
+            <fieldset class="also-in" data-testid="ticket-also-in">
+              <legend>Also start in <span class="muted small">(one session each, same branch)</span></legend>
+              {#each siblings as c (c.id)}
+                <label>
+                  <input
+                    type="checkbox"
+                    data-testid="ticket-also-in-{c.id}"
+                    checked={alsoIn.includes(c.id)}
+                    onchange={(e) => toggleAlso(c.id, (e.target as HTMLInputElement).checked)}
+                  />
+                  {c.label}
+                </label>
+              {/each}
+            </fieldset>
           {/if}
         {/if}
       </div>

@@ -178,9 +178,9 @@ pub fn claude_md() -> &'static str {
      \n\
      Two rules.\n\
      \n\
-     1. **Destructive work is proposed, never assumed.** Killing, deleting,\n\
-     moving, broadcasting and committing stop for a confirmation you do not\n\
-     control. Say plainly what you are about to do and let the dialog do its\n\
+     1. **Destructive work is proposed, never assumed.** Starting or killing\n\
+     a session, deleting, moving, broadcasting and committing stop for a\n\
+     confirmation you do not control. Say plainly what you are about to do and let the dialog do its\n\
      job; do not try to route around a refusal.\n\
      \n\
      2. **This directory is not a repository and you do not write code in\n\

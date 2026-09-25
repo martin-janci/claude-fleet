@@ -558,7 +558,8 @@ impl FleetTools {
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
-        {key|url}; trackers; scopes; orgs; org_suggestions; tidy; reopened.")]
+        {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
+        tidy; reopened.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -633,6 +634,13 @@ impl FleetTools {
             WorkAction::Orgs => ok_json_compact(
                 &crate::service::orgs::org_details(&self.store, &scope).map_err(to_mcp_err)?,
             ),
+            WorkAction::Card => ok_json(
+                &w::card::card(&self.store, args.key.as_deref().unwrap_or_default(), &scope)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Today => ok_json_compact(
+                &w::today::today(&self.store, args.since, &scope).map_err(to_mcp_err)?,
+            ),
             WorkAction::Tidy => ok_json_compact(
                 &crate::service::work::tidy::work_tidy(
                     &self.store,
@@ -652,9 +660,10 @@ impl FleetTools {
         suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
-        ticket. archive|unarchive (UI only), snooze {days}|never (tidy-up); \
-        dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill \
-        when dirty).")]
+        ticket (project_ids: one per repo). handover {session_id}: ask it to \
+        write its hand-off. archive|unarchive (UI only), snooze {days}|never \
+        (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
+        kill when dirty).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -686,6 +695,39 @@ impl FleetTools {
             ));
         }
         let scope = self.org_scope(&caller)?;
+        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
+            // Only ever gates the operator (D12): a session is about to exist.
+            // (`work_link` is `confirm: true` for M7's tidy kills; a person's
+            // start or resume is never gated.)
+            self.confirm_gate(
+                "work_link",
+                args.confirm_nonce.as_deref(),
+                &format!(
+                    "{} key={:?} url={:?} item_id={:?} host={:?} project_id={:?} project_ids={:?} mode={:?}",
+                    args.action,
+                    args.key,
+                    args.url,
+                    args.item_id,
+                    args.host_alias,
+                    args.project_id,
+                    args.project_ids,
+                    args.mode
+                ),
+                &caller,
+            )?;
+        }
+        if args.action == "handover" {
+            // Work graph M9.3: ask a live session to write its hand-off (on
+            // demand only, D9). The host and org fences are inside.
+            let sid = args
+                .session_id
+                .ok_or_else(|| mcp_err("E_INVALID", "handover needs session_id", None))?;
+            let row =
+                crate::service::work::agent_handover::request(&self.store, &self.ssh, sid, &scope)
+                    .await
+                    .map_err(to_mcp_err)?;
+            return ok_json(&row);
+        }
         if args.action == "resume" {
             // The host fence (a per-host token resumes only onto its own
             // host) and the org fence are inside `resume_work`'s scope.
@@ -765,6 +807,28 @@ impl FleetTools {
             return ok_json(&report);
         }
         if args.action == "start" {
+            if let Some(ids) = args.project_ids.as_ref().filter(|v| !v.is_empty()) {
+                // Work graph M9.6: one sibling per repository, same branch.
+                if args.project_id.is_some() {
+                    return Err(mcp_err(
+                        "E_INVALID",
+                        "pass project_id or project_ids, not both",
+                        None,
+                    ));
+                }
+                let out = crate::service::trackers::tickets::start_work_many(
+                    &self.store,
+                    &self.ssh,
+                    &self.reg,
+                    &crate::service::work::start_args(&args),
+                    ids,
+                    &scope,
+                    &crate::service::trackers::default_net(),
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                return ok_json(&out);
+            }
             // The host fence (a per-host token starts only its own host's
             // tickets, on its own host) is inside `start_work`'s scope.
             let row = crate::service::trackers::tickets::start_work(

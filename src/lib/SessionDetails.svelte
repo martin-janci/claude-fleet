@@ -32,6 +32,7 @@
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
+  import TicketCard from './TicketCard.svelte';
   import Timeline from './Timeline.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';
@@ -566,6 +567,8 @@
       </dd>
     {/if}
   </dl>
+
+  <TicketCard {session} />
 
   {#if related.length > 0}
     <section class="related" data-testid="related-sessions">

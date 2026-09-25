@@ -1,14 +1,18 @@
 <script lang="ts">
-  import { selectedSession } from './selection';
+  import { onDestroy } from 'svelte';
+  import { selectedSession, onSessionOpened } from './selection';
+  import { todayOpen } from './today';
   import SessionDetails from './SessionDetails.svelte';
+  import TodayView from './TodayView.svelte';
+
+  // Today (work graph M9.1) is the empty state, and ⌘⇧T opens it over a
+  // selected session; opening a session from anywhere closes it again.
+  const off = onSessionOpened(() => todayOpen.set(false));
+  onDestroy(off);
 </script>
 
-{#if $selectedSession}
+{#if $selectedSession && !$todayOpen}
   <SessionDetails session={$selectedSession} />
 {:else}
-  <p class="empty" data-testid="details-empty">Pick a session to see details.</p>
+  <TodayView onclose={$selectedSession ? () => todayOpen.set(false) : undefined} />
 {/if}
-
-<style>
-  .empty { color: var(--fg-muted); font-size: 0.9rem; }
-</style>

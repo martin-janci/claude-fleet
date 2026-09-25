@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { appChord, hostsChordLabel, sessionViewChordLabel, agentChordLabel } from './app_views';
+import { appChord, hostsChordLabel, sessionViewChordLabel, agentChordLabel, todayChordLabel } from './app_views';
 
 const ev = (key: string, mods: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
   key,
@@ -68,5 +68,16 @@ describe('appChord', () => {
   it('labels the agent chord per platform', () => {
     expect(agentChordLabel(true)).toBe('⌘E');
     expect(agentChordLabel(false)).toBe('Ctrl+Shift+E');
+  });
+});
+
+describe('the Today chord (work graph M9.1)', () => {
+  it('⌘⇧T on macOS, Ctrl+Shift+T elsewhere; never without Shift', () => {
+    expect(appChord(ev('T', { metaKey: true, shiftKey: true }), true)).toBe('today');
+    expect(appChord(ev('t', { ctrlKey: true, shiftKey: true }), false)).toBe('today');
+    expect(appChord(ev('t', { metaKey: true }), true)).toBeNull();
+    expect(appChord(ev('T', { ctrlKey: true, shiftKey: true }), true)).toBeNull();
+    expect(todayChordLabel(true)).toBe('⌘⇧T');
+    expect(todayChordLabel(false)).toBe('Ctrl+Shift+T');
   });
 });

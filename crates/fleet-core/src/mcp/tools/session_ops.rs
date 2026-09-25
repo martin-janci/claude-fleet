@@ -325,6 +325,15 @@ impl FleetTools {
         );
         // A per-host token may only spawn on its own host (B1).
         require_host(&caller, &p.host_alias, "the new session")?;
+        self.confirm_gate(
+            "new_session",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "host={} name={} project_id={:?}",
+                p.host_alias, p.name, p.project_id
+            ),
+            &caller,
+        )?;
         let args = sessions::NewSessionArgs {
             host_alias: p.host_alias,
             project_id: p.project_id,
@@ -365,6 +374,15 @@ impl FleetTools {
         );
         // A per-host token may only spawn on its own host (B1).
         require_host(&caller, &p.host_alias, "the new session")?;
+        self.confirm_gate(
+            "new_shell_session",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "host={} name={} project_id={:?}",
+                p.host_alias, p.name, p.project_id
+            ),
+            &caller,
+        )?;
         let args = sessions::NewSessionArgs {
             host_alias: p.host_alias,
             project_id: p.project_id,

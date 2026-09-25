@@ -15,7 +15,7 @@ use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::trackers::admin::{self, TestReport, WorkAdminArgs};
-use fleet_core::service::trackers::tickets::Ticket;
+use fleet_core::service::trackers::tickets::{MultiStart, Ticket};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store, TrackerRow};
 use serde::{Deserialize, Serialize};
@@ -259,6 +259,26 @@ pub async fn work_lookup(
     routed::work_lookup(&backend, args, &store).await
 }
 
+/// A multi-repo start (work graph M9.6): the start's fields plus the
+/// projects, one sibling session per project, all on one branch name.
+#[derive(Deserialize)]
+pub struct StartWorkMultiArgs {
+    #[serde(flatten)]
+    pub start: StartWorkArgs,
+    pub project_ids: Vec<i64>,
+}
+
+#[tauri::command]
+pub async fn start_work_multi(
+    args: StartWorkMultiArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<MultiStart, IpcError> {
+    routed::start_work_multi(&backend, args, &store, &ssh, &reg).await
+}
+
 #[tauri::command]
 pub async fn start_work(
     args: StartWorkArgs,
@@ -333,6 +353,46 @@ pub(crate) mod routed {
                 tickets::lookup(
                     store,
                     &args.reference,
+                    &fleet_core::service::orgs::OrgScope::All,
+                    &default_net(),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn start_work_multi(
+        backend: &FleetBackend,
+        args: StartWorkMultiArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<MultiStart, IpcError> {
+        let a = &args.start;
+        let is_url = a.reference.as_deref().is_some_and(|r| r.contains("://"));
+        let wire = WorkLinkArgs {
+            action: "start".into(),
+            key: a.reference.clone().filter(|_| !is_url),
+            url: a.reference.clone().filter(|_| is_url),
+            item_id: a.item_id,
+            project_ids: Some(args.project_ids.clone()),
+            host_alias: a.host_alias.clone(),
+            with_brief: a.with_brief.then_some(true),
+            brief: a.brief.clone(),
+            name: a.name.clone(),
+            worktree: a.worktree.clone(),
+            force_cross_org: a.force_cross_org.then_some(true),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("start_work_multi", &wire).await,
+            None => {
+                tickets::start_work_many(
+                    store,
+                    ssh,
+                    reg,
+                    &fleet_core::service::work::start_args(&wire),
+                    &args.project_ids,
                     &fleet_core::service::orgs::OrgScope::All,
                     &default_net(),
                 )

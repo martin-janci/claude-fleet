@@ -123,6 +123,7 @@
     "repo_file",
     "repo_log",
     "repo_tree",
+    "request_work_handover",
     "resolve_move",
     "restart_session",
     "restore_host_sessions",
@@ -139,6 +140,7 @@
     "snooze_tidy",
     "spawn_review",
     "start_work",
+    "start_work_multi",
     "tidy_apply",
     "unarchive_session_work",
     "unlink_session_work",
@@ -147,8 +149,10 @@
     "work_reopened",
     "work_resume_plan",
     "work_scopes",
+    "work_ticket_card",
     "work_tickets",
-    "work_tidy"
+    "work_tidy",
+    "work_today"
   ],
   "routed_unless": [
     {

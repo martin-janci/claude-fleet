@@ -8,6 +8,8 @@
   import { healthCheck, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
+  import { todayOpen } from './lib/today';
+  import { composerInsert } from './lib/conversation';
   import TerminalView from './lib/TerminalView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
@@ -569,6 +571,18 @@
     requestNewSessionOnHost(alias);
   }
 
+  // "Insert into composer" (work graph M9.2) shows where the text went: the
+  // selected session's conversation, over Today if it was open.
+  let lastInsertSeq = 0;
+  $effect(() => {
+    const ins = $composerInsert;
+    if (!ins || ins.seq === lastInsertSeq) return;
+    lastInsertSeq = ins.seq;
+    if ($selectedSession?.id !== ins.sessionId) return;
+    todayOpen.set(false);
+    setSessionView('conversation');
+  });
+
   function onChordKeydown(e: KeyboardEvent) {
     const chord = appChord(e, isMac);
     if (!chord) return;
@@ -582,6 +596,7 @@
     else if (chord === 'settings') settingsOpen.set(true);
     else if (chord === 'agent') void toggleAgent();
     else if (chord === 'scope') cycleScope();
+    else if (chord === 'today') todayOpen.update((v) => !v);
   }
 
   function onKeydown(e: KeyboardEvent) {

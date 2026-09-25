@@ -1039,6 +1039,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 start_command: None,
                 friendly_name: None,
                 resume_claude_session_id: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1055,6 +1056,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 new_worktree: None,
                 base_branch: None,
                 start_command: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1251,6 +1253,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 kind: Some("shell".into()),
                 start_command: Some("echo hi".into()),
                 friendly_name: Some("a".repeat(81)), // over the 80-char cap
+                confirm_nonce: None,
             }),
         )
         .await
@@ -2999,7 +3002,27 @@ fn the_served_definition_budget_stays_bounded() {
     // `transport` / `settings` and M7's `auto_tidy`, the enums M7's actions.
     // Measured at 70,209 on 2026-09-25 (M7-on-M8.0 70,020 + 189 for M6.1);
     // plus 100.
-    const BUDGET_BYTES: usize = 70_309;
+    // Work graph M9.1: `work` gains `today` (the Today view's digest) and
+    // one parameter, `since`. No new tool. Measured at 69,265 on 2026-09-25
+    // (+94); plus 100.
+    // Work graph M9.2: `work` gains `card` (the ticket context card; no
+    // parameter). Measured at 69,284 on 2026-09-25 (+19): inside the
+    // headroom, so the constant was not raised.
+    // M9.1 + M9.2 merged over M6: measured at 69,473 on 2026-09-25 (M6's
+    // 69,360 + 113); plus 100.
+    // Work graph M9.7 (decision D12): `confirm_nonce` on new_session,
+    // new_shell_session, safe_kill_session and work_link, so the operator's
+    // starts and kills can carry an approval. Measured at 69,801 on
+    // 2026-09-25 (+328); plus 100.
+    // Work graph M9.3: `work_link` gains `handover` (one enum value and a
+    // clause of description). Measured at 69,865 on 2026-09-25 (+64): inside
+    // the headroom, not raised.
+    // Work graph M9.6: `work_link` start gains `project_ids` (a multi-repo
+    // start). Measured at 69,998 on 2026-09-25 (+133); plus 100.
+    // M7 (main, #267) merged into M9: measured at 70,765 on 2026-09-25
+    // (M7-on-M6's 70,209 + 556 for M9.1-M9.7; M7 had already added
+    // `confirm_nonce` to `work_link`); plus 100.
+    const BUDGET_BYTES: usize = 70_865;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -6336,4 +6359,215 @@ async fn list_sessions_fresh_for_is_unchanged_when_only_row_order_flips() {
         v2["unchanged"], true,
         "a pure reorder from a field the slim shape drops must not invalidate the cursor: {v2}"
     );
+}
+
+/// Work graph M9.7 (decision D12): the operator's starts and kills always
+/// need a person's approval, whatever `mcp.confirm_destructive` says; for
+/// everyone else nothing changes.
+#[test]
+fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
+    for tool in [
+        "new_session",
+        "new_shell_session",
+        "safe_kill_session",
+        "work_link",
+        "kill_session",
+        "delete_worktree",
+        "broadcast_prompt",
+    ] {
+        assert!(guard::operator_must_confirm(true, tool), "{tool}");
+        assert!(!guard::operator_must_confirm(false, tool), "{tool}");
+    }
+    for tool in ["list_sessions", "send_prompt", "work", "restart_session"] {
+        assert!(!guard::operator_must_confirm(true, tool), "{tool}");
+    }
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    assert!(op.is_operator());
+    assert!(!client_caller("phone", TokenMode::Full).is_operator());
+    assert!(!Caller::master().is_operator());
+    assert!(!host_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full
+    )
+    .is_operator());
+}
+
+fn guarded_tools(s: Store, approver: bool) -> FleetTools {
+    let g = McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {}));
+    FleetTools::new(
+        Arc::new(Mutex::new(s)),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        if approver { g } else { g.without_approver() },
+    )
+}
+
+fn confirm_nonce_of(e: &McpError) -> String {
+    assert!(e.message.starts_with("E_CONFIRM_REQUIRED"), "{}", e.message);
+    e.data.as_ref().unwrap()["details"]["confirm_nonce"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    // An unknown item: the start itself fails locally, after the gate.
+    let start = |nonce: Option<String>| WorkLinkArgs {
+        action: "start".into(),
+        item_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+    let phone = t
+        .work_link(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(start(None)),
+        )
+        .await
+        .unwrap_err();
+    assert!(phone.message.starts_with("E_NOTFOUND"), "{}", phone.message);
+
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(start(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(
+        asked
+            .message
+            .contains("the operator's starts and kills always do"),
+        "{}",
+        asked.message
+    );
+    // Approved: the call goes through to the start (which then refuses the
+    // unknown item on its own).
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let after = t
+        .work_link(Extension(op.clone()), Parameters(start(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(after.message.starts_with("E_NOTFOUND"), "{}", after.message);
+
+    // Denied: refused, and nothing ran.
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(start(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, false));
+    let denied = t
+        .work_link(Extension(op.clone()), Parameters(start(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        denied.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        denied.message
+    );
+
+    // A decision on a link is not a start: never gated.
+    t.work_link(
+        Extension(op),
+        Parameters(WorkLinkArgs {
+            session_id: Some(on_b),
+            action: "link".into(),
+            key: Some("PAY-7".into()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("link is not gated");
+}
+
+#[tokio::test]
+async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
+    let (s, pid, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let e = t
+        .new_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "project_id": pid, "name": "x"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .new_shell_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "project_id": pid, "name": "sh"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .safe_kill_session(
+            Extension(op.clone()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    // `kill_session` is confirm-gated for everyone once the toggle is on; for
+    // the operator it is gated with the toggle off too.
+    let e = t
+        .kill_session(
+            Extension(op),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+}
+
+#[tokio::test]
+async fn a_hub_with_no_approver_refuses_the_operator_s_start_outright() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, false);
+    let e = t
+        .work_link(
+            Extension(client_caller(
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                TokenMode::Full,
+            )),
+            Parameters(WorkLinkArgs {
+                action: "start".into(),
+                item_id: Some(1),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("no approver"),
+        "{}",
+        e.message
+    );
+    assert!(t.guards.confirms.pending_tools().is_empty());
 }

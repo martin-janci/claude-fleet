@@ -576,6 +576,38 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "work_ticket_card",
+            "work",
+            json!({ "session_id": null, "key": "PAY-7", "action": "card" }),
+            r#"{"key":"PAY-7","title":"Refund","cached":true,"acceptance":["Refund issued"],"composer_text":"Ticket PAY-7: Refund\n"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_ticket_card(
+                    b,
+                    commands::work::WorkTicketCardArgs {
+                        key: "PAY-7".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_today",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "today", "since": 1_700_000_000 }),
+            r#"{"since":1700000000,"now":1700003600,"groups":[{"bucket":"waiting","key":"PAY-7","title":"Refund","sessions":[{"id":4,"name":"pay","host_alias":"h","attention":"waiting","last_activity_at":1700003000}]}],"shipped":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_today(
+                    b,
+                    commands::work::WorkTodayArgs {
+                        since: Some(1_700_000_000),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "work_purge_impact",
             "work",
             json!({ "session_id": null, "key": null, "action": "purge_impact",
@@ -1042,6 +1074,48 @@ fn routed_mutation_cases() -> Vec<Case> {
                     s,
                     &ssh(),
                     &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "start_work_multi",
+            "work_link",
+            json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": null, "project_ids": [3, 4], "host_alias": "h",
+                    "with_brief": true }),
+            r#"{"key":"ABC-1","started":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::start_work_multi(
+                    b,
+                    commands::trackers::StartWorkMultiArgs {
+                        start: commands::trackers::StartWorkArgs {
+                            reference: Some("ABC-1".into()),
+                            host_alias: Some("h".into()),
+                            with_brief: true,
+                            ..Default::default()
+                        },
+                        project_ids: vec![3, 4],
+                    },
+                    s,
+                    &ssh(),
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "request_work_handover",
+            "work_link",
+            json!({ "session_id": 5, "action": "handover", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::request_work_handover(
+                    b,
+                    commands::work::RequestWorkHandoverArgs { session_id: 5 },
+                    s,
+                    &ssh(),
                 ))
                 .map(|_| ())
             }),

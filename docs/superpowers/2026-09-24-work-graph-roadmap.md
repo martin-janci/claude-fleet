@@ -553,6 +553,36 @@ The ideas the review ranked, for when M1–M8 have settled.
 - **Webhook nudges** for a hub with a public URL. A webhook only triggers a
   targeted fetch.
 
+**Status (2026-09-25): M9.1 and M9.2 landed** on
+`claude/cloud-fleet-work-graph-m9`, per
+`plans/2026-09-24-work-graph-m9-beyond.md` (its *Revisions* list every
+deviation). Verified with `cargo fmt`, `clippy -D warnings` (workspace),
+`cargo test` (fleet-core, claude-fleet, fleet-hub; only the four chmod tests
+that fail as root on `main` fail) and `pnpm check` / `pnpm test`; the manual
+acceptance is still to do.
+
+- **M9.1 Today view**: `work { action: today, since }` (the digest, scoped
+  by `OrgScope`), the Routed `work_today`, the Today view as Details' empty
+  state and on ⌘⇧T, the scope-aware plain-text **Copy standup**.
+- **M9.2 ticket context card**: `work { action: card, key }` (cache only,
+  acceptance criteria parsed in Rust, `composer_text` fenced by
+  `fence_untrusted`), the Routed `work_ticket_card`, the card in Details and
+  **Insert into composer** (inserts, never sends).
+- **M9.7 operator confirmation** (D12): the operator's session starts
+  (`new_session`, `new_shell_session`, `work_link` start / resume) and kills
+  always need a person's approval, whatever `mcp.confirm_destructive` says;
+  a hub (no approver) refuses them. "Tidy up done tickets" waits for M7.
+- **M9.3 agent-written handover** (D9, on demand): `work_link { action:
+  handover }`, marker-delimited reply read by the Stop hook, kept as an
+  agent `note`, shown first (fenced) in briefs; the card's *Ask for a
+  handover*.
+- **M9.6 multi-repo start** (D11): `work_link start { project_ids }`, one
+  sibling per repo on one branch, per-repo duplicate guard; *Also start in*
+  in the New-session dialog.
+- **Not built, by decision:** write-back (D3 none), dead-session summaries
+  (D10 off), webhook nudges (D13 no). Today's **Stale** links to M7's
+  Tidy-up sheet once M7 merges.
+
 ## Critical path and parallelism
 
 ```
@@ -573,10 +603,15 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 |---|---|---|---|
 | D1 | Provider order after Jira | GitHub → Asana → Linear, or Asana first (Company B is real work) | GitHub first (no credentials, a quick check of the abstraction), then Asana immediately |
 | D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org |
-| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | None until M9 |
+| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-25: none.** M9.5 stays planned, not built |
 | D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub |
 | D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide |
 | D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only |
+| D9 | May fleet spend a turn of a session's model to write its handover (M9.3)? | on demand · also at safe kill · never | **Decided 2026-09-25: on demand only** (a button; never at safe kill) |
+| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-25: off.** M9.4 stays planned, not built |
+| D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before** |
+| D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always** |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
 
 ## Risks to watch
 
@@ -648,3 +683,21 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   migrations were renumbered to 052 (`work_lifecycle`) and 053
   (`org_auto_tidy`), and a database that already ran M6's 051 gets both.
   `work_admin` carries M6's `transport` / `settings` and M7's `auto_tidy`.
+- 2026-09-25: M9 planned (`plans/2026-09-24-work-graph-m9-beyond.md`) and
+  M9.1 (Today view, Copy standup) and M9.2 (ticket context card) landed on
+  `claude/cloud-fleet-work-graph-m9`: two `work` actions (`today`, `card`)
+  and one parameter (`since`), two Routed commands (163). The tool budget
+  grew by 113 B (94 raised the constant to 69,365; `card`'s 19 fit the
+  headroom); no new tool, no contract bump. The other six M9 items wait on
+  the new decisions D9–D13 and on D3.
+- 2026-09-25: decisions D3 (none) and D9–D13 (defaults) recorded; `main`
+  (M6) merged into the M9 branch; M9.7, M9.3 and M9.6 landed. Two
+  `work_link` things (the `handover` action, the `project_ids` parameter)
+  and `confirm_nonce` on four tools; two more Routed commands (165). The
+  tool budget is 70,098 (measured 69,998). No new tool, no migration, no
+  contract bump.
+- 2026-09-25: M7 (main, #267) merged into the M9 branch. `work_link` is
+  `confirm: true` since M7 (its tidy kills); M9.7's start / resume gate
+  therefore runs only for the operator, so a person's start is never gated.
+  Tool budget 70,865 (measured 70,765).
+

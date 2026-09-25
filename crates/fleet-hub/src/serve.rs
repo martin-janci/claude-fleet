@@ -744,7 +744,8 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             nonce = %req.nonce,
             "confirmation requested but this hub has no approver; disable mcp.confirm_destructive"
         );
-    }));
+    }))
+    .without_approver();
 
     warn_if_confirm_destructive(&store);
 

@@ -79,6 +79,12 @@ impl FleetTools {
             p.tmux_name.as_deref(),
             "the session to retire",
         )?;
+        self.confirm_gate(
+            "safe_kill_session",
+            p.confirm_nonce.as_deref(),
+            &format!("host={host_alias} name={tmux_name}"),
+            &caller,
+        )?;
         let args = safe_kill::SafeKillSessionArgs {
             host_alias,
             tmux_name,

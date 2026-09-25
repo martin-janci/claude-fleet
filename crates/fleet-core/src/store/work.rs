@@ -1015,6 +1015,17 @@ impl Store {
         Ok(out)
     }
 
+    /// Every work item some confirmed link points at, live or ended (the
+    /// Today view's "shipped" reads a done ticket only when it is work).
+    pub fn linked_work_item_ids(&self) -> Result<std::collections::HashSet<i64>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT item_id FROM work_links \
+             WHERE item_id IS NOT NULL AND state = 'confirmed'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Confirmed links that ended at or after `since` (past work, for the
     /// sidebar's past-only groups), newest first, at most `limit`.
     pub fn recent_ended_work_links(

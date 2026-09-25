@@ -66,7 +66,7 @@ pub struct Ticket {
 /// read every ticket any of them works on); the org fence is added because
 /// the host fence alone would let a host read another org's ticket that a
 /// person force-linked on it.
-fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
+pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
     let Some(h) = scope.host() else {
         return Ok(None);
     };
@@ -366,6 +366,9 @@ pub struct StartArgs {
     /// Link across orgs anyway (work graph M5): the ticket's org differs
     /// from the org the new session would belong to.
     pub force_cross_org: bool,
+    /// A multi-repo start (work graph M9.6): the duplicate guard counts only
+    /// live sessions on the key in THIS start's project.
+    pub per_project: bool,
 }
 
 /// Where a start lands and what it is called.
@@ -486,8 +489,12 @@ pub async fn plan_start(
         }
     };
     let s = lock(store)?;
-    if let Some((_, row)) = s.live_work_sessions_for_key(&key)?.into_iter().next() {
-        if !scope.sees_row(&row) {
+    let live = s.live_work_sessions_for_key(&key)?;
+    if let Some((_, row)) = live
+        .iter()
+        .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
+    {
+        if !scope.sees_row(row) {
             // Still one live session per key, but an isolated org's session
             // is not named to a host outside it (D7).
             return Err(IpcError::new(
@@ -661,6 +668,17 @@ fn tracker_line(s: &str, max: usize) -> String {
 /// [`BRIEF_MAX_CHARS`](crate::service::work::handover::BRIEF_MAX_CHARS), so
 /// the end marker always survives.
 pub fn ticket_brief(store: &Mutex<Store>, plan: &StartPlan) -> Result<String, IpcError> {
+    ticket_brief_with(store, plan, "")
+}
+
+/// [`ticket_brief`] with more of fleet's own lines (`extra`, e.g. a
+/// multi-repo start's siblings) after the header, inside the same budget,
+/// so the fence's end always survives.
+pub fn ticket_brief_with(
+    store: &Mutex<Store>,
+    plan: &StartPlan,
+    extra: &str,
+) -> Result<String, IpcError> {
     const FROM: &str = "the tracker ticket's description";
     let s = lock(store)?;
     let item = plan
@@ -683,6 +701,10 @@ pub fn ticket_brief(store: &Mutex<Store>, plan: &StartPlan) -> Result<String, Ip
         }
     }
     out.push_str(&format!("Branch: {}\n", plan.branch));
+    if !extra.trim().is_empty() {
+        out.push_str(extra.trim_end());
+        out.push('\n');
+    }
     if let Some(d) = meta.and_then(|m| m.description) {
         let overhead = out.chars().count()
             + crate::mcp::guard::fence_untrusted("", FROM, 0)
@@ -798,6 +820,183 @@ pub async fn start_work(
         );
     }
     Ok(row)
+}
+
+// --- multi-repo start (work graph M9.6) ---------------------------------------
+
+/// At most this many repositories in one start.
+pub const MULTI_START_MAX: usize = 8;
+
+/// A repository a multi-repo start left alone: the key already runs there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartSkip {
+    pub project_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    pub reason: String,
+}
+
+/// A repository a multi-repo start could not start in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartFailure {
+    pub project_id: i64,
+    pub code: String,
+    pub message: String,
+}
+
+/// `work_link { action: start, project_ids }`: one sibling session per
+/// repository, each on the same branch name (decision D11).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MultiStart {
+    pub key: String,
+    #[serde(default)]
+    pub started: Vec<SessionRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<StartSkip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<StartFailure>,
+}
+
+/// PURE: the line each sibling's brief carries about the others.
+pub fn siblings_line(key: &str, here: &str, others: &[String], branch: &str) -> String {
+    let mut line = format!(
+        "This is one of {} sessions starting {key} together, one per repository: this one \
+         works in {here}",
+        others.len() + 1
+    );
+    if !others.is_empty() {
+        line.push_str(&format!("; the others in {}", others.join(", ")));
+    }
+    line.push_str(&format!(
+        ". Each works on branch {branch} in its own repository; change only this one."
+    ));
+    line
+}
+
+/// Plan and start one sibling per project; `spawn` makes a session. A repo
+/// where the key already runs is skipped (naming the session), one that
+/// fails to plan or spawn is reported, and the rest still start. Returns
+/// the result and the rows whose brief was queued.
+pub async fn start_many<F, Fut>(
+    store: &Arc<Mutex<Store>>,
+    args: &StartArgs,
+    project_ids: &[i64],
+    scope: &OrgScope,
+    net: &TrackerNet,
+    mut spawn: F,
+) -> Result<(MultiStart, Vec<SessionRow>), IpcError>
+where
+    F: FnMut(crate::service::sessions::NewSessionArgs) -> Fut,
+    Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+{
+    let mut ids: Vec<i64> = Vec::new();
+    for id in project_ids {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    if ids.is_empty() || ids.len() > MULTI_START_MAX {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("a multi-repo start takes 1 to {MULTI_START_MAX} project_ids"),
+        ));
+    }
+    let mut out = MultiStart::default();
+    let mut plans: Vec<StartPlan> = Vec::new();
+    for pid in &ids {
+        let one = StartArgs {
+            project_id: Some(*pid),
+            per_project: true,
+            ..args.clone()
+        };
+        match plan_start(store, &one, scope, net).await {
+            Ok(p) => plans.push(p),
+            Err(e) if e.code == codes::E_EXISTS => out.skipped.push(StartSkip {
+                project_id: *pid,
+                session_id: e.details.as_ref().and_then(|d| d["session_id"].as_i64()),
+                reason: e.message.to_string(),
+            }),
+            Err(e) => out.failed.push(StartFailure {
+                project_id: *pid,
+                code: e.code.to_string(),
+                message: e.message.to_string(),
+            }),
+        }
+    }
+    if let Some(p) = plans.first() {
+        out.key = p.key.clone();
+    }
+    let labels: Vec<String> = {
+        let s = lock(store)?;
+        plans
+            .iter()
+            .map(|p| {
+                let repo = s
+                    .get_project(p.project_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| format!("{}/{}", r.owner, r.repo))
+                    .unwrap_or_else(|| format!("project {}", p.project_id));
+                format!("{repo} on {}", p.host_alias)
+            })
+            .collect()
+    };
+    let mut queued_rows = Vec::new();
+    for (i, plan) in plans.iter().enumerate() {
+        let others: Vec<String> = labels
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, l)| l.clone())
+            .collect();
+        let sib = siblings_line(&plan.key, &labels[i], &others, &plan.branch);
+        let brief = match (&args.brief, args.with_brief) {
+            (Some(b), _) => Some(format!("{sib}\n\n{b}")),
+            (None, true) if brief_visible_on(store, plan)? => {
+                Some(ticket_brief_with(store, plan, &sib)?)
+            }
+            (None, _) => None,
+        };
+        match start_with(store, plan, brief, &mut spawn).await {
+            Ok((row, queued)) => {
+                if queued {
+                    queued_rows.push(row.clone());
+                }
+                out.started.push(row);
+            }
+            Err(e) => out.failed.push(StartFailure {
+                project_id: plan.project_id,
+                code: e.code.to_string(),
+                message: e.message.to_string(),
+            }),
+        }
+    }
+    Ok((out, queued_rows))
+}
+
+/// [`start_many`] over the real `new_session`, typing each start prompt.
+pub async fn start_work_many(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<crate::ssh::SshClient>,
+    reg: &Arc<crate::cancel::CancellationRegistry>,
+    args: &StartArgs,
+    project_ids: &[i64],
+    scope: &OrgScope,
+    net: &TrackerNet,
+) -> Result<MultiStart, IpcError> {
+    let (out, queued) = start_many(store, args, project_ids, scope, net, |a| {
+        crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
+    })
+    .await?;
+    for row in &queued {
+        crate::service::work::resume::spawn_start_prompt(
+            Arc::clone(store),
+            Arc::clone(ssh),
+            row,
+            start_prompt(&out.key),
+        );
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+import { writable } from 'svelte/store';
 import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
 import type { ClaudeStatus, StuckKind, SessionRow } from './sessions';
@@ -881,6 +882,28 @@ export const composerDrafts = new Map<number, string>();
 export function rememberDraft(sessionId: number, text: string): void {
   if (text.length === 0) composerDrafts.delete(sessionId);
   else composerDrafts.set(sessionId, text);
+}
+
+/** The last "Insert into composer" (work graph M9.2): the session and its
+ *  whole new draft. ConversationPanel adopts it when it shows that session;
+ *  App opens the conversation view for it. `seq` makes a repeat distinct. */
+export interface ComposerInsert {
+  sessionId: number;
+  draft: string;
+  seq: number;
+}
+export const composerInsert = writable<ComposerInsert | null>(null);
+
+/**
+ * Put `text` into a session's composer — appended after a blank line to
+ * whatever is already typed — and never send it. The draft is stored first,
+ * so a panel that mounts later (the view was on the terminal) finds it.
+ */
+export function insertIntoComposer(sessionId: number, text: string): void {
+  const prev = (composerDrafts.get(sessionId) ?? '').replace(/\s+$/, '');
+  const draft = prev ? `${prev}\n\n${text}` : text;
+  rememberDraft(sessionId, draft);
+  composerInsert.update((v) => ({ sessionId, draft, seq: (v?.seq ?? 0) + 1 }));
 }
 
 /** Prompts plus reply items, for "N new" while the user is scrolled up. */

@@ -1522,7 +1522,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 169 commands, 66 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1793,6 +1793,13 @@ deliberately.
   and the hub logs a warning naming the tool and nonce. A `state.db` copied
   from a desktop can carry it switched on; `fleet-hub serve` logs a warning
   at startup when it is.
+- **The operator's starts and kills.** The UX agent's operator session
+  must have its session starts (`new_session`, `new_shell_session`,
+  `work_link` `start` / `resume`) and kills approved by a person, whatever
+  `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
+  no approver, so an operator homed on a hub-served fleet is refused those
+  calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from
+  the sidebar.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions

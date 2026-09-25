@@ -699,6 +699,176 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // The ticket card (work graph M9.2): from the cache, and to a host only
+    // for its own work — with the tracker text fenced, never plain.
+    for key in ["BB-1", "AA-1"] {
+        m.row(
+            "work",
+            "card",
+            move |_, _| json!({ "action": "card", "key": key }),
+            move |_, who, a| {
+                let mine = matches!((who, key), (Who::HostA, "AA-1") | (Who::HostB, "BB-1"));
+                if who.is_host() && !mine {
+                    return is_code(who, a, "E_FORBIDDEN", "another org's card");
+                }
+                is_ok(who, a, "card");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                let secret = if key == "BB-1" {
+                    "SECRET-B"
+                } else {
+                    "SECRET-A"
+                };
+                let fenced = v["composer_text"].as_str().unwrap();
+                assert!(
+                    fenced.contains(secret) && fenced.contains(crate::mcp::guard::UNTRUSTED_END),
+                    "{who:?}: {v}"
+                );
+                if who.is_host() {
+                    assert!(
+                        v.get("excerpt").is_none() && v.get("acceptance").is_none(),
+                        "{v}"
+                    );
+                } else {
+                    assert!(v["excerpt"].as_str().unwrap().contains(secret), "{v}");
+                }
+            },
+        )
+        .await;
+    }
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "card", "key": "BB-1" }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "card", "key": "ZZ-404" }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
+    // Multi-repo start (work graph M9.6): each repo is planned under the
+    // caller's scope, so a host that cannot see B's ticket starts nothing.
+    m.row(
+        "work_link",
+        "start",
+        |_, _| json!({ "action": "start", "key": "BB-2", "project_ids": [1, 2], "host_alias": "h-a" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            assert_eq!(v["started"], json!([]), "{who:?}: {v}");
+            if matches!(who, Who::HostA | Who::HostNone) {
+                assert!(
+                    v["failed"].as_array().unwrap().iter().all(|f| f["code"] == "E_FORBIDDEN"),
+                    "{who:?}: {v}"
+                );
+            }
+        },
+    )
+    .await;
+    // Agent-written handover (work graph M9.3): a caller asks only its own
+    // sessions; the send itself fails here for want of a real host.
+    m.row(
+        "work_link",
+        "handover",
+        |fx, who| json!({ "action": "handover", "session_id": own(fx, who) }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            assert!(
+                !matches!(code(a), "E_FORBIDDEN" | "E_NOTFOUND" | "E_INVALID")
+                    && !text(a).contains("not visible"),
+                "{who:?}: {a:?}"
+            );
+        },
+    )
+    .await;
+    // Host A on s_x (A's session carrying B's ticket): the work is not A's
+    // to read, so the session reads as having none.
+    let x = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "handover", "session_id": fx.s_x }),
+    )
+    .await;
+    is_code(Who::HostA, &x, "E_INVALID", "B's work on an A session");
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "handover", "session_id": fx.s_b }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work_link",
+        json!({ "action": "handover", "session_id": 999_999 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &fx.s_b.to_string(), "999999");
+    // Today (work graph M9.1): BB-3 shipped today (done, and its ended
+    // session left a PR). Each host reads its own host's day inside its org.
+    {
+        let s = fx.t.store.lock().unwrap();
+        let now = crate::service::catalog::now_secs();
+        s.conn_for_test()
+            .execute(
+                "UPDATE work_items SET status_category = 'done', status_changed_at = ?1 \
+                 WHERE id IN (SELECT item_id FROM work_links WHERE snap_tmux = 's-b-old')",
+                [now],
+            )
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE work_links SET snap_pr_url = 'https://github.com/beta/web/pull/3' \
+                 WHERE snap_tmux = 's-b-old'",
+                [],
+            )
+            .unwrap();
+    }
+    m.row(
+        "work",
+        "today",
+        |_, _| json!({ "action": "today", "since": 0 }),
+        |fx, who, a| {
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            let mut ids: Vec<i64> = v["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|g| g["sessions"].as_array().unwrap().iter())
+                .filter_map(|s| s["id"].as_i64())
+                .collect();
+            ids.sort();
+            let shipped: Vec<&str> = v["shipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s["key"].as_str())
+                .collect();
+            let mut want = match who {
+                Who::HostA => vec![fx.s_a, fx.s_x],
+                Who::HostB => vec![fx.s_b],
+                Who::HostNone => vec![fx.s_n],
+                _ => vec![fx.s_a, fx.s_b, fx.s_n, fx.s_x],
+            };
+            want.sort();
+            assert_eq!(ids, want, "{who:?}: {v}");
+            match who {
+                Who::HostA | Who::HostNone => assert!(shipped.is_empty(), "{who:?}: {v}"),
+                _ => assert_eq!(shipped, vec!["BB-3"], "{who:?}: {v}"),
+            }
+        },
+    )
+    .await;
     m.row(
         "work",
         "scopes",

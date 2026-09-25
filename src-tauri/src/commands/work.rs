@@ -14,8 +14,10 @@
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::work::card::TicketCard;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
+use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{ReopenedWork, SessionRow, Store, WorkLinkRow};
@@ -234,6 +236,54 @@ pub async fn resume_work(
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SessionRow, IpcError> {
     routed::resume_work(&backend, args, &store, &ssh, &reg).await
+}
+
+/// Ask a live session to write its hand-off (work graph M9.3, on demand).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestWorkHandoverArgs {
+    pub session_id: i64,
+}
+
+#[tauri::command]
+pub async fn request_work_handover(
+    args: RequestWorkHandoverArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<SessionRow, IpcError> {
+    routed::request_work_handover(&backend, args, &store, &ssh).await
+}
+
+/// The Today view's digest (work graph M9.1). `since` is the viewer's local
+/// midnight: the hub does not know the desktop's timezone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkTodayArgs {
+    #[serde(default)]
+    pub since: Option<i64>,
+}
+
+#[tauri::command]
+pub async fn work_today(
+    args: WorkTodayArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Today, IpcError> {
+    routed::work_today(&backend, args, &store).await
+}
+
+/// A ticket's context card from the hub's cache (work graph M9.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkTicketCardArgs {
+    pub key: String,
+}
+
+#[tauri::command]
+pub async fn work_ticket_card(
+    args: WorkTicketCardArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<TicketCard, IpcError> {
+    routed::work_ticket_card(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -575,6 +625,31 @@ pub(crate) mod routed {
         }
     }
 
+    pub async fn request_work_handover(
+        backend: &FleetBackend,
+        args: RequestWorkHandoverArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<SessionRow, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "handover".into(),
+            session_id: Some(args.session_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("request_work_handover", &wire).await,
+            None => {
+                work::agent_handover::request(
+                    store,
+                    ssh,
+                    args.session_id,
+                    &fleet_core::service::orgs::OrgScope::All,
+                )
+                .await
+            }
+        }
+    }
+
     pub async fn resume_work(
         backend: &FleetBackend,
         args: ResumeWorkArgs,
@@ -604,6 +679,40 @@ pub(crate) mod routed {
                 )
                 .await
             }
+        }
+    }
+
+    pub async fn work_today(
+        backend: &FleetBackend,
+        args: WorkTodayArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Today, IpcError> {
+        let wire = WorkArgs {
+            action: Some("today".into()),
+            since: args.since,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_today", &wire).await,
+            None => {
+                work::today::today(store, args.since, &fleet_core::service::orgs::OrgScope::All)
+            }
+        }
+    }
+
+    pub async fn work_ticket_card(
+        backend: &FleetBackend,
+        args: WorkTicketCardArgs,
+        store: &Mutex<Store>,
+    ) -> Result<TicketCard, IpcError> {
+        let wire = WorkArgs {
+            action: Some("card".into()),
+            key: Some(args.key.clone()),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_ticket_card", &wire).await,
+            None => work::card::card(store, &args.key, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 
