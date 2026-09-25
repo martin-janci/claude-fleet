@@ -103,7 +103,7 @@ function row(i: number, r: () => number): SessionRow {
     worktree_key: roll >= 0.7 && roll < 0.8 ? `feat/CORE-${i}-thing` : `wt${i}`,
     lost_at: null,
     claude_session_id: null,
-    claude_status: r() < 0.1 ? 'waiting' : 'idle',
+    claude_status: r() < 0.1 ? 'blocked' : 'idle',
     effort_level: null,
     pr_url: null,
     current_activity: null,
@@ -229,14 +229,14 @@ describe('work graph at scale (M12.2)', () => {
     let severityCalls = 0;
     const sorted = sortWorkGroups(out.groups, (s) => {
       severityCalls++;
-      return s.claude_status === 'waiting' ? 2 : 0;
+      return s.claude_status === 'blocked' ? 2 : 0;
     });
     expect(severityCalls).toBe(grouped.length);
     expect(sorted).toHaveLength(out.groups.length);
 
     const { p95 } = measure(`buildSessionsByWork + sortWorkGroups, ${SESSIONS} rows`, () => {
       const o = build();
-      sortWorkGroups(o.groups, (s) => (s.claude_status === 'waiting' ? 2 : 0));
+      sortWorkGroups(o.groups, (s) => (s.claude_status === 'blocked' ? 2 : 0));
     });
     expect(p95).toBeLessThan(250);
   });
@@ -250,7 +250,7 @@ describe('work graph at scale (M12.2)', () => {
       { tracker: 2, status: 'todo' },
       { assignee: '@me', archived: false },
       { hasSession: 'no' },
-      { host: 'h1', scope: 'org:1', showBgAgents: false, status: 'done', predicate: (s) => s.claude_status === 'waiting' },
+      { host: 'h1', scope: 'org:1', showBgAgents: false, status: 'done', predicate: (s) => s.claude_status === 'blocked' },
     ];
     // Shape: each count agrees with a direct reading of the fixture.
     const count = (f: RowFilters) => fr.filter((r) => rowMatches(r, f)).length;
@@ -285,7 +285,7 @@ describe('work graph at scale (M12.2)', () => {
         name: s.tmux_name,
         host_alias: s.host_alias,
         org_id: s.org_id,
-        attention: s.claude_status === 'waiting' ? 'waiting' : null,
+        attention: s.claude_status === 'blocked' ? 'waiting' : null,
         stale: s.id % 11 === 0 ? 'idle' : null,
         pr_url: s.id % 13 === 0 ? `https://github.com/o/r/pull/${s.id}` : null,
         last_activity_at: s.last_activity_at,
