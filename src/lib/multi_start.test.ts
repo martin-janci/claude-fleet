@@ -1,7 +1,12 @@
 // Multi-repo start (work graph M9.6): which projects the dialog offers, and
 // the note on what a start left out.
-import { describe, it, expect } from 'vitest';
-import { siblingCandidates, multiStartNote, shownSiblings } from './multi_start';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { get } from 'svelte/store';
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+import { invoke } from '@tauri-apps/api/core';
+import { siblingCandidates, multiStartNote, shownSiblings, startWorkMulti } from './multi_start';
+import { sessions, resetTombstonesForTests } from './sessions';
+import { session } from './hosts_fixture';
 import type { ProjectTreeRow } from './projects';
 import type { WorkLink } from './work';
 
@@ -66,5 +71,60 @@ describe('shownSiblings', () => {
     expect(shownSiblings([9], offered)).toEqual([]);
     expect(shownSiblings([2], [])).toEqual([]);
     expect(shownSiblings([], offered)).toEqual([]);
+  });
+});
+
+describe('startWorkMulti', () => {
+  beforeEach(() => {
+    resetTombstonesForTests();
+    sessions.set([]);
+    vi.mocked(invoke).mockReset();
+  });
+
+  it('sends one start and takes every started row into the store', async () => {
+    const other = session('h', 'other', { id: 70 });
+    const app = session('h', 'app-abc-7', { id: 71, project_id: 1 });
+    const web = session('h', 'web-abc-7', { id: 72, project_id: 2 });
+    sessions.set([other]);
+    vi.mocked(invoke).mockResolvedValue({
+      key: 'ABC-7',
+      started: [app, web],
+      skipped: [{ project_id: 3, session_id: 5, reason: 'already running' }],
+    });
+    const args = { reference: 'ABC-7', project_id: 1, host_alias: 'h', name: 'abc-7', project_ids: [2, 3] };
+    const r = await startWorkMulti(args);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('start_work_multi', { args });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.started.map((s) => s.id)).toEqual([71, 72]);
+      expect(r.value.skipped).toEqual([{ project_id: 3, session_id: 5, reason: 'already running' }]);
+    }
+    const ids = get(sessions).map((s) => s.id).sort((a, b) => a - b);
+    expect(ids).toEqual([70, 71, 72]);
+    // A started row that was already listed is replaced, not doubled.
+    vi.mocked(invoke).mockResolvedValue({ key: 'ABC-7', started: [{ ...web, friendly_name: 'web' }] });
+    await startWorkMulti(args);
+    const rows = get(sessions);
+    expect(rows).toHaveLength(3);
+    expect(rows.find((s) => s.id === 72)?.friendly_name).toBe('web');
+  });
+
+  it('a refusal is the answer and the store is untouched', async () => {
+    const other = session('h', 'other', { id: 70 });
+    sessions.set([other]);
+    vi.mocked(invoke).mockRejectedValue({ code: 'E_FORBIDDEN', message: 'ABC-7 is not visible' });
+    const r = await startWorkMulti({ reference: 'ABC-7', project_id: 1, project_ids: [2] });
+    expect(r).toEqual({ ok: false, error: { code: 'E_FORBIDDEN', message: 'ABC-7 is not visible' } });
+    expect(get(sessions)).toEqual([other]);
+  });
+
+  it('an answer without a started list (an older hub, or nothing started) merges nothing and is still ok', async () => {
+    sessions.set([]);
+    vi.mocked(invoke).mockResolvedValue({ key: 'ABC-7', failed: [{ project_id: 2, code: 'E_SSH', message: 'host down' }] });
+    const r = await startWorkMulti({ reference: 'ABC-7', project_id: 1, project_ids: [2] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.failed?.[0].code).toBe('E_SSH');
+    expect(get(sessions)).toEqual([]);
   });
 });
