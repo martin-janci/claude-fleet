@@ -1,5 +1,6 @@
 //! The tidy planner's table: one row per reason, one per protection, the
-//! secondary-reason merge, snooze / never, and what auto-tidy may act on.
+//! secondary-reason merge, snooze / never / keep, and what auto-tidy may act
+//! on — including `idle_unlinked`'s own exclusions and D19.
 
 use super::*;
 use crate::service::pane_intel::PendingInput;
@@ -26,6 +27,8 @@ fn session(id: i64, idle: i64) -> TidySession {
         last_touch_at: None,
         open_tasks: false,
         branch: None,
+        any_link: false,
+        kept_until: None,
     }
 }
 
@@ -440,4 +443,360 @@ fn an_org_override_decides_auto_tidy_for_its_sessions() {
     assert_eq!(auto_ids(&on_but_8), vec![1, 3]);
     assert!(!cfg().auto_anywhere());
     assert_eq!(run(&sessions, &cfg())[0].org_id, Some(7));
+}
+
+// ── idle_unlinked (work graph M11.3) ──────────────────────────────────
+
+/// An unlinked work session, created long ago, idle for `idle` seconds, with
+/// no prompt, attach or turn since it went idle.
+fn unlinked(id: i64, idle: i64) -> TidySession {
+    let mut s = session(id, idle);
+    s.row.created_at = NOW - 60 * DAY;
+    s.row.started_at = Some(NOW - 60 * DAY);
+    s.row.last_turn_at = Some(NOW - idle);
+    s.row.last_stop_at = Some(NOW - idle);
+    s.last_touch_at = Some(NOW - idle);
+    s
+}
+
+#[test]
+fn idle_unlinked_is_offered_after_the_window_with_a_safe_kill() {
+    let got = run(&[unlinked(1, 9 * DAY)], &cfg());
+    assert_eq!(
+        reasons(&got),
+        vec![(1, TidyReason::IdleUnlinked, TidyAction::SafeKill)]
+    );
+    let c = &got[0];
+    assert_eq!(c.since, NOW - 9 * DAY, "the evidence: quiet since");
+    assert_eq!(c.idle_secs, 9 * DAY);
+    assert_eq!(c.link_id, None);
+    assert_eq!(c.key, None);
+    assert!(!c.auto);
+    // Exactly at the window it counts; a second short of it does not.
+    assert_eq!(run(&[unlinked(1, 7 * DAY)], &cfg()).len(), 1);
+    assert!(run(&[unlinked(1, 7 * DAY - 1)], &cfg()).is_empty());
+    // The window is the setting's.
+    let three = TidyConfig {
+        unlinked_idle_secs: 3 * DAY,
+        ..cfg()
+    };
+    assert_eq!(run(&[unlinked(1, 4 * DAY)], &three).len(), 1);
+}
+
+/// One row per thing that keeps an idle, unlinked session OUT of the sheet —
+/// each a mutation of the canonical candidate above, which alone is offered.
+#[test]
+fn idle_unlinked_exclusions_table() {
+    let base = || unlinked(1, 9 * DAY);
+    let who = ("local".to_string(), "s1".to_string());
+    type Case = (&'static str, Box<dyn Fn() -> TidySession>);
+    let cases: Vec<Case> = vec![
+        // What it must be: a work session with its own tracked tree.
+        (
+            "kind shell",
+            Box::new(move || {
+                let mut s = base();
+                s.row.kind = "shell".into();
+                s
+            }),
+        ),
+        (
+            "kind bg",
+            Box::new(move || {
+                let mut s = base();
+                s.row.kind = "bg".into();
+                s
+            }),
+        ),
+        (
+            "kind external",
+            Box::new(move || {
+                let mut s = base();
+                s.row.kind = "external".into();
+                s
+            }),
+        ),
+        (
+            "kind review",
+            Box::new(move || {
+                let mut s = base();
+                s.row.kind = "review".into();
+                s
+            }),
+        ),
+        (
+            "no tracked worktree",
+            Box::new(move || {
+                let mut s = base();
+                s.row.worktree_id = None;
+                s
+            }),
+        ),
+        // No link of any kind.
+        (
+            "a primary confirmed link",
+            Box::new(move || TidySession {
+                link: Some(link("todo", 30 * DAY)),
+                ..base()
+            }),
+        ),
+        (
+            "another live link or a suggestion",
+            Box::new(move || TidySession {
+                any_link: true,
+                ..base()
+            }),
+        ),
+        // Idle, and unused, for the whole window.
+        (
+            "not idle (no idle stamp)",
+            Box::new(move || {
+                let mut s = base();
+                s.row.idle_since = None;
+                s
+            }),
+        ),
+        (
+            "idle only 6 days",
+            Box::new(move || {
+                let mut s = base();
+                s.row.idle_since = Some(NOW - 6 * DAY);
+                s
+            }),
+        ),
+        (
+            "prompted or attached 2 days ago",
+            Box::new(move || TidySession {
+                last_touch_at: Some(NOW - 2 * DAY),
+                ..base()
+            }),
+        ),
+        (
+            "a turn finished 3 days ago",
+            Box::new(move || {
+                let mut s = base();
+                s.row.last_turn_at = Some(NOW - 3 * DAY);
+                s
+            }),
+        ),
+        (
+            "a Stop hook 3 days ago",
+            Box::new(move || {
+                let mut s = base();
+                s.row.last_stop_at = Some(NOW - 3 * DAY);
+                s
+            }),
+        ),
+        (
+            "created inside the window",
+            Box::new(move || {
+                let mut s = base();
+                s.row.created_at = NOW - 2 * DAY;
+                s
+            }),
+        ),
+        (
+            "started inside the window",
+            Box::new(move || {
+                let mut s = base();
+                s.row.started_at = Some(NOW - 2 * DAY);
+                s
+            }),
+        ),
+        (
+            "kept for 3 more days",
+            Box::new(move || TidySession {
+                kept_until: Some(NOW + 3 * DAY),
+                ..base()
+            }),
+        ),
+        (
+            "host unreachable",
+            Box::new(move || {
+                let mut s = base();
+                s.row.host_alias = "remote".into();
+                s
+            }),
+        ),
+        (
+            "a ghost",
+            Box::new(move || {
+                let mut s = base();
+                s.row.status = "ghost".into();
+                s
+            }),
+        ),
+        // Every hard-coded protection wins.
+        (
+            "protection: in_progress",
+            Box::new(move || TidySession {
+                in_progress: true,
+                ..base()
+            }),
+        ),
+        (
+            "protection: working",
+            Box::new(move || {
+                let mut s = base();
+                s.row.claude_status = Some("working".into());
+                s
+            }),
+        ),
+        (
+            "protection: blocked",
+            Box::new(move || {
+                let mut s = base();
+                s.row.claude_status = Some("blocked".into());
+                s
+            }),
+        ),
+        (
+            "protection: failed",
+            Box::new(move || {
+                let mut s = base();
+                s.row.claude_status = Some("failed".into());
+                s
+            }),
+        ),
+        (
+            "protection: stuck",
+            Box::new(move || {
+                let mut s = base();
+                s.row.stuck_kind = Some("trust_prompt".into());
+                s
+            }),
+        ),
+        (
+            "protection: needs you",
+            Box::new(move || {
+                let mut s = base();
+                s.row.pending_input = Some(PendingInput {
+                    kind: "question".into(),
+                    question: None,
+                    options: vec![],
+                });
+                s
+            }),
+        ),
+        (
+            "protection: touched within the hour",
+            Box::new(move || TidySession {
+                last_touch_at: Some(NOW - 60),
+                ..base()
+            }),
+        ),
+        (
+            "protection: open tasks",
+            Box::new(move || TidySession {
+                open_tasks: true,
+                ..base()
+            }),
+        ),
+        (
+            "protection: safe kill in flight",
+            Box::new(move || {
+                let mut s = base();
+                s.row.safe_kill_state = Some("requested".into());
+                s
+            }),
+        ),
+    ];
+    assert_eq!(
+        run(&[base()], &cfg()).len(),
+        1,
+        "the base row is a candidate"
+    );
+    for (name, make) in &cases {
+        let got = run(&[make()], &cfg());
+        assert!(
+            got.iter().all(|c| c.reason != TidyReason::IdleUnlinked),
+            "{name}: {got:?}"
+        );
+    }
+    // The controller and the operator, which the context names.
+    let reachable = local();
+    for (controller, operator) in [(Some(&who), None), (None, Some(&who))] {
+        let got = plan_tidy(
+            &[base()],
+            &cfg(),
+            &TidyContext {
+                controller,
+                operator,
+                reachable: &reachable,
+                now: NOW,
+            },
+        );
+        assert!(got.is_empty(), "{controller:?} {operator:?}");
+    }
+    // A kept session is back once the keep ends.
+    let lapsed = TidySession {
+        kept_until: Some(NOW - 1),
+        ..base()
+    };
+    assert_eq!(run(&[lapsed], &cfg()).len(), 1);
+}
+
+#[test]
+fn idle_unlinked_never_offers_a_shared_worktree() {
+    // Two unlinked sessions on one tree: the idler is a duplicate (a plain
+    // kill of a tree in use), never an idle_unlinked kill; the other keeps
+    // the tree and is not offered.
+    let mut a = unlinked(1, 10 * DAY);
+    a.row.worktree_key = Some("shared".into());
+    let mut b = unlinked(2, 9 * DAY);
+    b.row.worktree_key = Some("shared".into());
+    let got = run(&[a, b], &cfg());
+    assert_eq!(
+        reasons(&got),
+        vec![(1, TidyReason::DuplicateWorktree, TidyAction::Kill)]
+    );
+    assert!(got[0].secondary.is_empty(), "{got:?}");
+}
+
+#[test]
+fn idle_unlinked_ranks_below_the_work_reasons() {
+    let s = TidySession {
+        pr_merged: true,
+        ..unlinked(1, 9 * DAY)
+    };
+    let got = run(&[s], &cfg());
+    assert_eq!(got[0].reason, TidyReason::PrMergedIdle);
+    assert_eq!(got[0].secondary, vec![TidyReason::IdleUnlinked]);
+}
+
+#[test]
+fn auto_tidy_never_acts_on_idle_unlinked() {
+    // D19: on globally, on for the org, every reason in the allowed list —
+    // still only suggested.
+    let mut s = unlinked(1, 30 * DAY);
+    s.row.org_id = Some(7);
+    let every = TidyConfig {
+        auto: true,
+        auto_reasons: TidyReason::RANKED.to_vec(),
+        org_auto: HashMap::from([(7, true)]),
+        ..cfg()
+    };
+    let got = run(&[s], &every);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].reason, TidyReason::IdleUnlinked);
+    assert!(!got[0].auto);
+    assert!(auto_selection(&got).is_empty());
+    // A candidate off the wire that claims `auto` is still not selected.
+    let forged = TidyCandidate {
+        auto: true,
+        ..got[0].clone()
+    };
+    assert!(auto_selection(&[forged]).is_empty());
+    assert!(!TidyReason::IdleUnlinked.auto_allowed());
+    assert!(!TidyReason::Unknown.auto_allowed());
+    assert!(TidyReason::DoneIdle.auto_allowed());
+}
+
+#[test]
+fn a_keep_holds_every_reason_of_a_live_session() {
+    let kept = TidySession {
+        kept_until: Some(NOW + DAY),
+        ..done_session(1)
+    };
+    assert!(run(&[kept], &cfg()).is_empty());
 }

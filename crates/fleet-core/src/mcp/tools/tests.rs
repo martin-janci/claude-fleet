@@ -3270,6 +3270,10 @@ fn the_served_definition_budget_stays_bounded() {
     // restore_host_sessions, recreate_session and restart_session (no new
     // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
     // plus 100.
+    // M11.3 (`idle_unlinked`, per-session keep): one value, `keep`, on
+    // `tidy_apply`'s item action. No new tool, no new parameter, no
+    // description change. Measured at 71,595 on 2026-09-25 (+5 over main's
+    // 71,590): inside the headroom, so the constant was not raised.
     const BUDGET_BYTES: usize = 71_658;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()

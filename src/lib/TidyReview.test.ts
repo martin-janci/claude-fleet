@@ -243,4 +243,79 @@ describe('TidyReview', () => {
     expect(screen.queryByTestId('tidy-sheet')).toBeNull();
     expect(get(tidyRequest)).toBeNull();
   });
+
+  describe('idle, no work linked (work graph M11.3)', () => {
+    const lonely = () =>
+      cand(7, {
+        link_id: null,
+        key: null,
+        item_status: null,
+        reason: 'idle_unlinked',
+        action: 'safe_kill',
+        since: Math.floor(Date.now() / 1000) - 9 * 86_400 - 60,
+        idle_secs: 9 * 86_400,
+      });
+
+    it('shows the reason, its evidence, starts unticked, and offers Keep and Safe kill', async () => {
+      candidates = [cand(1), lonely()];
+      await mount();
+      await fireEvent.click(await screen.findByTestId('tidy-pill'));
+      await tick();
+      expect(screen.getAllByTestId('tidy-group').map((g) => g.textContent)).toEqual([
+        'Done and idle · 1',
+        'Idle, no work linked · 1',
+      ]);
+      const row = screen.getAllByTestId('tidy-row')[1];
+      expect(row.querySelector('[data-testid="tidy-evidence"]')).toHaveTextContent('idle 9 d · no work linked');
+      expect(row).toHaveTextContent('only if clean & pushed');
+      expect(row).not.toHaveTextContent('commits & pushes first');
+      const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+      expect(checks.map((c) => c.checked)).toEqual([true, false]);
+      const select = row.querySelector('[data-testid="tidy-choice"]') as HTMLSelectElement;
+      expect(Array.from(select.options, (o) => o.textContent)).toEqual(['Safe kill', 'Keep 7 d']);
+      expect(row.querySelector('[data-testid="tidy-keep"]')).toHaveTextContent('Keep 7 d');
+      expect(row.querySelector('[data-testid="tidy-safe-kill"]')).toHaveTextContent('Safe kill');
+    });
+
+    it('Keep sends a per-session keep for 7 days', async () => {
+      candidates = [lonely()];
+      await mount();
+      await fireEvent.click(await screen.findByTestId('tidy-pill'));
+      await tick();
+      await fireEvent.click(screen.getByTestId('tidy-keep'));
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith('tidy_apply', {
+          args: { items: [{ session_id: 7, action: 'keep', days: 7 }] },
+        }),
+      );
+    });
+
+    it('Safe kill arms on the first click and acts on the second', async () => {
+      candidates = [lonely()];
+      await mount();
+      await fireEvent.click(await screen.findByTestId('tidy-pill'));
+      await tick();
+      const kill = screen.getByTestId('tidy-safe-kill');
+      await fireEvent.click(kill);
+      await tick();
+      expect(kill).toHaveTextContent('Confirm safe kill');
+      expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+      await fireEvent.click(kill);
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith('tidy_apply', {
+          args: { items: [{ session_id: 7, action: 'safe_kill' }] },
+        }),
+      );
+    });
+
+    it('Enter with nothing ticked applies nothing', async () => {
+      candidates = [lonely()];
+      await mount();
+      await fireEvent.click(await screen.findByTestId('tidy-pill'));
+      await tick();
+      await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'Enter' });
+      await tick();
+      expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+    });
+  });
 });

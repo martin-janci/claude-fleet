@@ -1750,6 +1750,86 @@ async fn run_matrix(isolate: bool) {
             .unwrap();
     }
 
+    // ── idle_unlinked and keep (work graph M11.3) ──────────────────────
+    // Two work sessions with their own worktrees and no work linked, idle
+    // and unprompted forever: A's on h-a, B's on h-b.
+    let (u_a, u_b) = {
+        let s = fx.t.store.lock().unwrap();
+        let unlinked = |name: &str, host: &str, pid: i64| {
+            let wid = s
+                .upsert_worktree_on(host, pid, name, &format!("/src/{name}"), Some(name))
+                .unwrap();
+            let id = s
+                .upsert_session(name, host, Some(pid), Some(wid), 1, 1, "running", None)
+                .unwrap();
+            s.conn_for_test()
+                .execute_batch(&format!(
+                    "UPDATE sessions SET claude_status = 'idle', idle_since = 0, \
+                       created_at = 0, worktree_key = '{name}' WHERE id = {id};"
+                ))
+                .unwrap();
+            id
+        };
+        (
+            unlinked("u-a", "h-a", fx.pid_acme),
+            unlinked("u-b", "h-b", fx.pid_beta),
+        )
+    };
+    m.row(
+        "work",
+        "tidy",
+        |_, _| json!({ "action": "tidy" }),
+        move |_, who, a| {
+            is_ok(who, a, "tidy");
+            let t = text(a);
+            let v: Value = serde_json::from_str(t).unwrap();
+            let has =
+                |id: i64| {
+                    v["candidates"].as_array().unwrap().iter().any(|c| {
+                        c["session_id"] == json!(id) && c["reason"] == json!("idle_unlinked")
+                    })
+                };
+            match who {
+                Who::HostA => assert!(has(u_a) && !has(u_b), "{t}"),
+                Who::HostB => assert!(has(u_b) && !has(u_a), "{t}"),
+                Who::HostNone => assert!(!has(u_a) && !has(u_b), "{t}"),
+                _ => assert!(has(u_a) && has(u_b), "{who:?}: {t}"),
+            }
+        },
+    )
+    .await;
+    // Keep is per session, fenced like every tidy item: another host's or
+    // org's session reads as one that does not exist.
+    m.row(
+        "work_link",
+        "tidy_apply",
+        move |_, _| {
+            json!({ "action": "tidy_apply",
+                    "items": [{ "session_id": u_b, "action": "keep", "days": 3 }] })
+        },
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_ok(who, a, "a batch always answers");
+            let t = text(a);
+            let refused = t.contains(&format!("session {u_b} not found"));
+            assert_eq!(
+                refused,
+                matches!(who, Who::HostA | Who::HostNone),
+                "{who:?}: {t}"
+            );
+            assert_eq!(t.contains("\"outcome\":\"kept\""), !refused, "{who:?}: {t}");
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        for id in [u_a, u_b] {
+            s.delete_session(id).unwrap();
+        }
+    }
+
     // Coverage: every action of the three tools has a row.
     let want: BTreeSet<(String, String)> = WORK_ACTIONS
         .iter()

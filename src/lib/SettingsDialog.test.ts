@@ -506,6 +506,7 @@ describe('SettingsDialog — Work lifecycle (work graph M7.3)', () => {
     await tick();
     expect((screen.getByTestId('work-tidy-done-days') as HTMLInputElement).value).toBe('2');
     expect((screen.getByTestId('work-tidy-idle-hours') as HTMLInputElement).value).toBe('4');
+    expect((screen.getByTestId('work-tidy-idle-unlinked-days') as HTMLInputElement).value).toBe('7');
     expect((screen.getByTestId('work-auto-tidy') as HTMLInputElement).checked).toBe(false);
     expect(screen.getByTestId('work-auto-tidy-warning').textContent).toContain('never touched');
     const reason = (r: string) => screen.getByTestId(`work-auto-tidy-reason-${r}`) as HTMLInputElement;
@@ -526,6 +527,33 @@ describe('SettingsDialog — Work lifecycle (work graph M7.3)', () => {
       expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
         key: 'work.auto_tidy_reasons',
         value: 'done_idle,pr_merged_idle,not_planned',
+      }),
+    );
+  });
+});
+
+describe('SettingsDialog — tidy: unlinked for (work graph M11.3)', () => {
+  it('writes work.tidy_idle_unlinked_days within 1–90 and refuses the rest here', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    const input = screen.getByTestId('work-tidy-idle-unlinked-days') as HTMLInputElement;
+    expect(input.min).toBe('1');
+    expect(input.max).toBe('90');
+    for (const bad of ['0', '91']) {
+      await fireEvent.change(input, { target: { value: bad } });
+      await tick();
+      expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'work.tidy_idle_unlinked_days',
+        value: bad,
+      });
+    }
+    expect(document.body.textContent).toContain('Tidy: unlinked for: must be 1–90');
+    await fireEvent.change(input, { target: { value: '14' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'work.tidy_idle_unlinked_days',
+        value: '14',
       }),
     );
   });
