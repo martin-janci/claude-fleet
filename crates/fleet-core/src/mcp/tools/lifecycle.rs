@@ -362,9 +362,9 @@ impl FleetTools {
         killed only once the target runs. strict refuses instead of \
         carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
         E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both \
-        sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH \
-        hosts (in practice the master). Returns a moved report, a preview or \
-        a wait.")]
+        sessions left), E_CONFIRM_REQUIRED, E_FORBIDDEN (cross-org; see \
+        force_cross_org). Needs a token allowed on BOTH hosts (in practice the \
+        master). Returns a moved report, a preview or a wait.")]
     // `clean_target`'s prose lives on the parameter itself rather than in the
     // sentence above: the served tool surface is capped
     // (`the_served_definition_budget_stays_bounded`), and a flag documented
@@ -380,14 +380,15 @@ impl FleetTools {
             "move_session",
             &format!(
                 "session_id={} target={} keep_source={} strict={} clean_target={} dry_run={} \
-                 when_is={:?}",
+                 when_is={:?} force_cross_org={}",
                 p.session_id,
                 p.target_host_alias,
                 p.keep_source,
                 p.strict,
                 p.clean_target,
                 dry_run,
-                when
+                when,
+                p.force_cross_org
             ),
         );
         crate::validate::host_alias(&p.target_host_alias).map_err(to_mcp_err)?;
