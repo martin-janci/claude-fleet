@@ -6,7 +6,8 @@
   //   any) opens a sheet listing each session's top suggestion with its
   //   why. j/k (or ↓/↑) move, y (or ↵) confirms, n (or ⌫) rejects — sticky,
   //   never suggested again. Deciding one brings that session's next
-  //   suggestion, if it has one, through the row update.
+  //   suggestion, if it has one, through the row update; a toast says what
+  //   was decided and what comes next.
   // - A session whose primary work becomes an automatic link (a trusted
   //   branch key, a sole ticket URL) gets a toast "Linked NAME → KEY
   //   (branch) · Undo"; Undo is "Not this" for that link.
@@ -70,9 +71,19 @@
     const sg = r?.work_suggested;
     if (!r || !sg || busy || blocked !== null) return;
     busy = true;
+    const name = rowName(r);
+    const key = sg.key ?? sg.title;
     const res = yes ? await confirmSessionWork(r.id, sg.link_id) : await rejectWorkLink(r.id, sg.link_id);
     busy = false;
-    if (!res.ok) pushError(res.error, yes ? 'Confirm failed' : 'Not this failed');
+    if (!res.ok) {
+      pushError(res.error, yes ? 'Confirm failed' : 'Not this failed');
+      return;
+    }
+    // The session's next suggestion takes this row's place under the same
+    // name, so without a word the click looks like it did nothing.
+    const next = res.value.work_suggested;
+    const more = next ? ` · next: ${next.key ?? next.title}? (${next.suggestions ?? 1} left)` : '';
+    push({ kind: 'info', message: yes ? `Linked ${name} → ${key}${more}` : `${name}: not ${key}${more}` });
   }
 
   function onSheetKey(e: KeyboardEvent) {

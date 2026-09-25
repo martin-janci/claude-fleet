@@ -430,3 +430,64 @@ fn the_branch_is_the_last_main_thread_git_branch() {
     assert_eq!(branch_from_jsonl(&jsonl).as_deref(), Some("abc-3-z"));
     assert_eq!(branch_from_jsonl(""), None);
 }
+
+/// A PR description that lists tickets (a release PR, an audit) names none
+/// of them as the session's work: past the dump guard its text proposes
+/// nothing, and what an earlier, shorter text proposed is withdrawn.
+#[test]
+fn a_pr_text_listing_tickets_proposes_none_of_them() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    let probe = |text: &[&str]| {
+        let sig = PrSignals {
+            text: text.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        f.s.set_pr_signals("h", "dev", Some(&serde_json::to_string(&sig).unwrap()))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+    };
+    probe(&["ABC-1"]);
+    assert_eq!(
+        links(&f.s, sid).len(),
+        1,
+        "one key in a PR text is a suggestion"
+    );
+    probe(&["ABC-1", "ABC-2", "ABC-3", "ABC-4"]);
+    assert!(
+        links(&f.s, sid).is_empty(),
+        "a list is a reference, not a suggestion: {:?}",
+        links(&f.s, sid)
+    );
+    assert_eq!(
+        f.s.get_session_by_id(sid).unwrap().unwrap().work_suggested,
+        None
+    );
+}
+
+/// Once a session has confirmed work, a weak mention (a prompt key, a PR
+/// text key, a trailer) no longer asks for a decision: deciding one
+/// suggestion must not bring up the next mention. A strong suggestion (the
+/// branch or PR moved on) still does.
+#[test]
+fn a_session_with_confirmed_work_surfaces_only_strong_suggestions() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    on_prompt(&f.s, sid, "see ABC-1, ABC-2 and ABC-3", false).unwrap();
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    let sg = row
+        .work_suggested
+        .expect("weak suggestions show while no work is confirmed");
+    assert_eq!(sg.suggestions, 3);
+    decide(&f.s, sid, sg.link_id, true).unwrap();
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert!(row.work.is_some());
+    assert_eq!(row.work_suggested, None, "the other mentions stay quiet");
+    assert_eq!(row.work.unwrap().suggestions, 0);
+
+    f.s.set_current_branch(sid, "abc-7-retry").unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let sg = f.s.get_session_by_id(sid).unwrap().unwrap().work_suggested;
+    let sg = sg.expect("a strong suggestion still asks");
+    assert_eq!((sg.key.as_deref(), sg.suggestions), (Some("ABC-7"), 1));
+}
