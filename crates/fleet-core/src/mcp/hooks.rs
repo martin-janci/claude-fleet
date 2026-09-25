@@ -205,18 +205,15 @@ pub async fn handle_hook(
             if event != "UserPromptSubmit" {
                 return StatusCode::NO_CONTENT.into_response();
             }
-            match crate::service::hooks::take_pending_delivery(&state.store, &payload, &ctx) {
-                Some(packed) if !packed.text.is_empty() => {
-                    tracing::debug!(
-                        event,
-                        delivered = packed.included.len(),
-                        remaining = packed.remaining,
-                        "[hook] carrying a delivery"
-                    );
+            // Mail, then the classification nudge (work graph M4.6) when it
+            // fires and fits: see `prompt_submit_context`.
+            match crate::service::hooks::prompt_submit_context(&state.store, &payload, &ctx) {
+                Some(text) if !text.is_empty() => {
+                    tracing::debug!(event, chars = text.len(), "[hook] carrying a delivery");
                     axum::Json(serde_json::json!({
                         "hookSpecificOutput": {
                             "hookEventName": event,
-                            "additionalContext": packed.text,
+                            "additionalContext": text,
                         }
                     }))
                     .into_response()

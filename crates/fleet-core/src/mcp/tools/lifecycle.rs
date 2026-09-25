@@ -185,6 +185,18 @@ impl FleetTools {
             p.name.as_deref(),
             "the session to restart",
         )?;
+        // The operator's restarts (a kill and a start) need a person (D12).
+        self.confirm_gate(
+            "restart_session",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "host={} name={} force={}",
+                bound_text(Some(&host_alias)),
+                bound_text(Some(&name)),
+                p.force
+            ),
+            &caller,
+        )?;
         let args = sessions::RestartSessionArgs {
             host_alias,
             name,
@@ -202,19 +214,34 @@ impl FleetTools {
     pub(super) async fn spawn_review(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<sessions::SpawnReviewArgs>,
+        Parameters(SpawnReviewParams {
+            args,
+            confirm_nonce,
+        }): Parameters<SpawnReviewParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "spawn_review",
             &format!("source_session_id={}", args.source_session_id),
         );
         // The review session is created on the source session's host.
-        self.resolve_target_row(
+        let source = self.resolve_target_row(
             &caller,
             Some(args.source_session_id),
             None,
             None,
             "the session to review",
+        )?;
+        self.confirm_gate(
+            "spawn_review",
+            confirm_nonce.as_deref(),
+            &format!(
+                "source_session_id={} host={} name={} prompt={}",
+                args.source_session_id,
+                bound_text(Some(&source.host_alias)),
+                bound_text(Some(&source.tmux_name)),
+                bound_body(Some(&args.prompt))
+            ),
+            &caller,
         )?;
         let row = sessions::spawn_review(args, &self.store, &self.ssh)
             .await

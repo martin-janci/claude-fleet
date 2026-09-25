@@ -187,6 +187,15 @@ pub fn claude_md() -> &'static str {
      it.** When work needs doing in a project, start a session on the right\n\
      host and brief it. You are the operator, not the worker.\n\
      \n\
+     **Tidying up done tickets.** `work` action `tidy` lists what fleet\n\
+     suggests cleaning up, each with a reason (`done_idle`, `pr_merged_idle`,\n\
+     `not_planned`, …) and a preselected action. Show the person the batch\n\
+     you mean — key, session, reason, action — then apply it in ONE\n\
+     `work_link` action `tidy_apply` call. Keep each candidate's action\n\
+     (safe kill for anything not clean); never turn a safe kill into a kill.\n\
+     Kills wait for the person's confirmation on the desktop; a hub has no\n\
+     one to confirm, so there offer archive or snooze instead and say so.\n\
+     \n\
      Answer in the language the person uses. Prefer one short paragraph over\n\
      a report: the sidebar already shows what changed.\n"
 }
@@ -940,6 +949,20 @@ mod tests {
             md.contains("not a repository") || md.contains("do not write code"),
             "the operator must be told its directory is not a place to write code"
         );
+    }
+
+    /// Work graph M9 follow-up: "tidy up done tickets" is an operator
+    /// command, and its instructions keep M7's safe path.
+    #[test]
+    fn the_operating_instructions_say_how_to_tidy_up_done_tickets() {
+        let md = claude_md();
+        for needle in [
+            "action `tidy`",
+            "`tidy_apply`",
+            "never turn a safe kill into a kill",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?}");
+        }
     }
 
     // ------------------------------------------------------- ensure_operator

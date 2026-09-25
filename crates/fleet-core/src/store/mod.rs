@@ -143,9 +143,40 @@ impl EventBus for StoreBus {
     }
 }
 
+/// How long a statement waits on another connection's lock (a `fleet-hub`
+/// CLI beside the daemon) before it fails with `SQLITE_BUSY`.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Journal settings for the long-lived file store, applied before migrating.
+///
+/// The default rollback journal with `synchronous = FULL` fsyncs several
+/// times per commit; on the hub's HDD-backed NAS volume that measured ~200 ms
+/// per autocommit write, all of it under the store mutex every reader waits
+/// on. WAL with `synchronous = NORMAL` commits without an fsync (~0.1 ms
+/// there): a power cut can lose the last commits, never corrupt the file.
+/// WAL is persistent in the file, so the read-only CLI opens inherit it.
+///
+/// A filesystem without shared-memory support refuses WAL and SQLite keeps
+/// the old mode; `synchronous` then stays at its safe default, since NORMAL
+/// under a rollback journal can corrupt on power loss.
+fn tune_file_connection(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+    if mode.eq_ignore_ascii_case("wal") {
+        conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+    } else {
+        tracing::warn!(
+            mode,
+            "[store] WAL refused; the store stays on its journal mode"
+        );
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open_with_bus(path: &std::path::Path, bus: Arc<dyn EventBus>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        tune_file_connection(&conn)?;
         let store = Self {
             conn,
             bus: StoreBus::new(bus),
@@ -183,6 +214,7 @@ impl Store {
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Ok(Self {
             conn,
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
@@ -410,5 +442,53 @@ mod tests {
         // it as a public getter, so this test is intentionally minimal.
         let _ = std::sync::Arc::new(NoopEventBus); // also exercises Send+Sync
         let _ = store; // touch it to keep it alive past the new
+    }
+
+    fn pragma<T: rusqlite::types::FromSql>(s: &Store, name: &str) -> T {
+        s.conn
+            .query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// On the hub's HDD-backed NAS volume a rollback-journal commit cost
+    /// ~200 ms of fsync while holding the store mutex; WAL costs ~0.1 ms.
+    #[test]
+    fn file_store_opens_in_wal_with_normal_sync_and_a_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+        assert_eq!(pragma::<String>(&s, "journal_mode"), "wal");
+        // 1 = NORMAL: in WAL mode a commit does not fsync; a power cut can
+        // lose the last commits but never corrupts the database.
+        assert_eq!(pragma::<i64>(&s, "synchronous"), 1);
+        assert!(pragma::<i64>(&s, "busy_timeout") >= 1000);
+    }
+
+    /// `fleet-hub pair` / `token show` read beside a live daemon. In WAL a
+    /// commit sits in `state.db-wal` until a checkpoint, and the read-only
+    /// open must still see it — and must work again once the daemon is gone.
+    #[test]
+    fn read_only_open_sees_uncheckpointed_writes_and_opens_after_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let live = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        live.set_controller("mac", "dev-fleet").unwrap();
+        assert!(
+            dir.path().join("state.db-wal").exists(),
+            "write went to the WAL"
+        );
+
+        let ro = Store::open_read_only(&db).unwrap();
+        assert_eq!(
+            ro.get_controller().unwrap(),
+            Some(("mac".to_string(), "dev-fleet".to_string()))
+        );
+        drop(ro);
+        drop(live);
+
+        let ro = Store::open_read_only(&db).unwrap();
+        assert_eq!(
+            ro.get_controller().unwrap(),
+            Some(("mac".to_string(), "dev-fleet".to_string()))
+        );
     }
 }

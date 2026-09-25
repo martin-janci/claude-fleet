@@ -355,7 +355,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 WHERE c.participant_id = p.id AND c.ended_at IS NULL \
                   AND c.is_primary = 1 AND c.state = 'confirmed')) \
        ORDER BY l.preselected DESC, \
-                CASE l.strength WHEN 'strong' THEN 0 ELSE 1 END, \
+                CASE l.strength WHEN 'strong' THEN 0 WHEN 'inferred' THEN 1 ELSE 2 END, \
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
