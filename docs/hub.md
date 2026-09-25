@@ -1873,8 +1873,10 @@ deliberately.
 - **A peer's own words cannot forge the marker that quotes them.** If a
   message body from another fleet happens to contain a line matching
   fleet's own untrusted-content marker, that line is neutralised (prefixed
-  `> `) before it is ever stored — a peer cannot close the marked block
-  early and have the rest of its text read back as fleet's own.
+  `> `, and every `[claude-fleet` in the body defused to `(claude-fleet`,
+  whatever invisible character sits in front of it) before it is ever
+  stored — a peer cannot close the marked block early and have the rest of
+  its text read back as fleet's own.
 - **Trust in a link is decided once, at pairing, by identity — not by a
   fleet-id allowlist.** The pairing code itself is the credential: only
   someone who can already run commands on the other hub can mint one, and
