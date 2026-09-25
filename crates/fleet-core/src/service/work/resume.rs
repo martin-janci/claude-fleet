@@ -503,6 +503,16 @@ pub fn resume_session_args(
     })
 }
 
+/// The brief a caller edited, blank counting as none: the Resume dialog
+/// sends `""` for a cleared textarea, and a blank body could only fail
+/// after the session exists. None here means the plan builds the brief.
+fn edited_brief(brief: Option<&str>) -> Option<String> {
+    brief
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string)
+}
+
 /// The short start prompt typed into a `brief` resume (the brief itself
 /// rides the hook's `additionalContext`, never the pane).
 pub fn start_prompt(key: &str) -> String {
@@ -535,7 +545,8 @@ where
             ),
         ));
     }
-    let with_brief = args.mode == "brief" && args.brief.is_none();
+    let edited = edited_brief(args.brief.as_deref());
+    let with_brief = args.mode == "brief" && edited.is_none();
     let plan = resume_plan(
         store,
         ssh,
@@ -581,14 +592,21 @@ where
         let s = lock(store)?;
         s.link_resumed_work(row.id, &plan.key)?;
         if args.mode == "brief" {
-            let body = args
-                .brief
-                .clone()
-                .or(plan.brief.clone())
-                .unwrap_or_default();
+            let body = edited.or(plan.brief.clone()).unwrap_or_default();
             let body: String = body.chars().take(handover::BRIEF_MAX_CHARS).collect();
             let meta = serde_json::json!({ "key": plan.key, "link_id": plan.link_id }).to_string();
-            Some(s.enqueue_handover(row.id, &body, Some(&meta))?)
+            // The session exists and is linked by now: a brief that cannot
+            // be queued (a blank one, say) is recorded on its timeline and
+            // the row is still answered; an error here would leave the
+            // caller with a session it was told failed.
+            match s.enqueue_handover(row.id, &body, Some(&meta)) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(session_id = row.id, key = %plan.key, error = %e.message, "[resume] the brief was not queued");
+                    let _ = s.insert_session_event(row.id, "handover_missing", Some(&e.message));
+                    None
+                }
+            }
         } else {
             None
         }
@@ -773,11 +791,16 @@ mod tests {
     /// A past session of ABC-1 on `h`, ended, in worktree `abc-1` of a
     /// project, with conversation `c-1`.
     fn fixture() -> (Arc<Mutex<Store>>, i64) {
+        fixture_on("h")
+    }
+
+    /// [`fixture`] with the past session on `host`.
+    fn fixture_on(host: &str) -> (Arc<Mutex<Store>>, i64) {
         let s = Store::open_in_memory().unwrap();
-        s.upsert_host("h").unwrap();
+        s.upsert_host(host).unwrap();
         let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
         let id = s
-            .upsert_session("dev-o-r--abc-1", "h", None, None, 1, 1, "running", None)
+            .upsert_session("dev-o-r--abc-1", host, None, None, 1, 1, "running", None)
             .unwrap();
         s.conn_ref()
             .execute(
@@ -789,8 +812,8 @@ mod tests {
         s.conn_ref()
             .execute(
                 "INSERT INTO worktrees (project_id, host_alias, name, path, branch) \
-                 VALUES (?1, 'h', 'abc-1', '/p/o/r/.worktrees/abc-1', 'abc-1')",
-                rusqlite::params![pid],
+                 VALUES (?1, ?2, 'abc-1', '/p/o/r/.worktrees/abc-1', 'abc-1')",
+                rusqlite::params![pid, host],
             )
             .unwrap();
         let wt: i64 = s.conn_ref().last_insert_rowid();
@@ -989,6 +1012,43 @@ mod tests {
         let s = st.lock().unwrap();
         let queued = s.undelivered_handovers(row.id).unwrap();
         assert_eq!(queued[0].body.as_deref(), Some("my edited brief"));
+    }
+
+    /// The dialog sends `""` for a cleared textarea: that is no brief, so
+    /// the plan builds one, and the resume answers the row it made rather
+    /// than failing after the session exists.
+    #[tokio::test]
+    async fn a_blank_edited_brief_gets_the_built_one_and_never_fails_after_spawn() {
+        assert_eq!(edited_brief(None), None);
+        assert_eq!(edited_brief(Some("")), None);
+        assert_eq!(edited_brief(Some(" \n\t")), None);
+        assert_eq!(edited_brief(Some(" x ")).as_deref(), Some("x"));
+        // On `local`, so the brief's git probe runs (and fails) here rather
+        // than over SSH; the brief is built from the store either way.
+        let (st, _) = fixture_on("local");
+        let ssh = Arc::new(SshClient::new());
+        let args = ResumeArgs {
+            key: "abc-1".into(),
+            mode: "brief".into(),
+            brief: Some("   ".into()),
+            ..Default::default()
+        };
+        let st2 = Arc::clone(&st);
+        let (row, handover) = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+            let s = st2.lock().unwrap();
+            let id = s
+                .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        })
+        .await
+        .expect("the row, not an error after the spawn");
+        assert!(handover.is_some(), "the plan's brief was queued");
+        assert_eq!(row.work.as_ref().and_then(|w| w.key.as_deref()), Some("ABC-1"));
+        let s = st.lock().unwrap();
+        let queued = s.undelivered_handovers(row.id).unwrap();
+        let body = queued[0].body.as_deref().unwrap_or_default();
+        assert!(body.contains("ABC-1"), "built, not the blank: {body:?}");
     }
 
     #[test]
