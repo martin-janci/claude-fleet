@@ -58,6 +58,58 @@ generated from it.
    into the notes if you want them inline, and **Publish**. See
    [GitHub release job](#github-release-job) below.
 
+## Upgrading into the work graph
+
+**v0.2.38 is the first release that carries the work graph.** It ships
+migrations 045–055 in one release: 045–053 are the work graph (participants
+for every session, work items and links, the journal, trackers, detection,
+orgs, the lifecycle columns), and 054/055 are hub↔hub peer links. v0.2.37
+is the last release without it; its schema ends at 044. v0.2.40 adds 056
+(the classification nudge stamp). 057 (a trigger re-issued for developer
+databases) is on `main` and not yet in a tag. A user upgrading from v0.2.37
+or older runs every migration from 045 on, on first launch.
+
+**Tell users to back up `state.db` before upgrading.** Quit the app, or stop
+`fleet-hub`, first, so the copy is consistent, then copy the file together
+with any `state.db-wal` / `state.db-shm` next to it:
+
+- desktop, macOS: `~/Library/Application Support/sk.rlt.claude-fleet/state.db`
+- desktop, Linux: `~/.local/share/claude-fleet/state.db`
+- hub: `<data-dir>/state.db` (`/var/lib/fleet-hub` in the Docker image; see
+  `docs/hub.md`)
+
+The copy is the only way back. Migrations are one-way, and **an older build
+refuses a database a newer one has migrated**. `Store::migrate` compares
+the recorded schema version with the newest one it knows and stops with
+*"this database is at schema version N, but this build of claude-fleet
+only knows up to M … It is not corrupt; do not delete it"*. It stops before
+writing anything. To roll back a release, restore the backup. Do not delete
+the file: deleting it throws away every link, journal and tracker setting.
+The guard landed with M12.1; releases before it had no such check and ran
+against a newer schema silently.
+
+**How long it takes.** The M12.1 upgrade test
+(`store::schema::tests_upgrade`) builds a v0.2.37-shaped database from the
+historical migration files (20 hosts, 40 projects, 150 worktrees, 500
+sessions, 2,000 conversations, 5,000 timeline events). It then runs every
+migration after 044, enumerated from `MIGRATIONS`, so a new migration is
+covered without editing the test. The chain has a 5 s budget. Measured on
+2026-09-25 (a CI-class Linux container, 045–057):
+
+| build | chain, in memory | through `open_with_bus` on a file (WAL) |
+|-------|------------------|------------------------------------------|
+| debug (`cargo test`) | ~120 ms | ~100 ms |
+| release (`cargo test --release`) | ~44 ms | ~46 ms |
+
+No single migration takes more than 20 ms in debug (048, fifteen
+`ALTER TABLE`s). 045's participant backfill is the only one that writes
+rows, one per session that had none. The rest are DDL, whose cost does not
+grow with the data. Re-run the numbers with:
+
+```bash
+cargo test -p fleet-core --lib store::schema::tests_upgrade -- --nocapture --test-threads=1
+```
+
 ## GitHub release job
 
 `.github/workflows/release.yml` runs on `push` of any `v*` tag — i.e. the tag
