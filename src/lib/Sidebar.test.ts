@@ -2012,6 +2012,34 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(within(group).getAllByTestId('sess-row').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('a focused session whose link is archived is shown as a row, not hidden under Done', async () => {
+    const work = (archived: number | null) => ({
+      link_id: 5, item_id: 9, key: 'PAY-7', title: 'Retry', source: 'manual',
+      status_category: 'done', status_name: 'Done', archived_at: archived,
+    });
+    const live = { ...sessionFor(1, 'dev-live'), work: work(null) };
+    const parked = { ...sessionFor(1, 'dev-parked'), work: work(1_700_000_000) };
+    mockBackend(workProjects, [live, parked]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const group = await screen.findByTestId('work-groups');
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.getByTestId('work-done')).toHaveTextContent('Done · 1');
+    // A tidy-up candidate clicked in the sheet: the focus must reveal the row.
+    focusSession(parked.id, 'dev-parked');
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('dev-parked');
+    expect(screen.queryByTestId('work-done')).toBeNull();
+    expect(screen.getByTestId('session-focus-bar')).toHaveTextContent('Showing only dev-parked');
+    // Lifting the focus puts it back under Done.
+    await fireEvent.click(screen.getByTestId('session-focus-clear'));
+    await tick(); await tick();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.getByTestId('work-done')).toHaveTextContent('Done · 1');
+  });
+
   it('the purge confirmation names the work that loses its conversations (M2.5)', async () => {
     mockBackend(workProjects, [sessionFor(1, 'dev-a')]);
     const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
