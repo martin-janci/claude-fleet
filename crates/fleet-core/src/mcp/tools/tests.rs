@@ -900,10 +900,6 @@ fn list_sessions_docs_quote_status_vocabulary() {
         list_sessions_param_doc("claude_status").contains(&ClaudeStatus::vocabulary_doc()),
         "ListSessionsParams.claude_status doc must quote the vocabulary verbatim"
     );
-    assert!(
-        list_sessions_param_doc("summary").contains(&StuckKind::vocabulary_doc()),
-        "ListSessionsParams.summary doc must quote the stuck_kind vocabulary verbatim"
-    );
     let tools = FleetTools::tool_router_for_doc().list_all();
     let desc = tools
         .iter()
@@ -912,6 +908,34 @@ fn list_sessions_docs_quote_status_vocabulary() {
         .expect("list_sessions description");
     assert!(desc.contains(&ClaudeStatus::vocabulary_doc()));
     assert!(desc.contains(&StuckKind::vocabulary_doc()));
+}
+
+/// Wherever a served description or parameter doc lists a status vocabulary,
+/// it lists all of it, as the enum renders it (M11.5 moved the lists to the
+/// places a caller reads them; this keeps any that remain from drifting).
+#[test]
+fn every_served_status_list_quotes_the_enum() {
+    let claude = ClaudeStatus::vocabulary_doc();
+    let stuck = StuckKind::vocabulary_doc();
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let t = present::present(t);
+        let mut texts = vec![t.description.as_deref().unwrap_or_default().to_string()];
+        if let Some(props) = t.input_schema.get("properties").and_then(|p| p.as_object()) {
+            texts.extend(
+                props
+                    .values()
+                    .filter_map(|p| p["description"].as_str().map(str::to_string)),
+            );
+        }
+        for text in texts {
+            if text.contains("working | blocked") {
+                assert!(text.contains(&claude), "{}: {text}", t.name);
+            }
+            if text.contains("auth_menu |") {
+                assert!(text.contains(&stuck), "{}: {text}", t.name);
+            }
+        }
+    }
 }
 
 #[test]
@@ -3270,7 +3294,15 @@ fn the_served_definition_budget_stays_bounded() {
     // restore_host_sessions, recreate_session and restart_session (no new
     // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
     // plus 100.
-    const BUDGET_BYTES: usize = 71_658;
+    // M11.5: paid back 16,944 B (M0.6). Descriptions and parameter docs
+    // reworded, no tool, action or parameter renamed and no schema shape
+    // changed: prose that restated a schema default, a parameter's own doc,
+    // or a vocabulary listed twice was cut; every confirm gate, untrusted
+    // marker, host fence and "never" clause kept. Measured at 71,590 before
+    // and 54,646 after on 2026-09-25; plus 100. Re-measure when the M11.1 /
+    // M11.3 / M11.4 branches land: whichever lands second merges and
+    // re-measures.
+    const BUDGET_BYTES: usize = 54_746;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

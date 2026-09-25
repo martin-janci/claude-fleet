@@ -13,10 +13,8 @@ pub(super) fn repo_diff_resource_key(session_id: i64, path: &str) -> String {
 
 #[tool_router(router = repo_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "List discovered projects (repos fleet can spawn \
-        sessions in). Slim rows by default (id, owner, repo, worktree_count, \
-        last_session_at); summary=false returns the full nested worktree \
-        tree, which is large — pair it with limit.")]
+    #[tool(description = "Discovered projects (repos fleet can spawn \
+        sessions in).")]
     pub(super) async fn list_projects(
         &self,
         Parameters(p): Parameters<ListProjectsParams>,
@@ -48,9 +46,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Rescan the local projects directory for new or \
-        removed repositories and worktrees. Returns the fresh project list. \
-        On a hub with hub.local_host off it returns E_NOTFOUND: that hub has \
-        no local projects directory to scan.")]
+        removed repositories and worktrees; returns the project list. \
+        E_NOTFOUND on a hub with hub.local_host off (no local projects \
+        directory).")]
     pub(super) async fn refresh_projects(&self) -> Result<CallToolResult, McpError> {
         audit("refresh_projects", "");
         ok_json_compact(
@@ -62,12 +60,10 @@ impl FleetTools {
 
     // ---- sessions ----
 
-    #[tool(description = "List git worktrees fleet knows about, with their \
+    #[tool(description = "Git worktrees fleet knows about, with their \
         alive-session occupants (0 = free to delete via delete_worktree). \
-        Returns {total, worktrees}: total counts every match, the array holds \
-        at most `limit` (default 100; 0 = no cap). Slim rows by default; summary=false \
-        adds the worktree path and the occupant sessions. Narrow with \
-        project_id / host_alias — a fleet-wide call answers hundreds of rows.")]
+        Returns {total, worktrees}: total counts every match. Narrow with \
+        project_id / host_alias: a fleet-wide call answers hundreds of rows.")]
     pub(super) async fn list_worktrees(
         &self,
         Parameters(p): Parameters<ListWorktreesParams>,
@@ -110,12 +106,12 @@ impl FleetTools {
         ok_json_compact(&serde_json::json!({ "total": total, "worktrees": worktrees }))
     }
 
-    #[tool(description = "Scan one host over SSH for a project's git worktrees \
-        and cache them as that host's rows. Returns {host_alias, project_id, \
-        cloned, worktrees}; cloned=false means the repo is not checked out \
-        there yet. Prefer list_worktrees, a store read, unless you need a \
-        REMOTE host's worktrees — the stored rows cover the local host only. \
-        Errors: E_NOTFOUND (no such project), E_GIT_SETUP, E_SSH.")]
+    #[tool(description = "Scan one host over SSH for a project's git \
+        worktrees and cache them. Returns {host_alias, project_id, cloned, \
+        worktrees}; cloned=false: not checked out there yet. Prefer \
+        list_worktrees (a store read) unless you need a REMOTE host's \
+        worktrees: stored rows cover the local host only. Errors: \
+        E_NOTFOUND, E_GIT_SETUP, E_SSH.")]
     pub(super) async fn list_host_worktrees(
         &self,
         Parameters(p): Parameters<ListHostWorktreesParams>,
@@ -135,8 +131,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Delete a git worktree on its host (no --force) and \
-        drop fleet's row. Refuses if an alive session points at it (override \
-        with force=true). Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, \
+        drop fleet's row. Refuses if an alive session points at it, unless \
+        force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, \
         E_CONFIRM_REQUIRED (desktop confirmation on).")]
     pub(super) async fn delete_worktree(
         &self,
@@ -165,8 +161,8 @@ impl FleetTools {
         )]))
     }
 
-    #[tool(description = "List a session's changed files (git status) in its \
-        worktree. Returns JSON array of changed files.")]
+    #[tool(description = "A session's changed files (git status) in its \
+        worktree.")]
     pub(super) async fn repo_changes(
         &self,
         Extension(caller): Extension<Caller>,
@@ -180,8 +176,8 @@ impl FleetTools {
         ok_json_compact(&v)
     }
 
-    #[tool(description = "List a session's worktree files (tracked + untracked, \
-        gitignore respected). Returns JSON {entries, truncated}.")]
+    #[tool(description = "A session's worktree files (tracked + untracked, \
+        gitignore respected): {entries, truncated}.")]
     pub(super) async fn repo_tree(
         &self,
         Extension(caller): Extension<Caller>,
@@ -195,8 +191,8 @@ impl FleetTools {
         ok_json_compact(&v)
     }
 
-    #[tool(description = "Read one worktree file's contents (capped). Returns \
-        JSON {path, content, truncated, binary, size}.")]
+    #[tool(description = "One worktree file's contents (capped): {path, \
+        content, truncated, binary, size}.")]
     pub(super) async fn repo_file(
         &self,
         Extension(caller): Extension<Caller>,
@@ -213,9 +209,8 @@ impl FleetTools {
         ok_json(&v)
     }
 
-    #[tool(description = "Unified diff for one worktree file vs HEAD (untracked \
-        files render as all-added). Returns JSON {path, diff, binary, truncated}. \
-        fresh_for returns only what is new since your last read.")]
+    #[tool(description = "Unified diff of one worktree file vs HEAD \
+        (untracked: all added): {path, diff, binary, truncated}.")]
     pub(super) async fn repo_diff(
         &self,
         Extension(caller): Extension<Caller>,
@@ -284,10 +279,8 @@ impl FleetTools {
         ok_json(&decision.envelope)
     }
 
-    #[tool(description = "Commit log (branch graph) for a session's worktree. \
-        all=true (default) includes every branch. Returns a JSON array of \
-        commits with parents + ref decorations, newest first; `limit` defaults \
-        to 50 and `skip` pages through older history.")]
+    #[tool(description = "Commit log (branch graph) of a session's worktree, \
+        newest first, with parents + ref decorations; `skip` pages back.")]
     pub(super) async fn repo_log(
         &self,
         Extension(caller): Extension<Caller>,
@@ -310,8 +303,8 @@ impl FleetTools {
         ok_json_compact(&v)
     }
 
-    #[tool(description = "List local + remote branches for a session's worktree \
-        with ahead/behind. Returns JSON array.")]
+    #[tool(description = "Local + remote branches of a session's worktree, \
+        with ahead/behind.")]
     pub(super) async fn repo_branches(
         &self,
         Extension(caller): Extension<Caller>,
@@ -325,8 +318,8 @@ impl FleetTools {
         ok_json_compact(&v)
     }
 
-    #[tool(description = "One commit's metadata + changed files. Returns JSON \
-        {hash, subject, body, author, date, files}.")]
+    #[tool(description = "One commit's metadata + changed files: {hash, \
+        subject, body, author, date, files}.")]
     pub(super) async fn repo_commit(
         &self,
         Extension(caller): Extension<Caller>,
@@ -343,8 +336,8 @@ impl FleetTools {
         ok_json(&v)
     }
 
-    #[tool(description = "Diff of one file within a commit. Returns JSON \
-        {path, diff, binary, truncated}.")]
+    #[tool(description = "One file's diff within a commit: {path, diff, \
+        binary, truncated}.")]
     pub(super) async fn repo_commit_diff(
         &self,
         Extension(caller): Extension<Caller>,

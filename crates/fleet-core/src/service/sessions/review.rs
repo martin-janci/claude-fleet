@@ -7,9 +7,9 @@ use crate::ipc_error::lock;
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "SpawnReviewParams")]
 pub struct SpawnReviewArgs {
-    /// Id of the session whose work should be reviewed.
+    /// The session to review.
     pub source_session_id: i64,
-    /// The review prompt to seed the new review session with.
+    /// The review prompt.
     pub prompt: String,
     // Reserved for future cancellation wiring. The frontend's
     // invokeCmdAbortable injects a call_id; v1 spawn_review doesn't register a
