@@ -627,6 +627,19 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - M10.0 (the plan) is committed; M10.1–M10.3, M10.5 and M10.6 are not
   started.
 
+### M11: the long tail
+
+Plan: `plans/2026-09-25-work-graph-m11-long-tail.md`.
+
+- **"Name this work…":** local work items with a title (M1).
+- **Resume:** probes whether the transcript still exists (M2).
+- **Tidy reason `idle_unlinked`:** suggest only, never auto (M7).
+- **GitHub Enterprise Server** through `gh --hostname`, plus per-tracker sync metrics (M6).
+- **The M0.6 tool-budget payback.**
+- **Every remaining "not done" is decided:** D17–D20, D18 for the M10.6 first-sync flood; D5 still waits on the remote numbers.
+
+**Value:** no silent "not done" is left anywhere in the roadmap.
+
 ## Critical path and parallelism
 
 ```
@@ -762,3 +775,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: `main` merged into M10.4. M4.6 had landed on `main` (#273,
   OFF behind `work.classify_nudge`), so M10.4's "decided against" is
   withdrawn: D14 reads *built, off by default*.
+
+- 2026-09-25: M11 planned (`plans/2026-09-25-work-graph-m11-long-tail.md`):
+  the long tail of every milestone's "not done" line. New decisions
+  D17–D20.
