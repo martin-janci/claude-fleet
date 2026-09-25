@@ -486,6 +486,54 @@ async fn a_brief_start_queues_the_ticket_with_its_text_fenced() {
     assert_eq!(pending[0].body.as_deref(), Some(brief.trim()));
 }
 
+/// Two starts of the same key race: both pass `plan_start`'s guard, but
+/// only the first to link wins. The second answers `E_EXISTS` naming the
+/// winner and the session it made and did not link (`orphan_session_id`).
+#[tokio::test]
+async fn a_start_that_loses_the_race_reports_the_winner_and_its_orphan() {
+    let fx = Fx::new();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    // While the session is being made, another start links ABC-1.
+    let winner = Arc::new(Mutex::new(None));
+    let w = Arc::clone(&winner);
+    let store = Arc::clone(&fx.store);
+    let spawn = move |a: crate::service::sessions::NewSessionArgs| {
+        let s = store.lock().unwrap();
+        let other = s
+            .upsert_session("winner", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(other, WorkTarget::Key("ABC-1"), "started")
+            .unwrap();
+        *w.lock().unwrap() = Some(other);
+        let id = s
+            .upsert_session("loser", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    };
+    let e = start_with(&fx.store, &plan, None, spawn).await.unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    let d = e.details.unwrap();
+    assert_eq!(d["session_id"], winner.lock().unwrap().unwrap());
+    let orphan = d["orphan_session_id"].as_i64().unwrap();
+    let s = fx.store.lock().unwrap();
+    let row = s.get_session_by_id(orphan).unwrap().unwrap();
+    assert_eq!(row.tmux_name, "loser");
+    assert!(row.work.is_none(), "the loser is not linked");
+    assert!(e.message.contains("loser"), "{}", e.message);
+}
+
 #[tokio::test]
 async fn a_key_no_tracker_knows_still_starts_work() {
     let fx = Fx::new();

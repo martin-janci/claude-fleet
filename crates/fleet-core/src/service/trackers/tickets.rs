@@ -431,6 +431,10 @@ pub struct StartPlan {
     pub worktree_id: Option<i64>,
     /// `KEY title`, the session's friendly name.
     pub name: String,
+    /// A multi-repo start's sibling: the duplicate guard counts only live
+    /// sessions on the key in this plan's project.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_project: bool,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -692,6 +696,7 @@ pub async fn plan_start(
         host_alias,
         branch,
         worktree_id,
+        per_project: args.per_project,
     })
 }
 
@@ -812,11 +817,49 @@ where
     };
     let row = spawn(args).await?;
     let s = lock(store)?;
+    // The guard `plan_start` checked under is long gone (the spawn is an
+    // SSH round trip): another start of the same key may have won since.
+    // Re-check under the guard that writes the link, and name the session
+    // this start made but did not link, so nobody has to find it.
+    let orphaned = |e: IpcError| -> IpcError {
+        let mut d = e.details.clone().unwrap_or_else(|| serde_json::json!({}));
+        if let Some(o) = d.as_object_mut() {
+            o.insert("orphan_session_id".into(), row.id.into());
+        }
+        e.with_details(d)
+    };
+    let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+    if let Some((_, other)) = live_work_on(&s, &plan.key, item_org)?
+        .into_iter()
+        .find(|(_, r)| {
+            r.id != row.id && (!plan.per_project || r.project_id == Some(plan.project_id))
+        })
+    {
+        return Err(orphaned(
+            IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "{} already has a live session ({} on {}); the session this start made \
+                     ({}) is not linked to it",
+                    plan.key,
+                    other.friendly_name.as_deref().unwrap_or(&other.tmux_name),
+                    other.host_alias,
+                    row.tmux_name
+                ),
+            )
+            .with_details(serde_json::json!({
+                "session_id": other.id,
+                "host_alias": other.host_alias,
+                "tmux_name": other.tmux_name,
+            })),
+        ));
+    }
     let target = match plan.item_id {
         Some(id) => WorkTarget::Item(id),
         None => WorkTarget::Key(&plan.key),
     };
-    s.link_session_work(row.id, target, "started")?;
+    s.link_session_work(row.id, target, "started")
+        .map_err(orphaned)?;
     let queued = match brief {
         Some(body) if !body.trim().is_empty() => {
             let body: String = body
