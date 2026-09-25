@@ -269,6 +269,77 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     );
 }
 
+/// Two Jira sites sharing a project key: a URL names its site, so it is
+/// answered from that site's cache (or fetched from that site), never from
+/// the other site's row under the same key.
+#[tokio::test]
+async fn a_lookup_by_url_answers_from_that_urls_tracker_only() {
+    let fx = Fx::new();
+    let acme = fx_tracker(&fx);
+    let other = {
+        let s = fx.store.lock().unwrap();
+        let t = s
+            .add_tracker("jira", "Other", "https://other.atlassian.net")
+            .unwrap()
+            .id;
+        s.set_tracker_credential(t, "basic", Some("me@y.com"), Some("tok-other-987654"), None)
+            .unwrap();
+        s.set_tracker_probe(
+            t,
+            None,
+            &TrackerConfig {
+                key_prefixes: vec!["ABC".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.set_tracker_state(t, "ok", None).unwrap();
+        let mut theirs = item("9", "ABC-9", ("To Do", "todo"), false, 1);
+        theirs.title = "From other".into();
+        theirs.url = Some("https://other.atlassian.net/browse/ABC-9".into());
+        s.upsert_tracker_item(t, &theirs).unwrap();
+        t
+    };
+    // Acme's URL: not other's row; fetched from acme and cached there.
+    fx.fake.once(
+        Method::Post,
+        "/issue/bulkfetch",
+        Ok(Response::json(
+            200,
+            &json!({"issues": [{"id": "909", "key": "ABC-9", "fields": {
+                "summary": "From acme", "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+                "issuetype": {"name": "Task", "hierarchyLevel": 0}, "project": {"key": "ABC"}}}]}),
+        )),
+    );
+    let mine = lookup(
+        &fx.store,
+        "https://acme.atlassian.net/browse/ABC-9",
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (mine.item.tracker_id, mine.item.title.as_str()),
+        (Some(acme), "From acme")
+    );
+    assert_eq!(fx.fake.count("/issue/bulkfetch"), 1);
+    // Other's URL: its own cached row, no request.
+    let theirs = lookup(
+        &fx.store,
+        "https://other.atlassian.net/browse/ABC-9",
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (theirs.item.tracker_id, theirs.item.title.as_str()),
+        (Some(other), "From other")
+    );
+    assert_eq!(fx.fake.count("/issue/bulkfetch"), 1, "answered from the cache");
+}
+
 #[test]
 fn branch_slugs_and_names_are_safe() {
     assert_eq!(

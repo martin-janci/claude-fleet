@@ -636,6 +636,29 @@ impl Store {
         })
     }
 
+    /// The item `key` names (its key or an alias) in ONE tracker's cache:
+    /// what a lookup by URL asks, since the URL says which tracker.
+    pub fn tracker_item_for_key_in(
+        &self,
+        tracker_id: i64,
+        key: &str,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let key = super::normalize_work_ref(key)?;
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ITEM_COLUMNS} FROM work_items WHERE tracker_id = ?1 AND \
+                       (key = ?2 OR EXISTS (SELECT 1 FROM json_each(COALESCE(aliases, '[]')) \
+                                            WHERE value = ?2)) \
+                     ORDER BY (key = ?2) DESC, id LIMIT 1"
+                ),
+                rusqlite::params![tracker_id, key],
+                map_item,
+            )
+            .optional()?)
+    }
+
     /// Record which items a favourite-filter view returned. A full listing
     /// (`full`) makes the membership exactly `external_ids`; an incremental
     /// one only adds.

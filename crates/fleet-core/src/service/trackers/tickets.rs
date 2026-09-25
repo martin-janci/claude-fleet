@@ -232,8 +232,9 @@ pub fn trackers(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<TrackerRow
 
 /// What a `lookup` reference names: a tracker and a key, when a URL (or a
 /// reference only one tracker can answer) says which tracker; a bare key
-/// otherwise.
-fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String), IpcError> {
+/// otherwise. The flag says the reference was a URL, whose tracker is
+/// then the only cache to answer from.
+fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String, bool), IpcError> {
     let r = reference.trim();
     let trackers = s.list_trackers()?;
     if r.starts_with("https://") || r.starts_with("http://") {
@@ -246,7 +247,7 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
                 )
                 .with_details(serde_json::json!({ "site_url": site, "key": key })));
             }
-            return Ok((t, key));
+            return Ok((t, key, true));
         }
         // Any other tracker URL the recogniser knows (GitHub, Asana,
         // Linear): its reference, answered by the trackers that claim it.
@@ -275,7 +276,7 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
         let t = (owners.len() == 1)
             .then(|| trackers.iter().find(|t| t.id == owners[0]).cloned())
             .flatten();
-        return Ok((t, key));
+        return Ok((t, key, true));
     }
     let key = crate::store::normalize_work_ref(r)?;
     // The tracker that may answer it, when exactly one does.
@@ -283,7 +284,7 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String),
     let t = (owners.len() == 1)
         .then(|| trackers.iter().find(|t| t.id == owners[0]).cloned())
         .flatten();
-    Ok((t, key))
+    Ok((t, key, false))
 }
 
 /// `work { action: lookup, key | url }`: the cache, else one live fetch.
@@ -293,7 +294,7 @@ pub async fn lookup(
     scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<Ticket, IpcError> {
-    let (tracker, key) = {
+    let (tracker, key, by_url) = {
         let s = lock(store)?;
         match recognise(&s, reference) {
             Ok(r) => r,
@@ -306,7 +307,12 @@ pub async fn lookup(
             Err(e) => return Err(e),
         }
     };
-    let cached = lock(store)?.tracker_item_for_key(&key)?;
+    // A URL names its tracker: only that tracker's cache answers for it
+    // (two sites can share a project key). A bare key asks every cache.
+    let cached = match (&tracker, by_url) {
+        (Some(t), true) => lock(store)?.tracker_item_for_key_in(t.id, &key)?,
+        _ => lock(store)?.tracker_item_for_key(&key)?,
+    };
     let item_id = match cached {
         Some(item) => item.id,
         None => {
