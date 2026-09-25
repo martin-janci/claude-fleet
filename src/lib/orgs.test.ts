@@ -1,7 +1,9 @@
 // Work graph M5.4 / M5.5: scopes, the selector's threshold, needs-you across
 // scopes, the colour bar, the chord and the one composed filter.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+import { invoke } from '@tauri-apps/api/core';
 import type { SessionRow } from './sessions';
 import { sessions } from './sessions';
 import { projects, type ProjectTreeRow } from './projects';
@@ -20,6 +22,7 @@ import {
   scopeSelectorShown,
   effectiveScope,
   orgColorById,
+  loadOrgs,
   type OrgDetail,
 } from './orgs';
 import { appChord, scopeChordLabel } from './app_views';
@@ -267,5 +270,21 @@ describe('⌘K under the scope (work graph M5.5)', () => {
     expect(keys('all')).toEqual(['s1', 's2', 't1', 't2', 't3', 'h']);
     expect(keys('org:1')).toEqual(['s1', 't1', 't3', 'h']);
     expect(keys('org:2')).toEqual(['s2', 't2', 't3', 'h']);
+  });
+});
+
+describe('loadOrgs', () => {
+  it('a stale list answer never overwrites a newer one', async () => {
+    const mocked = vi.mocked(invoke);
+    let first: (v: unknown) => void = () => {};
+    mocked.mockImplementationOnce(() => new Promise((r) => (first = r)));
+    mocked.mockResolvedValueOnce([org(2, 'newer')]);
+    const a = loadOrgs();
+    const b = loadOrgs();
+    await b;
+    expect(get(orgs).map((o) => o.name)).toEqual(['newer']);
+    first([org(1, 'older')]);
+    expect((await a).ok).toBe(true);
+    expect(get(orgs).map((o) => o.name)).toEqual(['newer']);
   });
 });

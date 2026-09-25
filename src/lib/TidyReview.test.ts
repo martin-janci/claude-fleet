@@ -11,6 +11,7 @@ import { EMPTY_REPORT, reopenedLoads, reopenedWork, requestTidy, tidyReport, tid
 import { toasts } from './toasts';
 import { get } from 'svelte/store';
 import { sessionFocus } from './session_focus';
+import { sessions, type SessionRow } from './sessions';
 
 const cand = (id: number, over: Partial<TidyCandidate> = {}): TidyCandidate => ({
   session_id: id,
@@ -38,6 +39,7 @@ beforeEach(() => {
   reopenedLoads.set(0);
   toasts.set([]);
   sessionFocus.set(null);
+  sessions.set([]);
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -67,6 +69,10 @@ async function mount() {
 describe('TidyReview', () => {
   it('clicking a row shows only that session; its checkbox does not; Cancel lifts it', async () => {
     candidates = [cand(1), cand(2)];
+    // The focus refuses a session the store does not have (a stale row).
+    sessions.set(
+      candidates.map((c) => ({ id: c.session_id, tmux_name: c.tmux_name, host_alias: c.host_alias }) as SessionRow),
+    );
     await mount();
     await fireEvent.click(await screen.findByTestId('tidy-pill'));
     await tick();
