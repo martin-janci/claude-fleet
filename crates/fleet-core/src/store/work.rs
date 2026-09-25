@@ -987,13 +987,17 @@ impl Store {
     }
 
     /// The work item that carries `key` (normalised): a tracker's item when
-    /// one exists, else the local one.
+    /// one exists, else the local one. A removed tracker's rows (kept for
+    /// the links that point at them) come last: they must not shadow the
+    /// same site re-added, whose fresh row carries the live title and org.
     pub fn work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
         self.conn
             .query_row(
                 &format!(
                     "SELECT {ITEM_COLUMNS} FROM work_items WHERE key = ?1 \
-                     ORDER BY (source = 'local') ASC, id ASC LIMIT 1"
+                     ORDER BY (tracker_id IS NOT NULL \
+                               AND tracker_id NOT IN (SELECT id FROM trackers)) ASC, \
+                              (source = 'local') ASC, id ASC LIMIT 1"
                 ),
                 rusqlite::params![key],
                 map_item,
