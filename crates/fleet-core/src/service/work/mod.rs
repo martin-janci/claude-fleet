@@ -111,7 +111,7 @@ pub struct WorkLinkArgs {
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
-    /// Start: session name. name: the work's title.
+    /// Session name; for name, the title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Start: worktree name.
