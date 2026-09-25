@@ -188,7 +188,10 @@ current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
 probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
 never groups a session), and the chip / popover / batch review UI. The
 SessionStart context (M4.5) is built but OFF behind
-`work.session_start_context` (decision D5); M4.6 is not done.
+`work.session_start_context` (decision D5). M4.6, the classification nudge
+(`service/work/nudge.rs`, migration 056), is built but OFF behind
+`work.classify_nudge`: its answer, `work_link { source: agent_inferred }`,
+is only ever a pre-selected suggestion (rule R11, tier `inferred`).
 Work graph M5 (organisations) is landed: migration 050 (`orgs`, text-keyed
 `org_rules`, `hosts.org_id`, `work_links.snap_org_id`), `SessionRow.org_id`
 (SQL, `session_org_sql!`, held equal to `store::org_of_session`), and the

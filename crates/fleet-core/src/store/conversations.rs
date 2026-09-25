@@ -377,6 +377,40 @@ impl Store {
             .optional()?)
     }
 
+    /// The classification nudge (work graph M4.6) was already handed to
+    /// this conversation. An unknown conversation reads as not nudged.
+    pub fn conversation_nudged(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+    ) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT classify_nudged_at IS NOT NULL FROM conversations \
+                 WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, claude_session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Stamp the nudge on the conversation. `true` only for the first stamp,
+    /// so two racing prompts cannot both carry it.
+    pub fn mark_conversation_nudged(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+    ) -> Result<bool, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE conversations SET classify_nudged_at = ?3 \
+             WHERE session_id = ?1 AND claude_session_id = ?2 AND classify_nudged_at IS NULL",
+            rusqlite::params![session_id, claude_session_id, super::now_unix()],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Count one turn of the conversation.
     pub fn conversation_bump_turns(
         &self,

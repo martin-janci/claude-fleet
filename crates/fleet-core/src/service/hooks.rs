@@ -443,8 +443,66 @@ pub fn take_pending_delivery(
     ctx: &HookContext,
 ) -> Option<crate::service::delivery::Packed> {
     let s = lock(store).ok()?;
-    let (packed, _) = take_pending_delivery_locked(&s, payload, ctx, false)?;
-    Some(packed)
+    let packed = take_pending_delivery_locked(&s, payload, ctx, false).map(|(p, _)| p);
+    with_classify_nudge(&s, payload, ctx, packed)
+}
+
+/// Append the classification nudge (work graph M4.6) to a UserPromptSubmit's
+/// delivery, AFTER the inbox mail and the handover briefs, in the same lock
+/// window. Only for the row's current conversation (the same guard as the
+/// mail), only when the whole still fits `additionalContext`'s budget — a
+/// nudge that does not fit waits for a later prompt rather than cutting the
+/// mail — and stamped on the conversation so it rides once.
+fn with_classify_nudge(
+    s: &Store,
+    payload: &HookPayload,
+    ctx: &HookContext,
+    packed: Option<crate::service::delivery::Packed>,
+) -> Option<crate::service::delivery::Packed> {
+    use crate::service::delivery::{Packed, CTX_MAX_CHARS, CTX_MAX_LINES};
+    // Off (the default): not even the row lookup.
+    if !crate::service::settings::get_bool(s, crate::service::settings::WORK_CLASSIFY_NUDGE) {
+        return packed;
+    }
+    let nudge = (|| {
+        let (row, _) = resolve_hook_row(s, payload, ctx, false).ok()??;
+        let current = row.claude_session_id.clone()?;
+        if payload.session_id.as_deref() != Some(current.as_str()) {
+            return None;
+        }
+        let now = crate::service::catalog::now_secs();
+        match crate::service::work::nudge::for_prompt(s, &row, &current, now) {
+            Ok(Some(text)) => Some((row.id, current, text)),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::debug!(error = %e.message, "[work] classification nudge failed");
+                None
+            }
+        }
+    })();
+    let Some((row_id, conversation, text)) = nudge else {
+        return packed;
+    };
+    let mut out = packed.unwrap_or(Packed {
+        text: String::new(),
+        included: Vec::new(),
+        remaining: 0,
+        handovers: Vec::new(),
+    });
+    let joined = if out.text.is_empty() {
+        text
+    } else {
+        format!("{}\n\n{text}", out.text)
+    };
+    if joined.chars().count() > CTX_MAX_CHARS || joined.lines().count() > CTX_MAX_LINES {
+        return Some(out).filter(|p| !p.text.is_empty());
+    }
+    if s.mark_conversation_nudged(row_id, &conversation)
+        .unwrap_or(false)
+    {
+        out.text = joined;
+    }
+    Some(out).filter(|p| !p.text.is_empty())
 }
 
 /// As [`take_pending_delivery`], plus what a `Stop` should do about it, and

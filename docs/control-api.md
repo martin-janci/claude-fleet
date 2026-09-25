@@ -354,7 +354,7 @@ Index by area (names only; see the reference for details):
   submitted prompts (keys, Jira / Linear / Asana / GitHub ticket URLs,
   `#n` against the session's own repo). Each link carries `state`
   (`confirmed` | `suggested` | `rejected`), `strength` (`explicit` |
-  `strong` | `weak`), `rule` (the resolver rule, R2–R8 and R3u of design §0.3.1) and
+  `inferred` | `strong` | `weak`), `rule` (the resolver rule, R2–R8, R3u and R11 of design §0.3.1) and
   `evidence` (what was seen: signal, matched text, a ±40-character redacted
   prompt snippet unless `work.evidence_snippets` is off, when, which
   conversation) — `work { session_id }` returns it all. A session row's
@@ -368,6 +368,16 @@ Index by area (names only; see the reference for details):
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
   sole branch key in that project link by itself (master or client token;
   refused to a per-host token). Prompts are never stored — only matches.
+  The classification nudge (M4.6, `work.classify_nudge`, off by default):
+  once a conversation has finished three turns with no link, and one to
+  five of the user's open tracker items (in a tracker the repository maps
+  to) or recent local items are in scope, one UserPromptSubmit
+  `additionalContext` — after the inbox, at most 400 characters, once per
+  conversation — lists them and asks Claude to answer with `work_link
+  { session_id, action: "link", key | item_id, source: "agent_inferred" }`.
+  That answer is a pre-selected suggestion (`strength` `inferred`, rule
+  R11), never a confirmed link, never across orgs, never for a target the
+  session rejected, and it decays at the next conversation boundary.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
   on a paired desktop the Settings → Work section says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,

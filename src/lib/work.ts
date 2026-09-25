@@ -56,7 +56,8 @@ export interface WorkLink {
 /** One evidence line of a link (`service::work::resolve::Evidence`). */
 export interface WorkEvidence {
   /** `branch` | `pr_head` | `pr_closing` | `pr_text` | `trailer` |
-   *  `prompt_url` | `prompt_key` | `prompt_issue` — tolerant of more. */
+   *  `prompt_url` | `prompt_key` | `prompt_issue` | `agent_inferred` —
+   *  tolerant of more. */
   signal: string;
   rule: string;
   text: string;
@@ -172,6 +173,7 @@ const SOURCE_LABEL: Record<string, string> = {
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
+  agent_inferred: "Claude's guess",
   resumed: 'resumed',
   forked: 'forked',
   inherited: 'inherited',
@@ -208,6 +210,8 @@ export function describeEvidence(e: WorkEvidence): string {
     case 'prompt_key':
     case 'prompt_issue':
       return `mentioned ${e.text} in a prompt at ${clock(e.at)}${note}${rule}`;
+    case 'agent_inferred':
+      return `Claude guessed ${e.text} when asked at ${clock(e.at)}${rule}`;
     default:
       return `${e.signal}: ${e.text}${rule}`;
   }

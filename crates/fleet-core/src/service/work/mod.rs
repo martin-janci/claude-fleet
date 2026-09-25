@@ -8,6 +8,7 @@ pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
+pub mod nudge;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
@@ -86,7 +87,7 @@ pub struct WorkLinkArgs {
     /// For unlink.
     #[serde(default)]
     pub link_id: Option<i64>,
-    /// manual (default) | agent
+    /// manual (default) | agent | agent_inferred (a guess: a suggestion)
     #[serde(default)]
     pub source: Option<String>,
     /// last|brief|fresh
@@ -616,6 +617,26 @@ pub fn work_link<'a>(
         }
     };
     match args.action.as_str() {
+        // An agent's guess after the classification nudge (M4.6, rule
+        // R11): a pre-selected suggestion, never a confirmed link, and — a
+        // guess — never across orgs, `force_cross_org` or not.
+        "link" if args.source.as_deref() == Some(resolve::INFERRED_SOURCE) => {
+            let (t, org) = visible_target(target()?)?;
+            orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), false)?;
+            let evidence = serde_json::to_string(&[resolve::Evidence {
+                signal: resolve::Signal::AgentInferred,
+                rule: "R11".into(),
+                text: target_name(t).chars().take(80).collect(),
+                snippet: None,
+                at: crate::service::catalog::now_secs(),
+                conversation: s
+                    .get_session_by_id(session_id)?
+                    .and_then(|r| r.claude_session_id),
+                note: None,
+            }])
+            .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))?;
+            s.suggest_inferred_work(session_id, t, &evidence)?;
+        }
         "link" => {
             let source = args.source.as_deref().unwrap_or("manual");
             let (t, org) = visible_target(target()?)?;

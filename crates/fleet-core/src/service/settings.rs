@@ -185,6 +185,11 @@ pub const WORK_EVIDENCE_SNIPPETS: &str = "work.evidence_snippets";
 /// hook synchronous, which can add up to ~2 s to a start when the hub is
 /// down. Takes effect when the hooks are next installed.
 pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
+/// The classification nudge (work graph M4.6): after a few turns with no
+/// work link, a UserPromptSubmit hands Claude the few items it could be
+/// working on and asks it to name one as a guess (a pre-selected
+/// suggestion, never a confirmed link). Off by default.
+pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -388,6 +393,11 @@ pub const SPECS: &[Spec] = &[
     },
     Spec {
         key: WORK_SESSION_START_CONTEXT,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: WORK_CLASSIFY_NUDGE,
         default: "false",
         kind: Kind::Bool,
     },

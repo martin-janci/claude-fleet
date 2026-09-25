@@ -21,6 +21,7 @@
 //! | R7 | a state signal's value changes | the auto link it made ENDS; suggestions it made go |
 //! | R8 | a key two trackers claim | never automatic: a suggestion |
 //! | R9 | a rejected (participant, target) pair | never proposed again, from any signal |
+//! | R11 | an agent's guess after the classification nudge (M4.6, `source: agent_inferred`) | a pre-selected suggestion, tier `inferred`; never confirmed; decays at the next conversation boundary |
 //!
 //! R10 (reviews and workers inherit the parent's primary) is M2.2's carry.
 
@@ -32,6 +33,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(rename_all = "snake_case")]
 pub enum Strength {
     Weak,
+    /// An agent's guess after the classification nudge (M4.6, R11): above a
+    /// weak mention, below a strong state signal.
+    Inferred,
     Strong,
     Explicit,
 }
@@ -40,6 +44,7 @@ impl Strength {
     pub fn as_str(self) -> &'static str {
         match self {
             Strength::Weak => "weak",
+            Strength::Inferred => "inferred",
             Strength::Strong => "strong",
             Strength::Explicit => "explicit",
         }
@@ -48,6 +53,7 @@ impl Strength {
     pub fn parse(s: &str) -> Option<Strength> {
         match s {
             "weak" => Some(Strength::Weak),
+            "inferred" => Some(Strength::Inferred),
             "strong" => Some(Strength::Strong),
             "explicit" => Some(Strength::Explicit),
             _ => None,
@@ -75,6 +81,9 @@ pub enum Signal {
     PromptKey,
     /// A bare `#n` in a prompt.
     PromptIssue,
+    /// The in-session agent's answer to the classification nudge (M4.6,
+    /// R11). Never read by [`resolve`]; it only explains a link.
+    AgentInferred,
 }
 
 impl Signal {
@@ -86,6 +95,7 @@ impl Signal {
             Signal::Trailer => "trailer",
             Signal::PromptUrl => "url",
             Signal::PromptKey | Signal::PromptIssue => "prompt",
+            Signal::AgentInferred => INFERRED_SOURCE,
         }
     }
 
@@ -98,6 +108,12 @@ impl Signal {
 /// Link sources the resolver itself writes. A link with any other source is
 /// a decision (a person's, an agent's, or a carry) and is never changed here.
 pub const AUTO_SOURCES: &[&str] = &["branch", "pr", "trailer", "url", "prompt"];
+
+/// The source of an agent's guess after the classification nudge (M4.6,
+/// R11). Not a decision and not the resolver's own: it ranks by its stored
+/// strength and decays at the next conversation boundary like an event
+/// suggestion, but the resolver never creates or confirms one.
+pub const INFERRED_SOURCE: &str = "agent_inferred";
 
 /// One line of a link's explanation, stored denormalised on the link (C13).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +182,7 @@ impl ExistingLink {
 
     /// The tier the primary choice ranks it by.
     fn tier(&self) -> Strength {
-        if self.is_auto() {
+        if self.is_auto() || self.source == INFERRED_SOURCE {
             self.strength.unwrap_or(Strength::Strong)
         } else {
             Strength::Explicit
@@ -530,7 +546,10 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
     // at the boundary. State suggestions follow R7 instead.
     if conv.is_some() {
         for l in &input.links {
-            let event = matches!(l.source.as_str(), "prompt" | "url" | "trailer");
+            let event = matches!(
+                l.source.as_str(),
+                "prompt" | "url" | "trailer" | INFERRED_SOURCE
+            );
             if l.state == "suggested"
                 && event
                 && !touched.contains(&l.id)

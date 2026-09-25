@@ -377,7 +377,7 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
       provision. The SessionStart answer also delivers undelivered handover
       briefs, whole, when they fit the 4,000 chars.
   14. **Not done:** M4.6 (the opt-in classification nudge, skipped by
-      design of this pass); the phone does not show suggestions (M8); the
+      design of this pass; landed 2026-09-25, below); the phone does not show suggestions (M8); the
       remote-host SessionStart measurement; the manual acceptance on a real
       fleet.
 - **2026-09-24, R3u (the user's call on the open question).** A PR closing
@@ -390,3 +390,52 @@ checks apply, plus `REGEN_*` whenever tools or verdicts change.
   same target (the PR head naming it) makes it tracked again, and a GitHub
   tracker lifts the rule. Tests: two resolver table rows and a store-level
   test in `detect/tests.rs`.
+- **2026-09-25, M4.6 landed** on `claude/cloud-fleet-work-graph-m4-6` (from
+  `main`), as specified, with these readings:
+  1. **Setting** `work.classify_nudge`, Bool, default **off**; a toggle in
+     Settings → Work next to the SessionStart one. Read on every prompt,
+     so it takes effect at once (no hook reinstall: it rides the existing
+     synchronous UserPromptSubmit answer).
+  2. **"No link after 3 prompts"** is read as: the conversation has
+     finished `NUDGE_AFTER_TURNS` = 3 turns (`conversations.turns`, bumped
+     by Stop / StopFailure) and the session has no live link in any state
+     but `rejected`. It fires on the next prompt, after that prompt's own
+     detection ran — a key in it that became a suggestion cancels the nudge.
+  3. **"Maps to a tracker"**: a GitHub tracker whose scope covers the
+     project's repository, or any tracker one of whose items a session of
+     this project was ever confirmed on (live or ended). **"My work"**: an
+     open (`status_category` not `done`), available item whose assignee is
+     the tracker's own account. **Local items**: open ones touched in the
+     last 14 days. A rejected target, another org's item (a guess never
+     crosses orgs) and anything outside the host's org fence are never
+     offered. 1–5 candidates, else no nudge.
+  4. **Once per conversation**: migration 056,
+     `conversations.classify_nudged_at`, stamped in the same lock window as
+     the delivery and only when the text rides. A nudge that would push the
+     inbox delivery past 8,000 chars / 200 lines waits for a later prompt;
+     the mail is never cut for it.
+  5. **Text**: ≤400 chars, fleet's own marker, `key K (title)` or
+     `item_id N (title)` per candidate, and the exact call including the
+     session's id (`work_link {action: link, session_id: N, source:
+     agent_inferred}`). Titles are third-party text: flattened, defused,
+     stripped of `( ) { } ; " \``, cut first (40 → 24 → 12 → none) so every
+     candidate survives.
+  6. **The answer**: `work_link { action: link, source: agent_inferred }`
+     writes a pre-selected suggestion — `strength` `inferred` (a new tier
+     between `weak` and `strong`), rule **R11**, evidence signal
+     `agent_inferred` — and nothing when the session already has a live link
+     to that target in any state (R9 for a rejection). Never confirmed,
+     never primary, refused across orgs even with `force_cross_org`. It
+     decays at the next conversation boundary like a prompt suggestion; a
+     later real signal for the same target may still promote it by its own
+     rule (the link keeps the `agent_inferred` source).
+  7. **UI**: the chip's why reads "Claude's guess · rule R11", the
+     evidence line "Claude guessed ABC-1 when asked at 10:12 · R11".
+  8. **Budget**: +41 B (the `source` doc line), inside the headroom
+     (71,107 of 71,166); no new tool, no new action, no contract bump.
+  - **Tests**: `service/work/nudge/tests.rs` (11: composition and its
+    budget, a forged marker in a title, each firing condition, GitHub and
+    history mapping, local items, the org fence, the answer as a suggestion,
+    R9, decay, and delivery after the mail and once), plus the evidence line
+    in `LinkReview.test.ts`.
+  - **Not done:** the manual acceptance on a real fleet.

@@ -630,6 +630,91 @@ impl Store {
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
     }
 
+    /// An agent's guess after the classification nudge (work graph M4.6,
+    /// rule R11): `target` becomes a pre-selected SUGGESTION with source
+    /// `agent_inferred` and strength `inferred` — never a confirmed link and
+    /// never the primary. `None` (nothing written) when the session already
+    /// has a live link to the target in any state: a rejection is final
+    /// (R9), and a confirmed link or a suggestion needs no guess. Emits
+    /// `session_updated` when it writes.
+    pub fn suggest_inferred_work(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        evidence: &str,
+    ) -> Result<Option<WorkLinkRow>, IpcError> {
+        let (item_id, ref_key) = self.resolve_work_target(target)?;
+        let participant = self.work_participant(session_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let existing: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_links \
+               WHERE participant_id = ?1 AND ended_at IS NULL \
+                 AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2) \
+                      OR (?3 IS NOT NULL AND ref_key = ?3)))",
+            rusqlite::params![participant, item_id, ref_key],
+            |r| r.get(0),
+        )?;
+        if existing {
+            return Ok(None);
+        }
+        self.conn.execute(
+            "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, \
+                                     is_primary, created_at, claude_session_id, strength, \
+                                     rule, evidence, preselected) \
+             VALUES (?1, ?2, ?3, 'suggested', 'agent_inferred', 0, ?4, \
+                     (SELECT claude_session_id FROM sessions WHERE id = ?5), 'inferred', \
+                     'R11', ?6, 1)",
+            rusqlite::params![
+                item_id,
+                ref_key,
+                participant,
+                now_unix(),
+                session_id,
+                evidence
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.bump_session_for_work(session_id)?;
+        tx.commit()?;
+        self.emit_session(session_id)?;
+        self.get_work_link(id)
+    }
+
+    /// Open local items touched since `since`, newest first, at most
+    /// `limit` (the classification nudge's local candidates, M4.6).
+    pub fn recent_open_local_items(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<WorkItemRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM work_items \
+             WHERE source = 'local' AND status_category <> 'done' AND updated_at >= ?1 \
+             ORDER BY updated_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit as i64], map_item)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Trackers whose items were ever worked on in `project_id`: a confirmed
+    /// link, live or ended, from a session of the project to one of their
+    /// items. How a repository "maps to a tracker" for the nudge (M4.6).
+    pub fn trackers_worked_in_project(
+        &self,
+        project_id: i64,
+    ) -> Result<std::collections::BTreeSet<i64>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT i.tracker_id FROM work_links l \
+             JOIN work_items i ON i.id = l.item_id \
+             LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             LEFT JOIN sessions s ON s.id = p.session_id AND l.ended_at IS NULL \
+             WHERE l.state = 'confirmed' AND i.tracker_id IS NOT NULL \
+               AND COALESCE(s.project_id, l.snap_project_id) = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![project_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Say that `session_id` works on `target`; it becomes the session's
     /// primary work. `source`: `manual` (a person), `started` (the session
     /// was created for it), `agent` (the in-session agent declared it).

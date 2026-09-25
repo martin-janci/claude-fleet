@@ -343,7 +343,10 @@ acceptance on a real fleet is still to do.
 - **M4.5** (51fc47b): SessionStart work context behind
   `work.session_start_context`, **off**; measured and recorded (D5 stays
   the user's).
-- **Not done:** M4.6 (the classification nudge), suggestions on the phone
+- **M4.6** (2026-09-25, `claude/cloud-fleet-work-graph-m4-6`): the
+  classification nudge behind `work.classify_nudge`, **off**; its answer is
+  a pre-selected suggestion (rule R11, tier `inferred`). Migration 056.
+- **Not done:** suggestions on the phone
   (M8), the remote-host SessionStart measurement.
 
 **Value:** most sessions are linked correctly without touching anything, and
@@ -700,4 +703,11 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   `confirm: true` since M7 (its tidy kills); M9.7's start / resume gate
   therefore runs only for the operator, so a person's start is never gated.
   Tool budget 70,865 (measured 70,765).
-
+- 2026-09-25: M4.6 landed on `claude/cloud-fleet-work-graph-m4-6` (from
+  `main`): the opt-in classification nudge (`work.classify_nudge`, off),
+  once per conversation after three turns with no link and one to five
+  candidates; the answer (`work_link { source: agent_inferred }`) is a
+  pre-selected suggestion, rule R11, tier `inferred`. Migration 056
+  (`conversations.classify_nudged_at`). Tool surface +41 B inside the
+  headroom; no new tool, no new action, no contract bump. Readings in the
+  M4 plan's *Revisions*.

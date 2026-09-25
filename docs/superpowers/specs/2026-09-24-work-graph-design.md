@@ -139,7 +139,8 @@ a tier the most recent decision. Nothing is learned.
 | R7 | a state signal's value changes | the confirmed auto link it made ENDS (`end_reason` `branch_changed` / `pr_changed`, snapshotted as past work); a suggestion it made is withdrawn; manual / started / agent links stay |
 | R8 | a key whose prefix two trackers claim (a URL's host settles it) | never automatic: a suggestion |
 | R9 | a rejected (participant, target) pair | never proposed again, from any signal |
-| decay | an EVENT suggestion (prompt, URL, trailer) from an earlier conversation, not seen in this one | removed at the boundary |
+| R11 | the agent's answer to the opt-in classification nudge (M4.6, `work_link { source: agent_inferred }`) | a pre-selected suggestion, tier `inferred` (between weak and strong); never confirmed, never primary, never across orgs |
+| decay | an EVENT suggestion (prompt, URL, trailer) or an `agent_inferred` guess from an earlier conversation, not seen in this one | removed at the boundary |
 | primary | live confirmed links ranked by (decided in the current conversation, explicit > strong > weak, most recent decision) | it moves only when a run loses its primary or confirms a link — never re-ranks decisions |
 
 Guards: a prompt carrying a `[claude-fleet` marker, equal (first 200 chars)

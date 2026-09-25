@@ -210,6 +210,15 @@ fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+fn conversations_has_classify_nudged_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'classify_nudged_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -543,6 +552,13 @@ const MIGRATIONS: &[Migration] = &[
     // `participants(peer_link_id)` index (federation review G17):
     // `CREATE INDEX IF NOT EXISTS`, safe to re-run.
     Migration::plain(55, include_str!("../../migrations/055_peer_link_index.sql")),
+    // Work graph M4.6: `conversations.classify_nudged_at` (the nudge fires
+    // once per conversation) — one ADD COLUMN, its own guard.
+    Migration {
+        version: 56,
+        sql: include_str!("../../migrations/056_classify_nudge.sql"),
+        already_applied: Some(conversations_has_classify_nudged_at),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

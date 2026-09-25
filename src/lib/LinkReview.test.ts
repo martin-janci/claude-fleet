@@ -11,7 +11,7 @@ import LinkReview from './LinkReview.svelte';
 import { sessions, sessionsLoaded, type SessionRow, type SessionWork } from './sessions';
 import { session } from './hosts_fixture';
 import { toasts, runToastAction } from './toasts';
-import { describeEvidence, newAutoLinks, autoLinkSnapshot } from './work';
+import { describeEvidence, newAutoLinks, autoLinkSnapshot, workWhy } from './work';
 import { sessionFocus } from './session_focus';
 import { selectedSession, selectSession } from './selection';
 
@@ -127,6 +127,21 @@ describe('work helpers', () => {
     expect(
       describeEvidence({ signal: 'prompt_key', rule: 'R6', text: 'ABC-99', at, note: 'reference' }),
     ).toBe('mentioned ABC-99 in a prompt at 09:05 (reference) · R6');
+    expect(describeEvidence({ signal: 'agent_inferred', rule: 'R11', text: 'ABC-1', at })).toBe(
+      'Claude guessed ABC-1 when asked at 09:05 · R11',
+    );
+  });
+
+  it("an agent's guess is never an automatic link", () => {
+    const r = session('h', 'a', {
+      id: 1,
+      status: 'running',
+      work: { link_id: 1, item_id: null, key: 'A-1', title: '', source: 'agent_inferred', state: 'confirmed' },
+    });
+    expect(newAutoLinks(new Map(), [r])).toEqual([]);
+    expect(workWhy({ source: 'agent_inferred', state: 'suggested', rule: 'R11' })).toBe(
+      "Claude's guess · rule R11",
+    );
   });
 
   it('a manual link is never an automatic one', () => {
