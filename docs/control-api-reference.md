@@ -165,9 +165,9 @@ Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
 ### `move_session`
 
-Move a work session to another host, carrying its work as it is: the transcript, unpushed commits, staged/modified/untracked and small git-ignored files (.env), plus the session's Claude directory and the project's Claude memory (added without replacing anything; these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the conversation and the source is killed only once the target runs. strict refuses instead of carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
+Move a work session to another host, carrying its work as it is: the transcript, unpushed commits, staged/modified/untracked and small git-ignored files (.env), plus the session's Claude directory and the project's Claude memory (added without replacing anything; these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the conversation and the source is killed only once the target runs. strict refuses instead of carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED, E_FORBIDDEN (cross-org; see force_cross_org). Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
 
-Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
+Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `force_cross_org`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
 
 ### `new_bg_session`
 
@@ -551,6 +551,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::set_tracker_credential`
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
+- `commands::trackers::tracker_sync_metrics`
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
 - `commands::trackers::work_lookup`

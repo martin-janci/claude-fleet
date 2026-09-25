@@ -418,6 +418,7 @@ fn sample_resume_plan() -> ResumePlan {
         }],
         hosts: vec!["trn".into()],
         brief: Some("# Handover".into()),
+        warnings: vec!["could not check the transcript on trn".into()],
     }
 }
 

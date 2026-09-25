@@ -175,6 +175,8 @@ const REASONS = {
     'the hub tests its trackers with its own credentials, and a client is never the fleet’s administrator — use `fleet-hub tracker test`',
   remove_tracker:
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
+  tracker_sync_metrics:
+    'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
   // Organisations (work graph M5): the per-host tokens' boundary is set on
   // the hub only; `work_admin` is master-only.
   add_org:

@@ -340,6 +340,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: TRACKERS_ARE_ADMIN,
         },
     ),
+    // Work graph M11.4: the sync's per-tracker counters are
+    // `work_admin { action: status }`, master-only like the rest.
+    (
+        "tracker_sync_metrics",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
     // Work graph M3.4: reading tickets and starting work route like every
     // other work read and decision.
     ("list_trackers", Verdict::Routed { tool: "work" }),

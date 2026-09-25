@@ -1585,6 +1585,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         clean_target: false,
                         dry_run: true,
                         when: fleet_core::service::move_session::When::Now,
+                        force_cross_org: false,
                     },
                     s,
                     h,
@@ -1612,6 +1613,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         clean_target: true,
                         dry_run: false,
                         when: fleet_core::service::move_session::When::Now,
+                        force_cross_org: false,
                     },
                     s,
                     h,
@@ -1640,6 +1642,35 @@ fn routed_mutation_cases() -> Vec<Case> {
                         clean_target: false,
                         dry_run: false,
                         when: fleet_core::service::move_session::When::Idle,
+                        force_cross_org: false,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `force_cross_org` (work graph M5): off the wire when false, so
+        // the three cases above reach an older hub exactly as before, and
+        // pinned here when true, so the one flag that turns a refused
+        // cross-org move into a carried one cannot stop short of the wire.
+        (
+            "move_session",
+            "move_session",
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": false, "clean_target": false, "dry_run": false, "when": "now", "force_cross_org": true }),
+            MOVE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::move_session::routed::move_session(
+                    b,
+                    MoveSessionArgs {
+                        session_id: 7,
+                        target_host_alias: "hetzner".into(),
+                        keep_source: false,
+                        strict: false,
+                        clean_target: false,
+                        dry_run: false,
+                        when: fleet_core::service::move_session::When::Now,
+                        force_cross_org: true,
                     },
                     s,
                     h,
@@ -1791,6 +1822,7 @@ fn a_hub_answering_a_preview_deserialises_into_move_outcome_preview() {
             clean_target: false,
             dry_run: true,
             when: fleet_core::service::move_session::When::Now,
+            force_cross_org: false,
         },
         &st,
         &ssh(),
@@ -2300,6 +2332,7 @@ fn dry_run_args(dry_run: bool) -> fleet_core::service::move_session::MoveSession
         clean_target: false,
         dry_run,
         when: fleet_core::service::move_session::When::Now,
+        force_cross_org: false,
     }
 }
 
@@ -2462,6 +2495,7 @@ fn when_args(
         clean_target: false,
         dry_run: false,
         when,
+        force_cross_org: false,
     }
 }
 

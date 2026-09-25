@@ -3322,10 +3322,16 @@ fn the_served_definition_budget_stays_bounded() {
     // re-measures.
     // Merged over main (#285: `inbox` gains the hub-link from_addr
     // untrusted clause): measured at 54,700 (+54), inside the headroom.
+    // Review follow-up: `move_session { force_cross_org }` (work graph M5 —
+    // a move whose live links would cross the org boundary is refused
+    // unless forced), one flag with a one-line doc plus a clause on the
+    // errors list. Measured at 54,927 on 2026-09-25 (+227); plus 100.
+    // M11.4 (`work_admin` `status`), 2026-09-25: measured at 54,934; plus 100.
     // M11.1: +96 B for work_link name / work local_items (`work_link` gains
     // `name` and a `title` parameter, `work` gains `local_items`; no
-    // description change). Measured at 54,796 on 2026-09-25; plus 100.
-    const BUDGET_BYTES: usize = 54_896;
+    // description change). Merged over M11.2 / M11.4: measured at 55,030 on
+    // 2026-09-25; plus 100.
+    const BUDGET_BYTES: usize = 55_130;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3609,6 +3615,7 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
         confirm_nonce: None,
         dry_run,
         when: crate::service::move_session::When::Now,
+        force_cross_org: false,
     };
 
     let err = t

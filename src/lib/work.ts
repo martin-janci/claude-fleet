@@ -446,6 +446,8 @@ export interface ResumePlan {
   modes: ResumeMode[];
   hosts?: string[];
   brief?: string | null;
+  /** What the plan could not check; never blocks a mode (M11.2). */
+  warnings?: string[];
 }
 
 export interface ResumePlanOpts {

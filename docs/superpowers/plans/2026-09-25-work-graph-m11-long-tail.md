@@ -147,6 +147,8 @@ M11.6    docs; any time, finalised after M11.1–M11.5
 ## Revisions
 - 2026-09-25: first version.
 - 2026-09-25: M11.5 built on `claude/cloud-fleet-work-graph-m11-budget`. The master surface measured 71,590 B before and 54,646 B after (16,944 B paid back, M0.6); `BUDGET_BYTES` is 54,746. Only description and parameter-doc wording changed: no tool, action or parameter renamed, no schema shape changed, and every confirm gate, untrusted marker, host fence and "never" clause kept. The `work` / `work_link` / `work_admin` texts, already cut in M5.1 and M8.0, were left as they are so M11.1 / M11.3 / M11.4 merge cleanly. The final `BUDGET_BYTES` must be re-measured once the M11.1, M11.3 and M11.4 branches land: whichever lands second merges and re-measures. The roadmap's *Revisions* and M0.6 status wait for the M11.6 docs pass.
+- 2026-09-25: M11.2 built. The probe checks the path a conversation row recorded (when it still validates), then `"$HOME"/.claude/projects/*/<uuid>.jsonl`, since a conversation row is gone once its session is (cascade) and the cwd slug is not always derivable; "absent" means absent from both. It runs in `resume_plan` when `last` is possible, and in `resume` only for mode `last`; an unknown answer adds `ResumePlan.warnings` (new, `#[serde(default)]`), shown in the Resume dialog.
+- 2026-09-25: M11.4 built (branch `claude/cloud-fleet-work-graph-m11-ghes`), no migration. GHES: `trackers.settings.hostname` (admin-fenced DNS name, optional port; `gh --hostname`, only `https://<host>/api/graphql`); keys `host/owner/repo#n`, recognised only for configured GitHub trackers' hosts; R3u is per GitHub instance. Metrics: `work_admin { action: status }`, in memory; Settings → Work, `fleet-hub tracker status`; new LocalOnly command `tracker_sync_metrics` (174 commands).
 - 2026-09-25: M11.1 built (branch `claude/cloud-fleet-work-graph-m11-name`).
   `work_link { action: name, session_id, title, key? }` names new local work
   and links the session (manual, confirmed, primary only when it has none);
@@ -161,4 +163,4 @@ M11.6    docs; any time, finalised after M11.1–M11.5
   `session_id` only. Desktop: Routed `list_local_work_items`,
   `name_session_work`, `rename_work_item`; "Name this work…" on a row's `#`
   menu and, in work mode, on a project group header (its sessions with no
-  work). Tool budget +96 B over M11.5 (measured 54,796; `BUDGET_BYTES` 54,896). No tool description changed.
+  work). Tool budget: see `BUDGET_BYTES`'s M11.1 note. No tool description changed.

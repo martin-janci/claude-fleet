@@ -37,6 +37,38 @@ describe('describeMoveError', () => {
     }
   });
 
+  // Work graph M5: `cross_org_check` in `move_session/mod.rs` refuses a move
+  // whose live links would cross the org boundary on the target, in
+  // `orgs::check_cross_org`'s shape; the sheet offers "Move anyway".
+  it('reads the cross-org refusal and offers to force it', () => {
+    const names = (id: number) => ({ 1: 'Company A', 2: 'Company B' })[id];
+    const d = describeMoveError(
+      err('E_FORBIDDEN', { cross_org: true, work_org_id: 1, session_org_id: 2 }),
+      'failed',
+      'turanga',
+      'check',
+      names,
+    );
+    expect(d.action).toEqual({ kind: 'force_cross_org' });
+    expect(d.what).toContain('Company A');
+    expect(d.what).toContain('Company B');
+    expect(d.what).toContain('turanga');
+    expect(d.what).not.toContain('raw backend text');
+    expect(d.standing).toContain('Nothing was copied');
+    // An unknown org reads by id.
+    const anon = describeMoveError(
+      err('E_FORBIDDEN', { cross_org: true, work_org_id: 1, session_org_id: 2 }),
+      'failed', 'turanga', 'check',
+    );
+    expect(anon.what).toContain('organisation 1');
+  });
+
+  it('treats any other E_FORBIDDEN as a plain refusal', () => {
+    const d = failed('E_FORBIDDEN', { cross_org: false });
+    expect(d.action).toEqual({ kind: 'retry' });
+    expect(d.what).toBe('raw backend text');
+  });
+
   it('tells busy from already-moving from anything else for E_INVALID_STATE', () => {
     expect(failed('E_INVALID_STATE', null, 'a move of session 5 is already in progress').what)
       .toBe('This session is already being moved.');

@@ -723,6 +723,10 @@ pub struct MoveSessionParams {
     /// `now`, `idle` (wait, then move) or `cancel` (end a wait).
     #[serde(default)]
     pub when: crate::service::move_session::When,
+    /// Carry a live work link across the org boundary on the target (a
+    /// warning) instead of E_FORBIDDEN. Default false.
+    #[serde(default)]
+    pub force_cross_org: bool,
 }
 
 impl MoveSessionParams {
@@ -743,6 +747,7 @@ impl MoveSessionParams {
             clean_target: self.clean_target,
             dry_run: self.dry_run,
             when: self.when,
+            force_cross_org: self.force_cross_org,
         }
     }
 }
