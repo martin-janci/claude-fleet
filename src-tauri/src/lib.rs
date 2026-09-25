@@ -300,6 +300,7 @@ pub fn run() {
             commands::work::resume_work,
             commands::work::work_purge_impact,
             commands::work::work_today,
+            commands::work::work_ticket_card,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,

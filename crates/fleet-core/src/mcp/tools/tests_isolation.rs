@@ -699,6 +699,57 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // The ticket card (work graph M9.2): from the cache, and to a host only
+    // for its own work — with the tracker text fenced, never plain.
+    for key in ["BB-1", "AA-1"] {
+        m.row(
+            "work",
+            "card",
+            move |_, _| json!({ "action": "card", "key": key }),
+            move |_, who, a| {
+                let mine = matches!((who, key), (Who::HostA, "AA-1") | (Who::HostB, "BB-1"));
+                if who.is_host() && !mine {
+                    return is_code(who, a, "E_FORBIDDEN", "another org's card");
+                }
+                is_ok(who, a, "card");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                let secret = if key == "BB-1" {
+                    "SECRET-B"
+                } else {
+                    "SECRET-A"
+                };
+                let fenced = v["composer_text"].as_str().unwrap();
+                assert!(
+                    fenced.contains(secret) && fenced.contains(crate::mcp::guard::UNTRUSTED_END),
+                    "{who:?}: {v}"
+                );
+                if who.is_host() {
+                    assert!(
+                        v.get("excerpt").is_none() && v.get("acceptance").is_none(),
+                        "{v}"
+                    );
+                } else {
+                    assert!(v["excerpt"].as_str().unwrap().contains(secret), "{v}");
+                }
+            },
+        )
+        .await;
+    }
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "card", "key": "BB-1" }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "card", "key": "ZZ-404" }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
     // Today (work graph M9.1): BB-3 shipped today (done, and its ended
     // session left a PR). Each host reads its own host's day inside its org.
     {

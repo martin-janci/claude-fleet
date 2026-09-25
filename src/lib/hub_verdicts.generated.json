@@ -140,6 +140,7 @@
     "work_purge_impact",
     "work_resume_plan",
     "work_scopes",
+    "work_ticket_card",
     "work_tickets",
     "work_today"
   ],

@@ -10,6 +10,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::work::card::TicketCard;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, PurgeImpact, WorkArgs, WorkLinkArgs};
@@ -144,6 +145,21 @@ pub async fn work_today(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Today, IpcError> {
     routed::work_today(&backend, args, &store).await
+}
+
+/// A ticket's context card from the hub's cache (work graph M9.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkTicketCardArgs {
+    pub key: String,
+}
+
+#[tauri::command]
+pub async fn work_ticket_card(
+    args: WorkTicketCardArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<TicketCard, IpcError> {
+    routed::work_ticket_card(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -391,6 +407,22 @@ pub(crate) mod routed {
             None => {
                 work::today::today(store, args.since, &fleet_core::service::orgs::OrgScope::All)
             }
+        }
+    }
+
+    pub async fn work_ticket_card(
+        backend: &FleetBackend,
+        args: WorkTicketCardArgs,
+        store: &Mutex<Store>,
+    ) -> Result<TicketCard, IpcError> {
+        let wire = WorkArgs {
+            action: Some("card".into()),
+            key: Some(args.key.clone()),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("work_ticket_card", &wire).await,
+            None => work::card::card(store, &args.key, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 

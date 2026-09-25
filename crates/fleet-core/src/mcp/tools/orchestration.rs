@@ -558,7 +558,7 @@ impl FleetTools {
     #[tool(description = "Work links: {session_id} → its live links; \
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
-        {key|url}; trackers; scopes; orgs; org_suggestions; today {since}.")]
+        {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -632,6 +632,10 @@ impl FleetTools {
             ),
             WorkAction::Orgs => ok_json_compact(
                 &crate::service::orgs::org_details(&self.store, &scope).map_err(to_mcp_err)?,
+            ),
+            WorkAction::Card => ok_json(
+                &w::card::card(&self.store, args.key.as_deref().unwrap_or_default(), &scope)
+                    .map_err(to_mcp_err)?,
             ),
             WorkAction::Today => ok_json_compact(
                 &w::today::today(&self.store, args.since, &scope).map_err(to_mcp_err)?,

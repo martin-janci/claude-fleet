@@ -576,6 +576,22 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "work_ticket_card",
+            "work",
+            json!({ "session_id": null, "key": "PAY-7", "action": "card" }),
+            r#"{"key":"PAY-7","title":"Refund","cached":true,"acceptance":["Refund issued"],"composer_text":"Ticket PAY-7: Refund\n"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::work_ticket_card(
+                    b,
+                    commands::work::WorkTicketCardArgs {
+                        key: "PAY-7".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "work_today",
             "work",
             json!({ "session_id": null, "key": null, "action": "today", "since": 1_700_000_000 }),

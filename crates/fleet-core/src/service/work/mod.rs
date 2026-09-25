@@ -3,6 +3,7 @@
 //! agnostic entry the MCP tools `work` / `work_link` and the desktop commands
 //! share, so a paired desktop and a local one answer the same way.
 
+pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
@@ -179,6 +180,8 @@ pub enum WorkAction {
     OrgSuggestions,
     /// The Today view's digest (work graph M9.1).
     Today,
+    /// A ticket's context card from the cache (work graph M9.2).
+    Card,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -196,6 +199,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("orgs", WorkAction::Orgs),
     ("org_suggestions", WorkAction::OrgSuggestions),
     ("today", WorkAction::Today),
+    ("card", WorkAction::Card),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -225,6 +229,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("list_orgs", "work", "orgs"),
     ("org_suggestions", "work", "org_suggestions"),
     ("work_today", "work", "today"),
+    ("work_ticket_card", "work", "card"),
     ("link_session_work", "work_link", "link"),
     ("reject_session_work", "work_link", "reject"),
     ("unlink_session_work", "work_link", "unlink"),

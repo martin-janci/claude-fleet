@@ -2981,6 +2981,9 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M9.1: `work` gains `today` (the Today view's digest) and
     // one parameter, `since`. No new tool. Measured at 69,265 on 2026-09-25
     // (+94); plus 100.
+    // Work graph M9.2: `work` gains `card` (the ticket context card; no
+    // parameter). Measured at 69,284 on 2026-09-25 (+19): inside the
+    // headroom, so the constant was not raised.
     const BUDGET_BYTES: usize = 69_365;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()

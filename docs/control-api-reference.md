@@ -473,7 +473,7 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}.
 
 Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `project_id`, `query`, `session_id`, `since`, `tracker_id`, `url`, `view`, `with_brief`
 
@@ -523,6 +523,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::resume_work`
 - `commands::work::work_purge_impact`
 - `commands::work::work_today`
+- `commands::work::work_ticket_card`
 - `commands::trackers::add_tracker`
 - `commands::trackers::update_tracker`
 - `commands::trackers::set_tracker_credential`
