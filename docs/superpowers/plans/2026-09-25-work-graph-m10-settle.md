@@ -179,3 +179,37 @@ M10.6 (independent; reuses M10.2's fake tracker)
 
 ## Revisions
 - 2026-09-25: first version.
+- 2026-09-25: **M10.4 done** on `claude/cloud-fleet-work-graph-m10`
+  (frontend, a script and docs; no new tool, action, Tauri command,
+  migration or contract bump; the tool budget is untouched).
+  - **Today → Tidy-up.** The Stale section's *Tidy up · n* already existed
+    on `main` (the M9 follow-up on M7: it ticked the stale candidates but
+    the sheet listed every candidate). A request now **narrows** the sheet
+    to the requested sessions, with "From Today's Stale · n of m" and
+    *Show all*; the pill's own opening, and a request none of whose
+    sessions is still a candidate, show everything. The per-row jump is
+    unchanged. `tidy_apply` stays Routed / blocked in hub-client mode as
+    before (`hubActionBlocked`).
+  - **Filter chrome.** A "⚑ work" pill in the sidebar's triage row opens
+    chip rows: tracker (only with two or more trackers), status category,
+    *mine*, *hide archived*, and — in work mode only — has-session (*any*,
+    *with session*, *past only*). Persisted as `sidebar.work-filters`, like
+    the host and scope filters; composed with needs-you; a focused
+    suggestion is past them. Everything goes through `rowMatches`
+    (`work_filters.ts` only builds rows): a session's tracker is its key's
+    owning tracker (`trackerForKey`), its status and archive come from
+    `SessionRow.work`, past links are archived and never live and have no
+    status (a status filter hides them). **Deviation:** *mine* is not an
+    assignee name — `SessionRow.work` carries no assignees — but the hub's
+    own `mine` view (`work { tickets, view: mine }`, already Routed; up to
+    200 items, assigned to you and not done), read while the chip is on.
+  - **Remote SessionStart measurement.** **Deviation:** not measured —
+    the build environment has no remote host, and no number is invented.
+    `scripts/measure-session-start.sh --ssh <host>` runs the exact
+    installed synchronous command on the host in the four cases of the
+    M4 table plus "hub stopped, tunnel alive" (`--hub-stopped`), and
+    prints Markdown rows (min / median / p95 / max, and curl's exit code,
+    with a warning when a case did not behave as named). The M4 plan has
+    a placeholder table "to be measured by the user". D5 stays open.
+  - **M4.6.** Not built: decided against (D14, default). The roadmap's M4
+    status says so, and D14–D16 are in its decisions table.
