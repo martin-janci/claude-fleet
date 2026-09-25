@@ -12,6 +12,7 @@ pub mod nudge;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
+pub mod retention;
 pub mod tidy;
 pub mod today;
 
