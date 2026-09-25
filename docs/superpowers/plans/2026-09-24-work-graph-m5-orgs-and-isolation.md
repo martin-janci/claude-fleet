@@ -381,7 +381,8 @@ M5.4 (`/security-review`) before they are pushed.
       names the worktree after the ticket. These are session data, which the
       plan fences only under D7; the docs say so.
 - **Open decisions (the user's):**
-  - Should a per-host token read its whole org's tickets (not only those
-    linked on its own host)? Default kept: own host AND own org.
+  - ~~Should a per-host token read its whole org's tickets (not only those
+    linked on its own host)?~~ **Decided 2026-09-24 (the user): keep own
+    host AND own org** — the composed fence stays.
   - Should `isolate_sessions` also redact session names / branches of
     other orgs' sessions when off, rather than being all-or-nothing?
