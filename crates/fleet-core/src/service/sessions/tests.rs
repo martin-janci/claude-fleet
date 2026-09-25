@@ -5663,3 +5663,62 @@ fn scrollback_lines_are_clamped() {
     );
     assert_eq!(clamp_scrollback(None), None);
 }
+
+#[tokio::test]
+async fn list_and_refresh_never_probe_a_resume_transcript() {
+    // Work graph M11.2: the transcript probe belongs to resume planning
+    // only. A host with ended, resumable work is listed and refreshed over
+    // the same (fake) ControlMaster without it.
+    use crate::service::work::resume::TRANSCRIPT_PROBE_TAG;
+    use crate::ssh_fake::FakeSsh;
+    use crate::store::WorkTarget;
+    use std::time::Duration;
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let id = s
+            .upsert_session("dev-o-r", "h", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        s.rebind_conversation(
+            id,
+            "0f8fad5b-d9cb-469f-a165-70867728950e",
+            crate::store::StartSource::Startup,
+            None,
+            None,
+        )
+        .unwrap();
+        s.link_session_work(id, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.delete_session(id).unwrap();
+    }
+    let fake = FakeSsh::new();
+    let exec_fake = fake.clone();
+    let deps = ReconcileDeps::fake(
+        move |alias| {
+            Box::new(crate::tmux::RemoteTmux {
+                client: exec_fake.clone(),
+                host: alias.to_string(),
+            })
+        },
+        Duration::from_secs(5),
+    );
+    let gate = ReconcileGate::new();
+    // The list path (stale, so it reconciles), then the forced refresh.
+    list_sessions_with(&store, &deps, &gate, Duration::ZERO, false)
+        .await
+        .unwrap();
+    list_sessions_with(&store, &deps, &gate, Duration::from_secs(60), true)
+        .await
+        .unwrap();
+    let commands = fake.commands();
+    assert!(
+        !fake.calls_for("h").is_empty(),
+        "the host was probed at all: {commands:?}"
+    );
+    assert!(
+        commands.iter().all(|c| !c.contains(TRANSCRIPT_PROBE_TAG)),
+        "{commands:?}"
+    );
+}
