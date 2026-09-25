@@ -108,6 +108,32 @@ struct Visible {
     meta: Option<String>,
 }
 
+impl Visible {
+    /// What a session row's `work` / `work_suggested` summary reads of the
+    /// item (`SESSION_COLUMNS` in `rows.rs`): key, title, status, url and
+    /// whether it is unavailable. The tracker (for `org_id`) never changes
+    /// on an update.
+    fn session_view(
+        &self,
+    ) -> (
+        &Option<String>,
+        &str,
+        &Option<String>,
+        &str,
+        &Option<String>,
+        bool,
+    ) {
+        (
+            &self.key,
+            &self.title,
+            &self.status_name,
+            &self.status_category,
+            &self.url,
+            self.unavailable,
+        )
+    }
+}
+
 /// The trackers that may answer `key` (M6): a GitHub `owner/repo#n` the
 /// GitHub trackers whose scope covers the repository; an `asana:<gid>` every
 /// Asana tracker (the gid is global, the tracker that has it answers); a
@@ -295,11 +321,12 @@ impl Store {
             meta: meta_json.clone(),
         };
 
-        let (id, changed, status_change) = match (existing, before) {
+        let (id, changed, status_change, session_visible) = match (existing, before) {
             (Some(id), Some((old, _))) => {
                 // `meta` holds the description too, which a reader of a
                 // lookup sees; it counts.
                 let changed = old != after;
+                let session_visible = changed && old.session_view() != after.session_view();
                 let status_moved = old.status_category != after.status_category
                     || old.status_name != after.status_name;
                 if changed {
@@ -366,7 +393,7 @@ impl Store {
                         after.status_name.clone().unwrap_or_default(),
                     )
                 });
-                (id, changed, status_change)
+                (id, changed, status_change, session_visible)
             }
             _ => {
                 self.conn.execute(
@@ -397,11 +424,11 @@ impl Store {
                         now
                     ],
                 )?;
-                (self.conn.last_insert_rowid(), true, None)
+                (self.conn.last_insert_rowid(), true, None, true)
             }
         };
         if changed {
-            self.emit_work_item(id)?;
+            self.emit_work_item(id, session_visible)?;
         }
         Ok(UpsertOutcome {
             id,
@@ -410,13 +437,23 @@ impl Store {
         })
     }
 
-    /// Emit `work:item`, then `session:updated` for every live session
-    /// whose primary work is this item (its `work` summary carries the
-    /// item's title and status).
-    fn emit_work_item(&self, id: i64) -> Result<(), IpcError> {
+    /// Emit `work:item`, then — when `sessions` — `session:updated` for
+    /// every live session whose primary work is this item (its `work`
+    /// summary carries the item's key, title, status, url and
+    /// availability).
+    ///
+    /// `sessions` is false when only what the session row does not show
+    /// moved (description, assignee, `updated`: a comment bumps it): that
+    /// frame would repeat the row with only `row_version` changed, and it
+    /// was most of the session frames a sync sent (work graph M10.6,
+    /// measured in `docs/superpowers/reviews/2026-09-25-replay-ring-pressure.md`).
+    fn emit_work_item(&self, id: i64, sessions: bool) -> Result<(), IpcError> {
         if let Some(row) = self.get_work_item(id)? {
             self.bus
                 .emit(&crate::events::RowChange::WorkItemUpdated(row));
+        }
+        if !sessions {
+            return Ok(());
         }
         let sessions: Vec<i64> = {
             let mut stmt = self.conn.prepare(
@@ -446,6 +483,17 @@ impl Store {
         external_id: &str,
         reason: &str,
     ) -> Result<bool, IpcError> {
+        // Only the stamp shows on a session row, not the reason.
+        let was_available: bool = self
+            .conn
+            .query_row(
+                "SELECT unavailable_at IS NULL FROM work_items \
+                 WHERE tracker_id = ?1 AND external_id = ?2",
+                rusqlite::params![tracker_id, external_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
         let n = self.conn.execute(
             "UPDATE work_items SET unavailable_at = ?1, unavailable_reason = ?2, updated_at = ?1 \
              WHERE tracker_id = ?3 AND external_id = ?4 \
@@ -454,7 +502,7 @@ impl Store {
         )?;
         if n > 0 {
             if let Some(id) = self.tracker_item_id(tracker_id, external_id)? {
-                self.emit_work_item(id)?;
+                self.emit_work_item(id, was_available)?;
             }
         }
         Ok(n > 0)
@@ -992,6 +1040,46 @@ mod tests {
         s.upsert_tracker_item(t, &write("70", "ABC-7", ("Done", "done")))
             .unwrap();
         assert_eq!(bus.names(), vec!["work:item", "session:updated"]);
+        // What the session row does not show (description, assignee, a
+        // comment's `updated`) moves the item only: no session frame, no
+        // `row_version` bump (M10.6).
+        let version = s.get_session_by_id(sid).unwrap().unwrap().row_version;
+        bus.take();
+        let mut quiet = write("70", "ABC-7", ("Done", "done"));
+        quiet.description = Some("New acceptance criteria".into());
+        quiet.assignees = vec!["Dev B".into()];
+        quiet.updated_ext = Some(200);
+        assert!(s.upsert_tracker_item(t, &quiet).unwrap().changed);
+        assert_eq!(bus.names(), vec!["work:item"]);
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.row_version, version);
+        // Unavailable shows on the row once; a new reason does not.
+        bus.take();
+        assert!(s.mark_tracker_item_unavailable(t, "70", "gone").unwrap());
+        assert_eq!(bus.names(), vec!["work:item", "session:updated"]);
+        assert!(
+            s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work
+                .unwrap()
+                .unavailable
+        );
+        bus.take();
+        assert!(s.mark_tracker_item_unavailable(t, "70", "other").unwrap());
+        assert_eq!(bus.names(), vec!["work:item"]);
+        // Seen again: available, and the row follows.
+        bus.take();
+        s.upsert_tracker_item(t, &quiet).unwrap();
+        assert_eq!(bus.names(), vec!["work:item", "session:updated"]);
+        assert!(
+            !s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work
+                .unwrap()
+                .unavailable
+        );
     }
 
     #[test]
