@@ -244,6 +244,28 @@ pub async fn rewind_conversation(
                 "this session has no Claude conversation to rewind",
             )
         })?;
+        crate::validate::claude_session_id(&claude_id).map_err(|_| {
+            IpcError::new(
+                codes::E_INVALID,
+                "this session's Claude conversation id is not a UUID",
+            )
+        })?;
+        // A rewind delegates the pane restart to `restart_session`, which runs
+        // `tmux_name_addressable` and `guard_not_controller` INSIDE itself —
+        // i.e. AFTER the rebind below has already committed. Spec §4.3 lists
+        // both as PRE-conditions, so check them here, before any I/O: a `bg:`
+        // row (a background agent or an external interactive session) has no
+        // pane to restart, and the controller refuses to restart itself. Fork
+        // touches nothing live and is exempt, exactly as the mid-turn guard is.
+        if args.mode == RewindMode::Rewind {
+            crate::validate::tmux_name_addressable(&sess.tmux_name)?;
+            crate::service::sessions::guard_not_controller(
+                s.get_controller()?.as_ref(),
+                &sess.host_alias,
+                &sess.tmux_name,
+                false,
+            )?;
+        }
         // `SessionRow` carries no `transcript_path` field of its own (only
         // conversation rows do); the session table's copy is a separate
         // getter, same as `transcript::resolve_args` uses.
@@ -311,7 +333,7 @@ pub async fn rewind_conversation(
                     sess.context.model.as_deref(),
                 )?;
             }
-            crate::service::sessions::restart_session(
+            let restarted = crate::service::sessions::restart_session(
                 crate::service::sessions::RestartSessionArgs {
                     host_alias: sess.host_alias.clone(),
                     name: sess.tmux_name.clone(),
@@ -320,7 +342,38 @@ pub async fn rewind_conversation(
                 store,
                 ssh,
             )
-            .await
+            .await;
+            // The rebind is committed before the restart can be attempted at
+            // all, and the restart can still fail for something only it can
+            // know (`E_REPAIR_REQUIRED` from `ensure_session_workspace`, an
+            // unreachable host). Put the row back on the conversation it was
+            // on, so it never reads a frozen copy while the live Claude keeps
+            // writing the original — the same restore-on-failure shape
+            // `send_prompt_inner` uses for `last_prompt`. Best-effort: the
+            // restart's error is what the caller must see.
+            if let Err(e) = &restarted {
+                if let Ok(s) = lock(store) {
+                    if let Err(re) = s.rebind_conversation(
+                        sess.id,
+                        &claude_id,
+                        StartSource::Resume,
+                        stored_transcript_path.as_deref(),
+                        sess.context.model.as_deref(),
+                    ) {
+                        tracing::warn!(
+                            session_id = sess.id,
+                            error = %re.message,
+                            "[rewind] restoring the previous conversation failed"
+                        );
+                    }
+                }
+                tracing::warn!(
+                    session_id = sess.id,
+                    error = %e.message,
+                    "[rewind] restart failed; rebound to the previous conversation"
+                );
+            }
+            restarted
         }
         RewindMode::Fork => {
             // `args.new_worktree` is guaranteed `None` here (the early
@@ -770,6 +823,122 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    /// C2: `restart_session` runs `tmux_name_addressable` and
+    /// `guard_not_controller` inside itself — i.e. AFTER a rewind has already
+    /// rebound the row. A `bg:` row has no pane to restart, so the refusal
+    /// must land BEFORE the rebind, or the row permanently reads a frozen copy
+    /// while the live Claude keeps writing the original transcript.
+    #[tokio::test]
+    async fn rewinding_a_pane_less_session_is_refused_before_the_rebind() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h1").unwrap();
+        let id = s
+            .upsert_session("bg:deadbeef", "h1", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, OLD).unwrap();
+        let store = std::sync::Mutex::new(s);
+        let err = rewind_conversation(
+            RewindArgs {
+                session_id: id,
+                anchor_uuid: Some(A2.into()),
+                mode: RewindMode::Rewind,
+                new_worktree: None,
+            },
+            &store,
+            &std::sync::Arc::new(SshClient::new()),
+            &CancellationRegistry::new(),
+        )
+        .await
+        .expect_err("a bg row has no pane to restart");
+        assert_eq!(err.code, codes::E_BG_SESSION);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some(OLD),
+            "the row must still name the original conversation"
+        );
+    }
+
+    /// C2, the controller half: the same refusal `restart_session` would make
+    /// one commit too late.
+    #[tokio::test]
+    async fn rewinding_the_controller_is_refused_before_the_rebind() {
+        let (s, id) = store_with_session("running", Some("idle"));
+        s.set_controller("h1", "sess").unwrap();
+        let store = std::sync::Mutex::new(s);
+        let err = rewind_conversation(
+            RewindArgs {
+                session_id: id,
+                anchor_uuid: Some(A2.into()),
+                mode: RewindMode::Rewind,
+                new_worktree: None,
+            },
+            &store,
+            &std::sync::Arc::new(SshClient::new()),
+            &CancellationRegistry::new(),
+        )
+        .await
+        .expect_err("the controller must not restart itself");
+        assert_eq!(err.code, codes::E_SELF_TARGET);
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some(OLD),
+        );
+        // Fork leaves the controller's pane alone, so it must NOT be refused
+        // for being the controller.
+        let err = rewind_conversation(
+            RewindArgs {
+                session_id: id,
+                anchor_uuid: Some(A2.into()),
+                mode: RewindMode::Fork,
+                new_worktree: None,
+            },
+            &store,
+            &std::sync::Arc::new(SshClient::new()),
+            &CancellationRegistry::new(),
+        )
+        .await
+        .expect_err("unreachable host");
+        assert_ne!(err.code, codes::E_SELF_TARGET);
+    }
+
+    /// M4: the id reaches `awk -v oldid=...`, where awk performs escape
+    /// processing on the value. Every other interpolation of this field
+    /// validates it first (`recreate_pane_command`, `resolve_args_for`).
+    #[tokio::test]
+    async fn a_non_uuid_claude_id_is_refused_before_it_reaches_awk() {
+        let (s, id) = new_test_session("running");
+        s.set_claude_session_id(id, "not a uuid\\x41").unwrap();
+        let err = rewind_conversation(
+            RewindArgs {
+                session_id: id,
+                anchor_uuid: None,
+                mode: RewindMode::Fork,
+                new_worktree: None,
+            },
+            &std::sync::Mutex::new(s),
+            &std::sync::Arc::new(SshClient::new()),
+            &CancellationRegistry::new(),
+        )
+        .await
+        .expect_err("the id is interpolated into an awk -v assignment");
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("not a UUID"), "{}", err.message);
     }
 
     #[test]
