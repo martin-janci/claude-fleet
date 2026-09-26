@@ -77,11 +77,17 @@ builds exactly those versions and nothing larger.
   it.
 - **The run.** On the session's own host, under its own account:
 
-  `claude -p --resume <id> --fork-session --model <m> --settings
-  '{"hooks":{}}' <no-tools flag> "<fixed summary prompt>"`
+  `claude -p --resume <id> --fork-session --no-session-persistence
+  --model <m> --settings '{"hooks":{}}' --tools '' --strict-mcp-config
+  "<fixed summary prompt>"`
 
-  The no-tools flag is taken from the installed `claude --help` when M13.1
-  is built, and pinned by a test.
+  Checked against Claude Code 2.1.283's `--help`:
+  - `--tools ""` disables every built-in tool;
+  - `--strict-mcp-config` without `--mcp-config` loads no MCP server, so no
+    MCP tool either;
+  - `--no-session-persistence` means the fork leaves no transcript behind.
+
+  A test pins these flags.
 
   - Every value is `shq`-quoted.
   - The fork never writes to the original transcript.
@@ -221,8 +227,8 @@ M13.4 ── independent (fleet-mobile repository)
 - Name a session's work from the phone.
 
 ## Risks
-- **A forked run executing tools.** Mitigation: the no-tools flag plus a
-  test that pins it, and the run has no hooks.
+- **A forked run executing tools.** Mitigation: `--tools ''` and
+  `--strict-mcp-config`, a test that pins them, and no hooks.
 - **Write scope.** Write-back needs a token with write scope where a
   read-only one sufficed. It is opt-in per tracker, and Settings says so.
 - **An internet-facing route.** Mitigations: 404 unless enabled per tracker,
