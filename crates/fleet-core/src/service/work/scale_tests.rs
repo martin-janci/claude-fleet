@@ -476,4 +476,16 @@ fn scale_plans_pin_the_m12_fixes() {
     assert!(uses(&plan, "idx_work_links_ref"), "{plan:?}");
     assert!(uses(&plan, "idx_work_links_item"), "{plan:?}");
     assert!(!plan.iter().any(|l| l.starts_with("SCAN")), "{plan:?}");
+
+    // Tidy-up's per-session keeps (M11.3): one index search per session row,
+    // never a walk of every timeline event.
+    let (_, sql) = traced(store, || lock(store).unwrap().tidy_sessions().unwrap());
+    let plan = plan_of(&sql, "tidy_kept");
+    assert!(uses(&plan, "idx_session_events_session"), "{plan:?}");
+    assert!(
+        !plan
+            .iter()
+            .any(|l| l.starts_with("SCAN e") || l.starts_with("SCAN x")),
+        "{plan:?}"
+    );
 }
