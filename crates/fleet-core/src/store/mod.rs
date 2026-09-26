@@ -422,6 +422,17 @@ impl Store {
         Ok(())
     }
 
+    /// Forget a key, so the next `get_setting` answers `None` and its reader
+    /// falls back to its own default. Absent and "stored as the default" are
+    /// not the same thing: the second pins today's default forever (see
+    /// `service::quick_replies::replace`). A key that was never there is not
+    /// an error.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key=?1", rusqlite::params![key])?;
+        Ok(())
+    }
+
     /// Record which session is the fleet controller (the calling session that
     /// must not kill/recreate/restart itself without `force`). Stored as two
     /// keys in the `settings` table.

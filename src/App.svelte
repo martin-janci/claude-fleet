@@ -62,6 +62,7 @@
   import { agentPanelOpen, closeAgent, toggleAgent } from './lib/operator';
   import type { AgentContextInput } from './lib/agent_context';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
+  import { loadComposerPresets } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection } from './lib/hub_connection';
@@ -272,6 +273,11 @@
     // Trackers (work graph M3): their state badges, chip staleness and the
     // quick switcher's tickets. A hub older than M3 has no answer.
     void loadTrackers();
+    // The composer's chip row. Fleet state since it moved off `localStorage`
+    // (so the phone and this window share one list), and never on the
+    // critical path: the cached copy is already on screen, and a failed read
+    // leaves those chips up rather than an error toast about buttons.
+    void loadComposerPresets();
     // Orgs (work graph M5): the scope selector, colour bars and Settings.
     // Org changes arrive as `session:updated` for the rows they move; the
     // list itself is refreshed with the trackers.

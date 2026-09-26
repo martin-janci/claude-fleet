@@ -880,7 +880,8 @@ async fn an_unheld_resume_id_gets_past_the_guards() {
 /// is linked to that worktree's row, which reconcile never does — tidy-up,
 /// safe kill and the idle killer inspect a work session's tree only through
 /// it. A new worktree gets its row (for the session's host); a system
-/// project, or a start in the main checkout, links nothing.
+/// project, or a start in the main checkout (by path or by its `main` row),
+/// links nothing.
 #[test]
 fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
     let s = Store::open_in_memory().unwrap();
@@ -952,10 +953,20 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         Some(wid)
     );
 
-    // The main checkout, or a system project: nothing.
+    // The main checkout, or a system project: nothing — not even when the
+    // start names the `main` row (discover hands one over for a remote
+    // project root): safe kill and discard `git worktree remove` a linked
+    // tree, and the clone itself is not one.
     let d = row("d", "local");
     assert_eq!(
         link_new_session_worktree(&s, d, &args("local", None, None), "/p/o/r", false).unwrap(),
+        None
+    );
+    let mid = s
+        .upsert_worktree(pid, "main", "/p/o/r", Some("main"))
+        .unwrap();
+    assert_eq!(
+        link_new_session_worktree(&s, d, &args("local", Some(mid), None), "/p/o/r", false).unwrap(),
         None
     );
     assert_eq!(

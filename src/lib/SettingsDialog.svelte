@@ -6,7 +6,14 @@
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
-  import { composerPresets, resetComposerPresets, addPreset, updatePreset, removePreset } from './composer_presets';
+  import {
+    composerPresets,
+    resetComposerPresets,
+    addPreset,
+    updatePreset,
+    removePreset,
+    flushComposerPresets,
+  } from './composer_presets';
   import { copyOnSelect } from './prefs';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
@@ -73,7 +80,19 @@
     type NotificationPermissionState,
   } from './notify';
 
-  let { onClose }: { onClose: () => void } = $props();
+  let { onClose: closeDialog }: { onClose: () => void } = $props();
+
+  /**
+   * Chip edits are debounced (the editor saves on every keystroke), so a
+   * dialog closed straight after the last character would otherwise leave
+   * that character's save to a timer on an unmounted component. Flushing
+   * here is fire-and-forget: it is the same write, only sooner, and the
+   * dialog must not wait on a hub round trip to disappear.
+   */
+  function onClose() {
+    void flushComposerPresets();
+    closeDialog();
+  }
 
   // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
   // a one-line summary that opens the view.

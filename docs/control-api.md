@@ -252,6 +252,9 @@ Index by area (names only; see the reference for details):
   `set_friendly_name`, `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
+- **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
+  presets the desktop and the phone both draw above their text box — call it
+  with no arguments to read, with `set` to replace the list).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),

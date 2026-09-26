@@ -14,6 +14,7 @@ pub mod onboarding;
 pub mod operator;
 pub mod orgs;
 pub mod projects;
+pub mod quick_replies;
 pub mod resolve_move;
 pub mod sessions;
 pub mod tasks;

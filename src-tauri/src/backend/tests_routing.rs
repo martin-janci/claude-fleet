@@ -453,6 +453,37 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Both quick-reply commands are the same tool: the read sends no
+        // `set` key, the write sends the list. Pinned here so a later
+        // "tidy" that makes the read send `set: null` — which the tool
+        // would read as "replace with nothing" — fails instead of wiping a
+        // fleet's chips the first time a paired desktop opened a composer.
+        (
+            "quick_replies",
+            "quick_replies",
+            json!({}),
+            r#"[{"label":"Clear","text":"/clear"}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::quick_replies::routed::quick_replies(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "set_quick_replies",
+            "quick_replies",
+            json!({ "set": [{ "label": "Tests", "text": "run the tests" }] }),
+            r#"[{"label":"Tests","text":"run the tests"}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::quick_replies::routed::set_quick_replies(
+                    b,
+                    vec![fleet_core::service::quick_replies::QuickReply {
+                        label: "Tests".into(),
+                        text: "run the tests".into(),
+                    }],
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_tasks",
             "list_tasks",
@@ -3405,6 +3436,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/projects.rs",
         include_str!("../commands/projects.rs"),
+    ),
+    (
+        "commands/quick_replies.rs",
+        include_str!("../commands/quick_replies.rs"),
     ),
     (
         "commands/resolve_move.rs",
