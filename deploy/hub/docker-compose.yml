@@ -63,7 +63,7 @@ services:
     #
     # A digest pins one exact multi-arch manifest; a version tag could in
     # principle be re-pushed. Nothing here rewrites a digest for you.
-    image: ghcr.io/martin-janci/fleet-hub:0.2.42
+    image: ghcr.io/martin-janci/fleet-hub:0.3.0
     restart: unless-stopped
     # Worst case a SIGTERM shutdown drains for DRAIN_TIMEOUT (10s) then waits
     # out TICK_SHUTDOWN_TIMEOUT (10s) for an in-flight reconcile/usage pass —
