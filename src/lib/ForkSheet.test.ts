@@ -27,10 +27,21 @@ beforeEach(() => {
 });
 
 describe('ForkSheet', () => {
-  it('defaults to a new worktree, because two sessions in one checkout lose work', () => {
+  it('opens with Same worktree selected, because New worktree is not implemented yet', () => {
+    // The backend does not implement a new-worktree fork yet
+    // (`rewind_conversation` refuses `mode: fork` + `new_worktree: Some(_)`
+    // with E_UNSUPPORTED — crates/fleet-core/src/service/rewind.rs). A
+    // default that cannot be submitted is worse than a default that is
+    // honest about its risk, so "Same worktree" (with its warning) is what
+    // opens selected and actionable. "New worktree" stays visible — its
+    // presence is what makes the deferral legible — but permanently
+    // disabled, never selectable.
     render(ForkSheet, { props: { sessionId: 1, anchor: null, suggestedName: 'fork-of-canopus', onclose: () => {} } });
+    const sameWt = screen.getByTestId('fork-same-worktree') as HTMLInputElement;
     const newWt = screen.getByTestId('fork-new-worktree') as HTMLInputElement;
-    expect(newWt.checked).toBe(true);
+    expect(sameWt.checked).toBe(true);
+    expect(newWt.checked).toBe(false);
+    expect(newWt.disabled).toBe(true);
   });
 
   it('warns in the same-worktree option rather than only in a tooltip', () => {
@@ -38,13 +49,7 @@ describe('ForkSheet', () => {
     expect(screen.getByTestId('fork-same-warning').textContent).toMatch(/same files/i);
   });
 
-  it('passes the chosen worktree name through to the backend', async () => {
-    // The backend does not implement a new-worktree fork yet
-    // (`rewind_conversation` refuses `mode: fork` + `new_worktree: Some(_)`
-    // with E_UNSUPPORTED — crates/fleet-core/src/service/rewind.rs), so
-    // the default (new worktree) selection must NOT be forkable: Fork stays
-    // disabled until the user explicitly picks the working option, and only
-    // then does it call through to the backend.
+  it('is forkable on open, in one click, with the default selection', async () => {
     mockedRewind.mockResolvedValue({ ok: true, value: { id: 1 } });
     const onclose = vi.fn();
     render(ForkSheet, {
@@ -52,11 +57,6 @@ describe('ForkSheet', () => {
     });
 
     const confirm = screen.getByTestId('fork-confirm') as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
-    expect(mockedRewind).not.toHaveBeenCalled();
-
-    await fireEvent.click(screen.getByTestId('fork-same-worktree'));
-    await settle();
     expect(confirm.disabled).toBe(false);
 
     await fireEvent.click(confirm);
@@ -75,8 +75,6 @@ describe('ForkSheet', () => {
     render(ForkSheet, {
       props: { sessionId: 1, anchor: null, suggestedName: 'f', onclose },
     });
-    await fireEvent.click(screen.getByTestId('fork-same-worktree'));
-    await settle();
     await fireEvent.click(screen.getByTestId('fork-confirm'));
     await settle();
     expect(onclose).not.toHaveBeenCalled();

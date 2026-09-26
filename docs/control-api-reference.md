@@ -597,6 +597,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
 - `commands::sessions::restart_session`
+- `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`

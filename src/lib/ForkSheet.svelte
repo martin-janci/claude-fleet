@@ -3,19 +3,24 @@
   // button via ConversationPanel's `openForkSheet`; this dialog IS the
   // confirmation — there is no second "are you sure?" on top of it.
   //
-  // New worktree is the default: two live Claude sessions editing one
-  // checkout is the standard way to lose work, so making the SAFE choice
-  // the one you have to opt out of (not opt into) is deliberate.
-  //
   // The backend does not implement a new-worktree fork yet:
   // `rewind_conversation` refuses `mode: fork` + `new_worktree: Some(_)`
   // with `E_UNSUPPORTED` (see crates/fleet-core/src/service/rewind.rs — a
   // not-yet-created worktree's physical path is only known after
   // `new_session` creates it, which is too late for the transcript rewrite
-  // that has to happen first). So the option stays visible and stays the
-  // default (it is still the right answer once it lands), but Fork itself
-  // is disabled while it is selected — never silently downgraded to a
-  // same-worktree fork, and never sent to the backend to fail server-side.
+  // that has to happen first).
+  //
+  // New worktree is the eventual right default (two live Claude sessions
+  // editing one checkout is the standard way to lose work) but it cannot be
+  // wired to a disabled option: a sheet whose only action is a dead button
+  // on open is worse than one that is honest about the risk it's taking. So
+  // "Same worktree" is what opens SELECTED and submittable, with its
+  // warning right there; "New worktree" stays visible, permanently
+  // disabled, with a note explaining why — present, not hidden, so the
+  // deferral reads as a fact about this build, not a missing feature no one
+  // can see. This is a deliberate, recorded reversal of the original
+  // new-worktree-by-default call, made only because the option isn't
+  // implemented, not because that preference was wrong.
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { rewindConversation } from './sessions';
@@ -37,7 +42,7 @@
   const NEW_WORKTREE_UNAVAILABLE =
     "Forking into a new worktree isn't available yet — the new session would start with no history. Pick Same worktree below to fork now.";
 
-  let choice = $state<'new' | 'same'>('new');
+  let choice = $state<'new' | 'same'>('same');
   // Prefill only — a live-changing suggestion while the sheet is open would
   // stomp on whatever the user typed, so this is deliberately a one-time
   // snapshot, not a binding to the prop.
@@ -69,30 +74,27 @@
   <fieldset class="choices">
     <legend class="sr-only">Worktree for the new session</legend>
 
-    <label class="choice">
+    <label class="choice off">
       <input
         type="radio"
         name="fork-worktree"
         data-testid="fork-new-worktree"
         checked={choice === 'new'}
-        disabled={busy}
-        onchange={() => (choice = 'new')}
+        disabled
       />
-      <span class="choice-label">New worktree <span class="recommended">(recommended)</span></span>
+      <span class="choice-label">New worktree <span class="recommended">(not available yet)</span></span>
     </label>
-    {#if choice === 'new'}
-      <div class="new-worktree-fields">
-        <label for="fork-worktree-name">worktree name</label>
-        <input
-          id="fork-worktree-name"
-          data-testid="fork-worktree-name"
-          value={worktreeName}
-          oninput={(e) => (worktreeName = (e.target as HTMLInputElement).value)}
-          disabled
-        />
-        <p class="unavailable" data-testid="fork-new-unavailable">{NEW_WORKTREE_UNAVAILABLE}</p>
-      </div>
-    {/if}
+    <div class="new-worktree-fields">
+      <label for="fork-worktree-name">worktree name</label>
+      <input
+        id="fork-worktree-name"
+        data-testid="fork-worktree-name"
+        value={worktreeName}
+        oninput={(e) => (worktreeName = (e.target as HTMLInputElement).value)}
+        disabled
+      />
+      <p class="unavailable" data-testid="fork-new-unavailable">{NEW_WORKTREE_UNAVAILABLE}</p>
+    </div>
 
     <label class="choice">
       <input
@@ -118,7 +120,6 @@
       class="primary"
       data-testid="fork-confirm"
       disabled={!canSubmit}
-      title={choice === 'new' ? NEW_WORKTREE_UNAVAILABLE : ''}
       onclick={() => void fork()}>{busy ? 'Forking…' : 'Fork'}</button
     >
   </div>
@@ -149,6 +150,10 @@
     gap: 0.4rem;
     padding: 0.3rem 0;
     cursor: pointer;
+  }
+  .choice.off {
+    cursor: not-allowed;
+    opacity: 0.7;
   }
   .choice-label {
     line-height: 1.3;
