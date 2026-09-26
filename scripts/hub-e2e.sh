@@ -21,9 +21,11 @@
 #   test-only `e2e` feature, with its own HOME and tmux server under $ROOT, a
 #   fake Jira Cloud (scripts/e2e-fake-jira.py) and a fake Claude
 #   (scripts/e2e-fake-claude.sh) on its PATH. See that leg's own header for
-#   what is real and what is simulated. Without WBIN the leg is skipped with
-#   a SKIP line (CI's plain build cannot run it, by design), except its first
-#   check: that $BIN refuses the fake-tracker override.
+#   what is real and what is simulated. CI (the hub-headless job) builds that
+#   hub into target/e2e and sets WBIN, so the leg runs on every PR; with
+#   CI=true a missing WBIN is a failure, never a skip. Locally, without WBIN
+#   the leg is skipped with a SKIP line, except its first check: that $BIN
+#   (the plain build) refuses the fake-tracker override.
 set -uo pipefail
 
 BIN="${BIN:?set BIN to the fleet-hub binary}"
@@ -197,7 +199,10 @@ check "MCP initialize over the public Host" 'echo "$init" | grep -q serverInfo' 
 list=$(rpc "$PA" "$PUB" "$TOKA" tools/list '{}')
 check "tools/list returns the fleet tools" 'echo "$list" | grep -q list_sessions' "${list:0:300}"
 h=$(tool "$PA" "$PUB" "$TOKA" fleet_health '{}')
-check "fleet_health reports the app version, not 0.1.0" 'echo "$h" | grep -qE "\\\\\"version\\\\\": ?\\\\\"0.2" ' "${h:0:300}"
+# The version this tree ships (scripts/release.sh keeps every carrier equal),
+# not a literal: a hard-coded "0.2" broke on the v0.3.0 bump.
+APPV=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../crates/fleet-hub/Cargo.toml" | head -1)
+check "fleet_health reports the app version ($APPV), not 0.1.0" '[ -n "$APPV" ] && [ "$APPV" != 0.1.0 ] && echo "$h" | grep -qF "\\\"version\\\":\\\"$APPV\\\""' "${h:0:300}"
 hosts=$(tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}')
 check "list_sessions (forced reconcile of local) succeeds" 'echo "$hosts" | grep -q "\"isError\":false"' "${hosts:0:400}"
 # The store is in WAL: while the daemon runs, every recent commit (tokens
@@ -712,7 +717,11 @@ echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)
 # agent leg, so nothing here touches this account's ~/.claude or its tmux.
 out=$(FLEET_E2E_TRACKER_PORT=1 timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
 check "a hub built without the e2e feature refuses the fake-tracker override" '[ $rc -ne 0 ] && echo "$out" | grep -q "FLEET_E2E_TRACKER_PORT is set" && [ ! -e "$ROOT/refuse/state.db" ]' "rc=$rc $out"
-if [ -z "$WBIN" ]; then
+if [ -z "$WBIN" ] && [ "${CI:-}" = true ]; then
+  # CI builds the e2e hub and passes it (ci.yml, hub-headless). A missing WBIN
+  # there is a broken workflow, never a reason to skip the leg quietly.
+  bad "WBIN is set in CI (the work-graph leg never skips there)" "CI=true but WBIN is empty; build it with: cargo build -p fleet-hub --features e2e --locked --target-dir target/e2e"
+elif [ -z "$WBIN" ]; then
   echo "SKIP  the work-graph scenarios: set WBIN to a fleet-hub built with --features e2e (scripts/ci-local.sh --hub-e2e builds one)"
 elif [ ! -f "$WBIN" ] || [ ! -x "$WBIN" ]; then
   bad "WBIN is an executable fleet-hub" "not an executable file: $WBIN"
