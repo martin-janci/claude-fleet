@@ -60,7 +60,8 @@ pub struct Spec {
 // ── keys ──
 pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
 /// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
-/// `tmux_server_gone`, with a `claude_session_id`) is kept before Phase 2
+/// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
+/// is kept before Phase 2
 /// hard-deletes it, counted from `lost_at` (when it was lost) — not extra
 /// time added on top of the usual one-cycle grace. Default 14 days. Wired
 /// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
