@@ -461,9 +461,18 @@ state and the store. It never calls a tracker or a host. For each tracker:
   them. Three failed passes in a row are `failing` too. A transient state
   (`rate_limited`, `unreachable`) with fewer failures is `degraded`: the sync
   retries it by itself.
-- `state`, `consecutive_failures`, `last_error` (redacted, one line, at most
-  300 characters, fenced as untrusted), `last_success_at`, `last_pass_at`,
-  and its org.
+- A pass that **skipped items** it could not store (the rest of the pass
+  still synced) is `degraded`; three such passes in a row are `failing`,
+  because the same item is stuck (decision D25). A clean pass is `ok`
+  again.
+- `reason`, why it is not `ok`: `credential` (auth_failed, captcha,
+  unconfigured), `sync_failed` (passes fail, or rate limited / unreachable)
+  or `items_skipped`; empty while `ok`.
+- `state`, `consecutive_failures`, `items_failed` (items the last pass
+  skipped), `consecutive_partial` (passes in a row that skipped some),
+  `last_error` (redacted, one line, at most 300 characters, fenced as
+  untrusted; for skipped items, why the last one failed), `last_success_at`,
+  `last_pass_at`, and its org.
 
 Fleet-wide it also counts `failing`, `degraded`, and the **detection
 backlog**: link suggestions on live sessions that have waited more than 7
@@ -480,6 +489,11 @@ On the desktop:
   **⚠ Reconnect Jira (acme) →**, which opens Settings scrolled to Work.
   Hover it for the error, the failure count and the org. A degraded tracker
   raises none.
+- A tracker failing because it keeps **skipping items** raises
+  **⚠ Sync skipping items — Jira (acme) →** instead: reconnecting would not
+  help. It also opens Settings → Work, where the tracker's last pass reads
+  `… · 2 skipped (3 passes in a row)` with the reason. See
+  [troubleshooting.md → Sync skips items](troubleshooting.md#sync-skips-items).
 - The roll-up is read at startup and every 60 seconds. On a paired desktop
   it is the hub's `fleet_health`.
 
