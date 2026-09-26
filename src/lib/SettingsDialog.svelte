@@ -13,7 +13,7 @@
   import Modal from './Modal.svelte';
   import McpSettings from './McpSettings.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -151,6 +151,18 @@
       hubError = r.error.message;
     }
   }
+
+  // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
+  // graph M12.4): scroll it into view once, then forget the request.
+  onMount(() => {
+    const section = $settingsSection;
+    if (!section) return;
+    settingsSection.set(null);
+    void tick().then(() => {
+      const el = document.querySelector<HTMLElement>(`[data-testid="${section}-section"]`);
+      el?.scrollIntoView?.({ block: 'start' });
+    });
+  });
 
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
