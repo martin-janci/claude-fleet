@@ -37,7 +37,21 @@ services:
     #
     # scripts/release.sh rewrites this line on every stable release, and
     # scripts/check-version-consistency.sh fails CI if it drifts from the rest
-    # of the tree — so the pin here is always a version that exists.
+    # of the tree. That is an agreement with the TREE, not with the registry:
+    # the check compares this tag against package.json and never asks ghcr
+    # anything, and the pin is written into the release commit BEFORE
+    # hub-image.yml has built or pushed a thing. So between that commit
+    # landing on main and both container legs finishing — and permanently, if
+    # a leg or the manifest merge fails for that tag — this line can name an
+    # image ghcr does not have, and `docker compose pull` says
+    # `manifest unknown`.
+    #
+    # What does check it: scripts/check-release-drift.sh check 5 asks ghcr
+    # daily whether this exact pin resolves, and the scheduled
+    # release-drift.yml job opens an issue when it does not. If you hit
+    # `manifest unknown` on a brand-new install, that is the window — the
+    # previous release's tag still works, and the package page lists what
+    # actually exists.
     #
     # To pin harder, replace the tag with the immutable digest that release
     # recorded on its GitHub Release page (also printable with

@@ -21,7 +21,16 @@ name: release
 # leg leaves the draft unpublished and intact for inspection. "Draft only when
 # something went wrong" falls out of that, with no second rule to keep in sync.
 #
-# Publishing fires docs.yml (`release: published`).
+# DOCS DO NOT FOLLOW FROM THIS PUBLICATION BY THEMSELVES. docs.yml triggers on
+# `release: published`, and GitHub's recursion guard says an event produced by
+# the default GITHUB_TOKEN — which is what publishes the release below — does
+# not start a workflow run. Every docs.yml run this repo has ever had came from
+# a human publishing a draft by hand, i.e. from the step this file deletes. So
+# the publish job ALSO asks for docs.yml explicitly (`gh workflow run`), as a
+# best-effort step that cannot fail the release. See the comment on that step:
+# whether a GITHUB_TOKEN dispatch starts a run is stated by GitHub as an
+# exception to the guard but has never been observed here, and docs.yml has
+# never succeeded anyway (Pages is not enabled on this repository).
 #
 # `version-consistency` is the gate in front of all of it: every other job
 # `needs:` it, it is NOT `continue-on-error`, and it asserts both that the six
@@ -504,6 +513,12 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [create-release, verify-release]
     runs-on: ubuntu-24.04
+    # `contents: write` to flip the draft; `actions: write` only so the
+    # best-effort docs dispatch below can start docs.yml. Spelled out at the
+    # job so the build legs do not also carry the right to start workflows.
+    permissions:
+      contents: write
+      actions: write
     steps:
       - name: Publish the release
         uses: actions/github-script@v7
@@ -511,8 +526,14 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         with:
           script: |
+            // `> 0`, not `Number.isInteger`: `Number('')` is 0 and
+            // `Number.isInteger(0)` is true, so an integer test would pass
+            // exactly the empty-string case this message names, and the job
+            // would go on to call updateRelease({ release_id: 0 }) and die on
+            // an opaque 404 instead of saying what went wrong. A real release
+            // id is always a positive integer.
             const release_id = Number(process.env.RELEASE_ID);
-            if (!Number.isInteger(release_id)) {
+            if (!Number.isInteger(release_id) || release_id <= 0) {
               core.setFailed(`create-release produced no usable release id (got '${process.env.RELEASE_ID}')`);
               return;
             }
@@ -524,10 +545,12 @@ jobs:
             // guard applies to the image.
             const prerelease = tag.slice(1).includes('-');
             // make_latest, stated rather than inherited. 'legacy' is
-            // GitHub's own by-creation-date rule, which is right here: it
-            // keeps the newest release the "Latest" one, and stops the
-            // publication of an old, backfilled draft from dragging the
-            // Latest badge backwards. A release candidate never takes it.
+            // GitHub's own rule, which it documents as the release with the
+            // later CREATION DATE *and* the higher semantic version — not
+            // date alone. Both halves point the same way here, which is why
+            // it is right: publishing an old, backfilled draft cannot drag
+            // the Latest badge backwards, because that draft is older on both
+            // counts. A release candidate never takes the badge at all.
             const make_latest = prerelease ? 'false' : 'legacy';
             const { data } = await github.rest.repos.updateRelease({
               owner, repo, release_id,
@@ -540,3 +563,35 @@ jobs:
               .addHeading(`Published ${tag}`, 3)
               .addLink(data.html_url, data.html_url)
               .write();
+
+      # Ask docs.yml to build rustdoc for this tag. This step exists because
+      # the `release: published` trigger it used to rely on will NOT fire: the
+      # publication above is performed by the default GITHUB_TOKEN, and GitHub
+      # does not start workflow runs from events that token creates. Every
+      # docs.yml run in this repo's history carries `event: release` from a
+      # human pressing Publish — the step this workflow removed.
+      #
+      # HYPOTHESIS, NOT A VERIFIED FIX, and deliberately harmless either way.
+      # GitHub documents `workflow_dispatch` as an exception to that recursion
+      # guard, so this dispatch should start a run; that has never been
+      # observed on this repository, and it cannot be observed from a branch.
+      # `continue-on-error: true` is therefore not politeness — the release is
+      # already published by the time this runs, and a docs build has never
+      # once succeeded here (Pages is not enabled; see docs.yml's header). A
+      # failure to start it must never colour the release run, which is the
+      # regression c3322683 fixed and this must not undo. If the dispatch does
+      # nothing, the state is exactly what it is today: run docs.yml by hand
+      # from the Actions tab.
+      - name: Ask docs.yml to build rustdoc for this tag (best effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+          if gh workflow run docs.yml --ref "$REF_NAME"; then
+            echo "Dispatched docs.yml at $REF_NAME."
+          else
+            echo "::warning title=docs.yml was not dispatched::Could not start docs.yml for $REF_NAME. The release is published; rustdoc is not. Run it by hand from the Actions tab if you want it."
+          fi

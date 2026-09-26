@@ -21,6 +21,16 @@ name: release-drift
 # skipped, and nobody is notified again. When the drift clears, the issue is
 # closed with a comment. A daily cron therefore costs zero notifications while
 # nothing changes, one when something breaks, and one when it is fixed.
+#
+# STATUS, stated so nobody reads the paragraph above as a report of observed
+# behaviour: the issue create/update/close steps have never run against
+# GitHub — they are reviewed YAML, and no offline test can exercise them. The
+# step that feeds them WAS executed: its body, extracted verbatim, run under
+# `bash -e` (the runner's default shell) against the live script on a repo
+# that is currently drifting, writes `drift=1`, appends the whole report to
+# the summary and exits 0. That is the part that used to be broken, silently,
+# on exactly the path this workflow exists for. The first scheduled run is
+# still the first real test of the rest.
 
 on:
   schedule:
@@ -54,18 +64,33 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+        # `|| code=$?`, not a bare call followed by `code=$?`. A `run:` with no
+        # `shell:` key is executed as `bash -e {0}`, and `set -uo pipefail`
+        # does NOT clear that inherited `-e` (verified: `bash -e -c 'set -uo
+        # pipefail; false; echo reached'` prints nothing). A bare call would
+        # therefore abort this step on the script's exit 1 — which is its
+        # NORMAL output, "drift found" — never writing the output, never
+        # appending the report to the summary, and skipping the issue step
+        # below (it has no `if:`, so it defaults to `success()`). Putting the
+        # call on the left of `||` suspends `-e` for it, which is what makes
+        # exit 1 survivable here.
         run: |
           set -uo pipefail
-          scripts/check-release-drift.sh >report.md
-          code=$?
+          code=0
+          scripts/check-release-drift.sh >report.md || code=$?
           echo "drift=$code" >>"$GITHUB_OUTPUT"
           cat report.md >>"$GITHUB_STEP_SUMMARY"
           # Exit 2 is a tooling failure (no gh, no network, no repo) and must
-          # fail the job: a check that cannot run has not passed. Exit 1 is the
-          # check working correctly and finding something, which is this
-          # workflow's normal output, not an error.
+          # fail the job: a check that cannot run has not passed — and it must
+          # fail BEFORE the issue step, so a half-written report can never be
+          # published as if it were the state of the repo. Exit 1 is the check
+          # working correctly and finding something, which is this workflow's
+          # normal output, not an error.
           if [ "$code" -gt 1 ]; then exit "$code"; fi
 
+      # No `if:` — the default `success()` is deliberate. The step above now
+      # survives exit 1 (drift) and fails only on exit 2 (the check could not
+      # run), and a check that could not run must not rewrite the issue.
       - name: Open, update or close the drift issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

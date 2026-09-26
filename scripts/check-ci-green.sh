@@ -40,7 +40,15 @@
 # CHANGELOG, and release.yml's own `version-consistency` job re-checks exactly
 # those on the tag — that is the cover for it, not this script.
 #
-# Usage: scripts/check-ci-green.sh [<sha>]        (default: HEAD)
+# Usage: scripts/check-ci-green.sh [<commit-ish>]  (default: HEAD)
+#        Anything `git rev-parse` resolves to a commit is accepted and is
+#        resolved to its full 40-character sha first: GitHub's `head_sha`
+#        filter matches on all 40 and answers an ABBREVIATED sha with an empty
+#        list, which this script would otherwise report as "CI has never
+#        tested this commit" — sending you to diagnose a push or GC problem
+#        that does not exist. A full 40-hex argument is passed through
+#        untouched, so a sha that exists only on the remote can still be asked
+#        about.
 # Env:   REPO      owner/repo (default: derived from `origin`)
 #        WORKFLOW  workflow file name (default: ci.yml)
 # Needs `gh` authenticated (read-only: one API GET).
@@ -56,10 +64,18 @@ die() { echo "$self: $1" >&2; exit "${2:-1}"; }
 command -v gh >/dev/null 2>&1 || die "gh is not installed — install it, or set RELEASE_SKIP_CI_CHECK=1 to cut the release without this check" 2
 command -v git >/dev/null 2>&1 || die "git is not installed" 2
 
-SHA="${1:-$(git rev-parse HEAD)}"
+REV="${1:-HEAD}"
+if [[ "$REV" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  SHA="$REV"
+else
+  SHA="$(git rev-parse --verify --quiet "$REV^{commit}" || true)"
+  [ -n "$SHA" ] || die "not a commit this repository knows: '$REV' (pass a full 40-character sha to ask about one that only exists on the remote)" 2
+  [ "$SHA" = "$REV" ] || echo "$self: $REV is $SHA" >&2
+fi
 case "$SHA" in
   *[!0-9a-fA-F]* | '') die "not a commit sha: '$SHA'" 2 ;;
 esac
+[ "${#SHA}" -eq 40 ] || die "'$REV' resolved to '$SHA', which is not a full 40-character sha — GitHub's head_sha filter needs all 40" 2
 
 WORKFLOW="${WORKFLOW:-ci.yml}"
 case "$WORKFLOW" in

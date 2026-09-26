@@ -1,7 +1,15 @@
 name: docs
 
-# rustdoc for the workspace, published to GitHub Pages when a release is
-# published.
+# rustdoc for the workspace, published to GitHub Pages for a released tag.
+#
+# HOW THIS ACTUALLY GETS STARTED. The `release: published` trigger below only
+# fires for a release a PERSON publishes: since T10 the publication is done by
+# release.yml's `publish` job using the default GITHUB_TOKEN, and GitHub does
+# not start workflow runs from events that token creates. That job therefore
+# also dispatches this workflow explicitly (`gh workflow run docs.yml --ref
+# <tag>`), as a best-effort step that cannot fail the release. The
+# `release: published` trigger is kept because it still covers the hand-
+# published case and costs nothing.
 #
 # THIS WORKFLOW HAS NEVER SUCCEEDED — 11 of 11 runs red, and every single one
 # for the same reason, which is not the Rust build: `cargo doc` completes,

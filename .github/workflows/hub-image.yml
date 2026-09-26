@@ -11,8 +11,17 @@ permissions:
 # release.yml carries. `workflow_dispatch` stays in the trigger list as the
 # re-run path for a tag whose image build failed — but it must be dispatched
 # AT a tag (`gh workflow run hub-image.yml --ref v1.2.3`), not at a branch.
-# Dispatched from a branch, every job below skips and the run publishes
-# nothing.
+# Dispatched from a branch that CONTAINS THIS FILE, every job below skips and
+# the run publishes nothing.
+#
+# That qualifier is load-bearing and cannot be engineered away here:
+# `workflow_dispatch` runs the workflow file as it exists on the SELECTED ref.
+# Dispatching at a branch cut before this gate landed still runs that branch's
+# ungated copy, which pushes by digest and hangs a `sha-<commit>` tag on it.
+# The gate protects the ref it is on, not the repository, and no YAML in this
+# file can change that. The durable closure is branch-protection / ref rules on
+# who may dispatch, or letting the old branches age out — not a comment here
+# claiming more than the code does.
 #
 # Without the gate, a branch dispatch pushed a real image built from
 # unreleased code into the namespace operators pull from: the `build` legs
@@ -72,13 +81,17 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/fleet-hub
           # `latest` is gated on the tag having NO pre-release suffix.
-          # deploy/hub/docker-compose.yml pins `fleet-hub:latest`, so a
-          # `v0.3.0-rc.1` tag moving it would push a release candidate onto
-          # every hub operator's next `docker compose pull` — silently, since
-          # nothing about the tag they pinned changed. The rc still gets its
+          # deploy/hub/docker-compose.yml no longer pins `latest` — it pins an
+          # exact version — so the operators this protects are the ones who
+          # chose `latest` themselves: the tag is documented (docs/hub.md, and
+          # the compose file's own comment) as "whatever the newest STABLE
+          # release is", and an rc moving it would hand those hubs a release
+          # candidate on their next `docker compose pull`, silently, since
+          # nothing about the tag they wrote changed. The rc still gets its
           # own `…:0.3.0-rc.1` tag from the semver line above. A pre-release
           # is a tag with a `-` in its version, the same test release.yml
-          # uses to set `prerelease:`.
+          # uses to set `prerelease:` and scripts/release.sh uses to decide
+          # whether to move the compose pin.
           #
           # (The comment lives out here rather than inside the block scalar
           # below: every line in there is an input value to the action.)
@@ -340,17 +353,40 @@ jobs:
               '```',
               END,
             ].join('\n');
+            // PAIR-AWARE, because this job holds `contents: write` and the
+            // text it is editing is the release notes a human wrote.
+            // `indexOf(START)` + `indexOf(END)` taken independently deletes
+            // everything between a STRAY marker and the real block's END:
+            // with `<!-- fleet-hub-image -->` mentioned once in prose, run 1
+            // appends a proper block (no END yet) and run 2 splices from the
+            // prose mention to the appended END, destroying the paragraphs in
+            // between (reproduced in node against this exact algorithm).
+            //
+            // So: find the END, then the LAST START before it — that is the
+            // real block's opening, whatever is quoted earlier — and refuse
+            // outright if anything marker-shaped survives after the END, since
+            // a body with two pairs is one this job did not write and must not
+            // guess at. Refusing leaves the notes intact and says so; the
+            // digest is still in the run's job summary.
             const body = release.body || '';
-            const from = body.indexOf(START);
-            const to = body.indexOf(END);
+            const endAt = body.indexOf(END);
+            const startAt = endAt === -1 ? -1 : body.lastIndexOf(START, endAt);
             let next;
-            if (from !== -1 && to !== -1 && to > from) {
-              next = body.slice(0, from) + block + body.slice(to + END.length);
+            if (startAt !== -1) {
+              const tail = body.slice(endAt + END.length);
+              if (tail.includes(START) || tail.includes(END)) {
+                core.warning(`The release body for ${tag} contains more than one fleet-hub-image marker pair; leaving it untouched rather than guessing which one to replace. The digest is in this run's job summary.`);
+                return;
+              }
+              next = body.slice(0, startAt) + block + tail;
               if (next === body) {
                 core.info('The release already records this digest; nothing to do.');
                 return;
               }
             } else {
+              if (body.includes(START)) {
+                core.warning(`The release body for ${tag} mentions ${START} with no closing ${END}; appending a fresh block instead of splicing into it.`);
+              }
               next = `${body.trimEnd()}\n\n${block}\n`;
             }
             await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, body: next });

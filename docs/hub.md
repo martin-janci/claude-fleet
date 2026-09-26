@@ -29,12 +29,15 @@ you can name, and going back to it is editing one line. Upgrading is a
 deliberate act: see *Upgrade and rollback* below.
 
 Note the missing `v`: the git tag is `v0.2.41`, the image tag published for it
-is `0.2.41`. Every released version has one, and so does every commit
-(`sha-<commit>`, for bisecting a regression). `latest` exists too and is a
-convenience for "whatever the newest stable release is" — fine for a throwaway
-trial, wrong for anything you will have to roll back, because the tag moves
-under you on the next release and `docker compose pull` then silently changes
-your deployment. A release candidate (`0.3.0-rc.1`) never moves `latest`.
+is `0.2.41`. Every released version has one. There is no image for an
+arbitrary commit: a `sha-<commit>` tag is published too, but only ever
+alongside a release, because only a `v*` tag builds an image at all (see the
+next paragraph) — so it is a second name for the version tag, not a way to
+pull an unreleased commit. `latest` exists as well and is a convenience for
+"whatever the newest stable release is" — fine for a throwaway trial, wrong
+for anything you will have to roll back, because the tag moves under you on
+the next release and `docker compose pull` then silently changes your
+deployment. A release candidate (`0.3.0-rc.1`) never moves `latest`.
 
 Only a pushed `v*` tag publishes an image at all: `hub-image.yml`'s jobs are
 gated on the ref being a tag, and on the tag matching the version in the tree
@@ -221,6 +224,19 @@ Refreshing the compose file itself (`curl -O …/deploy/hub/docker-compose.yml`)
 also upgrades you, because the copy on `main` carries the pin from the newest
 stable release. Diff it against yours before overwriting: it is the file your
 local edits live in.
+
+One window to know about. That pin is written in the release commit, which
+lands on `main` at the same moment the image build *starts* — so for the
+length of two container builds, and permanently if that build fails, the pin
+on `main` can name a tag ghcr does not have yet. A fresh install caught in it
+gets `manifest unknown` from `docker compose pull`. Nothing in CI can catch
+this (`check-version-consistency.sh` compares the pin with the repo's own
+version, not with the registry); what does is
+`scripts/check-release-drift.sh`, which asks ghcr daily whether the pin
+resolves and opens an issue when it does not. If you hit it, pin the previous
+version — [the package
+page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
+lists what actually exists — and try again later.
 
 **Roll back.** Put the old version back in `image:` and repeat the same two
 commands:

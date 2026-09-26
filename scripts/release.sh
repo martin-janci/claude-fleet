@@ -5,8 +5,12 @@
 #        scripts/release.sh --next         (print that derived version; changes nothing)
 #        scripts/release.sh --list         (print the version carriers; changes nothing)
 #        scripts/release.sh --list-image-pin (print the hub compose path; changes nothing)
-# Env:   RELEASE_DRY_RUN=1        edit files only — no cargo/commit/tag (for testing)
+# Env:   RELEASE_DRY_RUN=1        edit files only — no cargo/commit/tag, and no
+#                                network: the remote preflight below is skipped
+#                                too, so a dry run still works offline
 #        RELEASE_SKIP_CI_CHECK=1  tag without proving CI is green on HEAD
+#        RELEASE_ALLOW_BEHIND_ORIGIN=1
+#                                 tag without proving HEAD is origin/main's tip
 # Needs: bash, git, cargo, node, awk, date, gh. See docs/RELEASING.md.
 #
 # The tag this creates is the trigger for a PUBLISHED release: pushing it runs
@@ -131,19 +135,51 @@ BRANCH="$(git branch --show-current)"
 git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null && die "tag v$NEW already exists"
 [[ "$CUR" != "$NEW" ]] || die "package.json is already at $NEW"
 
-# CI must have passed on the commit being released. Pushing the tag this
-# script creates now publishes a release without anyone looking at it, so the
-# one remaining place to catch a red tree is here, before the tag exists.
-# scripts/check-ci-green.sh defines "green" and, importantly, refuses when it
-# cannot tell — no run for this sha, a run still going, a cancelled or skipped
-# run. What it CANNOT cover: the release commit created below is by
-# construction newer than anything CI has seen; release.yml's own
-# version-consistency job is what covers that commit.
-if [[ -n "${RELEASE_SKIP_CI_CHECK:-}" ]]; then
-  echo "release.sh: RELEASE_SKIP_CI_CHECK is set — releasing $NEW without checking CI on HEAD" >&2
+# --- remote preflight: is THIS commit the one to release, and is it green? ---
+# Both questions need the network, and neither protects anything in a dry run,
+# which creates no commit and no tag. So the whole block is skipped under
+# RELEASE_DRY_RUN — otherwise the documented "edit files only, for testing"
+# mode would require gh, a network and a pushed, CI-green HEAD, and there would
+# be no way to rehearse a bump offline at all.
+if [[ -n "${RELEASE_DRY_RUN:-}" ]]; then
+  echo "release.sh: RELEASE_DRY_RUN is set — skipping the remote preflight (up-to-date check and CI gate); a dry run creates no tag for them to protect" >&2
 else
-  scripts/check-ci-green.sh \
-    || die "CI is not green on HEAD (see above). Fix it, or set RELEASE_SKIP_CI_CHECK=1 if you know why this is safe."
+  # 1. HEAD must be origin/main's tip. Being ON main is not the same as being
+  #    UP TO DATE with it, and everything downstream quietly assumes the
+  #    latter: `check-ci-green.sh` below would pass (that older commit really
+  #    does have a green run), `derive_next` and the CHANGELOG section are
+  #    built from LAST_TAG..HEAD and would silently omit every commit that
+  #    landed upstream, and `git tag -a` would tag the stale commit. The
+  #    result is a PUBLISHED release built from a tree that is not main's,
+  #    advertising notes that omit the newest work — and the only way back is
+  #    deleting a pushed tag. FETCH_HEAD, not a remote-tracking ref, so this
+  #    does not depend on how the remote is configured locally.
+  if [[ -n "${RELEASE_ALLOW_BEHIND_ORIGIN:-}" ]]; then
+    echo "release.sh: RELEASE_ALLOW_BEHIND_ORIGIN is set — not checking that HEAD is origin/main's tip" >&2
+  else
+    git fetch --quiet origin main \
+      || die "could not fetch origin/main — cannot tell whether this commit is the one to release. Fix the network, or set RELEASE_ALLOW_BEHIND_ORIGIN=1 if you know why this is safe."
+    ORIGIN_MAIN="$(git rev-parse --verify FETCH_HEAD)"
+    HEAD_SHA="$(git rev-parse --verify HEAD)"
+    [[ "$HEAD_SHA" == "$ORIGIN_MAIN" ]] || die "HEAD is $HEAD_SHA but origin/main is $ORIGIN_MAIN — this checkout is not the tip of main.
+  Run: git pull --ff-only    (or push what is local first)
+  Releasing from here would tag a tree that is not main's and publish a CHANGELOG that omits the difference."
+  fi
+
+  # 2. CI must have passed on the commit being released. Pushing the tag this
+  #    script creates now publishes a release without anyone looking at it, so
+  #    the one remaining place to catch a red tree is here, before the tag
+  #    exists. scripts/check-ci-green.sh defines "green" and, importantly,
+  #    refuses when it cannot tell — no run for this sha, a run still going, a
+  #    cancelled or skipped run. What it CANNOT cover: the release commit
+  #    created below is by construction newer than anything CI has seen;
+  #    release.yml's own version-consistency job is what covers that commit.
+  if [[ -n "${RELEASE_SKIP_CI_CHECK:-}" ]]; then
+    echo "release.sh: RELEASE_SKIP_CI_CHECK is set — releasing $NEW without checking CI on HEAD" >&2
+  else
+    scripts/check-ci-green.sh \
+      || die "CI is not green on HEAD (see above). Fix it, or set RELEASE_SKIP_CI_CHECK=1 if you know why this is safe."
+  fi
 fi
 
 echo "Bumping $CUR -> $NEW"
@@ -315,7 +351,11 @@ git commit -q -m "chore(release): v$NEW"
 git tag -a "v$NEW" -m "claude-fleet v$NEW"
 echo
 echo "Committed chore(release): v$NEW and created tag v$NEW. To publish:"
-echo "  git push origin main --follow-tags"
+# --atomic, not a bare --follow-tags: without it the branch update and the tag
+# update are independent, so a `main` that moved under you is rejected while
+# the TAG still lands — and a pushed tag is the one step of a release that
+# cannot be taken back. With --atomic the remote applies both or neither.
+echo "  git push --atomic origin main --follow-tags"
 echo
 echo "That push builds every asset and — once verify-release passes — PUBLISHES"
 echo "the release. Nothing else to press. If a leg fails, the release stays a"

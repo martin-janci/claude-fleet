@@ -20,9 +20,10 @@ Two files decide what a release *is*, and neither has a second copy anywhere:
 | `scripts/release.sh --list-image-pin` | the one file whose version lives in a Docker tag: `deploy/hub/docker-compose.yml` |
 | `scripts/release-assets.sh` | the build legs and the exact asset filenames the release must carry |
 
-`scripts/check-version-consistency.sh` reads the first and is run by both
-`ci.yml` and `release.yml`; `scripts/verify-release.sh` reads the second and
-is the last job of `release.yml`. If you add a build target or rename an
+Seven files in all, then: six carriers plus the image pin.
+`scripts/check-version-consistency.sh` reads the **first two** and is run by
+`ci.yml`, `release.yml` and `hub-image.yml`; `scripts/verify-release.sh`
+reads the third and is the last job of `release.yml`. If you add a build target or rename an
 asset, edit `scripts/release-assets.sh` and nothing else — the workflow
 matrices, the packaging script's output names and the release gate are all
 generated from it.
@@ -211,10 +212,11 @@ somewhere: a failed leg, a failed gate or a cancelled run skips the job, and
 what is left is a draft carrying exactly what the run managed to build, for
 you to look at.
 
-**Re-running over a release that is already published is safe** — that is
-why `create-release` matches on the tag alone and not on "a draft with this
-tag". It reuses the release, replaces the assets it rebuilds, and leaves the
-body alone (so notes you edited on the release survive). Two things to know
+**Re-running over a release that is already published is supported, with one
+visible caveat** — that is why `create-release` matches on the tag alone and
+not on "a draft with this tag". It reuses the release, replaces the assets it
+rebuilds, and leaves the body alone (so notes you edited on the release
+survive). Nothing is lost; something is briefly missing. Two things to know
 before you do it:
 
 - `scripts/upload-release-asset.sh` deletes an asset before re-uploading it,
@@ -377,6 +379,21 @@ against the tag. That is the cover for it.
 
 `RELEASE_SKIP_CI_CHECK=1` skips the gate and says so, loudly, on stderr.
 
+Alongside it, and for the same reason, the script refuses to run unless
+`HEAD` **is** `origin/main`'s tip — being *on* main is not being *up to date
+with* it. From a main that is behind, the CI gate would happily pass (that
+older commit does have a green run), the derived version and the CHANGELOG
+section would be built from a range that omits everything that landed
+upstream, and `git tag -a` would tag the stale commit. `git fetch origin
+main` plus a sha comparison is the whole check; `RELEASE_ALLOW_BEHIND_ORIGIN=1`
+skips it, loudly. The push the script prints is `git push --atomic origin main
+--follow-tags`, because without `--atomic` a rejected branch update does not
+stop the tag from landing anyway — and a pushed tag now publishes.
+
+Both are skipped under `RELEASE_DRY_RUN=1`: a dry run creates no commit and no
+tag, so there is nothing for them to protect, and requiring `gh` plus a
+network for the documented offline rehearsal would defeat it.
+
 ### The drift check
 
 `.github/workflows/release-drift.yml` runs `scripts/check-release-drift.sh`
@@ -392,12 +409,23 @@ exist. It reports:
    lingering draft means a leg failed and nobody went back to it;
 3. the newest ten releases still carrying every asset, checked by
    `scripts/verify-release.sh` itself — not a second copy of the rule;
-4. a release whose tag no longer resolves.
+4. a release whose tag no longer resolves;
+5. the hub image pin in `deploy/hub/docker-compose.yml` actually resolving in
+   ghcr. This is the only check that looks outside GitHub, and it is the only
+   thing anywhere that does: `check-version-consistency.sh` proves the pin
+   agrees with the repo's own version, never that the image was published.
+
+A GitHub or registry call that *fails* is exit 2, a red job, and the issue is
+left alone — "could not check" is never filed as "the release is broken".
 
 Everything lands in **one** issue labelled `release-drift`, rewritten in
 place. The report deliberately contains no timestamps, so an unchanged
 problem produces an identical body, the edit is skipped and nobody is
 notified again; when the drift clears, the issue is closed with a comment.
+*The issue create/update/close steps have never run against GitHub* — they
+are reviewed YAML, and the step that feeds them was verified by executing its
+body under `bash -e` (the Actions default shell) against the live script.
+Expect the first scheduled run to be the real test.
 
 A tag that is *meant* to have no release goes in `.github/release-drift-ignore`
 with the reason in a `#` comment. That is the only way to silence a line.
@@ -427,7 +455,13 @@ for a failed image build, but it must be dispatched at the tag:
 
 ```bash
 gh workflow run hub-image.yml --ref v0.3.0
-``` **arm64 is best-effort**: its leg may fail without blocking the
+```
+
+That gate protects the ref it is on, not the repository: `workflow_dispatch`
+runs the workflow file *as it exists on the ref you pick*, so a branch cut
+before the gate landed still runs its own ungated copy.
+
+**arm64 is best-effort**: its leg may fail without blocking the
 image — `merge` still runs (`if: !cancelled()`) and publishes an amd64-only
 manifest under the same tags, so amd64's own publication is never slowed or
 blocked by arm64, and the *run stays green* (a `continue-on-error` leg's
@@ -516,11 +550,21 @@ re-run.
 
 ## Docs workflow
 
-`.github/workflows/docs.yml` builds rustdoc and deploys it to GitHub Pages on
-`release: published` — i.e. when `release.yml`'s `publish` job publishes the
-release. It can also be triggered by hand via `workflow_dispatch` on the
-Actions tab. It checks out the released tag, so the published docs describe
-the code that was released.
+`.github/workflows/docs.yml` builds rustdoc and deploys it to GitHub Pages. It
+checks out the released tag, so the published docs describe the code that was
+released.
+
+**Its `release: published` trigger no longer fires for an automated
+release.** That event is now produced by the default `GITHUB_TOKEN` in
+`release.yml`'s `publish` job, and GitHub does not start workflow runs from
+events that token creates. Every docs.yml run this repository has ever had
+came from a human pressing *Publish* — the step T10 removed. In its place the
+`publish` job dispatches docs.yml explicitly (`gh workflow run docs.yml --ref
+<tag>`) as a **best-effort** step: `continue-on-error: true`, so it can never
+colour the release run. Whether a `GITHUB_TOKEN` dispatch starts a run is
+documented by GitHub as an exception to that guard but **has not been
+observed here**, and cannot be from a branch. If it does nothing, the position
+is what it already is today: run docs.yml by hand from the Actions tab.
 
 **It has never succeeded.** All 11 runs failed, none of them in the Rust
 build: `cargo doc` completes and `actions/configure-pages` then 404s, because
