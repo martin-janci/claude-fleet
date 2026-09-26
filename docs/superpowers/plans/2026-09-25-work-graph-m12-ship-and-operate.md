@@ -276,3 +276,25 @@ M12.6        docs; after the user's M10.3 acceptance run
   - **Other docs.** `getting-started.md` (*Connect a tracker*, and a *Work* line under everyday use), `troubleshooting.md` (three quick-reference rows and *Work and trackers*: sync failures by state, `lagged` after a tracker's first sync (D18), "why is this session linked to X?"), `concepts.md` (detection, Today, and a link to the guide in *Work*), `README.md` and `docs/README.md`.
   - **Keeping it current.** A plan that changes what a user sees of the work graph updates `docs/work-graph.md` in the same PR and says so in its *Revisions*; the settings table is enforced by the test above.
 - 2026-09-26: after M12.4 merged (#303), `main` was merged into `claude/cloud-fleet-work-graph-m12-guide` and the guide's *Trackers in fleet health* section was rewritten from the code: the `health` levels and when each applies (`tracker_health_level`, `TRACKER_FAILING_AFTER` = 3), the per-tracker fields, the 7-day detection backlog (a constant, `DETECTION_BACKLOG_DAYS`), the per-host fence, the footer line (`trackersSummary`), and the one-per-failing-tracker Reconnect item (`TrackerAttention.svelte`, re-read every 60 s). The `<!-- M12.4: verify after merge -->` marker is removed. M12.4 added no setting, so the settings table is unchanged; `troubleshooting.md` names the Reconnect item and the footer line.
+- 2026-09-26: **M12.6 written** (docs only):
+  `../reviews/2026-09-26-work-graph-decisions-revisited.md`.
+  - **No usage claimed.** The M10.3 acceptance run has not happened
+    (`docs/work-graph-acceptance.md` does not exist). The note cites only
+    M10.2's scenarios, the M10.6 report, the code and later changes (GHES,
+    retention, `fleet_health.trackers`, local items, the phone's M8.6 /
+    M10.5), and marks every item "waits on M10.3".
+  - **Recommendations.** D3 (write-back), D13 (webhooks) and D17 (`acli`)
+    stay decided against. D10 (dead-session summaries) and D15 / D20 (the
+    phone) are to decide after M10.3. Each item has its smallest safe
+    version: scope, modules, isolation, M9.7, `BUDGET_BYTES`, contract and
+    phone.
+  - **Found.** D15's row ("read-only only") understates what was built: M8.6.3
+    put *Ask for a handover* on the phone, and the hub serves `handover`,
+    multi-start and `name` to any full client token. The row is left for
+    the user to restate. `net/https.rs`'s module comment still promises
+    `acli`; it is left for the next code change there.
+  - **D16** is corrected in the roadmap to done: `hub-e2e.sh` runs in the
+    `hub-headless` job. Its work-graph leg (hub W) is skipped in CI for want
+    of an `e2e`-feature build.
+  - The note ends with *What M10.3 should capture* for these decisions.
+  - The decisions table is otherwise unchanged; the user decides.

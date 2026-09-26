@@ -654,7 +654,12 @@ explained.
   table names one that is not registered. Getting started, troubleshooting,
   concepts and both READMEs link to it. Its fleet-health section was
   rewritten from M12.4's code once #303 merged.
-- M12.6 is not started.
+- **M12.6 written; decisions wait on the user.**
+  `reviews/2026-09-26-work-graph-decisions-revisited.md` revisits D3, D10,
+  D13, D15 / D20 and D17 with the repository's evidence (M10.3 has not run,
+  so no usage is claimed) and recommends. D16 is corrected below. The
+  decisions table is otherwise unchanged: the user updates it, and each
+  "yes" becomes its own milestone (M13+).
 
 ## Critical path and parallelism
 
@@ -687,7 +692,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
 | D15 | Handover and multi-start on the phone (M10.5)? | read-only M9 only · also the actions | Read-only only (Today + card) |
-| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | Local opt-in, as today |
+| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done: hub-e2e already runs in CI** (`hub-headless` job, `.github/workflows/ci.yml`, every PR and `main` push). The M10.2 work-graph leg needs an `e2e`-feature hub and is skipped there; `ci-local.sh --hub-e2e` runs it |
 
 ## Risks to watch
 
@@ -798,3 +803,11 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   milestone that changes what a user sees.
 - 2026-09-26: M12.4 merged (#303); the guide's *Trackers in fleet health*
   section now describes the code as landed, and its verify marker is gone.
+- 2026-09-26: M12.6 written, docs only
+  (`reviews/2026-09-26-work-graph-decisions-revisited.md`): per
+  decided-against item, the source, the evidence in the repository, the
+  smallest safe version, the risks and a recommendation (D3, D13, D17 stay
+  decided against; D10, D15 / D20 decide after M10.3). D16 is corrected to
+  done: hub-e2e already runs in CI's `hub-headless` job. The note also
+  records that D15's row understates the phone (M8.6.3 built *Ask for a
+  handover*); the row is left for the user to restate.
