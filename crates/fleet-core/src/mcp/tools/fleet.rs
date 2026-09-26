@@ -13,10 +13,10 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
     ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
-        let mut h = health::health_check(&self.store);
+        let mut h = health::health_check(self.reader());
         h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
-            if let Ok(s) = self.store.lock() {
+            if let Ok(s) = self.reader().lock() {
                 health::scope_usage_to_host(&mut h, &s, host);
             }
         }
@@ -61,7 +61,7 @@ impl FleetTools {
         claude/tmux versions, and linked account. Returns JSON.")]
     pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
-        ok_json_compact(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
+        ok_json_compact(&hosts::list_hosts(self.reader()).map_err(to_mcp_err)?)
     }
 
     #[tool(

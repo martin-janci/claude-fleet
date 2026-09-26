@@ -29,9 +29,9 @@ impl FleetTools {
             ),
         );
         let mut trees = if p.has_sessions {
-            projects::list_projects_with_sessions(&self.store)
+            projects::list_projects_with_sessions(self.reader())
         } else {
-            projects::list_projects(&self.store)
+            projects::list_projects(self.reader())
         }
         .map_err(to_mcp_err)?;
         // After the filter, so a capped page is a page of matches — the same
@@ -82,7 +82,7 @@ impl FleetTools {
         let args = worktrees::ListWorktreesArgs {
             project_id: p.project_id,
         };
-        let mut out = worktrees::list_worktrees(args, &self.store).map_err(to_mcp_err)?;
+        let mut out = worktrees::list_worktrees(args, self.reader()).map_err(to_mcp_err)?;
         if let Some(host) = p.host_alias.as_deref() {
             out.retain(|w| w.worktree.host_alias == host);
         }

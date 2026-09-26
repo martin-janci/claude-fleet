@@ -2224,6 +2224,85 @@ async fn concurrent_list_sessions_share_one_reconcile_pass() {
     assert_eq!(rows[0].tmux_name, "s1");
 }
 
+/// Hub store latency, task 7: once a pass has completed, a listing served
+/// from the store reads through the reader it is handed (the hub's read
+/// pool) — so it answers while the writer's mutex is held by a reconcile
+/// transaction or a hook. Bounded on an OS thread: a read stuck in a std
+/// `Mutex::lock` would stall a tokio timer too.
+#[test]
+fn a_listing_served_from_the_store_reads_through_the_reader_not_the_writer() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let store = Arc::new(Mutex::new(
+        Store::open_with_bus(&path, Arc::new(crate::events::NoopEventBus)).unwrap(),
+    ));
+    let pool = Arc::new(
+        crate::store::ReadPool::open(&path, crate::store::READ_POOL_SIZE)
+            .unwrap()
+            .unwrap(),
+    );
+    let gate = Arc::new(ReconcileGate::new());
+    let (deps, _probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_millis(1),
+        Duration::from_secs(5),
+    );
+    let window = Duration::from_secs(60);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // Cold start: the inline pass writes (and reads back) through the writer.
+    let rows = rt
+        .block_on(list_sessions_with_reader(
+            &store,
+            pool.get().unwrap(),
+            &deps,
+            &gate,
+            window,
+            false,
+        ))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let writer = Arc::clone(&store);
+    let holder = std::thread::spawn(move || {
+        let _guard = writer.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = hold_rx.recv_timeout(Duration::from_secs(30));
+    });
+    held_rx.recv().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (store, pool, deps, gate) = (store.clone(), pool.clone(), deps.clone(), gate.clone());
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let rows = rt.block_on(list_sessions_with_reader(
+                &store,
+                pool.get().unwrap(),
+                &deps,
+                &gate,
+                window,
+                false,
+            ));
+            let _ = tx.send(rows.map(|r| r.len()));
+        });
+    }
+    let answered = rx.recv_timeout(Duration::from_secs(3));
+    assert!(
+        matches!(answered, Ok(Ok(1))),
+        "a fresh listing waited on the writer: {answered:?}"
+    );
+    hold_tx.send(()).unwrap();
+    holder.join().unwrap();
+}
+
 #[tokio::test]
 async fn list_sessions_within_freshness_window_causes_zero_probes() {
     // BE-2: a store that was reconciled within the interval is served as

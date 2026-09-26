@@ -18,6 +18,9 @@ pub mod metrics;
 pub mod pairing;
 pub mod report_route;
 pub mod settings;
+#[cfg(test)]
+mod tests_token_cache;
+mod token_cache;
 mod tools;
 pub mod wire;
 
@@ -39,6 +42,7 @@ pub use events_route::{EventFeed, EventHistory, EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
 pub use listener::{NoTls, TlsAcceptor};
 pub use pairing::{pair_url, PairingRequest, PendingPairings};
+use token_cache::TokenCache;
 pub use tools::tool_deadline;
 pub use tools::FleetTools;
 
@@ -161,6 +165,11 @@ struct AuthState {
     /// Non-loopback `Host`/`Origin` values accepted besides loopback (see
     /// `auth::check_origin`). Empty on the desktop.
     allowed_hosts: Arc<Vec<String>>,
+    /// The hub's in-memory token tables, checked against the store's auth
+    /// epoch on every request (see [`TokenCache`]). `None` — the desktop,
+    /// tests, a store without a read pool — reads the tables through the
+    /// writer per request, as before.
+    tokens: Option<Arc<TokenCache>>,
 }
 
 /// Pull `token=<v>` out of a raw query string. Tokens are hex, so no
@@ -187,18 +196,38 @@ async fn authorize(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::http::StatusCode;
-    // Sync lock, released before the next `.await` — never held across one.
-    // `active_client_tokens` drops revoked pairings, so a revoked client token
-    // simply stops resolving on the next request.
-    let (host_tokens, client_tokens) = {
-        let s = state
-            .store
-            .lock()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        (
-            s.list_host_tokens().unwrap_or_default(),
-            s.active_client_tokens().unwrap_or_default(),
-        )
+    // The hub's cache first: it re-reads the auth epoch on a read-only
+    // connection per request, so a token revoked by any process is gone from
+    // the rows it returns on the next request — without the writer's lock.
+    let cached = state
+        .tokens
+        .as_ref()
+        .and_then(|cache| match cache.tokens() {
+            Ok(rows) => Some(rows),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e.message,
+                    "[mcp] token cache unavailable; reading the token tables through the writer"
+                );
+                None
+            }
+        });
+    // Otherwise a sync lock on the writer, released before the next `.await`
+    // — never held across one. `active_client_tokens` drops revoked
+    // pairings, so a revoked client token simply stops resolving on the next
+    // request.
+    let (host_tokens, client_tokens) = match cached {
+        Some(rows) => rows,
+        None => {
+            let s = state
+                .store
+                .lock()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            (
+                Arc::new(s.list_host_tokens().unwrap_or_default()),
+                Arc::new(s.active_client_tokens().unwrap_or_default()),
+            )
+        }
     };
     let caller = match auth::check_request(
         request.headers(),
@@ -241,9 +270,32 @@ async fn authorize(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        if let Ok(s) = state.store.lock() {
-            if let Err(e) = s.touch_client_token(client.id, now) {
-                tracing::debug!(error = %e.message, "[mcp] could not touch client token");
+        match state.tokens.as_ref() {
+            // The hub: the same minute, gated in memory so a request that is
+            // not due never touches the writer, and `try_lock` so one that
+            // is never waits on it — a stamp the writer was too busy for is
+            // retried by the next request.
+            Some(cache) => {
+                if cache.touch_due(client.id, now) {
+                    match state.store.try_lock() {
+                        Ok(s) => {
+                            if let Err(e) = s.touch_client_token(client.id, now) {
+                                tracing::debug!(
+                                    error = %e.message,
+                                    "[mcp] could not touch client token"
+                                );
+                            }
+                        }
+                        Err(_) => cache.untouch(client.id),
+                    }
+                }
+            }
+            None => {
+                if let Ok(s) = state.store.lock() {
+                    if let Err(e) = s.touch_client_token(client.id, now) {
+                        tracing::debug!(error = %e.message, "[mcp] could not touch client token");
+                    }
+                }
             }
         }
     }
@@ -409,6 +461,7 @@ pub(crate) fn test_app(
             master: Arc::new(master.to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         },
         pairing::PairState::new(
             Arc::clone(&store),
@@ -558,6 +611,8 @@ pub async fn start_with_handle(
         token,
         allowed_hosts,
         events,
+        // The desktop reads through its one writer, as before.
+        None,
         None::<NoTls>,
     )
     .await
@@ -570,6 +625,11 @@ pub async fn start_with_handle(
 /// the TLS stack stays in the hub (see [`listener`]), and everything below the
 /// accept loop is the same server the desktop runs. The plain-HTTP path is
 /// unchanged — `axum::serve` is still handed the `TcpListener` directly.
+///
+/// `read_pool` is the hub's read-only connections on the same `state.db`
+/// ([`crate::store::ReadPool`]): with it, `authorize` checks tokens against
+/// an in-memory [`TokenCache`] and the plain read tools read off the writer.
+/// `None` keeps every read on `store`, as the desktop does.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_with_listener<A: TlsAcceptor>(
     store: Arc<Mutex<Store>>,
@@ -581,6 +641,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
     token: String,
     allowed_hosts: Vec<String>,
     events: Option<EventFeed>,
+    read_pool: Option<Arc<crate::store::ReadPool>>,
     tls: Option<A>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     // The bound address, not a requested one: with the listener already open
@@ -634,10 +695,24 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
         };
+        // Built from the store now; a store the pool cannot read keeps the
+        // per-request read through the writer rather than refusing to serve.
+        let tokens = read_pool.as_ref().and_then(|pool| {
+            TokenCache::new(Arc::clone(pool))
+                .map(Arc::new)
+                .map_err(|e| {
+                    tracing::warn!(
+                        error = %e.message,
+                        "[mcp] token cache unavailable; authorizing through the writer"
+                    )
+                })
+                .ok()
+        });
         let auth_state = AuthState {
             master: Arc::new(token),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
+            tokens,
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),
@@ -650,7 +725,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         let metrics_for_route = Arc::clone(&guards.metrics);
         let events_state =
             EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token());
-        let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
+        let tools = FleetTools::new(store, ssh, reg, tunnels, guards).with_read_pool(read_pool);
         let service = streamable_service(
             tools.clone(),
             serve_shutdown.child_token(),
@@ -783,6 +858,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         };
         // The pairing registry the test mints into and `/pair` redeems from.
         let pairings = Arc::new(pairing::PendingPairings::new());
@@ -1169,6 +1245,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
+            tokens: None,
         };
         let app2 = build_app(
             metrics::MetricsState {
@@ -1230,6 +1307,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         };
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
         let report_state3 = report_route::ReportState::new(Arc::clone(&store));
@@ -1333,6 +1411,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
+            tokens: None,
         };
         let guards = McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {}));
         let pair_state = pairing::PairState::new(
@@ -1674,6 +1753,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),

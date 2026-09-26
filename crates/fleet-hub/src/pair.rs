@@ -893,6 +893,14 @@ mod tests {
             token,
             vec![],
             None,
+            // Read through a pool and authorize through the token cache, as
+            // `serve` does: `pair` is the hub path that mints a client token.
+            fleet_core::store::ReadPool::open(
+                &dir.path().join("state.db"),
+                fleet_core::store::READ_POOL_SIZE,
+            )
+            .unwrap()
+            .map(Arc::new),
             tls,
         )
         .await

@@ -1603,13 +1603,31 @@ pub(super) async fn list_sessions_with(
     window: std::time::Duration,
     force: bool,
 ) -> Result<Vec<SessionRow>, IpcError> {
+    list_sessions_with_reader(store, store, deps, gate, window, force).await
+}
+
+/// [`list_sessions_with`], with the final read of stored rows through
+/// `reader` (the hub's read pool) whenever this call ran no pass inline. A
+/// call that did run one — `force`, or a cold start — reads its rows back
+/// through the writer that just wrote them.
+pub(super) async fn list_sessions_with_reader(
+    store: &Arc<Mutex<Store>>,
+    reader: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    gate: &Arc<ReconcileGate>,
+    window: std::time::Duration,
+    force: bool,
+) -> Result<Vec<SessionRow>, IpcError> {
+    let mut reader = reader;
     if force {
         run_full_reconcile(store, deps, gate).await?;
+        reader = &**store;
     } else if !gate.has_completed_once() {
         // Cold start: keep today's inline pass so the first listing isn't
         // empty. `Ok(false)` here (another caller won the gate concurrently)
         // just falls through to the stored rows, same as before.
         run_full_reconcile(store, deps, gate).await?;
+        reader = &**store;
     } else if !gate.is_fresh(window) {
         // A pass has completed before and the gate is stale: serve the
         // stored rows now and catch up detached. `try_begin` inside
@@ -1626,7 +1644,7 @@ pub(super) async fn list_sessions_with(
             }
         });
     }
-    let s = lock(store)?;
+    let s = lock(reader)?;
     s.list_all_sessions().map_err(IpcError::from)
 }
 
@@ -1697,10 +1715,24 @@ pub async fn list_sessions(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    let window = list_freshness_window(store);
-    list_sessions_with(
+    list_sessions_reading(store, store, ssh).await
+}
+
+/// [`list_sessions`] reading the settings it needs, and the stored rows it
+/// serves, through `reader` — the hub's read pool, so a listing served from
+/// the store never waits on the writer. A pass it has to run inline (a cold
+/// start) still writes through `store`, and its rows are then read back
+/// through `store` too.
+pub async fn list_sessions_reading(
+    store: &Arc<Mutex<Store>>,
+    reader: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<Vec<SessionRow>, IpcError> {
+    let window = list_freshness_window(reader);
+    list_sessions_with_reader(
         store,
-        &ReconcileDeps::real(ssh, local_host(store)),
+        reader,
+        &ReconcileDeps::real(ssh, local_host(reader)),
         &reconcile_gate(),
         window,
         false,

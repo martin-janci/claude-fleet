@@ -1144,8 +1144,16 @@ impl FleetTools {
     /// that dropped `org_id` cannot make a row look unassigned. Fails
     /// closed: if the scope or a row's org cannot be read, every work field
     /// goes.
-    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
-        let Ok(s) = self.store.lock() else {
+    ///
+    /// The orgs are read through `store`: the read pool for a tool that
+    /// wrote nothing (`POOLED_READ_TOOLS`), else the writer.
+    pub(super) fn redact_work_via(
+        &self,
+        store: &Mutex<Store>,
+        caller: &Caller,
+        result: &mut CallToolResult,
+    ) {
+        let Ok(s) = store.lock() else {
             strip_all_work(result);
             return;
         };
@@ -1176,6 +1184,13 @@ impl FleetTools {
             }
         };
         rewrite_json_content(result, |v| scope.redact_json(v, &org_of));
+    }
+
+    /// [`Self::redact_work_via`] through the writer, as `call_tool` gates a
+    /// tool that may have written.
+    #[cfg(test)]
+    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
+        self.redact_work_via(&self.store, caller, result)
     }
 
     /// [`Self::resolve_target`] returning the whole row.

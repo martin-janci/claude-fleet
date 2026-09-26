@@ -343,6 +343,7 @@ pub(crate) mod tests {
             "test-token".to_string(),
             vec![],
             None,
+            None,
             Some(tls),
         )
         .await
