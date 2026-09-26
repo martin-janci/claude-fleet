@@ -71,6 +71,11 @@ Bugs the review found that hurt today and that the work graph builds on.
     although its own code comment says a readonly token may call it.
   - Decide which one is right. The skill now tolerates both.
 
+**Status (2026-09-26, M13.0):** M0.1–M0.5 reached `main` with #260 and were
+compiled and tested there. **M0.6 done (M11.5, #286):** the master tool
+surface went from 71,590 B to 54,646 B. The `whoami` question is unchanged:
+`TOOL_POLICIES` still says `readonly: false`, and no decision records it.
+
 **Value:** phone tags stop disappearing; renames stop orphaning mail and
 history. **Exit:** everything the graph anchors on (participants) is present
 and durable for every session kind.
@@ -145,10 +150,10 @@ by key, and names stop being "yes". **Tests:**
     / `unlink_session_work`, all `Routed` (137 commands).
   - Frontend: `workKeyFor` prefers the link (source `link`), skips rejected
     keys; `work.ts`; a `#` work menu on each row (set, *Not KEY*, *Clear*).
-  - Not done here: "Name this work…" on a group header (local items with a
-    title — the store has `create_local_work_item`, no tool or command
-    exposes it yet), the New session dialog does not link with
-    `source: started` yet, and the phone app does not read `work`.
+  - Left over from M1b.2, all since done: "Name this work…" on a group
+    header and a row (done, M11.1, #288); the New session dialog links
+    `source: started` through `start_work` (done, M3.4 / M3.5, #262); the
+    phone reads `work` (done, M8.1–M8.5, fleet-mobile #32).
 
 ### M2: resume and work memory
 
@@ -212,10 +217,11 @@ list every deviation). Verified with `cargo fmt`, `clippy -D warnings`,
   Resume split button + dialog (reasons, Jump, host override, editable
   brief), the New-session "has previous work · Resume" note, and the purge
   warning.
-- **Not done:** the phone does not show past work or resume (M8); the
-  resume plan does not probe whether the transcript file still exists on
-  the host (purge flag + reachability + held-conversation only); the
-  acceptance run on a real fleet.
+- **Follow-ups:** resume on the phone (done, M8.5, fleet-mobile #32) and
+  past work on the phone (done, M8.6, fleet-mobile #35); the resume plan
+  probes that the transcript is still on the host (done, M11.2, #290); the
+  acceptance run on a real fleet waits on the user (M10.3,
+  `docs/work-graph-acceptance.md`).
 
 ### M3: tracker foundation and Jira Cloud (read-only)
 
@@ -299,6 +305,8 @@ Jira Cloud site is still to do.
   Settings → Work, the retro-link reveal.
 - **M3.6 docs**: `docs/hub.md` → *Trackers*, `docs/concepts.md` → *Work*,
   `docs/control-api.md`, the control skill.
+- **Follow-ups:** reached `main` with #262. The acceptance on a real Jira
+  Cloud site waits on the user (M10.3).
 
 ### M4: smarter detection and explanations
 
@@ -347,11 +355,12 @@ acceptance on a real fleet is still to do.
   opt-in classification nudge — one ≤ 400-char note per conversation after
   three link-less turns with 1–5 candidates in the host's scope; Claude's
   answer (`source: agent_inferred`) is a pre-selected suggestion only (R11).
-  See the M4 plan's Revisions.
+  See the M4 plan's Revisions. It was opened as #273, which was closed
+  unmerged; the same commit (c688bc7) reached `main` with #270.
 - **Remote-host SessionStart measurement:** the procedure is written
   (`scripts/measure-session-start.sh`, M10.4) and the M4 plan has a
-  placeholder table; **to be measured by the user**. D5 stays open.
-  (Suggestions on the phone landed with M8.)
+  placeholder table; **waits on the user (D5)**. M4.1–M4.5 reached `main`
+  with #263. (Suggestions on the phone landed with M8.)
 
 **Value:** most sessions are linked correctly without touching anything, and
 every link says why. **Tests:** the resolver table (conflicts, a sticky reject,
@@ -403,8 +412,11 @@ to do.
 - **Filter chrome** (M10.4): tracker / status / mine / has-session /
   archived are chips under the sidebar's "⚑ work" pill, persisted, through
   the same `rowMatches`.
-- **Not done:** a Today view to scope (M9 does not exist yet); the phone
-  does not show orgs (M8); the manual acceptance.
+- **Follow-ups:** reached `main` with #264. The Today view respects the
+  scope (done, M9.1, #268: `work { today }` is filtered by `OrgScope`); the
+  phone shows org labels and an org filter (done, M8.6, fleet-mobile #35,
+  on `org_id` from #275); the manual acceptance on two orgs waits on the
+  user (M10.3).
 
 ### M6: more providers
 
@@ -451,8 +463,11 @@ still to do.
   M5's isolation rules (acceptance 6).
 - **M6.6** (ea01b01): Connect any tracker by pasting a URL, provider
   badges, the Asana section map editor; docs.
-- **Not done:** `acli`, GitHub Enterprise Server, per-provider metrics, the
-  phone (M8), the manual acceptance.
+- **Follow-ups:** reached `main` with #266. `acli`: decided against (D17);
+  GitHub Enterprise Server and per-tracker sync metrics: done (M11.4, #292);
+  the phone: done (M8, fleet-mobile #32 — it shows every provider's keys and
+  status through the hub); the manual acceptance on real accounts waits on
+  the user (M10.3).
 
 ### M7: self-cleaning lifecycle
 
@@ -500,9 +515,12 @@ fleet is still to do.
 - **After M5 merged:** migration 051 (M5 took 050; 052 once M6 took 051), the per-org override
   `orgs.auto_tidy` (migration 052; 053 after M6), and org-scoped candidates / apply / reopened for a
   per-host token.
-- **Not done:** `idle_unlinked`
-  (an unlinked session has no link to archive under); the phone (M8); the
-  manual acceptance.
+- **Follow-ups:** reached `main` with #267. `idle_unlinked`: done (M11.3,
+  #291; auto-tidy never acts on it, D19). The phone reads `archived_at` and
+  can hide archived sessions (M8.6, fleet-mobile #35); Tidy-up and
+  *Reopened* stay desktop-only: no plan or decision puts them on the phone
+  (the phone is a pager, M8 plan). The manual acceptance waits on the user
+  (M10.3).
 
 ### M8: phone
 
@@ -540,6 +558,16 @@ the plan's Revisions item 4 (an absent `work` on a row means none), which
 work, *Ask for a handover* followed on the timeline, org labels and an org
 filter, and the `agent_inferred` wording — on fleet-mobile's
 `claude/cloud-fleet-work-graph-m8-6`, per the M8 plan's §M8.6.
+
+**Status (2026-09-26, M13.0): M8 done.** The hub side reached `main` with
+#265 (M8.0) and #275 (`org_id`). M8.6 reached fleet-mobile `main` with
+martin-janci/fleet-mobile#35 (merge `6ed86ed`, first in fleet-mobile
+v0.2.41): *Ask for a handover* (M8.6.3) is in `WorkSheet.kt`, gated in
+`SessionWorkViewModel.kt` (`canHandover`: a primary key, the session can be
+asked, the hub lists the action) and sent through `WorkActions.handover`.
+M10.5 (Today, *Share standup*, the ticket card) followed with
+fleet-mobile #36. Multi-start (D15) and naming local work (D20) stay
+desktop-only.
 
 ### M9: beyond
 
@@ -595,6 +623,8 @@ acceptance is still to do.
   in the New-session dialog.
 - **Not built, by decision:** write-back (D3 none), dead-session summaries
   (D10 off), webhook nudges (D13 no).
+- **On `main`:** M9.1 / M9.2 and M9.3 / M9.6 / M9.7 with #268, the M7
+  follow-ups with #271, the handover fix (idle REPL only) with #274.
 - **Follow-ups on M7** (after #268): Today's **Stale** section opens M7's
   Tidy-up sheet with its stale candidates picked; the agent panel's
   **Tidy up done tickets** command fills the operator's composer, and the
@@ -624,18 +654,69 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
   script and a placeholder table for the user (D5 open). M4.6 was built
   on its own branch and merged (#273, OFF), which settles D14. Frontend and docs only: no new tool, action, command,
   migration or contract bump.
-- M10.0 (the plan) is committed; M10.1–M10.3, M10.5 and M10.6 are not
-  started.
-- **M10.3: script written; waits on the user's run.**
+
+**Status (2026-09-26, M13.0): M10.1–M10.6 landed.**
+- **M10.1** review leftovers (multi-start, handover bound to its turn, the
+  per-caller isolation rows): #279.
+- **M10.2** the work graph end to end in `scripts/hub-e2e.sh` against a
+  loopback fake tracker: #285, plus `get_settings` / `set_setting` for its
+  settings scenarios (#287). Since #314 the leg runs in CI on every PR
+  (D16).
+- **M10.3** the written acceptance: #313 (below).
+- **M10.4** as above: #278.
+- **M10.5** Today, *Share standup* and the ticket card on the phone:
+  martin-janci/fleet-mobile#36.
+- **M10.6** replay-ring pressure measured
+  (`reviews/2026-09-25-replay-ring-pressure.md`), `session:updated` for a
+  tracker item only when the row shows the change: #280. The first-sync
+  flood is accepted (D18).
+- **M10.3: script written (#313); the run waits on the user.**
   `docs/work-graph-acceptance.md` (2026-09-26) is the one manual
   acceptance run, 59 steps, with the evidence M12.6 asked for and the D5
   measurement. The filled-in copy is committed as the record and updates
   the decisions table.
 
+### M11: the long tail
+
+Plan: `plans/2026-09-25-work-graph-m11-long-tail.md`.
+
+- **M11.1** "Name this work…": local work items named and renamed from a
+  row's `#` menu or a group header.
+- **M11.2** resume probes that the transcript is still on the host.
+- **M11.3** tidy reason `idle_unlinked`, with a per-session *keep*.
+- **M11.4** GitHub Enterprise Server through `gh --hostname`, and
+  per-tracker sync metrics.
+- **M11.5** pay back the tool-description budget (M0.6).
+- **M11.6** every "Not done" line done or decided (D17–D20).
+
+**Value:** every "not done" of M0–M10 is either done or decided; local work
+has a name; resume says before it runs that a transcript is gone.
+
+**Status (2026-09-26, M13.0): landed.**
+- **M11.1** (#288): `work_link { action: name }` (new item, or rename by
+  `item_id`), `work { action: local_items }`; Routed
+  `list_local_work_items` / `name_session_work` / `rename_work_item`; no
+  migration.
+- **M11.2** (#290): `resume_plan` / `resume` (mode `last`) probe the
+  recorded transcript path, then `~/.claude/projects/*/<uuid>.jsonl`;
+  absent falls back to fresh with the brief, unknown adds
+  `ResumePlan.warnings`.
+- **M11.3** (#291): `idle_unlinked` in `service/gc/tidy.rs`, behind
+  `work.tidy_idle_unlinked_days` (7); *keep* is a `tidy_kept` timeline
+  event; never preselected; never auto-tidied (D19, enforced in the
+  planner, `auto_selection` and the executor); no migration.
+- **M11.4** (#292): `trackers.settings.hostname` for GHES (admin-fenced),
+  keys `host/owner/repo#n`; in-memory `SyncMetrics` in
+  `work_admin { status }`, Settings → Work and `fleet-hub tracker status`;
+  LocalOnly `tracker_sync_metrics`.
+- **M11.5** (#286): 71,590 B → 54,646 B (16,944 B paid back); no tool,
+  action or parameter renamed.
+- **M11.6**: never ran as its own pass; M13.0 did it. D17 decided against,
+  D18 accept, D19 never, D20 waits on the user (after M10.3).
+
 ### M12: ship and operate
 
-Plan: `plans/2026-09-25-work-graph-m12-ship-and-operate.md`. (M11, the long
-tail, has its own plan: `plans/2026-09-25-work-graph-m11-long-tail.md`.)
+Plan: `plans/2026-09-25-work-graph-m12-ship-and-operate.md`.
 
 - **M12.1** upgrade path proven on a generated pre-work-graph database.
 - **M12.2** scale budgets and the indexes they needed (migration 058).
@@ -665,6 +746,32 @@ explained.
   so no usage is claimed) and recommends. D16 is corrected below. The
   decisions table is otherwise unchanged: the user updates it, and each
   "yes" becomes its own milestone (M13+).
+- **On `main` (verified 2026-09-26, M13.0):** M12.1 #297, M12.2 #298
+  (migration 058), M12.3 #299 and the index-backed `tidy_kept` lookup #300,
+  M12.4 #303, M12.5 #304, M12.6 #307 (D15 restated #309; the `acli` promise
+  removed from `net/https.rs` #310). **M12 is done.**
+
+### M13: live use
+
+Plan: `plans/2026-09-26-work-graph-m13-live-use.md`.
+
+- **M13.0** this roadmap and CLAUDE.md say what is true on `main` (docs).
+- **M13.1** a tracker that skips items reads `degraded`, then `failing`
+  ("Sync skipping items"), from #318's per-item failures (D25).
+- **M13.2** `work_admin { usage }`: master-only counts over existing rows,
+  nothing leaves the machine (D24).
+- **M13.3** triage of the owner's M10.3 run (waits on the run).
+- **M13.4** the decision-gated builds, each only on a "yes": D20, D5, D10,
+  D15, D3.
+- **M13.5** close-out: the work graph is *operating* (D26).
+
+**Value:** the roadmap matches `main`, partial sync failures are visible,
+and every open decision gets an answer backed by usage.
+
+**Status (2026-09-26):**
+- **M13.0 done** (this revision).
+- M13.1 and M13.2 are not started. M13.3 waits on the owner's run; M13.4
+  waits on the decisions.
 
 ## Critical path and parallelism
 
@@ -674,7 +781,16 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
     │                     ├─> M6
     │                     └─> M8 (after M3's start/resume)
     └─ M0 PRs are independent of each other
+
+M4, M5, M6, M7, M8 ─> M9 ─> M10 ─┬─> M11 ─┐
+                                 └─> M12 ─┴─> M13 (live use)
+                                        M10.3 (the owner's run) ─> M13.3 ─> M13.4
 ```
+
+- M0–M12 are on `main`. M11 and M12 ran in parallel; M12.4 reads M11.4's
+  sync metrics.
+- In M13, M13.0–M13.2 do not wait on anything; M13.3 waits on the owner's
+  M10.3 run, and each M13.4 item on its decision's "yes".
 
 - M3 can start its transport spike and fixtures in parallel with M2.
 - M5's security boundary must land **before** a second org's tracker is
@@ -682,22 +798,38 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 
 ## Decisions still open (the user's)
 
-| # | Question | Options | Default if no answer |
+The last column is the current answer (verified against `main` on
+2026-09-26, M13.0). *Waits on the user* means the default holds until the
+user writes an answer here; each "yes" becomes an M13.4 item.
+
+| # | Question | Options | Default if no answer / current answer |
 |---|---|---|---|
-| D1 | Provider order after Jira | GitHub → Asana → Linear, or Asana first (Company B is real work) | GitHub first (no credentials, a quick check of the abstraction), then Asana immediately |
-| D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org |
-| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-25: none.** M9.5 stays planned, not built |
-| D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub |
-| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95 |
-| D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only |
-| D9 | May fleet spend a turn of a session's model to write its handover (M9.3)? | on demand · also at safe kill · never | **Decided 2026-09-25: on demand only** (a button; never at safe kill) |
-| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-25: off.** M9.4 stays planned, not built |
-| D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before** |
-| D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always** |
-| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
-| D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
-| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens; Today and the card are read-only, M10.5) | desktop only · also on the phone | Desktop only; decide after M10.3 |
-| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done: hub-e2e already runs in CI** (`hub-headless` job, `.github/workflows/ci.yml`, every PR and `main` push). The M10.2 work-graph leg needs an `e2e`-feature hub and is skipped there; `ci-local.sh --hub-e2e` runs it |
+| D1 | Provider order after Jira | GitHub → Asana → Linear, or Asana first (Company B is real work) | GitHub first (no credentials, a quick check of the abstraction), then Asana immediately. **Done** in that order (M6, #266) |
+| D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org. **Built** (M7, #267): `work.auto_tidy` off, `orgs.auto_tidy` per org, safe kill only |
+| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-25: none.** M9.5 stays planned, not built. M12.6 recommends keeping it; the smallest "yes" is the PR remote link (M13.4e). Revisit after M10.3 |
+| D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub. **Done** (M5.3, #264) |
+| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95. **Waits on the user** (M10.3 step; M13.4b) |
+| D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only. **Built anyway** (M6.5, #266): the M6 brief asked for it |
+| D7 | Isolate sessions (list, message, dispatch) across orgs? (M5 plan) | off per org · on per org | Off per org; the user turns it on per org. **Built** (M5.3, #264): `orgs.isolate_sessions`, off |
+| D8 | — | — | **Unused**: no decision was ever numbered D8 in the work graph |
+| D9 | May fleet spend a turn of a session's model to write its handover (M9.3)? | on demand · also at safe kill · never | **Decided 2026-09-25: on demand only** (a button; never at safe kill). Built (M9.3, #268) |
+| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-25: off.** M9.4 stays planned, not built. **Waits on the user** after M10.3 (M12.6; M13.4c) |
+| D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before.** Built (M9.6, #268) |
+| D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always.** Built (M9.7, #268) |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built; M12.6 keeps it, M13 does not reopen it |
+| D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25)**: `work.classify_nudge`. Opened as #273 (closed unmerged); the commit reached `main` with #270 |
+| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | Desktop only. **Waits on the user** after M10.3 (M13.4d) |
+| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done.** hub-e2e runs in CI's `hub-headless` job (`.github/workflows/ci.yml`, every PR and `main` push). Since #314 the job also builds an `e2e`-feature hub into `target/e2e` and passes it as `WBIN`, so the M10.2 work-graph leg runs on every PR; with `CI=true` a missing `WBIN` fails instead of skipping (`scripts/hub-e2e.sh`) |
+| D17 | Support `acli` (Atlassian CLI) as a Jira transport? (M11 plan) | yes · decided against | **Decided against:** REST and `via_host` (`gh`, `curl`) cover it. M12.6 keeps it; M13 does not reopen it |
+| D18 | First sync of a new tracker: suppress per-item frames? (M11 plan) | accept the flood · suppress (design change) | **Accept** (the M10.6 report, `reviews/2026-09-25-replay-ring-pressure.md`); nothing suppresses them on `main` |
+| D19 | May auto-tidy ever act on `idle_unlinked`? (M11 plan) | never · per org | **Never.** Enforced (M11.3, #291) in `TidyReason::auto_allowed`, `auto_selection` and the executor |
+| D20 | Local work items on the phone (name / rename)? (M11 plan) | no (read-only phone) · yes | No. **Waits on the user** after M10.3 (M12.6; M13.4a) |
+| D21 | Retention defaults: journal / done items / work timeline events (M12 plan) | 365 / 180 / 180 days · keep forever | **Built** (M12.3, #299): `work.retention.journal_days` 365, `…tracker_items_days` 180, `…timeline_work_events_days` 180; `0` = forever |
+| D22 | Should a failing tracker raise an Attention item, not only a health row? (M12 plan) | yes · health only | **Yes, built** (M12.4, #303): one "Reconnect …" item per tracker, deduplicated |
+| D23 | Per-org retention override (needs a migration)? (M12 plan) | now · later | **Later:** settings only (M12.3, #299); no migration |
+| D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2 |
+| D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1 |
+| D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | Yes (default); M13.5 |
 
 ## Risks to watch
 
@@ -825,3 +957,16 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   phone, the M11 / M12 manual items, the evidence for D3, D10, D13,
   D15 / D20, D17 and tracker health, and the D5 measurement. It waits on the
   user's run; no result is claimed.
+- 2026-09-26: **M13.0, the truth pass** (docs only; facts from `main`
+  a599ffa and its merge history, and fleet-mobile `main` d3af329). M11 and
+  M13 sections added; M11 is landed (#286, #288, #290, #291, #292) and M11.6
+  is done by this pass. Every "Not done" line of M1, M2, M5, M6 and M7 (and
+  the leftovers of M0, M3, M4) now reads done (with its PR), decided
+  against or waits on the user. M0.6 done (M11.5). M8 marked done: M8.6 is
+  on fleet-mobile `main` (#35, v0.2.41), which answers the M12.6 question
+  about M8.6.3. M10's status corrected: M10.1–M10.6 landed (#279, #285 /
+  #287, #313, #278, fleet-mobile #36, #280). M12's PRs recorded. The
+  decisions table gained D7, D8 (unused), D17–D26 and a current answer on
+  every row; D16 corrected (the work-graph leg runs in CI since #314); D14
+  corrected (#273 was closed; M4.6 reached `main` with #270). The critical
+  path covers M9–M13.

@@ -205,3 +205,10 @@ M13.5   last
 ## Revisions
 
 - 2026-09-26: first version.
+- 2026-09-26: **M13.0 done** (docs only). The roadmap has M11 and M13
+  sections, no stale "Not done" line, M10's and M12's PRs, and a decisions
+  table through D26 (D8 unused, D16 and D14 corrected); the M12.6 review
+  records that M8.6.3 is on fleet-mobile `main` (#35, v0.2.41); CLAUDE.md
+  covers M10–M13. Found on the way: M4.6's #273 was closed unmerged, the
+  commit reached `main` with #270; `main` had moved to a599ffa (v0.3.1),
+  which changes none of the facts above.
