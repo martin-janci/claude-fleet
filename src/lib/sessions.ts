@@ -232,6 +232,8 @@ export function lostReasonLabel(reason: string | null | undefined): string | nul
       return 'host rebooted';
     case 'tmux_server_gone':
       return 'tmux server stopped';
+    case 'local_disabled':
+      return 'local host is off on this hub';
     default:
       return null;
   }

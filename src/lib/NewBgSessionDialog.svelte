@@ -1,6 +1,7 @@
 <script lang="ts">
   import { newBgSession } from './sessions';
-  import { hosts } from './hosts';
+  import { untrack } from 'svelte';
+  import { defaultHost, hosts, isPickableHost } from './hosts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import Modal from './Modal.svelte';
@@ -25,6 +26,13 @@
     bgModalLoading: boolean;
     onClose: () => void;
   } = $props();
+
+  // Offer only pickable hosts (the NewSessionDialog rule); a draft host that
+  // is not one — `local` on a hub without it — starts on the default instead.
+  const pickableHosts = $derived($hosts.filter((h) => isPickableHost($hosts, h.alias)));
+  untrack(() => {
+    if (!isPickableHost($hosts, bgModalHost)) bgModalHost = defaultHost($hosts);
+  });
 
   async function doNewBgSession() {
     bgModalError = null;
@@ -51,7 +59,7 @@
     <label class="modal-field">
       <span>Host</span>
       <select bind:value={bgModalHost}>
-        {#each $hosts as host (host.alias)}
+        {#each pickableHosts as host (host.alias)}
           <option value={host.alias}>{host.alias}</option>
         {/each}
       </select>

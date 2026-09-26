@@ -1570,7 +1570,14 @@ rotated one, and see *Trackers* above.
 The desktop's `state.db` carries a `local` host row for the machine it ran
 on. Since the hub defaults `hub.local_host` to `false`, that copied `local`
 row is hidden and marked unreachable automatically on first start — not
-deleted, just no longer listed, counted, probed or polled for usage.
+deleted, just no longer listed, counted, probed or polled for usage. The
+sessions that were live on it are ghosted with `lost_reason =
+local_disabled` on every start (nothing probes `local` on such a hub, so
+they would otherwise stay live and refuse every action); they stay
+dismissable and are pruned like any other ghost. `refresh_projects` has no
+local projects directory to scan there and returns the stored list, and the
+new-session, add-project and background-session dialogs start on the first
+pickable host instead of `local`.
 
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a
