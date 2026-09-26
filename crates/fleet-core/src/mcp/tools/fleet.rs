@@ -9,8 +9,9 @@ impl FleetTools {
         readiness, the cached fleet roll-up, per-host reverse-tunnel health \
         (tunnels_flapping: supervised but crash-looping, so the Control API \
         is unreachable from that host), and ESTIMATED token usage and cost \
-        (micro-USD) per host and UTC day for 7 days. A per-host token's \
-        usage covers its own host only.")]
+        (micro-USD) per host and UTC day for 7 days; tracker sync health \
+        and the detection backlog. A per-host token's usage and backlog \
+        cover its own host only.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -23,6 +24,8 @@ impl FleetTools {
                 health::scope_usage_to_host(&mut h, &s, host);
             }
         }
+        let scope = self.org_scope(&caller)?;
+        health::scope_trackers(&mut h, &self.store, &scope);
         ok_json_compact(&h)
     }
 

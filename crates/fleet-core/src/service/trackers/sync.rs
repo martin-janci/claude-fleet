@@ -109,6 +109,11 @@ pub struct SyncMetrics {
     /// [`METRIC_ERROR_MAX_CHARS`] characters. `None` for a pass that ended ok.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Passes in a row that ended with an error, up to and including this
+    /// one; 0 after a pass that ended ok (work graph M12.4, read by
+    /// `fleet_health`'s tracker roll-up).
+    #[serde(default)]
+    pub consecutive_failures: u32,
 }
 
 /// Longest `SyncMetrics.last_error`.
@@ -146,7 +151,7 @@ fn read_metrics(table: &MetricsTable, tracker_ids: &[i64]) -> Vec<SyncMetrics> {
 
 /// A pass's error as a metric: redacted, `[claude-fleet` defused, control
 /// characters flattened, capped.
-fn metric_error(e: &str) -> String {
+pub(crate) fn metric_error(e: &str) -> String {
     let red = crate::logging::redact(e);
     crate::mcp::guard::defuse(&red)
         .chars()
@@ -350,7 +355,8 @@ impl TrackerSync {
                 outcome.get_or_insert_with(|| e.explain());
             }
         }
-        let m = SyncMetrics {
+        let failed = outcome.is_some();
+        let mut m = SyncMetrics {
             tracker_id: t.id,
             last_pass_at: Some(now),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -358,8 +364,15 @@ impl TrackerSync {
             items_changed: (pass.changed + pass.unavailable) as u64,
             frames_emitted: self.frames.load(Ordering::Relaxed),
             last_error: outcome.as_deref().map(metric_error),
+            consecutive_failures: 0,
         };
         if let Ok(mut table) = self.metrics.lock() {
+            if failed {
+                m.consecutive_failures = table
+                    .get(&t.id)
+                    .map_or(0, |prev| prev.consecutive_failures)
+                    .saturating_add(1);
+            }
             table.insert(t.id, m);
         }
         pass

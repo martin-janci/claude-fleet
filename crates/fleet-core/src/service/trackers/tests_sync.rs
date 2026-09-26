@@ -897,6 +897,28 @@ async fn a_failed_pass_records_a_redacted_one_line_error_and_a_frame_outside_the
     );
 }
 
+#[tokio::test]
+async fn consecutive_failures_count_up_while_offline_and_reset_on_an_ok_pass() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    fx.fake.clear_routes(); // offline: unreachable, which is retried
+    for n in 1..=3 {
+        sync.run_pass(&fx.store).await.unwrap();
+        let m = sync.metrics(&[fx.tracker]).remove(0);
+        assert_eq!(m.consecutive_failures, n, "{m:?}");
+        assert!(m.last_error.is_some());
+    }
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!(
+        (m.consecutive_failures, m.last_error.as_deref()),
+        (0, None),
+        "{m:?}"
+    );
+}
+
 #[test]
 fn a_metric_error_is_redacted_defused_flattened_and_capped() {
     let e = metric_error(

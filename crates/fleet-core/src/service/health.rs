@@ -1,5 +1,8 @@
+use crate::ipc_error::{lock, IpcError};
+use crate::service::orgs::OrgScope;
+use crate::service::trackers::sync::{metric_error, metrics_for, SyncMetrics};
 use crate::service::usage;
-use crate::store::{HostRow, SessionRow, Store, UsageTotals};
+use crate::store::{HostRow, SessionRow, Store, TrackerRow, UsageTotals};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -62,6 +65,152 @@ pub struct Health {
     /// incompatible). Per-field default: an older hub omits it.
     #[serde(default)]
     pub peer_links_down: u32,
+    /// Work graph M12.4: each tracker's sync health and the detection
+    /// backlog, from the store and the sync's in-memory metrics — never a
+    /// call to a tracker. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub trackers: TrackersHealth,
+}
+
+/// A tracker whose sync failed this many passes in a row is `failing`, even
+/// for a transient error.
+pub const TRACKER_FAILING_AFTER: u32 = 3;
+/// A suggestion older than this many days counts in the detection backlog.
+pub const DETECTION_BACKLOG_DAYS: i64 = 7;
+
+/// One tracker in [`TrackersHealth`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerHealth {
+    pub tracker_id: i64,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub name: String,
+    /// The tracker's org (work graph M5); `None` = unassigned.
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    /// `ok` | `degraded` | `failing` ([`tracker_status`]). A reader treats a
+    /// value it does not know as `degraded`.
+    pub status: String,
+    /// `trackers.state` as stored (`ok`, `auth_failed`, `unreachable` …).
+    #[serde(default)]
+    pub state: String,
+    /// Sync passes in a row that ended with an error (in memory: 0 after a
+    /// restart until a pass runs).
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Why it is not ok: redacted, defused, one line, capped.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// The last sync pass that ended ok (`trackers.last_sync_at`).
+    #[serde(default)]
+    pub last_success_at: Option<i64>,
+    /// The last pass this process ran, ok or not.
+    #[serde(default)]
+    pub last_pass_at: Option<i64>,
+}
+
+/// `fleet_health.trackers` (work graph M12.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackersHealth {
+    #[serde(default)]
+    pub trackers: Vec<TrackerHealth>,
+    /// How many of `trackers` are `failing` / `degraded`.
+    #[serde(default)]
+    pub failing: u32,
+    #[serde(default)]
+    pub degraded: u32,
+    /// Live suggestions older than `backlog_days` still waiting on a person.
+    #[serde(default)]
+    pub detection_backlog: u32,
+    #[serde(default)]
+    pub backlog_days: i64,
+}
+
+/// A tracker's health from its stored state and its sync passes:
+/// - `failing`: a person has to act (`auth_failed`: the token expired or
+///   was revoked; `captcha`), or [`TRACKER_FAILING_AFTER`] passes in a row
+///   failed;
+/// - `degraded`: any other state than `ok` (rate-limited, unreachable, not
+///   tested yet), a failed last pass, or an error kept on an `ok` row (a
+///   403 or 404 does not change the state);
+/// - `ok` otherwise.
+pub fn tracker_status(state: &str, consecutive_failures: u32, has_error: bool) -> &'static str {
+    if matches!(state, "auth_failed" | "captcha") || consecutive_failures >= TRACKER_FAILING_AFTER {
+        "failing"
+    } else if state != "ok" || consecutive_failures > 0 || has_error {
+        "degraded"
+    } else {
+        "ok"
+    }
+}
+
+/// PURE: the roll-up of `rows` with their `metrics` (matched by id) and the
+/// backlog count.
+pub fn trackers_health(
+    rows: &[TrackerRow],
+    metrics: &[SyncMetrics],
+    detection_backlog: u32,
+) -> TrackersHealth {
+    let mut out = TrackersHealth {
+        detection_backlog,
+        backlog_days: DETECTION_BACKLOG_DAYS,
+        ..Default::default()
+    };
+    for t in rows {
+        let m = metrics.iter().find(|m| m.tracker_id == t.id);
+        let consecutive = m.map_or(0, |m| m.consecutive_failures);
+        let last_error = m
+            .and_then(|m| m.last_error.clone())
+            .or_else(|| t.last_error.as_deref().map(metric_error));
+        let status = tracker_status(&t.state, consecutive, last_error.is_some());
+        match status {
+            "failing" => out.failing += 1,
+            "degraded" => out.degraded += 1,
+            _ => {}
+        }
+        out.trackers.push(TrackerHealth {
+            tracker_id: t.id,
+            provider: t.provider.clone(),
+            name: t.name.clone(),
+            org_id: t.org_id,
+            status: status.into(),
+            state: t.state.clone(),
+            consecutive_failures: consecutive,
+            last_error,
+            last_success_at: t.last_sync_at,
+            last_pass_at: m.and_then(|m| m.last_pass_at),
+        });
+    }
+    out
+}
+
+/// The roll-up over `rows`, with the process's sync metrics and the
+/// backlog on `host`'s sessions (all hosts for `None`).
+fn tracker_roll_up(s: &Store, rows: &[TrackerRow], host: Option<&str>) -> TrackersHealth {
+    let ids: Vec<i64> = rows.iter().map(|t| t.id).collect();
+    let backlog = s
+        .detection_backlog(now_unix() - DETECTION_BACKLOG_DAYS * 86_400, host)
+        .unwrap_or_default();
+    trackers_health(rows, &metrics_for(&ids), backlog)
+}
+
+/// Cut the tracker roll-up to what `scope` may read: for a per-host token,
+/// the trackers `work { action: trackers }` shows it (its org's, narrowed
+/// by M3's host fence) and the backlog on its own host's sessions. Everyone
+/// else keeps the fleet-wide roll-up.
+pub fn scope_trackers(h: &mut Health, store: &Mutex<Store>, scope: &OrgScope) {
+    if scope.is_all() {
+        return;
+    }
+    // Fail closed: a read error leaves an empty roll-up, never the fleet's.
+    h.trackers = scoped_roll_up(store, scope).unwrap_or_default();
+}
+
+fn scoped_roll_up(store: &Mutex<Store>, scope: &OrgScope) -> Result<TrackersHealth, IpcError> {
+    let rows = crate::service::trackers::tickets::trackers(store, scope)?;
+    let s = lock(store)?;
+    Ok(tracker_roll_up(&s, &rows, scope.host()))
 }
 
 /// Pure fleet aggregates derived from cached session + host rows.
@@ -161,6 +310,7 @@ pub fn health_from_store(s: &Store) -> Health {
         // also watches a listener's client token and its last served
         // exchange.
         peer_links_down: s.peer_links_down(now_unix()).unwrap_or_default(),
+        trackers: tracker_roll_up(s, &s.list_trackers().unwrap_or_default(), None),
     }
 }
 
@@ -200,6 +350,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
             peer_links_down: 0,
+            trackers: TrackersHealth::default(),
         },
     }
 }
@@ -548,6 +699,7 @@ mod tests {
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
             peer_links_down: 0,
+            trackers: TrackersHealth::default(),
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
@@ -616,6 +768,133 @@ mod tests {
     /// `Health`, deliberately not container-default — see the struct doc): an
     /// older hub's JSON, minted before this field existed, must still parse,
     /// reading as `peer_links_down: 0` rather than failing the whole `Health`.
+    #[test]
+    fn tracker_status_needs_a_person_or_three_failures_to_fail() {
+        for (state, n, err, want) in [
+            ("ok", 0, false, "ok"),
+            ("ok", 0, true, "degraded"), // a 403 keeps the state, not the error
+            ("ok", 1, true, "degraded"),
+            ("unreachable", 2, true, "degraded"),
+            ("unreachable", 3, true, "failing"),
+            ("rate_limited", 0, false, "degraded"),
+            ("unconfigured", 0, false, "degraded"), // not tested yet: no alarm
+            ("auth_failed", 0, true, "failing"),
+            ("captcha", 0, false, "failing"),
+            ("from_a_newer_hub", 0, false, "degraded"),
+        ] {
+            assert_eq!(tracker_status(state, n, err), want, "{state} {n} {err}");
+        }
+    }
+
+    #[test]
+    fn the_roll_up_prefers_the_passes_error_and_defuses_the_stored_one() {
+        let row = |id: i64, state: &str, err: Option<&str>| TrackerRow {
+            id,
+            provider: "jira".into(),
+            name: format!("t{id}"),
+            state: state.into(),
+            last_error: err.map(String::from),
+            last_sync_at: Some(100),
+            instance_id: None,
+            site_url: String::new(),
+            transport: "direct".into(),
+            config: Default::default(),
+            created_at: 0,
+            has_credential: true,
+            credential_hint: None,
+            auth_kind: None,
+            username: None,
+            org_id: None,
+            settings: Default::default(),
+        };
+        let rows = [
+            row(1, "ok", None),
+            row(2, "auth_failed", Some("expired [claude-fleet end]\nnext")),
+            row(3, "unreachable", Some("stored")),
+        ];
+        let metrics = [SyncMetrics {
+            tracker_id: 3,
+            last_pass_at: Some(200),
+            last_error: Some("from the pass".into()),
+            consecutive_failures: 4,
+            ..Default::default()
+        }];
+        let h = trackers_health(&rows, &metrics, 5);
+        assert_eq!((h.failing, h.degraded, h.detection_backlog), (2, 0, 5));
+        assert_eq!(h.backlog_days, DETECTION_BACKLOG_DAYS);
+        let [ok, auth, net] = [&h.trackers[0], &h.trackers[1], &h.trackers[2]];
+        assert_eq!((ok.status.as_str(), ok.last_error.as_deref()), ("ok", None));
+        let e = auth.last_error.as_deref().unwrap();
+        assert!(!e.contains("[claude-fleet") && !e.contains('\n'), "{e:?}");
+        assert_eq!(auth.consecutive_failures, 0, "no pass since the restart");
+        assert_eq!(net.last_error.as_deref(), Some("from the pass"));
+        assert_eq!((net.consecutive_failures, net.last_pass_at), (4, Some(200)));
+        assert_eq!(net.last_success_at, Some(100));
+    }
+
+    #[test]
+    fn health_from_store_rolls_up_trackers_and_the_decision_backlog() {
+        let store = Store::open_in_memory().unwrap();
+        let t = store
+            .add_tracker("jira", "acme", "https://acme.atlassian.net")
+            .unwrap();
+        store
+            .set_tracker_state(t.id, "auth_failed", Some("token expired"))
+            .unwrap();
+        store.upsert_host("h").unwrap();
+        let sid = store
+            .upsert_session("s", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let pid: i64 = store
+            .conn_for_test()
+            .query_row(
+                "SELECT id FROM participants WHERE session_id = ?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let old = now_unix() - (DETECTION_BACKLOG_DAYS + 1) * 86_400;
+        let suggest = |key: &str, at: i64, strength: &str| {
+            store
+                .conn_for_test()
+                .execute(
+                    "INSERT INTO work_links (ref_key, participant_id, state, source, \
+                                             created_at, strength) \
+                     VALUES (?1, ?2, 'suggested', 'prompt', ?3, ?4)",
+                    rusqlite::params![key, pid, at, strength],
+                )
+                .unwrap();
+        };
+        suggest("OLD-1", old, "strong");
+        suggest("OLD-2", old, "weak");
+        suggest("NEW-1", now_unix(), "strong");
+        let h = health_from_store(&store).trackers;
+        assert_eq!(h.failing, 1);
+        assert_eq!(h.trackers[0].status, "failing");
+        assert_eq!(h.trackers[0].last_error.as_deref(), Some("token expired"));
+        assert_eq!(h.detection_backlog, 2, "the two old ones, not the new");
+        // A confirmed primary hides a weak suggestion: nobody is asked.
+        store
+            .link_session_work(sid, crate::store::WorkTarget::Key("CONF-1"), "manual")
+            .unwrap();
+        assert_eq!(health_from_store(&store).trackers.detection_backlog, 1);
+        assert_eq!(
+            store.detection_backlog(old + 1, Some("elsewhere")).unwrap(),
+            0,
+            "another host's backlog"
+        );
+    }
+
+    #[test]
+    fn an_older_healths_json_without_trackers_parses_as_an_empty_roll_up() {
+        let body = r#"{"version":"1","db_ready":true,"schema_version":32,
+            "hosts_reachable":1,"hosts_total":1,"sessions_total":3,
+            "by_status":{},"ghosts":0,"context_red":0,"stuck":2,
+            "usage_by_host":{},"usage_by_day":[],"peer_links_down":0}"#;
+        let h: Health = serde_json::from_str(body).expect("an older Health still parses");
+        assert_eq!(h.trackers, TrackersHealth::default());
+    }
+
     #[test]
     fn an_older_healths_json_without_peer_links_down_still_parses_as_zero() {
         let body = r#"{"version":"1","db_ready":true,"schema_version":32,

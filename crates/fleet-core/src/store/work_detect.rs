@@ -541,6 +541,26 @@ impl Store {
         )?)
     }
 
+    /// Live suggestions made before `before` that still wait on a person
+    /// (work graph M12.4's detection backlog): the ones a session row shows,
+    /// so a weak suggestion behind a confirmed primary does not count. Only
+    /// sessions on `host` when one is given.
+    pub fn detection_backlog(&self, before: i64, host: Option<&str>) -> Result<u32, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM work_links l \
+             JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             JOIN sessions s ON s.id = p.session_id \
+             WHERE l.ended_at IS NULL AND l.state = 'suggested' AND l.created_at < ?1 \
+               AND (?2 IS NULL OR s.host_alias = ?2) \
+               AND (l.strength IS NOT 'weak' OR NOT EXISTS \
+                    (SELECT 1 FROM work_links c \
+                      WHERE c.participant_id = p.id AND c.ended_at IS NULL \
+                        AND c.is_primary = 1 AND c.state = 'confirmed'))",
+            rusqlite::params![before, host],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Project ids whose sessions have at least `n` branch links a person
     /// confirmed from a suggestion (the auto-trust count): live or ended.
     pub fn confirmed_branch_suggestions(&self, project_id: i64) -> Result<i64, IpcError> {

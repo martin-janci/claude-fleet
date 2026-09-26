@@ -322,6 +322,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
             fx.t.whoami(ext, Parameters(serde_json::from_value(args).unwrap()))
                 .await
         }
+        "fleet_health" => fx.t.fleet_health(ext).await,
         other => panic!("no harness arm for {other}"),
     };
     match r {
@@ -2224,6 +2225,84 @@ async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
         .await
         .unwrap_err();
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+}
+
+/// Work graph M12.4: `fleet_health.trackers` is org-scoped. B's tracker
+/// fails with an error naming B; a host of A never reads it, nor B's
+/// detection backlog; the master and paired clients read the whole fleet.
+#[tokio::test]
+async fn fleet_health_shows_a_host_only_its_orgs_trackers_and_its_own_backlog() {
+    let fx = fixture(false);
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.set_tracker_state(
+            fx.tracker_b,
+            "auth_failed",
+            Some("SECRET-B: the tracker refused the credential"),
+        )
+        .unwrap();
+        // A suggestion on B's session made two weeks ago, never decided.
+        let pid: i64 = s
+            .conn_for_test()
+            .query_row(
+                "SELECT id FROM participants WHERE session_id = ?1",
+                [fx.s_b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "INSERT INTO work_links (ref_key, participant_id, state, source, created_at, \
+                                         strength) \
+                 VALUES ('BB-9', ?1, 'suggested', 'prompt', ?2, 'strong')",
+                rusqlite::params![pid, crate::service::catalog::now_secs() - 14 * 86_400],
+            )
+            .unwrap();
+    }
+    let roll_up = |a: &Answer| -> Value {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        v["trackers"].clone()
+    };
+    let ids = |t: &Value| -> Vec<i64> {
+        t["trackers"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|x| x["tracker_id"].as_i64().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for who in EVERYONE.iter().copied() {
+        let a = call(&fx, who, "fleet_health", json!({})).await;
+        is_ok(who, &a, "fleet_health");
+        for m in who.forbidden_markers() {
+            assert!(!text(&a).contains(m), "{who:?} read {m}: {}", text(&a));
+        }
+        let t = roll_up(&a);
+        let backlog = t["detection_backlog"].as_u64().unwrap_or(0);
+        match who {
+            Who::HostA => {
+                assert_eq!(ids(&t), vec![fx.tracker_a], "{t}");
+                assert_eq!(backlog, 0, "B's backlog is not A's: {t}");
+            }
+            Who::HostB => {
+                assert_eq!(ids(&t), vec![fx.tracker_b], "{t}");
+                assert_eq!(t["failing"], 1, "{t}");
+                assert_eq!(backlog, 1, "{t}");
+            }
+            Who::HostNone => {
+                assert!(ids(&t).is_empty(), "{t}");
+                assert_eq!(backlog, 0, "{t}");
+            }
+            _ => {
+                assert_eq!(ids(&t), vec![fx.tracker_a, fx.tracker_b], "{who:?}: {t}");
+                assert_eq!(t["failing"], 1, "{t}");
+                assert_eq!(backlog, 1, "{t}");
+                assert!(text(&a).contains("SECRET-B"), "the fleet's reader sees why");
+            }
+        }
+    }
 }
 
 /// A paired client can never reach a Master tool, whatever its mode, and a
