@@ -565,6 +565,45 @@ stored setting) on a *running* hub, a phone can be sent to the new address by
 the QR and then handed the old one to talk to. Restart `fleet-hub serve`
 before pairing anything, and the two agree again.
 
+### Attaching a file
+
+A `full` client may stage one file in a session's worktree:
+
+```
+POST /attachment?session_id=<id>&name=<filename>
+Authorization: Bearer <client token>
+Content-Type: application/octet-stream
+
+<raw bytes>
+```
+
+It answers `{"path": "/abs/path/on/the/host/<name>"}`. Put that path in the
+prompt (`send_prompt`) and the agent can read it without a permission
+prompt — the file lands under the worktree root, in
+`.claude-fleet-attachments/`, which is excluded untracked so it never shows
+as a change.
+
+Not an MCP tool on purpose: the bytes travel raw rather than base64 through
+`tools/call`, and the tool surface is left alone.
+
+- **`full` only.** A `readonly` client gets `403` — this writes to a machine
+  in the fleet, unlike `/report`, which any client may post to.
+- **One file per request**, at most 10 MB (`MAX_BYTES`). The 25 MB batch
+  ceiling is the client's to keep across requests. A body exceeding 10 MB is
+  refused with `413 Payload Too Large` from the transport layer, before the
+  handler runs — the file is never read into the hub.
+- **The name is a suggestion.** It is reduced to a bare filename before use,
+  so it cannot address a directory; a name is refused with `400` when its
+  basename is empty, whitespace-only, or contains any control character
+  (including newlines, which the desktop composer already rejects for the
+  same reason: the path travels into the prompt text). Collisions within a
+  send get `-1`, `-2`, … before the extension.
+- **Session lookup.** An unknown `session_id` answers `404 Not Found` — a
+  client holding a stale session list hits this when a session is killed on
+  another machine.
+- **Error codes.** SSH-family failures (host unreachable, timeout, agent
+  offline) map to `502` so a client can retry; other failures map to `500`.
+
 ## Clients
 
 ```bash
