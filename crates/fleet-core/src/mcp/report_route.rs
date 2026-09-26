@@ -98,7 +98,9 @@ pub async fn handle_reports(
 mod tests {
     use super::*;
     use crate::mcp::guard::RateLimiter;
-    use crate::mcp::{auth, build_app, events_route::EventsState, hooks, pairing, AuthState};
+    use crate::mcp::{
+        attachment_route, auth, build_app, events_route::EventsState, hooks, pairing, AuthState,
+    };
     use crate::ssh::SshClient;
     use fleet_proto::report::{Report, ReportBatch, BODY_MAX, HTTP_BATCH_MAX};
     use std::net::{Ipv4Addr, SocketAddr};
@@ -140,6 +142,7 @@ mod tests {
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             ReportState::new(Arc::clone(&store)),
+            attachment_route::AttachmentState::new(Arc::clone(&store), Arc::new(SshClient::new())),
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

@@ -5,6 +5,7 @@
 //! server is off by default and enabled from Settings; every request must
 //! carry a bearer token. See `docs/specs/2026-05-21-control-api-mcp-design.md`.
 
+pub mod attachment_route;
 // `pub(crate)` for `agent::ws`'s tests, which mint a client token the way the
 // pairing flow does; the public surface stays the `pub use`s below.
 pub(crate) mod auth;
@@ -293,6 +294,7 @@ fn build_app(
     events_state: EventsState,
     agent_state: crate::agent::ws::AgentWsState,
     report_state: report_route::ReportState,
+    attachment_state: attachment_route::AttachmentState,
 ) -> axum::Router {
     // The MCP streamable-HTTP service is mounted with `route_service` at the
     // exact `/mcp` path — NOT `nest_service("/", …)` under `nest("/mcp", …)`.
@@ -352,6 +354,21 @@ fn build_app(
                 ))
                 .with_state(report_state),
         )
+        // `/attachment` is `/report`'s shape with a bigger body and a
+        // different destination: behind `authorize`, its own state, its own
+        // limit. The limit is the per-file ceiling itself, so a file too big
+        // is refused by the transport rather than after it is in memory.
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/attachment",
+                    axum::routing::post(attachment_route::handle_attachment),
+                )
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::service::attachments::MAX_BYTES as usize,
+                ))
+                .with_state(attachment_state),
+        )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
     // `/healthz` and `/pair` are registered on a SEPARATE router merged after
     // the layered one: in axum 0.8 `.layer` wraps only the routes added
@@ -394,6 +411,7 @@ pub(crate) fn test_app(
     master: &str,
     agent_state: crate::agent::ws::AgentWsState,
 ) -> axum::Router {
+    let ssh = Arc::new(SshClient::new());
     build_app(
         metrics::MetricsState {
             metrics: Arc::new(metrics::Metrics::new()),
@@ -403,7 +421,7 @@ pub(crate) fn test_app(
         None,
         hooks::HookState {
             store: Arc::clone(&store),
-            ssh: Arc::new(SshClient::new()),
+            ssh: Arc::clone(&ssh),
         },
         AuthState {
             master: Arc::new(master.to_string()),
@@ -419,6 +437,7 @@ pub(crate) fn test_app(
         EventsState::disabled(),
         agent_state,
         report_route::ReportState::new(Arc::clone(&store)),
+        attachment_route::AttachmentState::new(Arc::clone(&store), Arc::clone(&ssh)),
     )
 }
 
@@ -630,6 +649,12 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         // Likewise taken before `store` is moved into `FleetTools`: `/report`
         // and `/reports` keep their own handle to the store.
         let reports_store = Arc::clone(&store);
+        // Likewise: `/attachment` keeps its own handle to the store, and its
+        // own `Arc<SshClient>` (cloned before `ssh` moves into `FleetTools`
+        // below) — it stages files over the same transport a session's tools
+        // already use.
+        let attachment_store = Arc::clone(&store);
+        let attachment_ssh = Arc::clone(&ssh);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -682,6 +707,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             // answers 503 rather than upgrading a socket nothing would read.
             crate::agent::ws::AgentWsState::new(agent_registry.map(|r| (r, agents_store))),
             report_route::ReportState::new(reports_store),
+            attachment_route::AttachmentState::new(attachment_store, attachment_ssh),
         );
 
         let scheme = if tls.is_some() { "https" } else { "http" };
@@ -809,6 +835,7 @@ mod tests {
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             report_route::ReportState::new(Arc::clone(&store)),
+            attachment_route::AttachmentState::new(Arc::clone(&store), Arc::new(SshClient::new())),
         );
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -1188,6 +1215,7 @@ mod tests {
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             report_route::ReportState::new(Arc::clone(&store)),
+            attachment_route::AttachmentState::new(Arc::clone(&store), Arc::new(SshClient::new())),
         );
         let listener2 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1233,6 +1261,8 @@ mod tests {
         };
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
         let report_state3 = report_route::ReportState::new(Arc::clone(&store));
+        let attachment_state3 =
+            attachment_route::AttachmentState::new(Arc::clone(&store), Arc::new(SshClient::new()));
         let app3 = build_app(
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
@@ -1251,6 +1281,7 @@ mod tests {
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             report_state3,
+            attachment_state3,
         );
         let listener3 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1342,6 +1373,8 @@ mod tests {
             "https://fleet.example.com".to_string(),
         );
         let report_state = report_route::ReportState::new(Arc::clone(&store));
+        let attachment_state =
+            attachment_route::AttachmentState::new(Arc::clone(&store), Arc::new(SshClient::new()));
         let tools = FleetTools::new(
             store,
             Arc::new(SshClient::new()),
@@ -1377,6 +1410,7 @@ mod tests {
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             report_state,
+            attachment_state,
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1699,6 +1733,7 @@ mod tests {
             events_state.clone(),
             crate::agent::ws::AgentWsState::disabled(),
             report_route::ReportState::new(Arc::clone(&store)),
+            attachment_route::AttachmentState::new(Arc::clone(&store), Arc::new(SshClient::new())),
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

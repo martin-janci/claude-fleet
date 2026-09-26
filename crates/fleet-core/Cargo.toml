@@ -79,13 +79,18 @@ hex = "0.4"
 base64 = "0.22"
 toml = "0.8"
 
+# `POST /attachment` (mcp/attachment_route.rs) spills the uploaded body to a
+# named temp file before handing it to `service::attachments::transfer_all`,
+# which reads from disk. A real dependency, not dev-only: it was previously
+# listed under `[dev-dependencies]` for the test suite alone.
+tempfile = "3"
+
 # `run_local_script` (service/add_project.rs) signals a script's whole process
 # group (`kill(-pgid, ..)`).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
 # `test-util` only: `#[tokio::test(start_paused = true)]`, so the listener's
 # handshake timeout can be tested without the test waiting it out in real time.
 tokio = { version = "1", features = ["full", "test-util"] }
