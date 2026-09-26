@@ -69,7 +69,7 @@
     PROMPT_CLAMP_LINES,
     turnDuration,
     composerStatus,
-    transcriptCarries,
+    carriedCount,
     matchSlashCommands,
     completeSlashCommand,
     sessionActivity,
@@ -91,7 +91,6 @@
     ACTIVITY_POLL_MS,
     type Conversation,
     type ConversationSummary,
-    type PendingPrompt,
     type SlashCommand,
     type ActivityProbe,
     type BackgroundEntry,
@@ -99,8 +98,7 @@
   } from './conversation';
   import { highlightNames, highlightCss, paintHighlights, clearHighlights } from './conversation_highlight';
   import { invokeCmd } from './result';
-  import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, type Attachment, type PickedFile } from './attachments';
-  import { withAttachments, tooLong } from './attach_prompt';
+  import { addFiles, pastedName, fmtBytes, clearSent, type Attachment, type PickedFile } from './attachments';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect } from './geometry';
   import Markdown from './MarkdownView.svelte';
@@ -108,6 +106,7 @@
   import SpiralLoader from './SpiralLoader.svelte';
   import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
+  import { outbox, isHeld, receipt } from './outbox';
 
   let {
     session,
@@ -123,8 +122,8 @@
     showComposer = true,
     // Text prepended to every prompt this composer sends (AgentPanel's
     // context chip). A prefix is a reason to feed THIS composer, not to
-    // build a second one: `pending`, `optimistic` and the immediate refetch
-    // are all set in `send()` and nowhere else, so a host that sends around
+    // build a second one: the outbox bubble, `optimistic` and the immediate
+    // refetch all follow from `send()` and nothing else, so a host that sends around
     // it gets a sheet that shows nothing until the next quiet tick — 15 s
     // later — with no indicator in between. A slash command is exempt: the
     // REPL reads the line exactly as typed.
@@ -189,16 +188,21 @@
   // grows it; polls keep using it so loaded history does not vanish.
   let turnsWanted = $state<number | undefined>(undefined);
   let loadingOlder = $state(false);
-  // Composer state. `pending` is the prompt just sent, rendered as its own
-  // turn until a poll brings back a transcript that carries it.
+  // Composer state. What was sent lives in the outbox (`outbox.ts`): each
+  // message is a bubble with its own receipt until a read of the transcript
+  // carries it. It is module-level, so a send survives a session switch.
   let draft = $state('');
   // The session the current `draft` was loaded for. The remember effect keys
   // on this, not on the prop, so a session switch can never write the old
   // text into the new session's slot whatever order the effects run in.
   let draftFor = $state<number | null>(null);
+  // Only a bare key press (the press_enter chip) is sent directly; its
+  // failure is the one the line above the chips reports.
   let sending = $state(false);
   let sendError = $state<string | null>(null);
-  let pending = $state<PendingPrompt | null>(null);
+  const outboxStore = outbox.store;
+  const outgoing = $derived($outboxStore.msgs[session.id] ?? []);
+  const lastSent = $derived($outboxStore.lastSent[session.id] ?? null);
   let box: HTMLTextAreaElement | undefined = $state();
   // The chip row holds one line; whatever does not fit collapses behind
   // "More". Measured, not computed, since it depends on layout.
@@ -217,9 +221,9 @@
   let histIndex = $state<number | null>(null);
   // Live indicator. `probe` is the latest on-demand pane read, laid over the
   // row's (tick-fresh) status while it is newer than the row; it is dropped
-  // as soon as a row event carries a newer state. `sentTurnSeq` marks our
-  // own send: until the row's turn counter moves past it, or a probe reports
-  // the session idle, the session is treated as working.
+  // as soon as a row event carries a newer state. `lastSent` marks our own
+  // send: until the row's turn counter moves past it, or a probe reports the
+  // session idle, the session is treated as working.
   let probe = $state<ActivityProbe | null>(null);
   // A probe outranks the row only while fresh: once the loop stops (the
   // indicator went away) a stale reading must not shadow a row that keeps
@@ -240,8 +244,10 @@
     probeFresh = next !== null;
     if (next !== null) probeTimer = setTimeout(() => (probeFresh = false), PROBE_TTL_MS);
   }
-  let sentTurnSeq = $state<number | null>(null);
-  let idleSeenSinceSend = $state(false);
+  // The `lastSent` stamp a quiet probe has been seen after, and the one a
+  // reset put behind us: either ends that send's optimistic window.
+  let idleSeenStamp = $state<number | null>(null);
+  let optimisticDismissed = $state<number | null>(null);
   let lastFetchAt = 0;
   let lastFetchTurnSeq = $state<number | null>(null);
   let seq = 0;
@@ -301,6 +307,7 @@
     const mine = ++seq;
     loading = conv === null;
     const fetchedTurnSeq = session.turn_seq;
+    const fetchedQuiet = isQuietStatus(session.claude_status);
     const pinned = justReset || !scroller ? true : isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
@@ -324,11 +331,14 @@
       errorCode = null;
       errorMsg = null;
       convCid = cid;
+      // Messages this read carries are shown by the thread from now on. Run
+      // on every read, changed or not: the quiet/turn rule can drop one on a
+      // read whose content did not move.
+      if (viewing === null) outbox.settle(id, r.value, { quiet: fetchedQuiet, turnSeq: fetchedTurnSeq });
       if (!sameConversation(conv, r.value)) {
         // Older turns prepended by Load older are history, not news.
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
         conv = r.value;
-        if (viewing === null && pending && transcriptCarries(conv, pending)) pending = null;
         // Pushed events the read now carries are the backend's to keep (or
         // age out); holding copies would grow `pushed` without bound.
         const carried = new Set((conv.events ?? []).map((e) => e.id));
@@ -385,7 +395,6 @@
    *  the draft is the caller's business. */
   function resetThread() {
     resetView();
-    pending = null;
     setProbe(null);
     probeSeq++;
     // Whether the hub serves `session_activity` is a fact about the hub, not
@@ -393,8 +402,7 @@
     // session switch, and it is what lets an upgraded hub start answering
     // again without an app restart.
     probeUnsupported = false;
-    sentTurnSeq = null;
-    idleSeenSinceSend = false;
+    optimisticDismissed = lastSent?.stamp ?? null;
   }
 
   // Reset + immediate fetch on session change. Nothing is snapshotted here:
@@ -496,13 +504,9 @@
       setProbe(null);
       probeSeq++;
     }
-    // The current conversation moved on while we were away: a prompt still
-    // shown pending belonged to the old one.
-    if (leavingForNewer) {
-      pending = null;
-      sentTurnSeq = null;
-      idleSeenSinceSend = false;
-    }
+    // The current conversation moved on while we were away: our last send
+    // belonged to the old one.
+    if (leavingForNewer) optimisticDismissed = lastSent?.stamp ?? null;
     void load();
   }
 
@@ -556,7 +560,7 @@
       untrack(() => {
         // An earlier conversation is finished: nothing to poll for.
         if (viewing !== null) return;
-        const quiet = isQuietStatus(liveStatus) && !pending && !optimistic;
+        const quiet = isQuietStatus(liveStatus) && outgoing.length === 0 && !optimistic;
         if (
           shouldFetchTranscript({
             quiet,
@@ -596,7 +600,14 @@
   const liveStatus = $derived(liveProbe?.claude_status ?? session.claude_status);
   const liveStuck = $derived(liveProbe?.stuck_kind ?? session.stuck_kind);
   const liveActivity = $derived(liveProbe?.current_activity ?? session.current_activity);
-  const optimistic = $derived(sentTurnSeq !== null && session.turn_seq === sentTurnSeq && !idleSeenSinceSend);
+  const optimistic = $derived(
+    lastSent !== null &&
+      lastSent.kind === 'prompt' &&
+      lastSent.turnSeq !== null &&
+      session.turn_seq === lastSent.turnSeq &&
+      idleSeenStamp !== lastSent.stamp &&
+      optimisticDismissed !== lastSent.stamp,
+  );
   const indicator = $derived(
     indicatorFor({
       status: liveStatus,
@@ -604,7 +615,9 @@
       waitingFor: liveProbe?.waiting_for ?? null,
       activity: liveActivity,
       spinner: liveProbe?.spinner ?? null,
-      pending: pending !== null,
+      // Delivered, not yet taken: the bubble says "Sent", this row says what
+      // it is waiting for.
+      pending: outgoing.some((m) => m.state === 'sent'),
       optimistic,
     }),
   );
@@ -941,7 +954,7 @@
       return;
     }
     setProbe(r.value);
-    if (sentTurnSeq !== null && isQuietStatus(r.value.claude_status)) idleSeenSinceSend = true;
+    if (lastSent !== null && isQuietStatus(r.value.claude_status)) idleSeenStamp = lastSent.stamp;
   }
 
   // Probe the pane every couple of seconds while something is live: once at
@@ -982,8 +995,11 @@
   // so each tick (which yields a new `doing`) does not restart the interval.
   // That covers a call pending while Claude waits on the terminal (blocked)
   // or a prompt was just sent, not only while the doing-now label shows.
+  // A send in flight needs it too: "Sending…" turns into "Still sending…".
   const doingSomething = $derived(
-    doing !== null || (viewing === null && indicator !== null && hasPendingCall(conv)),
+    doing !== null ||
+      (viewing === null && indicator !== null && hasPendingCall(conv)) ||
+      outgoing.some((m) => m.state === 'sending'),
   );
   $effect(() => {
     if (!doingSomething) return;
@@ -1001,7 +1017,7 @@
       : emptyStateHint(errorCode, !!session.claude_session_id, canPrompt),
   );
   // The scroller (and so the thread) is on screen: find has something to search.
-  const threadShown = $derived(!(empty && !(pending && viewing === null)) && !loading);
+  const threadShown = $derived(!(empty && !(outgoing.length > 0 && viewing === null)) && !loading);
 
   // Keep the unsent text across tab switches (the panel unmounts).
   $effect(() => {
@@ -1069,8 +1085,12 @@
   // composers shared only the note; that is how the gate was lost. The
   // comment is true now because there is one expression, not two.)
   const busyNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
-  const busyBlocked = $derived(blockWhileBusy && busyNote !== null);
-  const canSend = $derived(draft.trim().length > 0 && !sending && viewing === null && !busyBlocked);
+  // A gated composer also waits for its own last message to be taken: the
+  // sheet is one-shot, and a second paste behind a first that Claude has not
+  // read yet is the mangled line the gate exists to prevent.
+  const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
+  const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
+  const canSend = $derived(draft.trim().length > 0 && viewing === null && !busyBlocked);
   const statusNote = $derived(
     viewing !== null ? 'Viewing an earlier conversation — go back to current to send.' : busyNote,
   );
@@ -1085,7 +1105,12 @@
   const SLASH_LIST_ID = `conv-slash-list-${hlSuffix}`;
   const slashOptionId = (i: number) => `conv-slash-opt-${hlSuffix}-${i}`;
   const COMPOSER_HINT_ID = `conv-composer-hint-${hlSuffix}`;
-  const history = $derived(promptHistory(conv, pending));
+  const history = $derived(
+    promptHistory(
+      conv,
+      outgoing.filter((m) => m.kind === 'prompt').map((m) => m.text),
+    ),
+  );
 
   /** ArrowUp / ArrowDown recall. Returns true when the key was consumed. */
   function caretOnEdgeLine(dir: -1 | 1): boolean {
@@ -1150,7 +1175,7 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text || sending) return;
+    if (!text) return;
     await sendText(text, { fromDraft: true });
   }
 
@@ -1176,134 +1201,111 @@
     text === '' ? 'key' : text.startsWith('/') ? 'command' : 'prompt';
 
   /** Send `text` as-is. Empty text is a bare Enter (the press_enter chip):
-   *  it lands in the REPL but is not a prompt, so nothing is shown pending. */
+   *  it lands in the REPL but is not a prompt, so it goes out directly and
+   *  nothing is shown for it. Anything else goes into the outbox, which
+   *  shows it at once and sends it in line — the box is free again the
+   *  moment Enter is pressed. */
   async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
-    if (sending || viewing !== null) return;
+    if (viewing !== null) return;
     const kind = sendKind(text);
-    if (kind !== 'key' && busyBlocked) return;
-    sending = true;
-    sendError = null;
-    const id = session.id;
-
-    // Attachments upload first; their remote paths ride along in the prompt
-    // text. A pasted entry has an empty `path` (see attachments.ts) — never
-    // authorised for the allow-list — so it is left out of `local_paths`
-    // rather than sent to `upload_attachments` at all. With nothing
-    // uploadable, nothing can fail: the draft (if any) still goes out on its
-    // own rather than being refused over a tile that was already showing its
-    // own honest error, and the tile itself is never touched below — it was
-    // never attempted, so it is not this send's to clear or flag.
-    // A key press carries nothing: it must not upload, spend or clear a tile
-    // the user attached for the prompt they have not sent yet.
-    const toUpload = kind === 'key' ? [] : attachments.filter((a) => a.path !== '');
-    const toUploadIds = new Set(toUpload.map((a) => a.id));
-
-    // `upload_attachments` consumes each path's allow-list entry the moment
-    // it clears the byte budget — before a byte moves, and not undone by a
-    // later failure (`UploadAllowList::consume` in
-    // `src-tauri/src/commands/upload.rs`). So a failure anywhere downstream
-    // of that point — the upload call itself, this side's own `tooLong`
-    // refusal, or a failed `sendPrompt` — can leave a tile in `toUpload`
-    // looking untouched while its local path is already unusable for a
-    // second attempt: pressing Send again would call `upload_attachments`
-    // with the same path and get back an authorisation error instead of a
-    // real retry. Rather than guess which specific failure actually
-    // consumed it, every failure below marks the attempted tiles as spent —
-    // occasionally more cautious than strictly necessary (a size-budget
-    // refusal happens before `consume`), never wrong.
-    let paths: string[] = [];
-    if (toUpload.length > 0) {
-      const up = await invokeCmd<string[]>('upload_attachments', {
-        args: {
-          host_alias: session.host_alias,
-          session_name: session.tmux_name,
-          local_paths: toUpload.map((a) => a.path),
-        },
-      });
-      if (session.id !== id) {
-        sending = false;
-        return;
-      }
-      if (!up.ok) {
-        // The draft stays: a prompt without its attachment is a worse
-        // outcome than no prompt at all.
-        sendError = up.error.message;
-        attachments = markNeedsReattach(attachments, toUploadIds);
-        sending = false;
-        return;
-      }
-      paths = up.value;
-    }
-
-    // The prefix rides in front of the attachment line, and in front of a
-    // `prompt` ONLY. Not a `command` — `/clear` with a paragraph glued to its
-    // nose is not a command the REPL runs — and not a `key`, where the whole
-    // point is that a bare Enter reaches the pane as a bare Enter.
-    const prefixed =
-      promptPrefix && kind === 'prompt' ? `${promptPrefix}\n\n${text}` : text;
-    const body = withAttachments(prefixed, paths);
-    // A remote send is quoted twice (see attach_prompt.ts's header comment
-    // for why that compounds rather than doubles), so the bound applied
-    // here must match the host the prompt is actually going to.
-    if (tooLong(body, session.host_alias === 'local')) {
-      // The file(s), if any, already uploaded successfully — only the
-      // prompt text is refused — so a retry needs a shorter prompt AND,
-      // since the upload above already spent the tile, a fresh attach.
-      sendError = 'That prompt is too long to send through tmux. Shorten it.';
-      attachments = markNeedsReattach(attachments, toUploadIds);
-      sending = false;
+    if (kind === 'key') {
+      await sendKey();
       return;
     }
-
-    const r = await sendPrompt(session.host_alias, session.tmux_name, body);
-    sending = false;
-    // The selection moved while the send was on the wire: the prompt landed
-    // in the old session; none of its state belongs to the new one.
-    if (session.id !== id) return;
-    if (!r.ok) {
-      sendError = r.error.message;
-      attachments = markNeedsReattach(attachments, toUploadIds);
-      return;
-    }
-    // A key press is spent here: it went into the pane, it is not a prompt,
-    // so there is no draft to clear, no tray to spend and nothing pending to
-    // show. Returning BEFORE the attachment bookkeeping is the point — the
-    // tray belongs to the prompt the user is still composing.
-    if (kind === 'key') return;
-    // Only the attachments this send actually uploaded are spent; anything
-    // it could not upload (a pasted entry) was never attempted and stays,
-    // so the evidence that it did not go is not lost.
-    attachments = clearSent(attachments, toUploadIds);
+    if (busyBlocked) return;
+    // A pasted tile has an empty `path` (see attachments.ts): nothing ever
+    // authorised it for the Rust allow-list, so it is never uploaded. It
+    // stays in the tray with its own honest error rather than being spent
+    // by a send it was never part of; the rest travel with the message.
+    const going = attachments.filter((a) => a.path !== '');
+    // The prefix rides in front of a `prompt` ONLY. Not a `command` —
+    // `/clear` with a paragraph glued to its nose is not a command the REPL
+    // runs (the outbox applies the same rule when it builds the body).
+    const prefix = kind === 'prompt' ? promptPrefix : null;
+    outbox.enqueue(
+      { id: session.id, host_alias: session.host_alias, tmux_name: session.tmux_name },
+      {
+        kind,
+        text,
+        prefix,
+        attachments: going,
+        // How many turns already carry this exact text, so a repeat of an
+        // earlier prompt ("continue") is not mistaken for the transcript
+        // catching up. Uploaded paths make a body with files new anyway.
+        seen: going.length > 0 ? 0 : carriedCount(conv, prefix ? `${prefix}\n\n${text}` : text),
+      },
+    );
+    attachments = clearSent(
+      attachments,
+      new Set(going.map((a) => a.id)),
+    );
     // The notes were about the tray that just went; they do not carry over.
     attachErrors = [];
     switchNotice = null;
+    sendError = null;
     // Only the box's own text is spent by a send; a chip sent with
     // Shift+click leaves whatever the user was typing.
     if (opts.fromDraft) draft = '';
     histIndex = null;
-    // A slash command is handled by the REPL itself: it is not recorded as a
-    // prompt (and /clear even moves to a new session id), so no pending
-    // turn, and nothing to wait for beyond a fresh read.
-    if (kind === 'command') {
-      box?.focus();
-      void load();
-      return;
-    }
-    sentTurnSeq = session.turn_seq;
-    idleSeenSinceSend = false;
-    pending = {
-      prompt: body,
-      at: new Date().toISOString(),
-      // how many turns already carried this exact text, so a repeat of an
-      // earlier prompt is not mistaken for the transcript catching up
-      seen: conv?.turns.filter((t) => t.prompt === body).length ?? 0,
-    };
+    // The user's own message: show it, wherever the thread was scrolled.
     await tick();
     scrollToBottom();
     box?.focus();
-    // Refetch now rather than up to a poll interval later.
-    void load();
   }
+
+  /** The bare Enter the press_enter chip sends: straight into the pane, no
+   *  bubble, never gated — it is the way out of the stuck state a gate
+   *  would be reading. */
+  async function sendKey() {
+    if (sending) return;
+    sending = true;
+    sendError = null;
+    const id = session.id;
+    const r = await sendPrompt(session.host_alias, session.tmux_name, '');
+    sending = false;
+    if (session.id !== id) return;
+    if (!r.ok) sendError = r.error.message;
+  }
+
+  /** Take a failed message back into the box to change it. Text the user
+   *  had started meanwhile is kept, after it. */
+  function editOutgoing(id: string) {
+    const back = outbox.edit(session.id, id);
+    if (!back) return;
+    draft = draft.trim() ? `${back.text}\n\n${draft}` : back.text;
+    attachments = [...attachments, ...back.attachments];
+    histIndex = null;
+    box?.focus();
+  }
+
+  // Each delivered send is worth a read now rather than up to a poll
+  // interval later: the transcript may already carry it, and a slash
+  // command shows only through the read. Keyed on the outbox's stamp, so a
+  // switch to a session with an older stamp is not a send.
+  const sentStamp = $derived(lastSent?.stamp ?? null);
+  let seenStamp: { sid: number; stamp: number | null } | null = null;
+  $effect(() => {
+    const stamp = sentStamp;
+    const sid = sessionId;
+    untrack(() => {
+      const prev = seenStamp;
+      seenStamp = { sid, stamp };
+      if (prev === null || prev.sid !== sid || stamp === null || prev.stamp === stamp) return;
+      if (viewing === null) void load();
+    });
+  });
+
+  // A bubble that changes state (a failure grows a row of buttons) keeps the
+  // thread pinned when it was.
+  $effect(() => {
+    void outgoing;
+    untrack(() => {
+      if (!atBottom) return;
+      void tick().then(() => {
+        if (atBottom) scrollToBottom();
+      });
+    });
+  });
 
   function onComposerKey(e: KeyboardEvent) {
     // WebKit fires the composition-confirming Enter with isComposing false
@@ -1723,7 +1725,7 @@
   <div class="thread-area">
   {#if bgEntry}
     <BackgroundDetail entry={bgEntry} onBack={() => (background = null)} onOpenSession={goToSession} />
-  {:else if empty && !(pending && viewing === null)}
+  {:else if empty && !(outgoing.length > 0 && viewing === null)}
     <div class="empty-state" data-testid="conv-empty-state">
       <p class="empty-title" data-testid="conv-empty">{empty}</p>
       {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
@@ -1940,16 +1942,46 @@
             {/if}
           {/each}
         {/if}
-        {#if pending && viewing === null}
-          <section class="turn pending" data-testid="conv-pending">
-            <div class="prompt">
-              <div class="prompt-head">
-                <span class="who">You</span>
-                <time datetime={pending.at}>{relativeTime(pending.at, nowMs)}</time>
+        {#if viewing === null}
+          {#each outgoing as m (m.id)}
+            {@const held = isHeld(outgoing, m.id)}
+            {@const r = receipt(m, held, nowMs)}
+            <!-- The bubble is the same prompt block the thread draws, so the
+                 swap to the transcript's own turn does not move a pixel. -->
+            <section class="turn outgoing" data-testid="conv-outgoing" data-state={held ? 'held' : m.state}>
+              <div class="prompt" class:is-failed={m.state === 'failed'} class:is-early={m.state === 'waiting' || m.state === 'sending'}>
+                <div class="prompt-head">
+                  <span class="who">You</span>
+                  <time datetime={m.at}>{relativeTime(m.at, nowMs)}</time>
+                </div>
+                <div class="prompt-text">{m.text}</div>
+                {#if m.attachments.length}
+                  <div class="outgoing-files" data-testid="conv-outgoing-files">
+                    {m.attachments.length === 1 ? m.attachments[0].name : `${m.attachments.length} files`}
+                  </div>
+                {/if}
               </div>
-              <div class="prompt-text">{pending.prompt}</div>
-            </div>
-          </section>
+              <div class="receipt" data-tone={r.tone} data-testid="conv-receipt" role="status" aria-live="polite">
+                {#if m.state === 'sending'}
+                  <SpiralLoader size={12} class="receipt-mark" />
+                {:else}
+                  <span class="receipt-mark" aria-hidden="true"
+                    >{m.state === 'received' ? '✓✓' : m.state === 'sent' || m.state === 'queued' ? '✓' : m.state === 'failed' ? '!' : '·'}</span
+                  >
+                {/if}
+                <span class="receipt-label">{r.label}</span>
+                {#if m.state === 'failed'}
+                  <span class="receipt-actions">
+                    {#if m.retryable}
+                      <button type="button" class="linkish" data-testid="conv-outgoing-retry" onclick={() => outbox.retry(session.id, m.id)}>Retry</button>
+                    {/if}
+                    <button type="button" class="linkish" data-testid="conv-outgoing-edit" onclick={() => editOutgoing(m.id)}>Edit</button>
+                    <button type="button" class="linkish" data-testid="conv-outgoing-discard" onclick={() => outbox.discard(session.id, m.id)}>Discard</button>
+                  </span>
+                {/if}
+              </div>
+            </section>
+          {/each}
         {/if}
         {#if viewing === null}
         {#if answerView}
@@ -1977,7 +2009,7 @@
           >
             <SpiralLoader size={16} paused={!indicator} class="indicator-spiral" />
             <span class="indicator-label"
-              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicatorLabel}</span
+              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : indicatorLabel}</span
             >
           </div>
         {/if}
@@ -2094,7 +2126,7 @@
               title={suggested
                 ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.\n\nClick fills the box; Shift+click sends now.`
                 : `${p.text}\n\nClick fills the box; Shift+click sends now.`}
-              disabled={sending || viewing !== null}
+              disabled={viewing !== null}
               onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
             >
           {/if}
@@ -2166,7 +2198,7 @@
           use:autoGrow={draft}
           onpaste={onComposerPaste}
           placeholder="Send a prompt…"
-          disabled={sending || viewing !== null}
+          disabled={viewing !== null}
         ></textarea>
         <div class="composer-actions">
           <button
@@ -2184,7 +2216,7 @@
             aria-label="Send prompt"
             title="Send (Enter)"
             aria-keyshortcuts="Enter"
-            disabled={!canSend}>{sending ? '…' : '↑'}</button>
+            disabled={!canSend}>↑</button>
         </div>
         {#if dragging}
           <div class="drop-veil" aria-hidden="true">Drop to attach</div>
@@ -2660,6 +2692,57 @@
     font-size: 0.85rem;
     line-height: 1.5;
     color: var(--fg);
+  }
+  /* Outgoing: the prompt block while it is on its way, and its receipt. */
+  .outgoing .prompt {
+    margin-bottom: 0.3rem;
+  }
+  .outgoing .prompt.is-early {
+    border-style: dashed;
+    border-left-style: solid;
+    background: color-mix(in srgb, var(--accent) 3%, var(--bg-pane));
+  }
+  .outgoing .prompt.is-early .prompt-text {
+    color: var(--fg-muted);
+  }
+  .outgoing .prompt.is-failed {
+    border-left-color: var(--usage-crit);
+    background: color-mix(in srgb, var(--usage-crit) 6%, var(--bg-pane));
+  }
+  .outgoing-files {
+    margin-top: 0.25rem;
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+  }
+  .receipt {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    padding-left: 0.2rem;
+    color: var(--fg-muted);
+    font-size: 0.72rem;
+  }
+  .receipt[data-tone='ok'] {
+    color: var(--usage-ok);
+  }
+  .receipt[data-tone='warn'] {
+    color: var(--usage-warn);
+  }
+  .receipt[data-tone='crit'] {
+    color: var(--usage-crit);
+  }
+  .receipt-mark {
+    flex: 0 0 auto;
+    letter-spacing: -0.15em;
+  }
+  .receipt-actions {
+    display: inline-flex;
+    gap: 0.6rem;
+    margin-left: 0.3rem;
+  }
+  .receipt-actions .linkish {
+    margin-top: 0;
   }
   .prompt-text.clamped {
     display: -webkit-box;
