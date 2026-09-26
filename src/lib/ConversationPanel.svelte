@@ -21,7 +21,7 @@
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
-  import { needsMore } from './composer_overflow';
+  import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
   import { timeAgo } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -1036,7 +1036,13 @@
   });
   function measureChips() {
     if (!chipsRow) return;
-    chipsOverflow = needsMore(chipsRow.scrollWidth, chipsRow.clientWidth);
+    const row = chipsRow;
+    // Untracked: the effect below calls this, and reading `chipsExpanded`
+    // there would make every toggle re-create the observer.
+    const expanded = untrack(() => chipsExpanded);
+    chipsOverflow = expanded
+      ? wrapsPastOneLine(Array.from(row.children, (c) => (c as HTMLElement).offsetTop))
+      : needsMore(row.scrollWidth, row.clientWidth);
     if (!chipsOverflow) chipsExpanded = false;
   }
   $effect(() => {
@@ -2173,7 +2179,7 @@
           <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
           <button
             type="submit"
-            class="btn btn--icon btn--primary"
+            class="btn btn--icon btn--primary composer-send"
             data-testid="conv-composer-send"
             aria-label="Send prompt"
             title="Send (Enter)"
@@ -2414,6 +2420,12 @@
     gap: var(--control-gap);
     min-height: var(--control-h-lg);
   }
+  /* Send sits on the right edge by itself. The hint's flex-grow used to be
+     what pushed it there, so where the hint hides (a narrow chat: the agent
+     sheet, a phone) Send slid left beside the attach button. */
+  .composer-send {
+    margin-left: auto;
+  }
   .composer-hint {
     flex: 1 1 auto;
     min-width: 0;
@@ -2510,9 +2522,15 @@
     color: var(--accent);
   }
   .conv-loading {
+    /* Fills the thread area and sits in its middle, where the transcript
+       (and the empty state) will be — not pinned to the top-left corner. */
+    flex: 1 1 auto;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 0.5rem;
+    margin: 0;
+    padding: 1.5rem 1.1rem;
     color: var(--fg-muted);
   }
   .linkish :global(.inline-spiral) {
