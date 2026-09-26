@@ -929,11 +929,16 @@ async fn consecutive_failures_count_up_and_a_pass_that_ends_ok_resets_them() {
         let m = sync.metrics(&[fx.tracker]).remove(0);
         assert_eq!(m.consecutive_failures, n, "{m:?}");
         assert!(m.last_error.is_some());
+        assert_eq!(
+            (m.passes_total, m.passes_failed_total),
+            (u64::from(n), u64::from(n))
+        );
     }
     fx.fake
         .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
     sync.run_pass(&fx.store).await.unwrap();
     let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!((m.passes_total, m.passes_failed_total), (4, 3), "{m:?}");
     assert_eq!(
         (m.consecutive_failures, m.last_error.as_deref()),
         (0, None),
@@ -1346,6 +1351,13 @@ async fn skipped_items_fill_the_metrics_walk_health_to_failing_and_a_clean_pass_
             m.last_item_error.as_deref()
         ),
         (0, 0, None),
+        "{m:?}"
+    );
+    // M13.2's running totals keep what the last-pass fields let go.
+    let n = u64::from(TRACKER_FAILING_AFTER);
+    assert_eq!(
+        (m.passes_total, m.passes_failed_total, m.items_failed_total),
+        (n + 1, 0, n),
         "{m:?}"
     );
     let h = health(&sync);
