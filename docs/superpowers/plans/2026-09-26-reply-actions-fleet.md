@@ -548,9 +548,14 @@ Runs the script on the session's host, then either rebinds-and-restarts this ses
       args: RewindArgs,
       store: &Mutex<Store>,
       ssh: &Arc<SshClient>,
+      reg: &Arc<CancellationRegistry>,
   ) -> Result<SessionRow, IpcError>;
   ```
-  Task 4 wraps this as an MCP tool; Task 5 as a Tauri command.
+  Task 4 wraps this as an MCP tool; Task 5 as a Tauri command. **Both must pass
+  a `reg`**: the Fork arm calls `sessions::new_session`, whose real signature
+  (`lifecycle.rs:318`) requires `reg: &Arc<CancellationRegistry>`. Passing a
+  throwaway registry instead would make the fork's clone step silently
+  uncancellable, so thread the caller's own.
 
 - [ ] **Step 1: Write the failing tests**
 
