@@ -27,9 +27,9 @@ impl FleetTools {
             ),
         );
         let mut trees = if p.has_sessions {
-            projects::list_projects_with_sessions(&self.store)
+            projects::list_projects_with_sessions(self.reader())
         } else {
-            projects::list_projects(&self.store)
+            projects::list_projects(self.reader())
         }
         .map_err(to_mcp_err)?;
         // After the filter, so a capped page is a page of matches — the same
@@ -47,8 +47,8 @@ impl FleetTools {
 
     #[tool(description = "Rescan the local projects directory for new or \
         removed repositories and worktrees; returns the project list. \
-        E_NOTFOUND on a hub with hub.local_host off (no local projects \
-        directory).")]
+        On a hub with hub.local_host off there is no local projects \
+        directory: nothing is scanned and the stored list is returned.")]
     pub(super) async fn refresh_projects(&self) -> Result<CallToolResult, McpError> {
         audit("refresh_projects", "");
         ok_json_compact(
@@ -78,7 +78,7 @@ impl FleetTools {
         let args = worktrees::ListWorktreesArgs {
             project_id: p.project_id,
         };
-        let mut out = worktrees::list_worktrees(args, &self.store).map_err(to_mcp_err)?;
+        let mut out = worktrees::list_worktrees(args, self.reader()).map_err(to_mcp_err)?;
         if let Some(host) = p.host_alias.as_deref() {
             out.retain(|w| w.worktree.host_alias == host);
         }

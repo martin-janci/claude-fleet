@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// Make the next COMMIT on `s` fail WITHOUT SQLite rolling anything back,
+/// once `event` (`"INSERT ON session_events"`, `"UPDATE ON sessions"`, …)
+/// fires: a TEMP trigger inserts an orphan row under a DEFERRED foreign key,
+/// which SQLite checks only when the outermost transaction commits. A COMMIT
+/// — or a top-level `RELEASE`, which is one — refused that way leaves the
+/// transaction open, the state no SAVEPOINT helper may leave behind.
+pub(super) fn arm_commit_failure(s: &Store, event: &str) {
+    s.conn
+        .execute_batch(&format!(
+            "CREATE TEMP TABLE IF NOT EXISTS fk_parent (id INTEGER PRIMARY KEY);
+             CREATE TEMP TABLE IF NOT EXISTS fk_orphan (
+                 parent INTEGER REFERENCES fk_parent(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TEMP TRIGGER arm_commit_failure AFTER {event}
+             BEGIN INSERT INTO fk_orphan (parent) VALUES (999); END;"
+        ))
+        .unwrap();
+}
+
 pub(super) fn store_with_recorder() -> (Store, Arc<crate::events::RecordingEventBus>) {
     let bus = Arc::new(crate::events::RecordingEventBus::new());
     let store = Store::open_with_bus_in_memory(bus.clone()).expect("store");

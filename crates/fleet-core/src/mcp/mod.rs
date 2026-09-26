@@ -18,6 +18,9 @@ pub mod metrics;
 pub mod pairing;
 pub mod report_route;
 pub mod settings;
+#[cfg(test)]
+mod tests_token_cache;
+mod token_cache;
 mod tools;
 pub mod wire;
 
@@ -39,6 +42,7 @@ pub use events_route::{EventFeed, EventHistory, EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
 pub use listener::{NoTls, TlsAcceptor};
 pub use pairing::{pair_url, PairingRequest, PendingPairings};
+use token_cache::TokenCache;
 pub use tools::tool_deadline;
 pub use tools::FleetTools;
 
@@ -161,6 +165,11 @@ struct AuthState {
     /// Non-loopback `Host`/`Origin` values accepted besides loopback (see
     /// `auth::check_origin`). Empty on the desktop.
     allowed_hosts: Arc<Vec<String>>,
+    /// The hub's in-memory token tables, checked against the store's auth
+    /// epoch on every request (see [`TokenCache`]). `None` — the desktop,
+    /// tests, a store without a read pool — reads the tables through the
+    /// writer per request, as before.
+    tokens: Option<Arc<TokenCache>>,
 }
 
 /// Pull `token=<v>` out of a raw query string. Tokens are hex, so no
@@ -187,18 +196,38 @@ async fn authorize(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::http::StatusCode;
-    // Sync lock, released before the next `.await` — never held across one.
-    // `active_client_tokens` drops revoked pairings, so a revoked client token
-    // simply stops resolving on the next request.
-    let (host_tokens, client_tokens) = {
-        let s = state
-            .store
-            .lock()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        (
-            s.list_host_tokens().unwrap_or_default(),
-            s.active_client_tokens().unwrap_or_default(),
-        )
+    // The hub's cache first: it re-reads the auth epoch on a read-only
+    // connection per request, so a token revoked by any process is gone from
+    // the rows it returns on the next request — without the writer's lock.
+    let cached = state
+        .tokens
+        .as_ref()
+        .and_then(|cache| match cache.tokens() {
+            Ok(rows) => Some(rows),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e.message,
+                    "[mcp] token cache unavailable; reading the token tables through the writer"
+                );
+                None
+            }
+        });
+    // Otherwise a sync lock on the writer, released before the next `.await`
+    // — never held across one. `active_client_tokens` drops revoked
+    // pairings, so a revoked client token simply stops resolving on the next
+    // request.
+    let (host_tokens, client_tokens) = match cached {
+        Some(rows) => rows,
+        None => {
+            let s = state
+                .store
+                .lock()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            (
+                Arc::new(s.list_host_tokens().unwrap_or_default()),
+                Arc::new(s.active_client_tokens().unwrap_or_default()),
+            )
+        }
     };
     let caller = match auth::check_request(
         request.headers(),
@@ -241,9 +270,32 @@ async fn authorize(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        if let Ok(s) = state.store.lock() {
-            if let Err(e) = s.touch_client_token(client.id, now) {
-                tracing::debug!(error = %e.message, "[mcp] could not touch client token");
+        match state.tokens.as_ref() {
+            // The hub: the same minute, gated in memory so a request that is
+            // not due never touches the writer, and `try_lock` so one that
+            // is never waits on it — a stamp the writer was too busy for is
+            // retried by the next request.
+            Some(cache) => {
+                if cache.touch_due(client.id, now) {
+                    match state.store.try_lock() {
+                        Ok(s) => {
+                            if let Err(e) = s.touch_client_token(client.id, now) {
+                                tracing::debug!(
+                                    error = %e.message,
+                                    "[mcp] could not touch client token"
+                                );
+                            }
+                        }
+                        Err(_) => cache.untouch(client.id),
+                    }
+                }
+            }
+            None => {
+                if let Ok(s) = state.store.lock() {
+                    if let Err(e) = s.touch_client_token(client.id, now) {
+                        tracing::debug!(error = %e.message, "[mcp] could not touch client token");
+                    }
+                }
             }
         }
     }
@@ -409,6 +461,7 @@ pub(crate) fn test_app(
             master: Arc::new(master.to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         },
         pairing::PairState::new(
             Arc::clone(&store),
@@ -423,7 +476,9 @@ pub(crate) fn test_app(
 }
 
 /// Which answer shape a mount produces. The two differ in one rmcp config
-/// flag and nothing else — same tools, same auth, same Host allowlist.
+/// flag and in what follows from it — same tools, same auth, same Host
+/// allowlist; only the SSE mount can carry `notifications/tools/list_changed`
+/// ahead of a result, so only it advertises `listChanged`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Framing {
     /// `text/event-stream`, the JSON-RPC body on a `data:` line.
@@ -436,9 +491,11 @@ pub(crate) enum Framing {
 ///
 /// Stateless means every POST is a self-contained JSON-RPC exchange served by
 /// a fresh `FleetTools` clone: no `Mcp-Session-Id` is issued or required, and
-/// `GET`/`DELETE` are refused (405). The server never sends server-initiated
-/// messages (tools only), so a session bought nothing and cost a reconnect
-/// after every app restart, port or token change, or tunnel bounce.
+/// `GET`/`DELETE` are refused (405). The one server-initiated message it has,
+/// `notifications/tools/list_changed`, rides the next `tools/call`'s own SSE
+/// response (see `tools::list_changed`), so a session would buy nothing and
+/// cost a reconnect after every app restart, port or token change, or tunnel
+/// bounce.
 ///
 /// rmcp keeps its own DNS-rebinding Host check, separate from fleet's
 /// `authorize` layer, and by default it admits only loopback Hosts. A Host
@@ -477,6 +534,7 @@ pub(crate) fn streamable_service(
         .map(str::to_string)
         .chain(allowed_hosts.iter().cloned())
         .collect();
+    let tools = tools.for_framing(framing);
     StreamableHttpService::new(
         move || Ok(tools.clone()),
         NeverSessionManager::default().into(),
@@ -558,6 +616,8 @@ pub async fn start_with_handle(
         token,
         allowed_hosts,
         events,
+        // The desktop reads through its one writer, as before.
+        None,
         None::<NoTls>,
     )
     .await
@@ -570,6 +630,11 @@ pub async fn start_with_handle(
 /// the TLS stack stays in the hub (see [`listener`]), and everything below the
 /// accept loop is the same server the desktop runs. The plain-HTTP path is
 /// unchanged — `axum::serve` is still handed the `TcpListener` directly.
+///
+/// `read_pool` is the hub's read-only connections on the same `state.db`
+/// ([`crate::store::ReadPool`]): with it, `authorize` checks tokens against
+/// an in-memory [`TokenCache`] and the plain read tools read off the writer.
+/// `None` keeps every read on `store`, as the desktop does.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_with_listener<A: TlsAcceptor>(
     store: Arc<Mutex<Store>>,
@@ -581,6 +646,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
     token: String,
     allowed_hosts: Vec<String>,
     events: Option<EventFeed>,
+    read_pool: Option<Arc<crate::store::ReadPool>>,
     tls: Option<A>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     // The bound address, not a requested one: with the listener already open
@@ -634,10 +700,24 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
         };
+        // Built from the store now; a store the pool cannot read keeps the
+        // per-request read through the writer rather than refusing to serve.
+        let tokens = read_pool.as_ref().and_then(|pool| {
+            TokenCache::new(Arc::clone(pool))
+                .map(Arc::new)
+                .map_err(|e| {
+                    tracing::warn!(
+                        error = %e.message,
+                        "[mcp] token cache unavailable; authorizing through the writer"
+                    )
+                })
+                .ok()
+        });
         let auth_state = AuthState {
             master: Arc::new(token),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
+            tokens,
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),
@@ -650,7 +730,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         let metrics_for_route = Arc::clone(&guards.metrics);
         let events_state =
             EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token());
-        let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
+        let tools = FleetTools::new(store, ssh, reg, tunnels, guards).with_read_pool(read_pool);
         let service = streamable_service(
             tools.clone(),
             serve_shutdown.child_token(),
@@ -783,6 +863,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         };
         // The pairing registry the test mints into and `/pair` redeems from.
         let pairings = Arc::new(pairing::PendingPairings::new());
@@ -1169,6 +1250,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
+            tokens: None,
         };
         let app2 = build_app(
             metrics::MetricsState {
@@ -1230,6 +1312,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         };
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
         let report_state3 = report_route::ReportState::new(Arc::clone(&store));
@@ -1323,8 +1406,17 @@ mod tests {
 
     /// [`serve_real_tools`] with a fleet Host/Origin allowlist.
     async fn serve_real_tools_with(allowed_hosts: Vec<String>) -> std::net::SocketAddr {
+        serve_real_tools_on(allowed_hosts).await.0
+    }
+
+    /// [`serve_real_tools_with`], handing back the store so a test can mint
+    /// client tokens into it.
+    async fn serve_real_tools_on(
+        allowed_hosts: Vec<String>,
+    ) -> (std::net::SocketAddr, Arc<Mutex<Store>>) {
         use std::net::Ipv4Addr;
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let served = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::new(SshClient::new()),
@@ -1333,6 +1425,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
+            tokens: None,
         };
         let guards = McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {}));
         let pair_state = pairing::PairState::new(
@@ -1391,7 +1484,7 @@ mod tests {
             .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        addr
+        (addr, served)
     }
 
     /// One raw HTTP/1.1 exchange; reads until the server closes or 800 ms.
@@ -1524,6 +1617,99 @@ mod tests {
             r.contains("401"),
             "an unauthenticated tool endpoint is the way to get this wrong:\n{r}"
         );
+    }
+
+    /// `listChanged` is advertised where it can be delivered: the SSE mount,
+    /// whose response stream can carry a notification ahead of the result.
+    /// `/mcp/json` answers with the first message the handler sends, so it
+    /// neither advertises nor sends one.
+    #[tokio::test]
+    async fn list_changed_is_advertised_on_the_sse_mount_only() {
+        let addr = serve_real_tools().await;
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+        let sse = raw_round_trip(addr, &post_mcp(init)).await;
+        assert!(sse.contains(r#""listChanged":true"#), "/mcp:\n{sse}");
+        let json = raw_round_trip(addr, &post_mcp_path("/mcp/json", "127.0.0.1", init)).await;
+        assert!(json.contains("200 OK"), "/mcp/json:\n{json}");
+        assert!(!json.contains("listChanged"), "/mcp/json:\n{json}");
+    }
+
+    const LIST_CHANGED: &str = "notifications/tools/list_changed";
+    const A_CALL: &str = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_friendly_name","arguments":{"session_id":999999,"friendly_name":"x"}}}"#;
+
+    /// A client left connected across a restart holds a list the new process
+    /// never served it. Its first call carries the notification ahead of the
+    /// result — once — and the result is still the last frame, which is what
+    /// every in-repo reader (`wire::last_event_payload`) takes.
+    #[tokio::test]
+    async fn a_caller_that_never_listed_is_told_once_ahead_of_the_result() {
+        let addr = serve_real_tools().await;
+        let first = raw_round_trip(addr, &post_mcp(A_CALL)).await;
+        let notice = first
+            .find(LIST_CHANGED)
+            .unwrap_or_else(|| panic!("notified:\n{first}"));
+        let result = first
+            .find(r#""id":3"#)
+            .unwrap_or_else(|| panic!("answered:\n{first}"));
+        assert!(
+            notice < result,
+            "the notification precedes the result:\n{first}"
+        );
+        let body = &first[first.find("\r\n\r\n").unwrap()..];
+        assert!(
+            wire::last_event_payload(body).contains("E_NOTFOUND"),
+            "the result is the last frame:\n{first}"
+        );
+
+        let second = raw_round_trip(addr, &post_mcp(A_CALL)).await;
+        assert!(second.contains(r#""id":3"#), "answered:\n{second}");
+        assert!(!second.contains(LIST_CHANGED), "told once:\n{second}");
+    }
+
+    /// A paired client is told like any other caller: an assistant may hold
+    /// one, and every reader that does not care skips the frame (fleet-mobile
+    /// takes the first frame with a `result` or `error`). A peer hub, which
+    /// may call one tool, is not.
+    #[tokio::test]
+    async fn a_paired_client_is_told_and_a_peer_is_not() {
+        let (addr, store) = serve_real_tools_on(vec![]).await;
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("phone", &auth::sha256_hex("client-tok"), "full")
+                .unwrap();
+            s.insert_client_token("hub-b", &auth::sha256_hex("peer-tok"), "peer")
+                .unwrap();
+        }
+        let as_token =
+            |tok: &str| post_mcp(A_CALL).replace("Bearer s3cret", &format!("Bearer {tok}"));
+
+        let client = raw_round_trip(addr, &as_token("client-tok")).await;
+        assert!(client.contains(r#""id":3"#), "answered:\n{client}");
+        assert!(
+            client.contains(LIST_CHANGED),
+            "a paired client is told:\n{client}"
+        );
+
+        let peer = raw_round_trip(addr, &as_token("peer-tok")).await;
+        assert!(peer.contains(r#""id":3"#), "answered:\n{peer}");
+        assert!(!peer.contains(LIST_CHANGED), "a peer is not:\n{peer}");
+    }
+
+    /// A client that listed on this process holds the current list: nothing
+    /// is sent. Neither is anything on `/mcp/json`, where it would replace
+    /// the result.
+    #[tokio::test]
+    async fn a_caller_that_listed_or_uses_the_json_mount_is_not_told() {
+        let addr = serve_real_tools().await;
+        let json = raw_round_trip(addr, &post_mcp_path("/mcp/json", "127.0.0.1", A_CALL)).await;
+        assert!(json.contains(r#""id":3"#), "/mcp/json answered:\n{json}");
+        assert!(!json.contains(LIST_CHANGED), "/mcp/json:\n{json}");
+
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        raw_round_trip(addr, &post_mcp(list)).await;
+        let r = raw_round_trip(addr, &post_mcp(A_CALL)).await;
+        assert!(r.contains(r#""id":3"#), "answered:\n{r}");
+        assert!(!r.contains(LIST_CHANGED), "listed, so current:\n{r}");
     }
 
     /// `/metrics` answers the master token and refuses everything else with a
@@ -1674,6 +1860,7 @@ mod tests {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
+            tokens: None,
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),

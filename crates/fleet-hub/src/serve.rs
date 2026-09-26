@@ -141,6 +141,21 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
                 .map_err(|e| format!("mark the local host unreachable: {e}"))?;
             }
         }
+        // Its sessions came along too. Nothing probes `local` here, so they
+        // would stay live forever and every click would hit the refusal:
+        // ghost them (dismissable, reaped by the routine prune).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let retired = fleet_core::service::hub::retire_local_sessions(&s, now)
+            .map_err(|e| format!("retire the local host's sessions: {}", e.message))?;
+        if retired > 0 {
+            tracing::info!(
+                retired,
+                "[hub] retired sessions left on the disabled local host"
+            );
+        }
     }
     Ok(())
 }
@@ -781,6 +796,25 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Err(e) => tracing::warn!("sweep_unresolved_waits at startup failed: {e}"),
     }
 
+    // Readers off the writer: read-only connections on the same file for the
+    // token cache in `authorize` and the plain read tools. Opened here, after
+    // `resolve_with_store` has migrated the file and switched it to WAL;
+    // `None` (a filesystem that refused WAL, a file that would not open
+    // read-only) leaves every read on the writer, as before.
+    let read_pool = match fleet_core::store::ReadPool::open(
+        &r.data_dir.join("state.db"),
+        fleet_core::store::READ_POOL_SIZE,
+    ) {
+        Ok(Some(pool)) => Some(Arc::new(pool)),
+        Ok(None) => {
+            tracing::warn!("state.db is not in WAL; every read stays on the writer");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not open the read pool; every read stays on the writer");
+            None
+        }
+    };
     let (shutdown, serve_task) = mcp::start_with_listener(
         Arc::clone(&store),
         Arc::clone(&ssh),
@@ -793,6 +827,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         // One fresh subscription per `GET /events` connection, plus the
         // replay history a reconnecting client resumes from.
         Some(Arc::clone(&bus).into()),
+        read_pool,
         tls,
     )
     .await?;
@@ -1049,6 +1084,45 @@ mod tests {
         assert_eq!(local.claude_version.as_deref(), Some("2.1.0"));
         assert_eq!(local.last_pinged_at, Some(1234));
         assert!(s.get_host_row("devbox").unwrap().unwrap().reachable);
+    }
+
+    /// A live session row on `host`, as a desktop's `state.db` carries it.
+    /// `upsert_bg_session` because it is the store's public writer (see
+    /// `demo.rs`); the retire covers every kind.
+    fn live_session(s: &Store, host: &str, name: &str) -> i64 {
+        s.upsert_bg_session(host, name, None, &format!("{name}-id"), None, 1, "bg", 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn persist_retires_sessions_left_on_a_copied_local_row() {
+        let (_dir, store) = store_with_local_row();
+        let (on_local, on_devbox) = {
+            let s = store.lock().unwrap();
+            (
+                live_session(&s, "local", "a"),
+                live_session(&s, "devbox", "b"),
+            )
+        };
+        persist(&store, &resolved(false)).unwrap();
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(on_local).unwrap().unwrap();
+        assert_eq!(row.status, "ghost", "nothing probes `local` here");
+        assert_eq!(
+            row.lost_reason.as_deref(),
+            Some(fleet_core::service::hub::LOST_LOCAL_DISABLED)
+        );
+        let other = s.get_session_by_id(on_devbox).unwrap().unwrap();
+        assert_ne!(other.status, "ghost");
+    }
+
+    #[test]
+    fn persist_with_a_local_host_leaves_its_sessions_alone() {
+        let (_dir, store) = store_with_local_row();
+        let id = live_session(&store.lock().unwrap(), "local", "a");
+        persist(&store, &resolved(true)).unwrap();
+        let s = store.lock().unwrap();
+        assert_ne!(s.get_session_by_id(id).unwrap().unwrap().status, "ghost");
     }
 
     #[test]
@@ -1496,6 +1570,7 @@ mod tests {
             listener,
             "test-token".to_string(),
             vec![],
+            None,
             None,
             Some(tls),
         )

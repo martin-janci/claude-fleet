@@ -59,6 +59,7 @@
     loadMine,
     mineItemIds,
     pastWorkFields,
+    statusNamesOf,
     toRowFilters,
     workFilterPredicate,
     workFilters,
@@ -208,7 +209,7 @@
   // — persisted chips in SidebarFilters, applied through `rowMatches` and
   // composed with needs-you. A focused suggestion is past them too.
   const workFilterView = $derived(
-    effectiveWorkFilters($workFilters, $trackers, $sidebarGroupBy === 'work'),
+    effectiveWorkFilters($workFilters, $trackers, $sidebarGroupBy === 'work', statusNamesOf($sessions)),
   );
   const workFilterCtx = $derived({ trackers: $trackers, mine: $mineItemIds });
   const workPredicate = $derived(workFilterPredicate(workFilterView, workFilterCtx));

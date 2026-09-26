@@ -212,6 +212,35 @@ pub fn ensure_local_allowed(alias: &str) -> Result<(), IpcError> {
     check_local_allowed(alias, local_host_enabled())
 }
 
+/// The `lost_reason` of a session a hub without a local host retired.
+pub const LOST_LOCAL_DISABLED: &str = "local_disabled";
+
+/// Self-heal for a hub with `hub.local_host=false`: ghost every live session
+/// row on `local`. Such rows come with a `state.db` copied from a desktop;
+/// reconcile never probes `local` here, so they would stay "live" forever
+/// and every click on one would hit the refusal. Ghosting (not deleting)
+/// keeps them dismissable and lets the routine prune reap them. Returns
+/// how many rows were retired.
+pub fn retire_local_sessions(s: &Store, now: i64) -> Result<usize, IpcError> {
+    let lost = s.mark_host_sessions_lost(
+        crate::service::projects::LOCAL_HOST,
+        LOST_LOCAL_DISABLED,
+        &[],
+        now,
+        0,
+    )?;
+    for row in lost.marked.iter().chain(&lost.reclassified) {
+        if let Err(e) = s.insert_session_event(row.id, "lost", Some(LOST_LOCAL_DISABLED)) {
+            tracing::warn!(
+                session_id = row.id,
+                error = %e.message,
+                "[hub] retire local session: event not recorded"
+            );
+        }
+    }
+    Ok(lost.marked.len() + lost.reclassified.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +369,31 @@ mod tests {
         // tests/local_host_guard.rs), so the default holds here.
         assert!(local_host_enabled());
         assert!(ensure_local_allowed("local").is_ok());
+    }
+
+    #[test]
+    fn retire_local_sessions_ghosts_only_local_rows_once() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("local", None).unwrap();
+        s.insert_host("devbox", Some("devbox")).unwrap();
+        let on_local = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let on_devbox = s
+            .upsert_session("b", "devbox", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        assert_eq!(retire_local_sessions(&s, 100).unwrap(), 1);
+        let row = s.get_session_by_id(on_local).unwrap().unwrap();
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.lost_reason.as_deref(), Some(LOST_LOCAL_DISABLED));
+        assert_eq!(row.lost_at, Some(100));
+        let other = s.get_session_by_id(on_devbox).unwrap().unwrap();
+        assert_ne!(other.status, "ghost", "a real host's rows are untouched");
+
+        // Idempotent: a second start finds nothing left to retire.
+        assert_eq!(retire_local_sessions(&s, 200).unwrap(), 0);
+        let row = s.get_session_by_id(on_local).unwrap().unwrap();
+        assert_eq!(row.lost_at, Some(100));
     }
 }

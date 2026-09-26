@@ -35,6 +35,14 @@
   import { agentContext, type AgentContextInput } from './agent_context';
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
+  import {
+    agentPanelSize,
+    agentPanelMaximized,
+    clampAgentPanelSize,
+    dragResize,
+    AGENT_PANEL_DEFAULT_W,
+    type AgentPanelSize,
+  } from './agent_panel_size';
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
@@ -85,6 +93,62 @@
     e.stopPropagation();
     closeAgent();
   }
+
+  // Resizing. The sheet is pinned bottom-right, so its top-left corner is
+  // the one that moves: dragging it left / up grows the sheet. The grip
+  // also answers the arrow keys (Home returns to the default size), and a
+  // double-click resets it, the way a split-pane divider does.
+  let panelEl: HTMLDivElement | undefined = $state();
+  let drag: { x: number; y: number; start: AgentPanelSize } | null = null;
+  const RESIZE_STEP = 20;
+  // How far the sheet may grow: up to 20px from the window's top and left
+  // edges. Its right and bottom edges do not move.
+  function growRoom(): AgentPanelSize | undefined {
+    if (!panelEl) return undefined;
+    const r = panelEl.getBoundingClientRect();
+    return r.right > 0 && r.bottom > 0 ? { w: r.right - 20, h: r.bottom - 20 } : undefined;
+  }
+  function currentSize(): AgentPanelSize {
+    const r = panelEl?.getBoundingClientRect();
+    return r && r.width > 0 ? { w: r.width, h: r.height } : { w: AGENT_PANEL_DEFAULT_W, h: 0 };
+  }
+  function onGripDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    drag = { x: e.clientX, y: e.clientY, start: currentSize() };
+    agentPanelMaximized.set(false);
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+  }
+  function onGripMove(e: PointerEvent) {
+    if (!drag) return;
+    agentPanelSize.set(dragResize(drag.start, e.clientX - drag.x, e.clientY - drag.y, growRoom()));
+  }
+  function endGrip() {
+    drag = null;
+  }
+  function resetSize() {
+    agentPanelMaximized.set(false);
+    agentPanelSize.set(null);
+  }
+  function onGripKey(e: KeyboardEvent) {
+    const d: Record<string, [number, number]> = {
+      ArrowLeft: [RESIZE_STEP, 0],
+      ArrowRight: [-RESIZE_STEP, 0],
+      ArrowUp: [0, RESIZE_STEP],
+      ArrowDown: [0, -RESIZE_STEP],
+    };
+    if (e.key === 'Home') {
+      e.preventDefault();
+      resetSize();
+      return;
+    }
+    const step = d[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const s = currentSize();
+    agentPanelMaximized.set(false);
+    agentPanelSize.set(clampAgentPanelSize({ w: s.w + step[0], h: s.h + step[1] }, growRoom()));
+  }
 </script>
 
 {#snippet chip()}
@@ -118,14 +182,46 @@
        is that the app stays usable underneath it. -->
   <div
     class="agent-panel"
+    class:sized={$agentPanelSize !== null && !$agentPanelMaximized}
+    class:maximized={$agentPanelMaximized}
+    style:--agent-w={$agentPanelSize ? `${$agentPanelSize.w}px` : undefined}
+    style:--agent-h={$agentPanelSize ? `${$agentPanelSize.h}px` : undefined}
     role="dialog"
     tabindex="-1"
     aria-label="Agent"
     data-testid="agent-panel"
+    bind:this={panelEl}
     onkeydown={onPanelKeydown}
   >
+    <!-- A focusable separator is a widget (it takes the arrow keys), which
+         the a11y rules do not model; the same exception Resizer.svelte is. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div
+      class="grip"
+      data-testid="agent-panel-grip"
+      role="separator"
+      aria-label="Resize the agent"
+      aria-orientation="horizontal"
+      tabindex="0"
+      title="Drag to resize · double-click to reset"
+      onpointerdown={onGripDown}
+      onpointermove={onGripMove}
+      onpointerup={endGrip}
+      onpointercancel={endGrip}
+      onlostpointercapture={endGrip}
+      ondblclick={resetSize}
+      onkeydown={onGripKey}
+    ></div>
     <header class="head">
       <span class="who">Agent</span>
+      <button
+        class="close"
+        data-testid="agent-panel-maximize"
+        aria-label={$agentPanelMaximized ? 'Restore the agent' : 'Maximize the agent'}
+        aria-pressed={$agentPanelMaximized}
+        title={$agentPanelMaximized ? 'Restore' : 'Maximize'}
+        onclick={() => agentPanelMaximized.update((m) => !m)}>{$agentPanelMaximized ? '⤡' : '⤢'}</button
+      >
       <button
         class="close"
         data-testid="agent-panel-close"
@@ -163,8 +259,9 @@
     /* Same slot as the toast column: clear of the status bar AND the FAB.
        Reads the tokens rather than restating the sum, so a change to any
        one of them moves this too (the hardcoded 80px was already 9px off). */
-    bottom: calc(var(--status-h) + var(--fab-size) + var(--layer-gap) * 2);
-    width: 360px;
+    --agent-bottom: calc(var(--status-h) + var(--fab-size) + var(--layer-gap) * 2);
+    bottom: var(--agent-bottom);
+    width: min(360px, calc(100vw - 40px));
     max-height: 60vh;
     display: flex;
     flex-direction: column;
@@ -177,6 +274,42 @@
     box-shadow: 0 4px 20px rgb(0 0 0 / 35%);
     z-index: 39;
   }
+  /* A size the person chose (drag / arrow keys), capped by the window so a
+     size saved on a large screen never pushes the sheet off a small one. */
+  .agent-panel.sized {
+    width: min(var(--agent-w), calc(100vw - 40px));
+    height: min(var(--agent-h), calc(100vh - var(--agent-bottom) - 20px));
+    max-height: none;
+  }
+  .agent-panel.maximized {
+    width: calc(100vw - 40px);
+    height: calc(100vh - var(--agent-bottom) - 20px);
+    max-height: none;
+  }
+  .grip {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
+    border-top-left-radius: 8px;
+    /* Two short diagonal strokes: the corner reads as a handle. */
+    background: linear-gradient(
+      135deg,
+      transparent 0 30%,
+      var(--fg-muted) 30% 38%,
+      transparent 38% 52%,
+      var(--fg-muted) 52% 60%,
+      transparent 60%
+    );
+    opacity: 0.45;
+    touch-action: none;
+  }
+  .grip:hover,
+  .grip:focus-visible {
+    opacity: 1;
+  }
   .head {
     display: flex;
     align-items: center;
@@ -184,6 +317,7 @@
     gap: 0.5rem;
   }
   .who {
+    margin-right: auto;
     color: var(--fg-muted);
     font-size: 0.75rem;
     text-transform: uppercase;

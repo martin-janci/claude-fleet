@@ -100,16 +100,27 @@ fn payload_transcript_path<'p>(
 
 /// Store the hook's transcript path when it validates: on the row (while the
 /// id is still its current conversation) and on that conversation's row.
+/// Best-effort; `Err` only when a failure took the hook's transaction with
+/// it ([`Store::ensure_in_tx`]).
 fn remember_transcript_path(
     s: &Store,
     row_id: i64,
     payload: &HookPayload,
     claude_session_id: &str,
-) {
+) -> Result<(), IpcError> {
     if let Some(p) = payload_transcript_path(payload, claude_session_id) {
-        let _ = s.set_transcript_path_for_row(row_id, claude_session_id, p);
-        let _ = s.set_conversation_transcript_path(row_id, claude_session_id, p);
+        if s.set_transcript_path_for_row(row_id, claude_session_id, p)
+            .is_err()
+        {
+            s.ensure_in_tx()?;
+        }
+        if s.set_conversation_transcript_path(row_id, claude_session_id, p)
+            .is_err()
+        {
+            s.ensure_in_tx()?;
+        }
     }
+    Ok(())
 }
 
 /// A short identifier-like value from a hook body (`reason`, `trigger`,
@@ -223,6 +234,9 @@ fn resolve_hook_row(
             _ => true,
         })
         .collect();
+    // `row_cwd` swallows its reads: one SQLite answered by rolling the
+    // hook's transaction back would read as "cwd unknown" and match.
+    s.ensure_in_tx()?;
     Ok(if matching.len() == 1 {
         matching
             .into_iter()
@@ -695,7 +709,8 @@ fn prompt_rebind_source(s: &Store, row: &SessionRow) -> Result<StartSource, IpcE
 /// worktree row belongs to the same host, else (local rows only) its
 /// project's base path. A remote row's project base path is the LOCAL
 /// checkout, which says nothing about the remote cwd, so it counts as
-/// unknown.
+/// unknown. Its reads are best-effort (a failure is "unknown" too), so a
+/// caller inside a transaction checks [`Store::ensure_in_tx`] after it.
 fn row_cwd(s: &Store, row: &SessionRow) -> Option<String> {
     let wt = row
         .worktree_id
@@ -783,7 +798,7 @@ fn resolve_and_rebind(
         Some(id),
         "conversation_started",
         Some(source.as_str()),
-    );
+    )?;
     Ok(Some((rebound, Binding::Rebound)))
 }
 
@@ -810,52 +825,60 @@ fn apply_session_start_hook(
 ) -> Result<(), IpcError> {
     let source = StartSource::from_hook(payload.source.as_deref().unwrap_or(""));
     let s = lock(store)?;
-    let Some((row, binding)) = resolve_and_rebind(&s, payload, ctx, source)? else {
-        return Ok(());
-    };
-    let id = payload.session_id.as_deref().unwrap_or_default();
-    if source == StartSource::Compact {
-        if s.conversation_record_compaction(row.id, id)? {
+    // Task 3: every store write below (including `resolve_and_rebind`'s own
+    // rebind) runs in one transaction instead of one commit per write.
+    // Nothing here is SSH/network/spawn work, so the whole body belongs
+    // inside `atomically`.
+    s.atomically(|s| {
+        let Some((row, binding)) = resolve_and_rebind(s, payload, ctx, source)? else {
+            return Ok(());
+        };
+        let id = payload.session_id.as_deref().unwrap_or_default();
+        if source == StartSource::Compact {
+            if s.conversation_record_compaction(row.id, id)? {
+                best_effort_event_for(
+                    s,
+                    row.id,
+                    Some(id),
+                    "compact_done",
+                    compact_trigger(payload),
+                )?;
+            }
+            return Ok(());
+        }
+        if binding == Binding::Current {
+            // A turn already began on this conversation (its
+            // UserPromptSubmit won the race and rebound the row): turns and
+            // first_prompt are written only by the conversation's own
+            // hooks, never at a genuine start, so either one proves this
+            // SessionStart is late.
+            let turn_started = s
+                .get_conversation(row.id, id)?
+                .is_some_and(|c| c.turns > 0 || c.first_prompt.is_some());
+            s.rebind_conversation_opts(
+                row.id,
+                id,
+                source,
+                payload_transcript_path(payload, id),
+                hook_token(payload.model.as_deref()),
+                turn_started,
+            )?;
             best_effort_event_for(
-                &s,
+                s,
                 row.id,
                 Some(id),
-                "compact_done",
-                compact_trigger(payload),
-            );
+                "conversation_started",
+                Some(source.as_str()),
+            )?;
         }
-        return Ok(());
-    }
-    if binding == Binding::Current {
-        // A turn already began on this conversation (its UserPromptSubmit
-        // won the race and rebound the row): turns and first_prompt are
-        // written only by the conversation's own hooks, never at a genuine
-        // start, so either one proves this SessionStart is late.
-        let turn_started = s
-            .get_conversation(row.id, id)?
-            .is_some_and(|c| c.turns > 0 || c.first_prompt.is_some());
-        s.rebind_conversation_opts(
-            row.id,
-            id,
-            source,
-            payload_transcript_path(payload, id),
-            hook_token(payload.model.as_deref()),
-            turn_started,
-        )?;
-        best_effort_event_for(
-            &s,
-            row.id,
-            Some(id),
-            "conversation_started",
-            Some(source.as_str()),
-        );
-    }
-    // A new conversation is a window boundary (M4.3): event suggestions of
-    // the last one decay unless seen again.
-    if let Err(e) = crate::service::work::detect::resolve_session(&s, row.id) {
-        tracing::debug!(error = %e.message, "[work] boundary resolve failed");
-    }
-    Ok(())
+        // A new conversation is a window boundary (M4.3): event suggestions
+        // of the last one decay unless seen again.
+        if let Err(e) = crate::service::work::detect::resolve_session(s, row.id) {
+            tracing::debug!(error = %e.message, "[work] boundary resolve failed");
+            s.ensure_in_tx()?;
+        }
+        Ok(())
+    })
 }
 
 /// `trigger` of a compaction hook: `manual` | `auto`, anything else dropped.
@@ -875,19 +898,22 @@ fn apply_pre_compact_hook(
     ctx: &HookContext,
 ) -> Result<(), IpcError> {
     let s = lock(store)?;
-    let Some((row, Binding::Current)) = resolve_and_rebind(&s, payload, ctx, StartSource::Unknown)?
-    else {
-        return Ok(());
-    };
-    s.set_current_activity(row.id, Some("compacting"))?;
-    best_effort_event_for(
-        &s,
-        row.id,
-        payload.session_id.as_deref(),
-        "compact_started",
-        compact_trigger(payload),
-    );
-    Ok(())
+    s.atomically(|s| {
+        let Some((row, Binding::Current)) =
+            resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+        else {
+            return Ok(());
+        };
+        s.set_current_activity(row.id, Some("compacting"))?;
+        best_effort_event_for(
+            s,
+            row.id,
+            payload.session_id.as_deref(),
+            "compact_started",
+            compact_trigger(payload),
+        )?;
+        Ok(())
+    })
 }
 
 /// The PostCompact hook: counts the compaction on the conversation it names
@@ -903,24 +929,33 @@ fn apply_post_compact_hook(
     ctx: &HookContext,
 ) -> Result<(), IpcError> {
     let s = lock(store)?;
-    let Some((row, binding)) = resolve_and_rebind(&s, payload, ctx, StartSource::Unknown)? else {
-        return Ok(());
-    };
     let id = payload.session_id.as_deref().unwrap_or_default();
-    if binding == Binding::Current && row.current_activity.as_deref() == Some("compacting") {
-        s.set_current_activity(row.id, None)?;
-    }
-    if s.conversation_record_compaction(row.id, id)? {
-        best_effort_event_for(
-            &s,
-            row.id,
-            Some(id),
-            "compact_done",
-            compact_trigger(payload),
-        );
-    }
+    // Task 3: the store writes are one transaction; the transcript-tail
+    // harvest is SSH/background work, so it stays outside — the closure
+    // only hands back whether a row was found (harvest needs its id).
+    let row_id = s.atomically(|s| {
+        let Some((row, binding)) = resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+        else {
+            return Ok(None);
+        };
+        if binding == Binding::Current && row.current_activity.as_deref() == Some("compacting") {
+            s.set_current_activity(row.id, None)?;
+        }
+        if s.conversation_record_compaction(row.id, id)? {
+            best_effort_event_for(
+                s,
+                row.id,
+                Some(id),
+                "compact_done",
+                compact_trigger(payload),
+            )?;
+        }
+        Ok(Some(row.id))
+    })?;
     drop(s);
-    crate::service::work::harvest::spawn_harvest_compact_summary(store, ssh, row.id, id);
+    if let Some(row_id) = row_id {
+        crate::service::work::harvest::spawn_harvest_compact_summary(store, ssh, row_id, id);
+    }
     Ok(())
 }
 
@@ -950,59 +985,77 @@ fn apply_stop_hook(
     };
     // Snapshot whether a safe-kill / open task is in flight BEFORE we update
     // status; the follow-ups (pane capture + SSH) run off the hook handler.
-    let (row_id, safe_kill_in_flight, task_worker) = {
+    // Task 3: every store write below runs in one transaction
+    // (`Store::atomically`) instead of the 8-9 separate commits this hook
+    // used to cost; nothing in the closure is SSH/network/spawn work, so it
+    // all belongs inside.
+    let outcome = {
         let s = lock(store)?;
-        let Some((before, binding)) = resolve_and_rebind(&s, payload, ctx, StartSource::Unknown)?
-        else {
-            return Ok(());
-        };
-        s.conversation_bump_turns(before.id, &session_id)?;
-        if binding != Binding::Current {
-            return Ok(());
-        }
-        let in_flight = before.safe_kill_state.as_deref() == Some("requested");
-        remember_transcript_path(&s, before.id, payload, &session_id);
-        let after = s.record_stop_hook_for_row(before.id)?;
-        // An agent-written handover's marker block (M9.3) is kept once, as
-        // the note: never in the turn's detail or its progress row.
-        let detail: Option<String> = payload
-            .last_assistant_message
-            .as_deref()
-            .map(|m| {
-                crate::service::work::agent_handover::strip_markers(m)
-                    .chars()
-                    .take(200)
-                    .collect::<String>()
-            })
-            .filter(|d| !d.is_empty());
-        best_effort_event_for(
-            &s,
-            before.id,
-            Some(&session_id),
-            "turn_done",
-            detail.as_deref(),
-        );
-        // Work memory (M2.1): the same detail, kept past the session.
-        if let Some(d) = detail.as_deref() {
-            if let Err(e) = s.journal_for_session(before.id, &session_id, "progress", "hook", d) {
-                tracing::debug!(error = %e.message, "[journal] progress not stored");
+        s.atomically(|s| {
+            let Some((before, binding)) =
+                resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+            else {
+                return Ok(None);
+            };
+            s.conversation_bump_turns(before.id, &session_id)?;
+            if binding != Binding::Current {
+                return Ok(None);
             }
-        }
-        // An agent-written handover asked for (work graph M9.3): settled by
-        // this turn's reply, markers and all.
-        if let Err(e) = crate::service::work::agent_handover::on_stop(
-            &s,
-            before.id,
-            &session_id,
-            payload.last_assistant_message.as_deref(),
-        ) {
-            tracing::debug!(error = %e.message, "[work] handover not settled");
-        }
-        let has_open_tasks = s
-            .open_tasks_for_worker(before.id)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        (before.id, in_flight, after.filter(|_| has_open_tasks))
+            let in_flight = before.safe_kill_state.as_deref() == Some("requested");
+            remember_transcript_path(s, before.id, payload, &session_id)?;
+            let after = s.record_stop_hook_for_row(before.id)?;
+            // An agent-written handover's marker block (M9.3) is kept once,
+            // as the note: never in the turn's detail or its progress row.
+            let detail: Option<String> = payload
+                .last_assistant_message
+                .as_deref()
+                .map(|m| {
+                    crate::service::work::agent_handover::strip_markers(m)
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                })
+                .filter(|d| !d.is_empty());
+            best_effort_event_for(
+                s,
+                before.id,
+                Some(&session_id),
+                "turn_done",
+                detail.as_deref(),
+            )?;
+            // Work memory (M2.1): the same detail, kept past the session.
+            if let Some(d) = detail.as_deref() {
+                if let Err(e) = s.journal_for_session(before.id, &session_id, "progress", "hook", d)
+                {
+                    tracing::debug!(error = %e.message, "[journal] progress not stored");
+                    s.ensure_in_tx()?;
+                }
+            }
+            // An agent-written handover asked for (work graph M9.3): settled
+            // by this turn's reply, markers and all.
+            if let Err(e) = crate::service::work::agent_handover::on_stop(
+                s,
+                before.id,
+                &session_id,
+                payload.last_assistant_message.as_deref(),
+            ) {
+                tracing::debug!(error = %e.message, "[work] handover not settled");
+                s.ensure_in_tx()?;
+            }
+            let has_open_tasks = s
+                .open_tasks_for_worker(before.id)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            Ok(Some((
+                before.id,
+                in_flight,
+                after.filter(|_| has_open_tasks),
+            )))
+        })?
+    };
+    let (row_id, safe_kill_in_flight, task_worker) = match outcome {
+        Some(t) => t,
+        None => return Ok(()),
     };
     if safe_kill_in_flight {
         let store = Arc::clone(store);
@@ -1041,35 +1094,41 @@ fn apply_prompt_submit_hook(
         return Ok(());
     };
     let s = lock(store)?;
-    let Some((row, binding)) = resolve_and_rebind(&s, payload, ctx, StartSource::Unknown)? else {
-        return Ok(());
-    };
-    match binding {
-        Binding::Stale => return Ok(()),
-        Binding::Current => remember_transcript_path(&s, row.id, payload, session_id),
-        Binding::Rebound => {}
-    }
-    // Fleet's own prompts (a peer's wake nudge, the safe-kill instructions,
-    // an inbox delivery, a typed start prompt) come back through this hook
-    // like a person's; the same guard detection uses tells them apart, so
-    // they never count as a touch (work graph M7).
-    let touch = payload.prompt.as_deref().is_none_or(|p| {
-        crate::service::work::detect::loop_guard(p, row.last_prompt.as_deref(), &[]).is_none()
-    });
-    s.record_prompt_submit_hook_for_row_with(row.id, touch)?;
-    if let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-        let first = s
-            .get_conversation(row.id, session_id)?
-            .is_none_or(|c| c.first_prompt.is_none());
-        s.conversation_set_first_prompt(row.id, session_id, p)?;
-        // Work detection (M4.2): references in the full prompt become
-        // suggestions with evidence; the prompt itself is never stored.
-        // Best-effort: a detection failure never fails the hook.
-        if let Err(e) = crate::service::work::detect::on_prompt(&s, row.id, p, first) {
-            tracing::debug!(error = %e.message, "[work] prompt detection failed");
+    // Task 3: one transaction for the ~5 separate commits this hook used to
+    // cost — no SSH/network work happens here.
+    s.atomically(|s| {
+        let Some((row, binding)) = resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+        else {
+            return Ok(());
+        };
+        match binding {
+            Binding::Stale => return Ok(()),
+            Binding::Current => remember_transcript_path(s, row.id, payload, session_id)?,
+            Binding::Rebound => {}
         }
-    }
-    Ok(())
+        // Fleet's own prompts (a peer's wake nudge, the safe-kill
+        // instructions, an inbox delivery, a typed start prompt) come back
+        // through this hook like a person's; the same guard detection uses
+        // tells them apart, so they never count as a touch (work graph M7).
+        let touch = payload.prompt.as_deref().is_none_or(|p| {
+            crate::service::work::detect::loop_guard(p, row.last_prompt.as_deref(), &[]).is_none()
+        });
+        s.record_prompt_submit_hook_for_row_with(row.id, touch)?;
+        if let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+            let first = s
+                .get_conversation(row.id, session_id)?
+                .is_none_or(|c| c.first_prompt.is_none());
+            s.conversation_set_first_prompt(row.id, session_id, p)?;
+            // Work detection (M4.2): references in the full prompt become
+            // suggestions with evidence; the prompt itself is never stored.
+            // Best-effort: a detection failure never fails the hook.
+            if let Err(e) = crate::service::work::detect::on_prompt(s, row.id, p, first) {
+                tracing::debug!(error = %e.message, "[work] prompt detection failed");
+                s.ensure_in_tx()?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// The SessionEnd hook: a conversation ended. The conversation is closed
@@ -1094,34 +1153,38 @@ fn apply_session_end_hook(
     };
     let reason = hook_token(Some(reason)).unwrap_or("other");
     let s = lock(store)?;
-    let Some((row, binding)) = resolve_and_rebind(&s, payload, ctx, StartSource::Unknown)? else {
-        return Ok(());
-    };
-    s.close_conversation(row.id, session_id, reason)?;
-    if binding != Binding::Current {
-        best_effort_event_for(
-            &s,
-            row.id,
-            Some(session_id),
-            "conversation_ended",
-            Some(reason),
-        );
-        return Ok(());
-    }
-    remember_transcript_path(&s, row.id, payload, session_id);
-    if matches!(reason, "clear" | "resume") {
-        s.mark_awaiting_rebind(row.id)?;
-        best_effort_event_for(
-            &s,
-            row.id,
-            Some(session_id),
-            "conversation_ended",
-            Some(reason),
-        );
-    } else if let Some(row) = s.record_session_end_hook_for_row(row.id)? {
-        best_effort_event_for(&s, row.id, Some(session_id), "session_end", Some(reason));
-    }
-    Ok(())
+    // Task 3: one transaction — pure store logic, no SSH/spawn.
+    s.atomically(|s| {
+        let Some((row, binding)) = resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+        else {
+            return Ok(());
+        };
+        s.close_conversation(row.id, session_id, reason)?;
+        if binding != Binding::Current {
+            best_effort_event_for(
+                s,
+                row.id,
+                Some(session_id),
+                "conversation_ended",
+                Some(reason),
+            )?;
+            return Ok(());
+        }
+        remember_transcript_path(s, row.id, payload, session_id)?;
+        if matches!(reason, "clear" | "resume") {
+            s.mark_awaiting_rebind(row.id)?;
+            best_effort_event_for(
+                s,
+                row.id,
+                Some(session_id),
+                "conversation_ended",
+                Some(reason),
+            )?;
+        } else if let Some(row) = s.record_session_end_hook_for_row(row.id)? {
+            best_effort_event_for(s, row.id, Some(session_id), "session_end", Some(reason))?;
+        }
+        Ok(())
+    })
 }
 
 /// The StopFailure hook: the turn ended in an API error (rate limit, auth,
@@ -1138,26 +1201,33 @@ fn apply_stop_failure_hook(
     let Some(session_id) = &payload.session_id else {
         return Ok(());
     };
+    // Task 3: one transaction; the context refresh is SSH/network work and
+    // stays outside, spawned after the transaction commits.
     let row_id = {
         let s = lock(store)?;
-        let Some((row, binding)) = resolve_and_rebind(&s, payload, ctx, StartSource::Unknown)?
-        else {
-            return Ok(());
-        };
-        s.conversation_bump_turns(row.id, session_id)?;
-        if binding != Binding::Current {
-            return Ok(());
-        }
-        remember_transcript_path(&s, row.id, payload, session_id);
-        if let Some(row) = s.record_stop_failure_hook_for_row(row.id)? {
-            let error = payload.error.as_deref().unwrap_or("unknown");
-            let detail = match payload.error_details.as_deref() {
-                Some(d) if !d.trim().is_empty() => format!("{error}: {}", d.trim()),
-                _ => error.to_string(),
+        s.atomically(|s| {
+            let Some((row, binding)) = resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+            else {
+                return Ok(None);
             };
-            best_effort_event_for(&s, row.id, Some(session_id), "stop_failure", Some(&detail));
-        }
-        row.id
+            s.conversation_bump_turns(row.id, session_id)?;
+            if binding != Binding::Current {
+                return Ok(None);
+            }
+            remember_transcript_path(s, row.id, payload, session_id)?;
+            if let Some(row) = s.record_stop_failure_hook_for_row(row.id)? {
+                let error = payload.error.as_deref().unwrap_or("unknown");
+                let detail = match payload.error_details.as_deref() {
+                    Some(d) if !d.trim().is_empty() => format!("{error}: {}", d.trim()),
+                    _ => error.to_string(),
+                };
+                best_effort_event_for(s, row.id, Some(session_id), "stop_failure", Some(&detail))?;
+            }
+            Ok(Some(row.id))
+        })?
+    };
+    let Some(row_id) = row_id else {
+        return Ok(());
     };
     spawn_refresh_context(store, ssh, row_id);
     Ok(())
@@ -1201,29 +1271,37 @@ fn apply_notification_hook(
         return Ok(());
     };
     let s = lock(store)?;
-    let Some((row, Binding::Current)) = resolve_and_rebind(&s, payload, ctx, StartSource::Unknown)?
-    else {
-        return Ok(());
-    };
-    remember_transcript_path(&s, row.id, payload, session_id);
-    if let Some(row) = s.record_notification_hook_for_row(row.id, status, stuck)? {
-        best_effort_event_for(&s, row.id, Some(session_id), "notification", Some(kind));
-    }
-    Ok(())
+    // Task 3: one transaction — pure store logic, no SSH/spawn.
+    s.atomically(|s| {
+        let Some((row, Binding::Current)) =
+            resolve_and_rebind(s, payload, ctx, StartSource::Unknown)?
+        else {
+            return Ok(());
+        };
+        remember_transcript_path(s, row.id, payload, session_id)?;
+        if let Some(row) = s.record_notification_hook_for_row(row.id, status, stuck)? {
+            best_effort_event_for(s, row.id, Some(session_id), "notification", Some(kind))?;
+        }
+        Ok(())
+    })
 }
 
-/// Timeline writes never fail the hook that produced them. Hook events carry
-/// the conversation they belong to.
+/// Timeline writes never fail the hook that produced them — unless the
+/// failure took the hook's transaction with it ([`Store::ensure_in_tx`]):
+/// the writes after it would then commit one by one. Hook events carry the
+/// conversation they belong to.
 fn best_effort_event_for(
     s: &Store,
     session_id: i64,
     claude_id: Option<&str>,
     kind: &str,
     detail: Option<&str>,
-) {
+) -> Result<(), IpcError> {
     if let Err(e) = s.insert_session_event_for(session_id, claude_id, kind, detail) {
         tracing::warn!(session_id, kind, error = %e, "[hook] session_event insert failed");
+        s.ensure_in_tx()?;
     }
+    Ok(())
 }
 
 /// Validate a `worktree_path` from a hook body before it becomes a row:
@@ -2340,6 +2418,144 @@ mod tests {
             .unwrap();
     }
 
+    /// Task 3: `remember_transcript_path`'s `sessions`-table write
+    /// (`set_transcript_path_for_row`) must skip a repeat of the same path.
+    /// Replaying the exact same Stop hook payload writes the row twice: the
+    /// first time the path is new (a real UPDATE), the second time it is
+    /// unchanged (should now be skipped). `record_stop_hook_for_row`'s own
+    /// write (turn_seq etc.) is a REAL change every time — turn counters may
+    /// legitimately bump — so the first replay must cost one MORE
+    /// `row_version` bump than the second: the transcript-path write firing
+    /// once (first call) but not twice (second call, no-op).
+    #[test]
+    fn stop_hook_replay_skips_noop_transcript_path_write() {
+        let store = make_store();
+        let id = hooked(&store);
+        let mut p = make_payload("Stop", "uuid-1");
+        p.transcript_path = Some("/home/u/.claude/projects/proj/uuid-1.jsonl".into());
+
+        let v0 = status_of(&store, id).row_version;
+        apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
+        let v1 = status_of(&store, id).row_version;
+        apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
+        let v2 = status_of(&store, id).row_version;
+
+        let first_delta = v1 - v0;
+        let second_delta = v2 - v1;
+        assert!(
+            second_delta < first_delta,
+            "replaying the same transcript_path must not bump row_version \
+             again: first={first_delta} second={second_delta} (v0={v0} v1={v1} v2={v2})"
+        );
+        // The path itself is still there — skipping the write must not lose it.
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .session_transcript_path(id)
+                .unwrap()
+                .as_deref(),
+            Some("/home/u/.claude/projects/proj/uuid-1.jsonl")
+        );
+    }
+
+    /// Task 3: the Stop hook's store writes run in one transaction
+    /// (`Store::atomically`). Force the LAST propagating write
+    /// (`record_stop_hook_for_row`'s `sessions` UPDATE, the only later write
+    /// besides the transcript path that is not best-effort/swallowed) to
+    /// fail with a genuine SQLite constraint violation (a TEMP trigger
+    /// raising `RAISE(ABORT, ...)`, installed through the `conn_ref()` seam
+    /// the same way `seed_pending_input` pokes the DB directly for test
+    /// setup) and check that the EARLIER write in the same call
+    /// (`conversation_bump_turns`) rolled back with it.
+    #[test]
+    fn stop_hook_last_write_failure_rolls_back_earlier_writes() {
+        let store = make_store();
+        let id = hooked(&store);
+        {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute_batch(&format!(
+                    "CREATE TEMP TRIGGER force_stop_hook_failure \
+                     BEFORE UPDATE ON sessions \
+                     WHEN NEW.id = {id} AND NEW.turn_seq > OLD.turn_seq \
+                     BEGIN SELECT RAISE(ABORT, 'forced failure for rollback test'); END;"
+                ))
+                .unwrap();
+        }
+        let mut p = make_payload("Stop", "uuid-1");
+        p.transcript_path = Some("/home/u/.claude/projects/proj/uuid-1.jsonl".into());
+
+        let result = apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None));
+        assert!(
+            result.is_err(),
+            "the forced constraint violation must propagate"
+        );
+
+        let s = store.lock().unwrap();
+        let turns = s.get_conversation(id, "uuid-1").unwrap().unwrap().turns;
+        assert_eq!(
+            turns, 0,
+            "conversation_bump_turns (an earlier write in the same \
+             transaction) must roll back with the failed write"
+        );
+        assert_eq!(
+            s.session_transcript_path(id).unwrap(),
+            None,
+            "the transcript-path write (also earlier in the transaction) \
+             must roll back too"
+        );
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.turn_seq, 0, "the failed write itself must not apply");
+    }
+
+    /// I1: SQLite answered a best-effort write (the `turn_done` timeline
+    /// row) by rolling the WHOLE transaction back — `RAISE(ROLLBACK)` stands
+    /// in for SQLITE_FULL / IOERR. The hook swallows that error, but the
+    /// writes after it (the progress journal row) must not then commit on
+    /// their own in autocommit: the hook fails and nothing is announced.
+    #[test]
+    fn stop_hook_lost_transaction_writes_no_tail_and_announces_nothing() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let store = Arc::new(Mutex::new(
+            Store::open_with_bus_in_memory(bus.clone()).unwrap(),
+        ));
+        let id = hooked(&store);
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch(
+                "CREATE TEMP TRIGGER lose_stop_tx BEFORE INSERT ON session_events \
+                 WHEN NEW.kind = 'turn_done' \
+                 BEGIN SELECT RAISE(ROLLBACK, 'injected whole-transaction rollback'); END;",
+            )
+            .unwrap();
+        bus.take();
+        let mut p = make_payload("Stop", "uuid-1");
+        p.last_assistant_message = Some("step one done".into());
+
+        let result = apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None));
+
+        let s = store.lock().unwrap();
+        let progress: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM work_journal WHERE kind = 'progress'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            progress, 0,
+            "a write after the lost transaction must not autocommit"
+        );
+        assert!(result.is_err(), "the lost transaction fails the hook");
+        assert!(s.conn_ref().is_autocommit(), "no transaction is left open");
+        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().turn_seq, 0);
+        assert!(bus.take().is_empty(), "nothing rolled back is announced");
+    }
+
     #[test]
     fn session_end_marks_stopped_and_records_the_reason() {
         let store = make_store();
@@ -2676,6 +2892,57 @@ mod tests {
         here.cwd = Some("/home/u/proj".into());
         apply_hook(&store, &make_ssh(), &here, &ctx(&host, None)).unwrap();
         assert_eq!(claude_id(&store, id).as_deref(), Some(NEW));
+    }
+
+    /// Residual I1: `row_cwd` swallows its project read. When SQLite answers
+    /// that read with a whole-transaction rollback (a real `SQLITE_IOERR`),
+    /// the awaiting row's cwd reads as unknown and would match: the rebind,
+    /// hook-seen stamp and prompt writes after it must not commit on their
+    /// own in autocommit, and nothing is announced.
+    #[test]
+    fn awaiting_rebind_lost_at_the_cwd_read_writes_nothing() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let store = Arc::new(Mutex::new(
+            Store::open_with_bus_in_memory(bus.clone()).unwrap(),
+        ));
+        let id = pane_session(&store, "s", "%3");
+        {
+            let s = store.lock().unwrap();
+            let pid = s.upsert_project("o", "r", "/home/u/proj").unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET project_id=?1 WHERE id=?2",
+                    rusqlite::params![pid, id],
+                )
+                .unwrap();
+            s.mark_awaiting_rebind(id).unwrap();
+            s.arm_read_ioerr_for_test("projects", "1");
+        }
+        bus.take();
+        let host = host_caller("local");
+        let mut prompt = make_payload("UserPromptSubmit", NEW);
+        prompt.cwd = Some("/home/u/other".into());
+        prompt.prompt = Some("fix it".into());
+
+        let result = apply_hook(&store, &make_ssh(), &prompt, &ctx(&host, None));
+
+        assert_eq!(
+            claude_id(&store, id).as_deref(),
+            Some(OLD),
+            "the rebind after the lost transaction must not autocommit"
+        );
+        let s = store.lock().unwrap();
+        assert!(
+            s.list_conversations(id, 5)
+                .unwrap()
+                .iter()
+                .all(|c| c.claude_session_id != NEW),
+            "no conversation opened"
+        );
+        assert_eq!(s.sessions_awaiting_rebind("local").unwrap().len(), 1);
+        assert!(result.is_err(), "the lost transaction fails the hook");
+        assert!(s.conn_ref().is_autocommit(), "no transaction is left open");
+        assert!(bus.take().is_empty(), "nothing rolled back is announced");
     }
 
     #[test]

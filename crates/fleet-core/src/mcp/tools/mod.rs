@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 mod assets;
 mod fleet;
 mod lifecycle;
+mod list_changed;
 mod messaging;
 mod orchestration;
 mod params;
@@ -52,6 +53,8 @@ mod support;
 mod tests;
 #[cfg(test)]
 mod tests_isolation;
+#[cfg(test)]
+mod tests_read_pool;
 mod views;
 
 // `rmcp::model::*` also exports a `CancelTaskParams`. Name ours explicitly:
@@ -64,11 +67,28 @@ use views::*;
 
 pub use support::tool_deadline;
 
+/// The tools that read only through [`FleetTools::reader`] — the hub's read
+/// pool — and write nothing: their per-host result gate reads there too.
+/// (`list_sessions` with `force` or `fresh_for` still writes: a forced pass,
+/// a read cursor. Its gate then reads the pool after those commits, which a
+/// new read transaction sees.)
+const POOLED_READ_TOOLS: [&str; 6] = [
+    "list_hosts",
+    "whoami",
+    "list_sessions",
+    "list_worktrees",
+    "list_projects",
+    "fleet_health",
+];
+
 /// The MCP server handler. Cloned per session by the streamable-HTTP service;
 /// every clone shares the same backend state via the `Arc`s.
 #[derive(Clone)]
 pub struct FleetTools {
     store: Arc<Mutex<Store>>,
+    /// The hub's read-only connections on the same file (see
+    /// [`FleetTools::reader`]). `None` on the desktop and in tests.
+    read_pool: Option<Arc<crate::store::ReadPool>>,
     ssh: Arc<SshClient>,
     reg: Arc<CancellationRegistry>,
     tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
@@ -81,6 +101,13 @@ pub struct FleetTools {
     /// retried call delivers once. Created once in `new`; every per-MCP-
     /// session clone shares it.
     recent_sends: Arc<std::sync::Mutex<RecentSends>>,
+    /// The tool list each caller is known to hold, for
+    /// `notifications/tools/list_changed`. Created once in `new`; both mounts
+    /// and every per-request clone share it.
+    list_changed: Arc<list_changed::ToolListTracker>,
+    /// True on the SSE mount only: `/mcp/json` answers with the FIRST message
+    /// the handler sends, so a notification there would replace the result.
+    push_list_changed: bool,
     tool_router: ToolRouter<FleetTools>,
 }
 
@@ -246,13 +273,66 @@ impl FleetTools {
     ) -> Self {
         Self {
             store,
+            read_pool: None,
             ssh,
             reg,
             tunnels,
             guards,
             long_polls: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
             recent_sends: Arc::new(std::sync::Mutex::new(RecentSends::default())),
+            list_changed: Arc::default(),
+            push_list_changed: false,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Read the plain listing tools through `pool` instead of the writer
+    /// (the hub). `None` leaves them on the writer.
+    pub fn with_read_pool(mut self, pool: Option<Arc<crate::store::ReadPool>>) -> Self {
+        self.read_pool = pool;
+        self
+    }
+
+    /// Where a tool reads when it has no write of its own to see: a pooled
+    /// read-only connection on the hub — never waiting on a reconcile pass
+    /// or a hook transaction holding the writer — else the writer. A tool
+    /// that writes and then reads in the same call keeps reading through
+    /// `self.store`, so it sees its own write under the same lock order.
+    pub(super) fn reader(&self) -> &Mutex<Store> {
+        crate::store::read_via(self.read_pool.as_deref(), &self.store)
+    }
+
+    /// This handler as mounted with `framing`: only an SSE response can carry
+    /// a notification ahead of the result, so only there is `listChanged`
+    /// advertised and sent.
+    pub(crate) fn for_framing(mut self, framing: super::Framing) -> Self {
+        self.push_list_changed = framing == super::Framing::Sse;
+        self
+    }
+
+    /// Fingerprint of the tool names `caller` may see — the same filter
+    /// `list_tools` applies, over names only so a `tools/call` does not clone
+    /// every schema.
+    fn visible_fingerprint(&self, caller: &Caller) -> u64 {
+        list_changed::fingerprint(
+            self.tool_router
+                .map
+                .keys()
+                .map(|k| k.as_ref())
+                .filter(|name| present::visible_to(caller, name)),
+        )
+    }
+
+    /// Tell `caller` its cached tool list is stale, on this call's own SSE
+    /// stream, ahead of the result — see `list_changed`. A send failure only
+    /// means the client went away; the call itself goes on.
+    async fn notice_list_changed(&self, caller: &Caller, context: &RequestContext<RoleServer>) {
+        if !self.push_list_changed || !list_changed::wants_notification(caller) {
+            return;
+        }
+        let current = self.visible_fingerprint(caller);
+        if self.list_changed.needs_notice(&caller.label(), current) {
+            let _ = context.peer.notify_tool_list_changed().await;
         }
     }
 
@@ -297,6 +377,9 @@ impl ServerHandler for FleetTools {
         let label = caller.label();
         // Audit first so refused calls are on the timeline too.
         persist_audit(&self.store, &tool, request.arguments.as_ref(), &caller);
+        // Before the gates: a call refused for a tool the caller cannot see is
+        // the likeliest sign that its list is stale.
+        self.notice_list_changed(&caller, &context).await;
         if let Err(e) = enforce_mode(&caller, &tool).and_then(|()| enforce_admin(&caller, &tool)) {
             return tool_error_result(e);
         }
@@ -323,7 +406,15 @@ impl ServerHandler for FleetTools {
         // details — a per-host token never receives session rows' work of
         // another org.
         if let (Ok(result), true) = (out.as_mut(), caller.host_alias.is_some()) {
-            self.redact_work_for(&caller, result);
+            // A tool that wrote nothing has no write of its own to see, so
+            // its gate reads the pool too; every other tool's reads the
+            // writer, after its own writes.
+            let orgs = if POOLED_READ_TOOLS.contains(&tool.as_str()) {
+                self.reader()
+            } else {
+                &self.store
+            };
+            self.redact_work_via(orgs, &caller, result);
         }
         out
     }
@@ -343,13 +434,17 @@ impl ServerHandler for FleetTools {
                 next_cursor: None,
             });
         };
-        let tools = self
+        let tools: Vec<Tool> = self
             .tool_router
             .list_all()
             .into_iter()
             .filter(|t| present::visible_to(&caller, &t.name))
             .map(present::present)
             .collect();
+        self.list_changed.listed(
+            &caller.label(),
+            list_changed::fingerprint(tools.iter().map(|t| t.name.as_ref())),
+        );
         Ok(ListToolsResult {
             tools,
             meta: None,
@@ -362,7 +457,13 @@ impl ServerHandler for FleetTools {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let tools = ServerCapabilities::builder().enable_tools();
+        let capabilities = if self.push_list_changed {
+            tools.enable_tool_list_changed().build()
+        } else {
+            tools.build()
+        };
+        ServerInfo::new(capabilities)
             .with_server_info(Implementation::from_build_env())
             // 2025-11-25; rmcp negotiates down for a client that asks for an
             // older known revision.

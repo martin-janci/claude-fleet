@@ -182,6 +182,9 @@ read-only over `fleet-core::net`, the sync tick, `work_admin`, tickets /
 lookup / start — `service/trackers/`, `store/trackers.rs`,
 `store/tracker_items.rs`); read
 `docs/superpowers/2026-09-24-work-graph-roadmap.md` before touching them.
+The user guide is `docs/work-graph.md`: update it with any change a user
+sees, and add every new `work.*` setting to its table
+(`work_settings_are_in_the_user_guide` fails otherwise).
 Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
 Work graph M4 (detection) is landed: one recogniser in Rust and TS over a
 shared fixture (`service/work/recognize.rs`, `src/lib/work_keys.ts`), the

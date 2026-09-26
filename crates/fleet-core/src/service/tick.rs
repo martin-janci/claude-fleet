@@ -104,7 +104,10 @@ pub fn spawn_reconcile_tick(
                 if n > 0 {
                     tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
                 }
-                let _ = service::gc::maybe_sweep(store, ssh).await;
+                // Wave 5 G-hub-latency Task 1: single-flight, off the tick
+                // body — a slow sweep (it does SSH work) must not stretch
+                // the tick past its period. Mirrors `service::usage::spawn_collect`.
+                service::gc::spawn_sweep(store, ssh);
                 // Wave 5 G1: per-session token usage, once per usage.interval_secs,
                 // in its own single-flight task so a slow host never stalls the tick.
                 service::usage::spawn_collect(store, ssh);

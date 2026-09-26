@@ -628,12 +628,106 @@ fn audit_row_falls_back_to_the_controller_session() {
         s.set_controller("local", "ctl").unwrap();
         id
     };
-    persist_audit(&store, "list_hosts", None, &Caller::master());
+    // Must be a MUTATING tool (Task 2: a read-only tool writes no audit row
+    // at all, whatever session it would resolve to) — `whoami` is a
+    // deliberate choice: despite reading nothing itself, its `TOOL_POLICIES`
+    // row is `readonly: false` (it is not in `guard::READONLY_TOOLS`), so it
+    // still exercises the controller-fallback path this test is about.
+    assert!(!guard::is_readonly_tool("whoami"));
+    persist_audit(&store, "whoami", None, &Caller::master());
     let s = store.lock().unwrap();
     let events = s.list_session_events(id, 10).unwrap();
     assert!(events
         .iter()
-        .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("list_hosts by master")));
+        .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("whoami by master")));
+}
+
+/// Task 2: a read-only tool (`guard::READONLY_TOOLS` — the exact set a
+/// `readonly` token may call) writes NO audit row at all, even with a
+/// controller registered. The `audit()` tracing log line still fires for
+/// every call (unchanged, see `support::audit`); what goes away is the
+/// `session_events` INSERT+prune under the store mutex — the desktop's own
+/// conversation poll alone produced ~720 of these an hour.
+#[test]
+fn a_readonly_tool_call_writes_no_audit_row_at_all() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    for tool in ["list_hosts", "list_sessions", "capture_session"] {
+        assert!(
+            guard::is_readonly_tool(tool),
+            "{tool} must be in the readonly set for this test to mean anything"
+        );
+        persist_audit(&store, tool, None, &Caller::master());
+    }
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    assert!(
+        !events.iter().any(|e| e.kind == "mcp_call"),
+        "a read-only tool must write no audit row at all: {events:?}"
+    );
+}
+
+/// A mutating tool call is still audited — unaffected by the read-only skip.
+#[test]
+fn a_mutating_tool_call_is_still_audited() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    assert!(!guard::is_readonly_tool("kill_session"));
+    persist_audit(&store, "kill_session", None, &Caller::master());
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    assert!(events
+        .iter()
+        .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("kill_session by master")));
+}
+
+/// "Audit first so refused calls are on the timeline too" (`call_tool`):
+/// `persist_audit` runs before `enforce_mode`, so a call `enforce_mode` goes
+/// on to refuse is still on the timeline, as long as the tool itself is
+/// mutating — a readonly token can never even reach a mutating tool without
+/// being refused, so this is the realistic "refused but audited" shape.
+#[test]
+fn a_refused_call_to_a_mutating_tool_is_still_audited() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let readonly_caller = host_caller("turanga", TokenMode::Readonly);
+    // `kill_session` is mutating, so a readonly token calling it is refused
+    // by `enforce_mode` a moment after `persist_audit` runs in `call_tool`.
+    assert!(enforce_mode(&readonly_caller, "kill_session").is_err());
+    persist_audit(&store, "kill_session", None, &readonly_caller);
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    assert!(
+        events.iter().any(|e| e.kind == "mcp_call"
+            && e.detail
+                .as_deref()
+                .is_some_and(|d| d.starts_with("kill_session by "))),
+        "a refused call to a mutating tool must still be audited: {events:?}"
+    );
 }
 
 /// The audit row is ONE line, caller label included. `redact_args` already
@@ -664,10 +758,15 @@ fn a_client_name_cannot_forge_a_second_audit_line() {
         }),
         mode: TokenMode::Full,
     };
-    // Both shapes of the detail string: with a summary and without one.
-    persist_audit(&store, "list_hosts", None, &sneaky);
+    // Both shapes of the detail string: with a summary and without one. Both
+    // tool names here must be MUTATING (not in `guard::READONLY_TOOLS`) — a
+    // read-only tool writes no audit row at all (Task 2), and this test is
+    // about the audit row's line-forging defence, not which tools get one.
+    assert!(!guard::is_readonly_tool("whoami"));
+    assert!(!guard::is_readonly_tool("restart_session"));
+    persist_audit(&store, "whoami", None, &sneaky);
     let args = serde_json::json!({ "host_alias": "local" });
-    persist_audit(&store, "list_sessions", args.as_object(), &sneaky);
+    persist_audit(&store, "restart_session", args.as_object(), &sneaky);
     let s = store.lock().unwrap();
     for row in s
         .list_session_events(id, 10)
@@ -3442,6 +3541,9 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
     // description; `set_setting`'s example key now `work.recent_days`),
     // merged over M11.3: measured at 55,635 on 2026-09-26 (+20); plus 100.
+    // Work graph M12.4 (`fleet_health` names its `trackers` roll-up and
+    // the org scope of a per-host token's): measured at 55,804 on
+    // 2026-09-26 (+169); plus 100.
     // `quick_replies` (the composer's shared chip row): one tool that both
     // reads and replaces the fleet's list, so the desktop and the phone stop
     // keeping private copies of the same buttons. A second, read-only tool
@@ -3449,16 +3551,18 @@ fn the_served_definition_budget_stays_bounded() {
     // strings, so the read is this tool with `set` omitted. Written in
     // M11.5's terse style from the start: 825 B over that baseline, measured
     // at 56,560 on 2026-09-26 (55,735 before, after M12.3); plus 100.
-    // `rewind_conversation` (reply actions Task 4): one tool with a `mode`
-    // rather than separate fork/rewind tools, so this stays a single
-    // addition; five fields whose per-field docs
-    // `every_tool_parameter_is_documented` makes mandatory account for most
-    // of the cost. Measured at 57,558 on 2026-09-26 (56,560 before, over
-    // the then-100-byte headroom already); trimming the description to one
-    // sentence was tried first and freed 79 bytes, to 57,479 — not enough
-    // to fit inside the existing headroom. Raised to 57,579 (the trimmed
-    // measurement plus 100).
-    const BUDGET_BYTES: usize = 57_579;
+    // Merged with M12.4 (+169): measured at 56,729 on 2026-09-26; plus 100.
+    // `rewind_conversation` (reply actions): one tool with a `mode` rather
+    // than separate fork/rewind tools, so this is a single addition; five
+    // fields whose per-field docs `every_tool_parameter_is_documented`
+    // makes mandatory account for most of the cost. Trimming the tool
+    // description to one sentence was done first and freed 79 bytes; the
+    // field docs are not slack. RE-MEASURED after merging origin/main,
+    // because the branch's own raise (to 57,579, against a 56,560
+    // baseline) was measured before M12.4 landed and was stale: the
+    // merged surface measures 57,696 on 2026-09-26, i.e. 967 bytes over
+    // M12.4's 56,729. Raised to that measurement plus 100.
+    const BUDGET_BYTES: usize = 57_796;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

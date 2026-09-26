@@ -2254,6 +2254,39 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     expect(get(workFilters)).toEqual(DEFAULT_WORK_FILTERS);
   });
 
+  it('offers the tracker’s own status names (QA Review) as chips beside the categories', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), work: { ...w('PAY-1', 1, 'in_progress'), status_name: 'In Progress' } };
+    const b = { ...sessionFor(1, 'dev-b'), work: { ...w('PAY-2', 2, 'in_progress'), status_name: 'QA Review' } };
+    const c = { ...sessionFor(1, 'dev-c'), work: { ...w('PAY-3', 3, 'todo'), status_name: 'To Do' } };
+    mockBackend(fakeProjects, [a, b, c]);
+    render(Sidebar);
+    await tick();
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    const chips = screen.getAllByTestId('wf-status-name').map((c) => c.textContent);
+    // Workflow order (to do, in progress), then by name.
+    expect(chips).toEqual(['To Do', 'In Progress', 'QA Review']);
+    // "in progress" lumps both together; the name picks the one column.
+    await fireEvent.click(screen.getByText('QA Review'));
+    await tick();
+    expect(names().some((n) => n.includes('dev-b'))).toBe(true);
+    expect(names().some((n) => n.includes('dev-a'))).toBe(false);
+    expect(names().some((n) => n.includes('dev-c'))).toBe(false);
+    expect(get(workFilters).status).toBe('name:QA Review');
+    // A second click on the active chip turns it off.
+    await fireEvent.click(screen.getByText('QA Review'));
+    await tick();
+    expect(names()).toHaveLength(3);
+  });
+
+  it('a stored status name no session is in any more does not empty the tree', async () => {
+    workFilters.set({ ...DEFAULT_WORK_FILTERS, status: 'name:Blocked' });
+    const a = { ...sessionFor(1, 'dev-a'), work: { ...w('PAY-1', 1, 'in_progress'), status_name: 'In Progress' } };
+    mockBackend(fakeProjects, [a]);
+    render(Sidebar);
+    await tick();
+    expect(names()).toHaveLength(1);
+  });
+
   it('mine reads the hub’s mine view and composes with needs-you', async () => {
     const a = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
     const b = { ...sessionFor(1, 'dev-b'), work: w('PAY-2', 2, 'in_progress') };

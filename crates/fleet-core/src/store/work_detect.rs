@@ -177,6 +177,11 @@ impl Store {
     /// Apply the resolver's changes for one session, in one transaction.
     /// Bumps the row and emits `session_updated` when anything changed.
     /// Returns whether it did.
+    ///
+    /// Runs under a SAVEPOINT (Task 3), so it works standalone (autocommit)
+    /// and nested inside `Store::atomically` — `service::work::detect::on_prompt`
+    /// / `resolve_session` reach this from the UserPromptSubmit and
+    /// SessionStart hooks' own transactions.
     pub fn apply_link_changes(
         &self,
         session_id: i64,
@@ -196,179 +201,182 @@ impl Store {
             let Some(i) = item else { return Ok(false) };
             Ok(matches!((self.item_org(i)?, session_org), (Some(a), Some(b)) if a != b))
         };
-        let tx = self.conn.unchecked_transaction()?;
-        let mut created: Vec<(String, i64)> = Vec::new();
-        for c in changes {
-            match c {
-                LinkChange::Create {
-                    target,
-                    state,
-                    source,
-                    strength,
-                    rule,
-                    preselected,
-                    tracker_id,
-                    evidence,
-                } => {
-                    let (item_id, ref_key) = self.detected_target(target, *tracker_id)?;
-                    if crosses(item_id)? {
-                        continue;
-                    }
-                    // One live link per item and participant, however the
-                    // target was spelled: a second one would sit beside a
-                    // decision (R1 / R9) or double a suggestion.
-                    if let Some(item) = item_id {
-                        let dup: bool = self.conn.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
-                               AND ended_at IS NULL AND item_id = ?2)",
-                            rusqlite::params![participant, item],
-                            |r| r.get(0),
-                        )?;
-                        if dup {
+        // `Store::in_savepoint`: one commit standalone, a nested savepoint
+        // inside a hook's or reconcile's transaction.
+        self.in_savepoint("apply_link_changes", |_| -> Result<(), IpcError> {
+            let mut created: Vec<(String, i64)> = Vec::new();
+            for c in changes {
+                match c {
+                    LinkChange::Create {
+                        target,
+                        state,
+                        source,
+                        strength,
+                        rule,
+                        preselected,
+                        tracker_id,
+                        evidence,
+                    } => {
+                        let (item_id, ref_key) = self.detected_target(target, *tracker_id)?;
+                        if crosses(item_id)? {
                             continue;
                         }
+                        // One live link per item and participant, however the
+                        // target was spelled: a second one would sit beside a
+                        // decision (R1 / R9) or double a suggestion.
+                        if let Some(item) = item_id {
+                            let dup: bool = self.conn.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
+                                   AND ended_at IS NULL AND item_id = ?2)",
+                                rusqlite::params![participant, item],
+                                |r| r.get(0),
+                            )?;
+                            if dup {
+                                continue;
+                            }
+                        }
+                        let state = match state {
+                            NewState::Suggested => "suggested",
+                            NewState::Confirmed => "confirmed",
+                        };
+                        let decided = (state == "confirmed").then_some(now);
+                        self.conn.execute(
+                            "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, \
+                               is_primary, created_at, decided_at, claude_session_id, strength, rule, \
+                               evidence, preselected) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            rusqlite::params![
+                                item_id,
+                                ref_key,
+                                participant,
+                                state,
+                                source,
+                                now,
+                                decided,
+                                conversation,
+                                strength.as_str(),
+                                rule,
+                                encode_evidence(&[], evidence),
+                                *preselected as i64
+                            ],
+                        )?;
+                        created.push((target.clone(), self.conn.last_insert_rowid()));
                     }
-                    let state = match state {
-                        NewState::Suggested => "suggested",
-                        NewState::Confirmed => "confirmed",
-                    };
-                    let decided = (state == "confirmed").then_some(now);
-                    self.conn.execute(
-                        "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, \
-                           is_primary, created_at, decided_at, claude_session_id, strength, rule, \
-                           evidence, preselected) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                        rusqlite::params![
-                            item_id,
-                            ref_key,
-                            participant,
-                            state,
-                            source,
-                            now,
-                            decided,
-                            conversation,
-                            strength.as_str(),
-                            rule,
-                            encode_evidence(&[], evidence),
-                            *preselected as i64
-                        ],
-                    )?;
-                    created.push((target.clone(), self.conn.last_insert_rowid()));
-                }
-                LinkChange::End { link_id, reason } => {
-                    self.end_live_link(*link_id, session_id, reason, now)?;
-                }
-                LinkChange::Withdraw { link_id } | LinkChange::Decay { link_id } => {
-                    self.conn.execute(
-                        "DELETE FROM work_links WHERE id = ?1 AND state = 'suggested' \
-                           AND ended_at IS NULL",
-                        rusqlite::params![link_id],
-                    )?;
-                }
-                LinkChange::Promote {
-                    link_id,
-                    rule,
-                    source,
-                    strength,
-                    evidence,
-                } => {
-                    let item: Option<i64> = self
-                        .conn
-                        .query_row(
-                            "SELECT item_id FROM work_links WHERE id = ?1",
+                    LinkChange::End { link_id, reason } => {
+                        self.end_live_link(*link_id, session_id, reason, now)?;
+                    }
+                    LinkChange::Withdraw { link_id } | LinkChange::Decay { link_id } => {
+                        self.conn.execute(
+                            "DELETE FROM work_links WHERE id = ?1 AND state = 'suggested' \
+                               AND ended_at IS NULL",
                             rusqlite::params![link_id],
-                            |r| r.get(0),
-                        )
-                        .optional()?
-                        .flatten();
-                    if crosses(item)? {
-                        continue;
+                        )?;
                     }
-                    let old = self.link_evidence(*link_id)?;
-                    // The link is now the promoting signal's (R7 ends a
-                    // `branch` / `pr` link when that signal moves on).
-                    self.conn.execute(
-                        "UPDATE work_links SET state = 'confirmed', rule = ?2, strength = ?3, \
-                           evidence = ?4, decided_at = ?5, claude_session_id = ?6, \
-                           source = ?7, preselected = 0 \
-                         WHERE id = ?1 AND state = 'suggested' AND ended_at IS NULL",
-                        rusqlite::params![
-                            link_id,
-                            rule,
-                            strength.as_str(),
-                            encode_evidence(&old, evidence),
-                            now,
-                            conversation,
-                            source
-                        ],
-                    )?;
-                }
-                LinkChange::Touch {
-                    link_id,
-                    evidence,
-                    conversation: conv,
-                    strength,
-                    preselected,
-                } => {
-                    let old = self.link_evidence(*link_id)?;
-                    self.conn.execute(
-                        "UPDATE work_links SET evidence = ?2, \
-                           claude_session_id = CASE WHEN state = 'suggested' \
-                             THEN COALESCE(?3, claude_session_id) ELSE claude_session_id END, \
-                           strength = COALESCE(?4, strength), \
-                           preselected = MAX(preselected, ?5) \
-                         WHERE id = ?1 AND ended_at IS NULL",
-                        rusqlite::params![
-                            link_id,
-                            encode_evidence(&old, evidence),
-                            conv,
-                            strength.map(|s| s.as_str()),
-                            *preselected as i64
-                        ],
-                    )?;
-                }
-                LinkChange::Primary(r) => {
-                    let id = match r {
-                        PrimaryRef::Link(id) => Some(*id),
-                        PrimaryRef::Target(t) => {
-                            created.iter().find(|(ct, _)| ct == t).map(|(_, id)| *id)
+                    LinkChange::Promote {
+                        link_id,
+                        rule,
+                        source,
+                        strength,
+                        evidence,
+                    } => {
+                        let item: Option<i64> = self
+                            .conn
+                            .query_row(
+                                "SELECT item_id FROM work_links WHERE id = ?1",
+                                rusqlite::params![link_id],
+                                |r| r.get(0),
+                            )
+                            .optional()?
+                            .flatten();
+                        if crosses(item)? {
+                            continue;
                         }
-                        PrimaryRef::None => None,
-                    };
-                    match (r, id) {
-                        (PrimaryRef::None, _) => {
-                            self.conn.execute(
-                                "UPDATE work_links SET is_primary = 0 \
-                                 WHERE participant_id = ?1 AND ended_at IS NULL",
-                                rusqlite::params![participant],
-                            )?;
+                        let old = self.link_evidence(*link_id)?;
+                        // The link is now the promoting signal's (R7 ends a
+                        // `branch` / `pr` link when that signal moves on).
+                        self.conn.execute(
+                            "UPDATE work_links SET state = 'confirmed', rule = ?2, strength = ?3, \
+                               evidence = ?4, decided_at = ?5, claude_session_id = ?6, \
+                               source = ?7, preselected = 0 \
+                             WHERE id = ?1 AND state = 'suggested' AND ended_at IS NULL",
+                            rusqlite::params![
+                                link_id,
+                                rule,
+                                strength.as_str(),
+                                encode_evidence(&old, evidence),
+                                now,
+                                conversation,
+                                source
+                            ],
+                        )?;
+                    }
+                    LinkChange::Touch {
+                        link_id,
+                        evidence,
+                        conversation: conv,
+                        strength,
+                        preselected,
+                    } => {
+                        let old = self.link_evidence(*link_id)?;
+                        self.conn.execute(
+                            "UPDATE work_links SET evidence = ?2, \
+                               claude_session_id = CASE WHEN state = 'suggested' \
+                                 THEN COALESCE(?3, claude_session_id) ELSE claude_session_id END, \
+                               strength = COALESCE(?4, strength), \
+                               preselected = MAX(preselected, ?5) \
+                             WHERE id = ?1 AND ended_at IS NULL",
+                            rusqlite::params![
+                                link_id,
+                                encode_evidence(&old, evidence),
+                                conv,
+                                strength.map(|s| s.as_str()),
+                                *preselected as i64
+                            ],
+                        )?;
+                    }
+                    LinkChange::Primary(r) => {
+                        let id = match r {
+                            PrimaryRef::Link(id) => Some(*id),
+                            PrimaryRef::Target(t) => {
+                                created.iter().find(|(ct, _)| ct == t).map(|(_, id)| *id)
+                            }
+                            PrimaryRef::None => None,
+                        };
+                        match (r, id) {
+                            (PrimaryRef::None, _) => {
+                                self.conn.execute(
+                                    "UPDATE work_links SET is_primary = 0 \
+                                     WHERE participant_id = ?1 AND ended_at IS NULL",
+                                    rusqlite::params![participant],
+                                )?;
+                            }
+                            // One guarded statement: the old primary is cleared
+                            // only when the new one is a live confirmed link of
+                            // this participant. A Promote skipped above (cross-
+                            // org) left it suggested, so nothing moves.
+                            (_, Some(id)) => {
+                                self.conn.execute(
+                                    "UPDATE work_links SET is_primary = (id = ?2) \
+                                     WHERE participant_id = ?1 AND ended_at IS NULL \
+                                       AND EXISTS(SELECT 1 FROM work_links n WHERE n.id = ?2 \
+                                           AND n.participant_id = ?1 AND n.state = 'confirmed' \
+                                           AND n.ended_at IS NULL)",
+                                    rusqlite::params![participant, id],
+                                )?;
+                            }
+                            // The target's Create was skipped (cross-org): the
+                            // session keeps the primary it has.
+                            (_, None) => {}
                         }
-                        // One guarded statement: the old primary is cleared
-                        // only when the new one is a live confirmed link of
-                        // this participant. A Promote skipped above (cross-
-                        // org) left it suggested, so nothing moves.
-                        (_, Some(id)) => {
-                            self.conn.execute(
-                                "UPDATE work_links SET is_primary = (id = ?2) \
-                                 WHERE participant_id = ?1 AND ended_at IS NULL \
-                                   AND EXISTS(SELECT 1 FROM work_links n WHERE n.id = ?2 \
-                                       AND n.participant_id = ?1 AND n.state = 'confirmed' \
-                                       AND n.ended_at IS NULL)",
-                                rusqlite::params![participant, id],
-                            )?;
-                        }
-                        // The target's Create was skipped (cross-org): the
-                        // session keeps the primary it has.
-                        (_, None) => {}
                     }
                 }
             }
-        }
-        self.conn.execute(
-            "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
-            rusqlite::params![session_id],
-        )?;
-        tx.commit()?;
+            self.conn.execute(
+                "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
+                rusqlite::params![session_id],
+            )?;
+            Ok(())
+        })?;
         self.emit_session(session_id)?;
         Ok(true)
     }
@@ -555,6 +563,30 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+
+    /// The detection backlog (work graph M12.4): live suggestions a person
+    /// has not decided that were made before `before` (unix seconds), on a
+    /// live session — on `host`'s sessions only when one is given. A weak
+    /// suggestion beside a confirmed primary is not counted: the session
+    /// row's `work_suggested` hides it too, so nobody is asked about it.
+    /// Driven from `sessions`, then each session's participant and its live
+    /// links, all by index.
+    pub fn detection_backlog(&self, before: i64, host: Option<&str>) -> Result<u32, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions s \
+             JOIN participants p ON p.session_id = s.id AND p.retired_at IS NULL \
+             JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
+             WHERE l.state = 'suggested' AND l.created_at < ?1 \
+               AND (?2 IS NULL OR s.host_alias = ?2) \
+               AND (l.strength IS NOT 'weak' OR NOT EXISTS \
+                    (SELECT 1 FROM work_links c \
+                      WHERE c.participant_id = p.id AND c.ended_at IS NULL \
+                        AND c.is_primary = 1 AND c.state = 'confirmed'))",
+            rusqlite::params![before, host],
+            |r| r.get(0),
+        )?;
+        Ok(u32::try_from(n).unwrap_or(u32::MAX))
+    }
 }
 
 /// `owner/repo` of a GitHub PR URL, lower case.
@@ -573,4 +605,114 @@ fn encode_evidence(old: &[serde_json::Value], new: &[Evidence]) -> String {
     all.extend(new.iter().filter_map(|e| serde_json::to_value(e).ok()));
     let skip = all.len().saturating_sub(EVIDENCE_MAX);
     serde_json::to_string(&all[skip..]).unwrap_or_else(|_| "[]".into())
+}
+
+#[cfg(test)]
+impl Store {
+    /// Test-only: turn a link into `state`, made at `created_at`, not primary.
+    pub(crate) fn set_work_link_state_for_test(
+        &self,
+        id: i64,
+        state: &str,
+        created_at: i64,
+    ) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE work_links SET state = ?2, is_primary = 0, created_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, state, created_at],
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::WorkTarget;
+
+    const DAY: i64 = 86_400;
+
+    /// A live link of a new session on `host`, turned into a suggestion made
+    /// at `at` of `strength`. Returns (session, link).
+    fn suggestion(
+        s: &Store,
+        name: &str,
+        host: &str,
+        key: &str,
+        at: i64,
+        strength: &str,
+    ) -> (i64, i64) {
+        let sid = s
+            .upsert_session(name, host, None, None, 1, 1, "running", None)
+            .unwrap();
+        let l = s
+            .link_session_work(sid, WorkTarget::Key(key), "manual")
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE work_links SET state = 'suggested', is_primary = 0, \
+                 created_at = ?2, strength = ?3 WHERE id = ?1",
+                rusqlite::params![l.id, at, strength],
+            )
+            .unwrap();
+        (sid, l.id)
+    }
+
+    #[test]
+    fn the_detection_backlog_counts_old_undecided_suggestions_on_live_sessions() {
+        let s = Store::open_in_memory().unwrap();
+        for h in ["h1", "h2"] {
+            s.upsert_host(h).unwrap();
+        }
+        let now = 100 * DAY;
+        let cutoff = now - 7 * DAY;
+        // Counted: old, strong, on h1 and h2.
+        suggestion(&s, "a", "h1", "ABC-1", now - 30 * DAY, "strong");
+        suggestion(&s, "b", "h2", "ABC-2", now - 8 * DAY, "weak");
+        // Not counted: too recent.
+        suggestion(&s, "c", "h1", "ABC-3", now - DAY, "strong");
+        // Not counted: decided (confirmed back), ended, on a retired session.
+        let (_, decided) = suggestion(&s, "d", "h1", "ABC-4", now - 30 * DAY, "strong");
+        s.conn
+            .execute(
+                "UPDATE work_links SET state = 'confirmed' WHERE id = ?1",
+                [decided],
+            )
+            .unwrap();
+        let (_, ended) = suggestion(&s, "e", "h1", "ABC-5", now - 30 * DAY, "strong");
+        s.conn
+            .execute("UPDATE work_links SET ended_at = 1 WHERE id = ?1", [ended])
+            .unwrap();
+        let (gone, _) = suggestion(&s, "f", "h1", "ABC-6", now - 30 * DAY, "strong");
+        s.conn
+            .execute(
+                "UPDATE participants SET retired_at = 1 WHERE session_id = ?1",
+                [gone],
+            )
+            .unwrap();
+        // Not counted: a weak suggestion beside a confirmed primary (hidden
+        // from the row, so nobody is asked).
+        let g = s
+            .upsert_session("g", "h1", None, None, 1, 1, "running", None)
+            .unwrap();
+        let primary = s
+            .link_session_work(g, WorkTarget::Key("ABC-7"), "manual")
+            .unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO work_links (ref_key, participant_id, state, source, created_at, strength) \
+                 VALUES ('ABC-8', ?1, 'suggested', 'detected', ?2, 'weak')",
+                rusqlite::params![primary.participant_id, now - 30 * DAY],
+            )
+            .unwrap();
+
+        assert_eq!(s.detection_backlog(cutoff, None).unwrap(), 2);
+        assert_eq!(s.detection_backlog(cutoff, Some("h1")).unwrap(), 1);
+        assert_eq!(s.detection_backlog(cutoff, Some("h2")).unwrap(), 1);
+        assert_eq!(s.detection_backlog(cutoff, Some("h3")).unwrap(), 0);
+        assert_eq!(
+            s.detection_backlog(now, None).unwrap(),
+            3,
+            "the recent one too"
+        );
+    }
 }

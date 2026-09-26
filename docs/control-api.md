@@ -107,6 +107,21 @@ port or token change, or a reverse-tunnel bounce therefore needs no reconnect
 on the client side — the next call simply works. Responses are SSE-framed so a
 long poll keeps receiving a keep-alive every 15 s.
 
+The SSE mount advertises `tools.listChanged`. With no `GET /mcp` stream to
+push on, `notifications/tools/list_changed` rides a `tools/call`'s own
+response, one frame ahead of the result. A caller is told on its next call
+when the tool list it may see differs from the one it last listed (or was
+last told about), and on its first call after a fleet restart if it has not
+listed since, because the new process cannot know what the client cached.
+In practice that is a client left connected across a fleet upgrade: it
+re-lists and sees the new tools without a manual reconnect. Each change is sent once per token, so two clients sharing
+one token share one notice. Every token is told except a peer hub's, which
+calls one tool; that includes a paired client whose mode flips between `full`
+and `readonly`. `/mcp/json` neither advertises nor sends it, because its
+answer is the handler's first message. A reader that takes the last `data:`
+frame of an SSE body (as `wire::last_event_payload` does), or the first frame
+carrying `result` or `error` (as fleet-mobile does), is unaffected.
+
 ### Endpoints
 
 | Path | Auth | What it is |
@@ -237,7 +252,9 @@ and CI fails when it is stale. The workflows that tie the tools together
 
 Index by area (names only; see the reference for details):
 
-- **Fleet & hosts** — `fleet_health`, `usage_report` (estimated token
+- **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
+  health and the detection backlog, from cached sync state; a per-host token
+  sees its own org's trackers), `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`

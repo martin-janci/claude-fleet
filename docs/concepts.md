@@ -31,8 +31,17 @@ brief. A **tracker** (Jira Cloud, GitHub Issues through `gh`, Asana, Linear
 or Jira Data Center, configured on the hub) only enriches
 this: titles and status on the chips, tickets in ⌘K, and starting a session
 from a ticket in one step. Trackers are polled, read-only, and never gate
-anything. See [control-api.md](control-api.md) (`work`, `work_link`,
-`work_admin`) and [hub.md](hub.md) → *Trackers*.
+anything.
+
+Detection keeps this current without anyone typing it: a key or ticket URL
+in a branch, a prompt or a pull request becomes a link only when it is
+unambiguous, and otherwise a **suggestion** that never regroups a session
+until a person confirms it. Every link carries the evidence it came from,
+shown in the work chip's popover. **Today** (⌘⇧T) digests the day, and a
+ticket's card shows its acceptance criteria. The whole feature, with every
+`work.*` setting, is in the [work guide](work-graph.md); the tools are in
+[control-api.md](control-api.md) (`work`, `work_link`, `work_admin`) and the
+hub's side in [hub.md](hub.md) → *Trackers*.
 
 **Organisations** are optional. A session belongs to at most one: the most
 specific text rule (path, `owner/repo`, owner, host) else its host's org; a

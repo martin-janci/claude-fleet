@@ -25,6 +25,9 @@ it.
 | Sidebar looks **stale** | Cache-first `list_sessions` inside the reconcile interval | Click **Refresh** (forced pass). See [reconcile tick](#the-reconcile-tick-reconcileinterval_secs-and-refresh). |
 | Need logs / reporting a bug | n/a | **Settings → Diagnostics → Copy diagnostics**; logs under `<app data>/logs/`. See [Logs](#logs-where-they-live-and-how-to-raise-verbosity). |
 | Session's **worktree directory vanished** (git errors in the pane, `cd: no such directory`, new panes fail) | The worktree was deleted, pruned, or moved on disk while the fleet row (and possibly the tmux session) survived | New session, Restart, Recreate and opening the terminal re-create only what is confirmed missing; anything more (a stale git entry, a moved checkout, a deleted branch, a pane in a removed directory) needs **Repair workspace** in the session details (or the `repair_session` tool). See [Repairing a session whose directory vanished](#repairing-a-session-whose-directory-vanished). (`E_REPAIR_REQUIRED`, `E_REPO_MISSING`, `E_BRANCH_CHECKED_OUT`, `E_WORKSPACE_LOCKED`, `E_REPAIR_FAILED`) |
+| A tracker shows **auth_failed** / **unreachable** / **rate_limited**, or chips show ◷ | The token expired or was revoked, the site or the `gh` host cannot be reached, or the tracker is throttling | Read the tracker's error in **Settings → Work** (or `fleet-hub tracker status`). See [Tracker sync fails](#tracker-sync-fails). |
+| A phone or `/events` client got **`lagged`** (or `resumed: false`) right after a tracker was added | The first sync of a new tracker sends one `work:item` frame per ticket and briefly fills the replay ring | Expected once per tracker (decision D18): the client re-lists and carries on. See [`lagged` after a first sync](#lagged-after-a-trackers-first-sync). |
+| **Why is this session linked to X?** | Detection linked or suggested it from a branch, a URL, a prompt or the PR | Click the work chip: the popover lists each link's evidence and rule. See [Why is this session linked to X?](#why-is-this-session-linked-to-x) |
 | *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
 
 ---
@@ -399,6 +402,76 @@ Cases that are reported rather than fixed:
 - `E_HOST_OFFLINE` — the host could not be reached before anything ran;
   nothing was changed.
 
+### Work and trackers
+
+The feature itself is explained in the [work guide](work-graph.md).
+
+#### Tracker sync fails
+
+A tracker's state is shown as a badge in **Settings → Work** (hover it for
+the last error, redacted) with its last sync pass, and on a hub by
+`fleet-hub tracker status` (`work_admin { action: status }`). A **failing**
+tracker also raises **⚠ Reconnect <tracker> →** in the attention strip, and
+the footer's `trackers: …` line counts failing and degraded ones
+(`fleet_health.trackers`; see the
+[work guide](work-graph.md#trackers-in-fleet-health)). Nothing waits
+on a tracker: while it fails, chips, ⌘K and Today answer from the cache, and
+a chip shows ◷ once the tracker has not synced for two intervals.
+
+| State | Meaning | Fix |
+|---|---|---|
+| `auth_failed` | the credential expired or was refused; polling has **stopped** | set a new one (**Settings → Work**, or `fleet-hub tracker set-credential <id>`), then **Test** (`fleet-hub tracker test <id>`) |
+| `captcha` | the site wants a browser login first | log in to the site once in a browser, then Test |
+| `rate_limited` | 429 / `Retry-After`, Linear's complexity limit, GitHub's spent quota | nothing: it retries on its own |
+| `unreachable` | the site, the `via_host` host or the `gh` host cannot be reached; for GitHub, `gh` is missing or logged out on that host | fix the network or run `gh auth login` (with `--hostname` for Enterprise) on that host; it retries on its own |
+
+- **Jira Cloud API tokens expire** within a year. An expired one looks like
+  `auth_failed` on a tracker that worked yesterday.
+- **Jira Data Center refuses** a site that resolves to a loopback or
+  link-local address unless `allow_private_network` is set, and needs an
+  internal CA in `extra_ca`. A site only a VPN host can reach needs
+  `--via-host <host>`. See [hub.md → Jira Data Center](hub.md#jira-data-center).
+- **Nothing syncs at all:** check `work.sync_interval_secs` (`0` turns the
+  sync off, and it is read at start: restart after changing it).
+- A ticket that was deleted or hidden is marked **unavailable** (a
+  struck-through chip). It is never deleted, and its links stay.
+
+#### `lagged` after a tracker's first sync
+
+The hub keeps the last 512 events in a replay ring so a reconnecting client
+(`Last-Event-ID`) can catch up, and a live subscriber that falls more than
+256 events behind gets one `lagged` frame and is disconnected. The **first
+sync of a newly added tracker** writes one `work:item` frame per ticket it
+lists (400 for two 200-item boards), so for a few minutes afterwards the
+ring reaches back only about two and a half minutes instead of the usual
+ten or so (`docs/superpowers/reviews/2026-09-25-replay-ring-pressure.md`).
+A phone that reconnects after a longer gap gets `resumed: false`, and a slow
+subscriber may get `lagged`. Both mean the same thing: re-list and carry on.
+The client does that by itself; nothing is lost. It happens once per tracker
+added, and the decision (D18) was to accept it rather than suppress the
+frames. Later syncs send a frame only for a ticket that really changed.
+
+#### Why is this session linked to X?
+
+Click the session's work chip. The popover lists every link and suggestion
+with its **evidence**, one line per signal, for example "branch
+`abc-123-login` since 09:05 · R3" or "mentioned ABC-99 in a prompt at
+10:12", and the resolver rule that decided it. The chip's style says how it
+came about: solid for a link a person, Claude or a start made; a small ring
+for one detection made by itself; dashed with `?` for a suggestion that has
+not grouped the session.
+
+- **Wrong:** **Not this** removes it, and fleet never suggests that pair
+  again. For an automatic link the toast's **Undo** does the same.
+- **Linked automatically from a branch you did not expect:** the project is
+  trusted for branch keys. Untick **Trust branch keys in this repo** in the
+  popover, or **Trust none** in Settings → Limits → Lifecycle.
+- **The right ticket:** **Pick another…** and type or paste its key or URL.
+- **"Claude named X when asked":** that is the classification nudge
+  (`work.classify_nudge`); its answer is only ever a suggestion.
+
+See the [work guide → Linking and detection](work-graph.md#linking-and-detection).
+
 ### Releases and tags
 
 `origin` currently has no `v0.2.x` tags even though the version fields moved
@@ -415,3 +488,4 @@ See [docs/RELEASING.md](RELEASING.md).
 
 - [Getting started](getting-started.md)
 - [Concepts](concepts.md)
+- [Work guide](work-graph.md)

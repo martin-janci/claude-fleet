@@ -1076,6 +1076,34 @@ describe('ConversationPanel quick actions', () => {
     expect(row.getAttribute('data-expanded')).toBe('true');
   });
 
+  it('stays expanded on a re-measure while the wrapped chips span two lines', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('conv-chips-more'));
+
+    // Wrapped, nothing clips: scrollWidth equals clientWidth. The old
+    // measurement read that as "fits" and collapsed the row it had just
+    // opened, so More showed nothing.
+    Object.defineProperty(row, 'scrollWidth', { value: 300, configurable: true });
+    const chips = Array.from(row.children) as HTMLElement[];
+    chips.forEach((c, i) => Object.defineProperty(c, 'offsetTop', { value: i === chips.length - 1 ? 30 : 0, configurable: true }));
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+    expect(row.getAttribute('data-expanded')).toBe('true');
+    expect(screen.getByTestId('conv-chips-more').getAttribute('aria-expanded')).toBe('true');
+
+    // Widened until every chip is back on one line: nothing more to show.
+    chips.forEach((c) => Object.defineProperty(c, 'offsetTop', { value: 0, configurable: true }));
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
+    expect(row.getAttribute('data-expanded')).toBe('false');
+  });
+
   it('preserveThread keeps the viewport on the same content when the composer grows', async () => {
     await mount();
     const row = screen.getByTestId('conv-chips');

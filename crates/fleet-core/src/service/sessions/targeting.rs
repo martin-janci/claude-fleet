@@ -100,10 +100,14 @@ pub fn find_session_by_tmux_name_scoped(
     scope: &crate::service::orgs::OrgScope,
 ) -> Result<SessionRow, IpcError> {
     crate::validate::tmux_name_lookup(tmux_name)?;
+    // `WHERE tmux_name=?` directly, instead of loading every session (lost
+    // ones included) and filtering in Rust. No `lost_at` filter here: a
+    // ghost must still be considered for the running-preference / ambiguity
+    // logic below.
     let all: Vec<SessionRow> = s
-        .list_all_sessions()?
+        .find_sessions_by_tmux_name(tmux_name, None)?
         .into_iter()
-        .filter(|r| r.tmux_name == tmux_name && scope.sees_row(r))
+        .filter(|r| scope.sees_row(r))
         .collect();
     // A ghost left behind on another host must not make a live session
     // ambiguous: prefer running rows, fall back to everything.

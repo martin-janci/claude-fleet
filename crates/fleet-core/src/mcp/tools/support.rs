@@ -640,6 +640,22 @@ pub(super) fn persist_audit(
     if caller.mode == TokenMode::Peer {
         return;
     }
+    // Task 2: a read-only tool (`guard::READONLY_TOOLS` — the exact set a
+    // `readonly` token may call) writes NO audit row at all, not even a
+    // quiet one. The tracing `audit()` line above (called separately, from
+    // each tool body) already covers every call including reads; this is
+    // only the persisted `session_events` row. A poll like the desktop's
+    // conversation refresh alone produced ~720 of these an hour, each one
+    // an INSERT+prune under the store mutex for a call that changed
+    // nothing. This check runs BEFORE the store is even locked, so a read
+    // never pays for the lock either. A refused call to a MUTATING tool is
+    // still audited exactly as before: this only ever short-circuits reads,
+    // and `enforce_mode` / `enforce_admin` (which decide "refused") run
+    // after `persist_audit` returns in `call_tool` — see "Audit first so
+    // refused calls are on the timeline too" there.
+    if guard::is_readonly_tool(tool) {
+        return;
+    }
     let Ok(s) = store.lock() else { return };
     let Some(session_id) = find_audit_session(&s, args) else {
         return;
@@ -650,22 +666,7 @@ pub(super) fn persist_audit(
     } else {
         format!("{tool} by {}: {summary}", caller.label())
     };
-    // A read is written but not announced. The timeline and `session_history`
-    // still carry it; what goes away is one `session:event` frame per read to
-    // every connected client — measured at ~720 an hour from the desktop's
-    // own conversation poll alone, each 253 B, and each one telling a
-    // read-only paired phone what the operator was doing. A write keeps its
-    // announcement: those are the events a client is watching for.
-    let _ = if guard::READONLY_TOOLS.contains(&tool) {
-        s.insert_session_event_quietly(
-            session_id,
-            None,
-            "mcp_call",
-            Some(&guard::scrub_line(&detail)),
-        )
-    } else {
-        s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)))
-    };
+    let _ = s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)));
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.
@@ -1273,8 +1274,16 @@ impl FleetTools {
     /// that dropped `org_id` cannot make a row look unassigned. Fails
     /// closed: if the scope or a row's org cannot be read, every work field
     /// goes.
-    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
-        let Ok(s) = self.store.lock() else {
+    ///
+    /// The orgs are read through `store`: the read pool for a tool that
+    /// wrote nothing (`POOLED_READ_TOOLS`), else the writer.
+    pub(super) fn redact_work_via(
+        &self,
+        store: &Mutex<Store>,
+        caller: &Caller,
+        result: &mut CallToolResult,
+    ) {
+        let Ok(s) = store.lock() else {
             strip_all_work(result);
             return;
         };
@@ -1305,6 +1314,13 @@ impl FleetTools {
             }
         };
         rewrite_json_content(result, |v| scope.redact_json(v, &org_of));
+    }
+
+    /// [`Self::redact_work_via`] through the writer, as `call_tool` gates a
+    /// tool that may have written.
+    #[cfg(test)]
+    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
+        self.redact_work_via(&self.store, caller, result)
     }
 
     /// [`Self::resolve_target`] returning the whole row.

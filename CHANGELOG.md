@@ -8,6 +8,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.3.0] - 2026-09-26
+
+A faster hub. On a NAS with spinning disks every store write held the one
+database lock for ~200 ms, so even read-only MCP calls queued behind it: 0.4–2 s
+for `whoami` / `list_hosts`, and ~15 s spikes for `list_sessions` /
+`list_worktrees`. Reads now come off the writer, and writes are batched into
+single transactions. The WAL change in v0.2.40 fixed the fsync cost; this
+release fixes the queueing.
+
+**Upgrading:** this release adds migrations 059 and 060. Back up `state.db`,
+together with any `state.db-wal` / `state.db-shm` next to it, before
+upgrading. See `docs/RELEASING.md`.
+
+### Added
+- **hub:** a read-only connection pool on the WAL database serves the listing
+  tools (`list_hosts`, `list_projects`, `list_worktrees`, `whoami`,
+  `fleet_health`, and the final read of `list_sessions`) without waiting on
+  the writer.
+- **hub:** `authorize` checks tokens against an in-memory cache. Migration 060
+  adds triggers that bump an auth epoch on every token change except the
+  `last_seen_at` stamp, and the epoch is re-read on every request. A revoked,
+  rotated or re-scoped client or host token is refused on the very next
+  request, even when another process changed it (the `fleet-hub` CLI via
+  `docker exec`).
+- **release:** releases publish themselves once every asset is verified. The
+  hub image is pinned to the release in `deploy/hub/docker-compose.yml`, and
+  drift is watched (#311).
+
+### Changed
+- **sessions:** `list_sessions` no longer probes every host inline when its
+  cache is stale. It answers from the stored rows and refreshes in the
+  background; only a cold start or `force` waits for the probe.
+- **reconcile:**
+  - `claude agents --json` runs at most once a minute per host, as intended;
+    before, it ran on every pass.
+  - Each host's writes commit in one transaction and unchanged host identity
+    is not rewritten.
+  - The GC sweep no longer runs inside the tick.
+- **hooks:** each hook's writes commit in one transaction, and updates that
+  change nothing are skipped.
+- **audit:** read-only tools no longer write an audit row on every call.
+- **usage / trackers:**
+  - Usage collection commits once per host and skips sessions with no new
+    usage.
+  - Tracker sync commits once per batch and stamps `fetched_at` in one
+    statement.
+- **store:**
+  - Migration 059 indexes live sessions by worktree.
+  - `list_worktrees` no longer queries once per worktree.
+  - `whoami` looks the session up by its name instead of loading every
+    session.
+
+### Fixed
+- **store:** a transaction that SQLite aborts midway (I/O error, full disk, out
+  of memory) no longer half-commits. The writes after the failure stop
+  instead of committing on their own without their events, and a failed
+  savepoint release can no longer leave the connection inside an open
+  transaction.
+- **store:** transactions begin `IMMEDIATE`, so a CLI writer next to the hub
+  makes the transaction wait instead of failing at once.
+- **usage:** a pass with no new usage no longer clears the usage cursor's last
+  message id.
+- **mcp:** `fleet_health` still reports a failed database lock when it reads
+  through the pool.
+
+## [0.2.42] - 2026-09-26
+
+### Added
+- **mcp:** tell paired clients about tool-list changes too
+- **mcp:** advertise tools.listChanged and send it on the next call
+- **assets:** read-only catalog overview on a hub client
+- **work:** filter by the tracker's own status name (QA Review)
+- **agent:** resize and maximize the agent sheet
+- **ui:** reconnect Attention item for failing trackers (work graph M12.4, D22)
+- **health:** tracker roll-up and detection backlog in fleet_health (work graph M12.4)
+- **settings:** work retention windows, status and dry run in Settings (M12.3)
+- **work_admin:** status and sweep_now for retention (M12.3)
+- **work:** retention sweep for journal, done tickets and work events (M12.3)
+- **store:** refuse a database a newer build has migrated
+- **composer:** the quick-reply chips are the fleet's, not each device's
+- **mcp:** get_settings / set_setting, so a hub's settings can be changed
+- **mcp:** get_settings / set_setting, so a hub's settings can be changed
+- **work-graph:** M11.3 tidy reason idle_unlinked and per-session keep
+
+### Changed
+- Revert "docs(work-graph): start the work graph user guide (M12.5, in progress)"
+- **e2e:** use a live key in the set_setting scenario
+- **mcp:** set BUDGET_BYTES to the M12.3 measurement plus 100
+- **routing:** record the two retention refusals in the local-only fixture
+- **store:** name the upgrade test's fingerprint type
+- **release:** release fleet-mobile under the same version
+- **work:** satisfy clippy's is_multiple_of in the scale fixture
+- **ui:** use a real ClaudeStatus in the scale fixture
+- **store:** prove the upgrade into the work graph on a generated database (M12.1)
+- **ui:** group-by-work, rowMatches and the Today view at 2,000 rows
+- **work:** seeded scale fixture and budget tests for the work graph
+- **store:** index ended work links and the handover guard; key lookup by index
+
+### Fixed
+- **composer:** More keeps the chip row open; Send stays right; center the loader
+- **hub:** self-heal leftovers of a disabled local host
+- **safe-kill:** never remove the main checkout; read a wrapped FAILED echo
+- **store:** read the tidy keep without scanning session_events
+- **work:** index-backed tidy_kept lookup
+- **lint:** collapse the nested if clippy 1.95 now reads as a guard
+
+### Documentation
+- **net:** describe the tracker SSRF fence as it is since M6
+- **net:** stop promising an acli transport in https.rs
+- **work:** restate D15 as multi-start on the phone only
+- **work:** revisit the decided-against list (work graph M12.6)
+- **hub:** the Assets tab is a read-only overview on a hub client
+- **control-api:** name fleet_health's trackers roll-up (work graph M12.4)
+- **work-graph:** start the work graph user guide (M12.5, in progress)
+- **work:** add the work graph user guide (M12.5)
+- **plan:** add the M12 plan with the M12.3 revision
+- upgrading into the work graph, and the M12 plan with M12.1's revision
+- **plan:** add the M12 plan with the M12.2 scale numbers
 ## [0.2.41] - 2026-09-26
 
 ### Added
@@ -1668,6 +1786,8 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.3.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.0
+[0.2.42]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.42
 [0.2.41]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.41
 [0.2.40]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.40
 [0.2.39]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.39

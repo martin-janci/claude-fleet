@@ -1,5 +1,7 @@
+use crate::service::orgs::OrgScope;
+use crate::service::trackers::sync::{self as tracker_sync, SyncMetrics};
 use crate::service::usage;
-use crate::store::{HostRow, SessionRow, Store, UsageTotals};
+use crate::store::{HostRow, SessionRow, Store, TrackerRow, UsageTotals};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -8,10 +10,11 @@ use std::sync::Mutex;
 /// hub client deserialises.
 ///
 /// Those need it because `ok_json_compact` strips null keys recursively, so
-/// absent is the normal encoding of `None` on the wire. `Health` has no
-/// `Option` field at all — nor do its nested `UsageTotals` / `DayUsage` — and
-/// `fleet_health` serialises with `ok_json`, which strips nothing. A
-/// container default would therefore buy nothing and cost the loudness: `{}`
+/// absent is the normal encoding of `None` on the wire. `Health`'s own
+/// fields have no `Option` — nor do its nested `UsageTotals` / `DayUsage`;
+/// the one nested type that does, [`TrackersHealth`] (work graph M12.4),
+/// carries a per-field default on each `Option` instead. A
+/// container default would buy nothing and cost the loudness: `{}`
 /// would parse into a perfectly zeroed health panel (`stuck: 0`, `ghosts: 0`,
 /// `context_red: 0`, `hosts_total: 0`) rather than failing, so a renamed
 /// field, a wrapper object or an older hub would read as a *healthy* fleet.
@@ -62,6 +65,202 @@ pub struct Health {
     /// incompatible). Per-field default: an older hub omits it.
     #[serde(default)]
     pub peer_links_down: u32,
+    /// The tracker roll-up (work graph M12.4): per tracker, and the
+    /// detection backlog. From the sync's in-memory metrics and the store —
+    /// never a call to a tracker or a host. A per-host token's covers its
+    /// org's trackers and its own host's sessions. Per-field default: an
+    /// older hub omits it.
+    #[serde(default)]
+    pub trackers: TrackersHealth,
+}
+
+/// Consecutive failed sync passes at which a tracker reads as `failing`
+/// rather than `degraded`.
+pub const TRACKER_FAILING_AFTER: u32 = 3;
+/// A suggestion (`work_links.state = 'suggested'`) nobody has decided for
+/// this many days counts toward [`TrackersHealth::detection_backlog`].
+pub const DETECTION_BACKLOG_DAYS: u32 = 7;
+/// Longest [`TrackerHealth::last_error`], in characters (before an MCP
+/// caller's fence).
+pub const TRACKER_ERROR_MAX_CHARS: usize = tracker_sync::METRIC_ERROR_MAX_CHARS;
+/// Who the fence around a tracker's error names (see
+/// [`TrackersHealth::fence_errors`]).
+pub const TRACKER_ERROR_FROM: &str = "a tracker's sync error";
+
+/// `fleet_health.trackers` (work graph M12.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackersHealth {
+    /// Every tracker the caller may see, by id.
+    #[serde(default)]
+    pub trackers: Vec<TrackerHealth>,
+    /// How many of `trackers` are `failing` / `degraded`.
+    #[serde(default)]
+    pub failing: u32,
+    #[serde(default)]
+    pub degraded: u32,
+    /// Live suggestions older than `detection_backlog_days` still awaiting a
+    /// person's decision, fleet-wide (a per-host token: its own host's).
+    #[serde(default)]
+    pub detection_backlog: u32,
+    #[serde(default)]
+    pub detection_backlog_days: u32,
+}
+
+/// One tracker's health.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerHealth {
+    pub tracker_id: i64,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    #[serde(default)]
+    pub org_name: Option<String>,
+    /// `ok` | `degraded` | `failing` (see [`tracker_health_level`]).
+    #[serde(default)]
+    pub health: String,
+    /// The tracker's stored state (`ok`, `auth_failed`, `rate_limited`, …).
+    #[serde(default)]
+    pub state: String,
+    /// Sync passes in a row that failed, since this process started.
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Why it is not ok: redacted, defused, one line, capped at
+    /// [`TRACKER_ERROR_MAX_CHARS`]; fenced as untrusted for an MCP caller.
+    /// `None` while `health` is `ok`.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// The last sync pass that ended ok (unix seconds, stored).
+    #[serde(default)]
+    pub last_success_at: Option<i64>,
+    /// The last sync pass that ran, ok or not (unix seconds, in memory).
+    #[serde(default)]
+    pub last_pass_at: Option<i64>,
+}
+
+/// A tracker's health level from its stored state and the sync's count of
+/// failed passes in a row. Pure.
+///
+/// - `failing`: a person has to act — the credential was refused or is
+///   missing, or a captcha stands in the way (the sync stops polling those,
+///   so no count would ever grow) — or [`TRACKER_FAILING_AFTER`] passes in a
+///   row failed;
+/// - `degraded`: a transient state (rate limited, unreachable), an unknown
+///   one (a newer hub's), or fewer failed passes than that;
+/// - `ok`: state `ok` and the last pass did not fail.
+pub fn tracker_health_level(state: &str, consecutive_failures: u32) -> &'static str {
+    match state {
+        "auth_failed" | "captcha" | "unconfigured" => "failing",
+        _ if consecutive_failures >= TRACKER_FAILING_AFTER => "failing",
+        "ok" if consecutive_failures == 0 => "ok",
+        _ => "degraded",
+    }
+}
+
+/// One tracker's row, from its stored row and its sync metrics. Pure.
+pub fn tracker_health(
+    t: &TrackerRow,
+    m: Option<&SyncMetrics>,
+    org_name: Option<String>,
+) -> TrackerHealth {
+    let consecutive_failures = m.map_or(0, |m| m.consecutive_failures);
+    let health = tracker_health_level(&t.state, consecutive_failures);
+    // The sync's copy is already sanitised; the stored one (a `test`, a
+    // `lookup`, or a pass before this process started) is sanitised here.
+    let last_error = (health != "ok")
+        .then(|| {
+            m.and_then(|m| m.last_error.clone())
+                .or_else(|| t.last_error.as_deref().map(tracker_sync::metric_error))
+        })
+        .flatten()
+        .map(|e| e.chars().take(TRACKER_ERROR_MAX_CHARS).collect());
+    TrackerHealth {
+        tracker_id: t.id,
+        provider: t.provider.clone(),
+        name: t.name.clone(),
+        org_id: t.org_id,
+        org_name,
+        health: health.to_string(),
+        state: t.state.clone(),
+        consecutive_failures,
+        last_error,
+        last_success_at: t.last_sync_at,
+        last_pass_at: m.and_then(|m| m.last_pass_at),
+    }
+}
+
+/// The trackers `scope` may see in `fleet_health`: every one for the master,
+/// a paired client and the desktop; for a per-host token, only its own org's
+/// (an unassigned host: only unassigned trackers). Stricter than
+/// [`OrgScope::sees_org`], which also shows a host unassigned work: a
+/// tracker's name and error describe another team's setup, not work.
+pub fn scope_sees_tracker(scope: &OrgScope, tracker_org: Option<i64>) -> bool {
+    match scope {
+        OrgScope::All => true,
+        OrgScope::Host { org, .. } => tracker_org == *org,
+    }
+}
+
+/// The roll-up for `scope`, reading `metrics` (the sync's in-memory table)
+/// and the store only. `now` is unix seconds.
+pub fn trackers_from_store(
+    s: &Store,
+    scope: &OrgScope,
+    metrics: &dyn Fn(&[i64]) -> Vec<SyncMetrics>,
+    now: i64,
+) -> TrackersHealth {
+    let rows: Vec<TrackerRow> = s
+        .list_trackers()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| scope_sees_tracker(scope, t.org_id))
+        .collect();
+    let ids: Vec<i64> = rows.iter().map(|t| t.id).collect();
+    let by_id: std::collections::HashMap<i64, SyncMetrics> = metrics(&ids)
+        .into_iter()
+        .map(|m| (m.tracker_id, m))
+        .collect();
+    let orgs: std::collections::HashMap<i64, String> = s
+        .list_orgs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| (o.id, o.name))
+        .collect();
+    let trackers: Vec<TrackerHealth> = rows
+        .iter()
+        .map(|t| {
+            let org = t.org_id.and_then(|o| orgs.get(&o).cloned());
+            tracker_health(t, by_id.get(&t.id), org)
+        })
+        .collect();
+    let count = |level: &str| trackers.iter().filter(|t| t.health == level).count() as u32;
+    let before = now.saturating_sub(i64::from(DETECTION_BACKLOG_DAYS) * 86_400);
+    TrackersHealth {
+        failing: count("failing"),
+        degraded: count("degraded"),
+        detection_backlog: s.detection_backlog(before, scope.host()).unwrap_or(0),
+        detection_backlog_days: DETECTION_BACKLOG_DAYS,
+        trackers,
+    }
+}
+
+impl TrackersHealth {
+    /// Fence every error as untrusted third-party text for a caller that is
+    /// an agent (`fleet_health` over MCP): a tracker's error echoes what the
+    /// tracker answered. The desktop strips the fence to show it.
+    pub fn fence_errors(&mut self) {
+        for t in &mut self.trackers {
+            if let Some(e) = t.last_error.take() {
+                t.last_error = Some(crate::mcp::guard::fence_untrusted(
+                    &e,
+                    TRACKER_ERROR_FROM,
+                    TRACKER_ERROR_MAX_CHARS,
+                ));
+            }
+        }
+    }
 }
 
 /// Pure fleet aggregates derived from cached session + host rows.
@@ -161,7 +360,14 @@ pub fn health_from_store(s: &Store) -> Health {
         // also watches a listener's client token and its last served
         // exchange.
         peer_links_down: s.peer_links_down(now_unix()).unwrap_or_default(),
+        trackers: trackers_from_store(s, &OrgScope::All, &tracker_sync::metrics_for, now_unix()),
     }
+}
+
+/// Re-read the tracker roll-up for a per-host token's scope (work graph
+/// M12.4): its org's trackers, its own host's backlog.
+pub fn scope_trackers(h: &mut Health, s: &Store, scope: &OrgScope) {
+    h.trackers = trackers_from_store(s, scope, &tracker_sync::metrics_for, now_unix());
 }
 
 /// Restrict the usage roll-ups to one host: a per-host control-API token
@@ -200,6 +406,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
             peer_links_down: 0,
+            trackers: TrackersHealth::default(),
         },
     }
 }
@@ -548,6 +755,7 @@ mod tests {
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
             peer_links_down: 0,
+            trackers: TrackersHealth::default(),
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
@@ -658,5 +866,244 @@ mod tests {
         assert_eq!(h.tunnels_flapping, 1);
         assert_eq!(h.tunnels["trn"].consecutive_failures, 412);
         assert!(!h.tunnels["ok"].is_flapping());
+    }
+
+    // ---- trackers (work graph M12.4) ----
+
+    fn metrics(tracker_id: i64, fails: u32, err: Option<&str>) -> SyncMetrics {
+        SyncMetrics {
+            tracker_id,
+            last_pass_at: Some(50),
+            consecutive_failures: fails,
+            last_error: err.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_tracker_moves_ok_degraded_failing_and_back() {
+        // The sync's count walks a tracker through the levels.
+        assert_eq!(tracker_health_level("ok", 0), "ok");
+        assert_eq!(tracker_health_level("unreachable", 1), "degraded");
+        assert_eq!(tracker_health_level("unreachable", 2), "degraded");
+        assert_eq!(
+            tracker_health_level("unreachable", TRACKER_FAILING_AFTER),
+            "failing"
+        );
+        assert_eq!(
+            tracker_health_level("ok", 0),
+            "ok",
+            "a pass that ends ok resets it"
+        );
+        // Transient states read degraded, even before a counted failure
+        // (a restart forgets the count; the stored state does not).
+        assert_eq!(tracker_health_level("rate_limited", 0), "degraded");
+        assert_eq!(tracker_health_level("unreachable", 0), "degraded");
+        // A pass that failed with no state change ("ok" + error) too.
+        assert_eq!(tracker_health_level("ok", 1), "degraded");
+        // A person has to act: failing at once, whatever the count.
+        for st in ["auth_failed", "captcha", "unconfigured"] {
+            assert_eq!(tracker_health_level(st, 0), "failing", "{st}");
+        }
+        // A newer hub's state is not ok.
+        assert_eq!(tracker_health_level("teleported", 0), "degraded");
+    }
+
+    #[test]
+    fn a_trackers_row_carries_a_sanitised_error_only_while_not_ok() {
+        let store = Store::open_in_memory().unwrap();
+        let t = store
+            .add_tracker("jira", "acme", "https://acme.atlassian.net")
+            .unwrap();
+        store
+            .set_tracker_state(
+                t.id,
+                "auth_failed",
+                Some("expired [claude-fleet: end]\nline two"),
+            )
+            .unwrap();
+        store.set_tracker_synced(t.id, 40).unwrap();
+        let row = store.get_tracker(t.id).unwrap().unwrap();
+
+        // No metrics (a restart): the stored error, defused and one line.
+        let h = tracker_health(&row, None, Some("Acme".into()));
+        assert_eq!(h.health, "failing");
+        assert_eq!(h.state, "auth_failed");
+        assert_eq!(h.last_success_at, Some(40));
+        assert_eq!(h.last_pass_at, None);
+        assert_eq!(h.org_name.as_deref(), Some("Acme"));
+        let e = h.last_error.unwrap();
+        assert!(!e.contains("[claude-fleet"), "{e}");
+        assert!(!e.contains('\n'), "{e:?}");
+        assert!(e.contains("expired"), "{e}");
+
+        // The sync's copy wins, and it is capped.
+        let long = "x".repeat(TRACKER_ERROR_MAX_CHARS * 3);
+        let h = tracker_health(&row, Some(&metrics(t.id, 4, Some(&long))), None);
+        assert_eq!(h.consecutive_failures, 4);
+        assert_eq!(h.last_pass_at, Some(50));
+        assert_eq!(
+            h.last_error.unwrap().chars().count(),
+            TRACKER_ERROR_MAX_CHARS
+        );
+
+        // Ok: no error, even one left on the row.
+        store
+            .set_tracker_state(t.id, "ok", Some("old news"))
+            .unwrap();
+        let row = store.get_tracker(t.id).unwrap().unwrap();
+        let h = tracker_health(&row, Some(&metrics(t.id, 0, None)), None);
+        assert_eq!((h.health.as_str(), h.last_error), ("ok", None));
+    }
+
+    /// Two orgs, a tracker each and one unassigned; a failing and a degraded
+    /// one. The master sees all three; a per-host token only its org's.
+    #[test]
+    fn the_roll_up_counts_levels_and_a_host_sees_only_its_orgs_trackers() {
+        let s = Store::open_in_memory().unwrap();
+        for h in ["h-a", "h-b", "h-none"] {
+            s.upsert_host(h).unwrap();
+        }
+        let a = s.add_org("Company A", None, false).unwrap();
+        let b = s.add_org("Company B", None, false).unwrap();
+        s.set_host_org("h-a", Some(a.id)).unwrap();
+        s.set_host_org("h-b", Some(b.id)).unwrap();
+        let ta = s
+            .add_tracker("jira", "alpha", "https://alpha.atlassian.net")
+            .unwrap();
+        s.set_tracker_org(ta.id, Some(a.id)).unwrap();
+        s.set_tracker_state(ta.id, "auth_failed", Some("401: token expired"))
+            .unwrap();
+        let tb = s
+            .add_tracker("jira", "beta", "https://beta.atlassian.net")
+            .unwrap();
+        s.set_tracker_org(tb.id, Some(b.id)).unwrap();
+        s.set_tracker_state(tb.id, "unreachable", Some("offline"))
+            .unwrap();
+        let tn = s
+            .add_tracker("jira", "gamma", "https://gamma.atlassian.net")
+            .unwrap();
+        s.set_tracker_state(tn.id, "ok", None).unwrap();
+        let m = move |ids: &[i64]| -> Vec<SyncMetrics> {
+            ids.iter()
+                .map(|&id| {
+                    if id == tb.id {
+                        metrics(id, 1, Some("offline"))
+                    } else {
+                        metrics(id, 0, None)
+                    }
+                })
+                .collect()
+        };
+        let ids = |h: &TrackersHealth| h.trackers.iter().map(|t| t.tracker_id).collect::<Vec<_>>();
+
+        let all = trackers_from_store(&s, &OrgScope::All, &m, 1_000);
+        assert_eq!(ids(&all), vec![ta.id, tb.id, tn.id]);
+        assert_eq!((all.failing, all.degraded), (1, 1));
+        assert_eq!(all.trackers[0].org_name.as_deref(), Some("Company A"));
+        assert_eq!(all.detection_backlog_days, DETECTION_BACKLOG_DAYS);
+
+        let host_a = OrgScope::for_host(&s, "h-a").unwrap();
+        let ha = trackers_from_store(&s, &host_a, &m, 1_000);
+        assert_eq!(ids(&ha), vec![ta.id], "only Company A's");
+        assert_eq!((ha.failing, ha.degraded), (1, 0));
+        let host_b = OrgScope::for_host(&s, "h-b").unwrap();
+        let hb = trackers_from_store(&s, &host_b, &m, 1_000);
+        assert_eq!(ids(&hb), vec![tb.id], "only Company B's");
+        assert!(
+            !serde_json::to_string(&hb).unwrap().contains("alpha"),
+            "nothing of A's tracker reaches B"
+        );
+        // An unassigned host: unassigned trackers only.
+        let host_none = OrgScope::for_host(&s, "h-none").unwrap();
+        assert_eq!(
+            ids(&trackers_from_store(&s, &host_none, &m, 1_000)),
+            vec![tn.id]
+        );
+        // A host moved by the master is fenced from the next read on.
+        s.set_host_org("h-a", Some(b.id)).unwrap();
+        let moved = OrgScope::for_host(&s, "h-a").unwrap();
+        assert_eq!(
+            ids(&trackers_from_store(&s, &moved, &m, 1_000)),
+            vec![tb.id]
+        );
+    }
+
+    #[test]
+    fn a_hosts_backlog_is_its_own_hosts_and_the_whole_health_carries_the_roll_up() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h1").unwrap();
+        let sid = s
+            .upsert_session("s", "h1", None, None, 1, 1, "running", None)
+            .unwrap();
+        // A suggestion made at 0: a year ago by `now`.
+        let l = s
+            .link_session_work(sid, crate::store::WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        s.set_work_link_state_for_test(l.id, "suggested", 0)
+            .unwrap();
+        let now = 365 * 86_400;
+        let none = |_: &[i64]| Vec::new();
+        assert_eq!(
+            trackers_from_store(&s, &OrgScope::All, &none, now).detection_backlog,
+            1
+        );
+        let h1 = OrgScope::for_host(&s, "h1").unwrap();
+        assert_eq!(
+            trackers_from_store(&s, &h1, &none, now).detection_backlog,
+            1
+        );
+        s.upsert_host("h2").unwrap();
+        let h2 = OrgScope::for_host(&s, "h2").unwrap();
+        assert_eq!(
+            trackers_from_store(&s, &h2, &none, now).detection_backlog,
+            0
+        );
+        // `health_from_store` fills it (the clock is real: a year-old one).
+        assert_eq!(health_from_store(&s).trackers.detection_backlog, 1);
+    }
+
+    #[test]
+    fn an_mcp_callers_errors_are_fenced_as_untrusted() {
+        let mut h = TrackersHealth {
+            trackers: vec![
+                TrackerHealth {
+                    tracker_id: 1,
+                    last_error: Some("token expired".into()),
+                    ..Default::default()
+                },
+                TrackerHealth {
+                    tracker_id: 2,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        h.fence_errors();
+        let e = h.trackers[0].last_error.as_deref().unwrap();
+        assert!(
+            e.starts_with(&crate::mcp::guard::untrusted_marker(TRACKER_ERROR_FROM)),
+            "{e}"
+        );
+        assert!(e.ends_with(crate::mcp::guard::UNTRUSTED_END), "{e}");
+        assert!(e.contains("\ntoken expired\n"), "{e}");
+        assert_eq!(h.trackers[1].last_error, None);
+    }
+
+    /// Additive on the wire (no contract bump): an older hub's `Health`
+    /// without `trackers` parses as an empty roll-up, and a null-stripped
+    /// tracker row parses too.
+    #[test]
+    fn an_older_healths_json_without_trackers_still_parses_as_empty() {
+        let body = r#"{"version":"1","db_ready":true,"schema_version":32,
+            "hosts_reachable":1,"hosts_total":1,"sessions_total":3,
+            "by_status":{},"ghosts":0,"context_red":0,"stuck":2,
+            "usage_by_host":{},"usage_by_day":[]}"#;
+        let h: Health = serde_json::from_str(body).expect("an older Health still parses");
+        assert_eq!(h.trackers, TrackersHealth::default());
+        let t: TrackersHealth =
+            serde_json::from_str(r#"{"trackers":[{"tracker_id":3,"health":"failing"}]}"#).unwrap();
+        assert_eq!(t.trackers[0].last_error, None);
+        assert_eq!(t.trackers[0].health, "failing");
     }
 }

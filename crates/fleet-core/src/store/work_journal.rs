@@ -163,57 +163,65 @@ impl Store {
             return Ok(None);
         }
         let now = now_unix();
-        let tx = self.conn.unchecked_transaction()?;
-        if cap_kind(kind).is_some() {
-            let last: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT body FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
-                     ORDER BY at DESC, id DESC LIMIT 1",
-                    rusqlite::params![claude_session_id, kind],
-                    |r| r.get(0),
-                )
-                .ok()
-                .flatten();
-            if last.is_some() && last == body {
-                return Ok(None);
+        // SAVEPOINT (`Store::in_savepoint`), not a second `BEGIN`:
+        // `Store::atomically` cannot nest, and Task 3 calls this (via
+        // `journal_for_session`, from the Stop hook) from inside one. A
+        // SAVEPOINT works both standalone (autocommit — it starts an
+        // implicit transaction) and already inside an open transaction.
+        self.in_savepoint("append_journal", |_| -> Result<Option<i64>, IpcError> {
+            if cap_kind(kind).is_some() {
+                let last: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT body FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
+                         ORDER BY at DESC, id DESC LIMIT 1",
+                        rusqlite::params![claude_session_id, kind],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .flatten();
+                // Best-effort dedupe read, unless SQLite answered it by
+                // rolling the savepoint back: the INSERT below would then
+                // commit on its own.
+                self.ensure_in_savepoint()?;
+                if last.is_some() && last == body {
+                    return Ok(None);
+                }
             }
-        }
-        let id =
-            if kind == "conversation" {
+            let id = if kind == "conversation" {
                 self.conn.query_row(
-                "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
-                                           body, meta) \
-                 VALUES (?1, ?2, ?3, 'conversation', ?4, ?5, ?6) \
-                 ON CONFLICT(claude_session_id) WHERE kind = 'conversation' DO UPDATE SET \
-                   at = excluded.at, \
-                   body = COALESCE(excluded.body, work_journal.body), \
-                   meta = COALESCE(excluded.meta, work_journal.meta), \
-                   participant_id = COALESCE(work_journal.participant_id, excluded.participant_id) \
-                 RETURNING id",
-                rusqlite::params![claude_session_id, participant_id, now, source, body, meta],
-                |r| r.get(0),
-            )?
+                    "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
+                                               body, meta) \
+                     VALUES (?1, ?2, ?3, 'conversation', ?4, ?5, ?6) \
+                     ON CONFLICT(claude_session_id) WHERE kind = 'conversation' DO UPDATE SET \
+                       at = excluded.at, \
+                       body = COALESCE(excluded.body, work_journal.body), \
+                       meta = COALESCE(excluded.meta, work_journal.meta), \
+                       participant_id = COALESCE(work_journal.participant_id, excluded.participant_id) \
+                     RETURNING id",
+                    rusqlite::params![claude_session_id, participant_id, now, source, body, meta],
+                    |r| r.get(0),
+                )?
             } else {
                 self.conn.execute(
-                "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
-                                           body, meta) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![claude_session_id, participant_id, now, kind, source, body, meta],
-            )?;
+                    "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
+                                               body, meta) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![claude_session_id, participant_id, now, kind, source, body, meta],
+                )?;
                 self.conn.last_insert_rowid()
             };
-        if let Some(cap) = cap_kind(kind) {
-            self.conn.execute(
-                "DELETE FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
-                   AND id NOT IN (SELECT id FROM work_journal \
-                                  WHERE claude_session_id = ?1 AND kind = ?2 \
-                                  ORDER BY at DESC, id DESC LIMIT ?3)",
-                rusqlite::params![claude_session_id, kind, cap as i64],
-            )?;
-        }
-        tx.commit()?;
-        Ok(Some(id))
+            if let Some(cap) = cap_kind(kind) {
+                self.conn.execute(
+                    "DELETE FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
+                       AND id NOT IN (SELECT id FROM work_journal \
+                                      WHERE claude_session_id = ?1 AND kind = ?2 \
+                                      ORDER BY at DESC, id DESC LIMIT ?3)",
+                    rusqlite::params![claude_session_id, kind, cap as i64],
+                )?;
+            }
+            Ok(Some(id))
+        })
     }
 
     /// Journal a harvested row for the session `session_id` is running

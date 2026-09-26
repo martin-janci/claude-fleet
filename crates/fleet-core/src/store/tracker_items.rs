@@ -23,6 +23,11 @@ use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
+/// Most ids one `UPDATE … WHERE id IN (…)` carries in
+/// [`Store::touch_tracker_items_fetched_at`], well under SQLite's default
+/// `SQLITE_LIMIT_VARIABLE_NUMBER` (32766 on the bundled build).
+const FETCHED_AT_TOUCH_CHUNK: usize = 500;
+
 /// One tracker item as a provider normalised it, ready to store.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrackerItemWrite {
@@ -55,6 +60,20 @@ pub struct UpsertOutcome {
     pub changed: bool,
     /// `(from, to)` status names, when the status moved on an existing item.
     pub status_change: Option<(String, String)>,
+}
+
+/// What [`Store::upsert_tracker_item_or_skip`] did for one item of a sync
+/// batch.
+#[derive(Debug)]
+pub(crate) enum ItemUpsertOutcome {
+    /// The item's upsert (and status-change journal row, if any) committed.
+    Stored(UpsertOutcome),
+    /// A per-item failure was tolerated: its `SAVEPOINT` rolled back and
+    /// nothing of it persists. Carries the failed statement's error
+    /// message, for a caller that must tell a genuine per-item failure
+    /// (some items still stored) from every item in a non-empty batch
+    /// failing (a systemic error), which it must not silently swallow.
+    Skipped(String),
 }
 
 /// `meta` JSON: the parts of a tracker item only fleet's own reads use.
@@ -295,11 +314,119 @@ impl Store {
 
     /// Insert or update one tracker item by `(tracker_id, external_id)`.
     /// Emits `work:item` (and `session:updated` for the live sessions whose
-    /// primary work it is) only when something a reader sees changed.
+    /// primary work it is) only when something a reader sees changed. An
+    /// unchanged item's `fetched_at` is touched right here.
     pub fn upsert_tracker_item(
         &self,
         tracker_id: i64,
         w: &TrackerItemWrite,
+    ) -> Result<UpsertOutcome, IpcError> {
+        self.upsert_tracker_item_impl(tracker_id, w, true)
+    }
+
+    /// Same as [`Store::upsert_tracker_item`] but for a caller batching many
+    /// items in one transaction (the tracker sync tick's `store_items`): an
+    /// unchanged item's `fetched_at` touch is NOT written here. The caller
+    /// collects `id`s of the unchanged outcomes and applies one
+    /// [`Store::touch_tracker_items_fetched_at`] after the loop instead of
+    /// one `UPDATE` per item.
+    pub fn upsert_tracker_item_batched(
+        &self,
+        tracker_id: i64,
+        w: &TrackerItemWrite,
+    ) -> Result<UpsertOutcome, IpcError> {
+        self.upsert_tracker_item_impl(tracker_id, w, false)
+    }
+
+    /// Batch-touch `fetched_at` for tracker items that were re-fetched but
+    /// did not change (paired with [`Store::upsert_tracker_item_batched`]):
+    /// one `UPDATE … WHERE id IN (…)` per chunk of at most
+    /// [`FETCHED_AT_TOUCH_CHUNK`] ids, instead of one `UPDATE` per item.
+    /// `ids` may repeat or be empty; a repeat is harmless (still one row).
+    pub fn touch_tracker_items_fetched_at(&self, ids: &[i64]) -> Result<(), IpcError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now = now_unix();
+        for chunk in ids.chunks(FETCHED_AT_TOUCH_CHUNK) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("UPDATE work_items SET fetched_at = ? WHERE id IN ({placeholders})");
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            params.push(&now);
+            for id in chunk {
+                params.push(id);
+            }
+            self.conn.execute(&sql, params.as_slice())?;
+        }
+        Ok(())
+    }
+
+    /// One item of a tracker sync batch: [`Store::upsert_tracker_item_batched`]
+    /// and, when the status moved, its [`Store::journal_status_change`] row,
+    /// together inside one `SAVEPOINT` ([`Store::in_savepoint`]) nested in
+    /// the batch's own `Store::atomically`. A per-item SQL failure (a
+    /// constraint, a hostile trigger, in either the upsert or the journal
+    /// write after it) rolls back only this item — the upsert and the
+    /// journal row together, so a journal failure no longer leaves an
+    /// orphaned upsert — and reports [`ItemUpsertOutcome::Skipped`] for the
+    /// caller to count as failed and let a later pass retry; any `work:item`
+    /// / `session:updated` frame this item already queued while the batch's
+    /// events are held ([`StoreBus::checkpoint`] / [`StoreBus::discard_since`])
+    /// is discarded with it, so a rolled-back item never announces anything.
+    /// A lost outer transaction ([`Store::ensure_in_tx`]) still propagates
+    /// as `Err`: that is the batch-wide case the caller must abort on, not a
+    /// per-item one.
+    ///
+    /// The journal key is the tracker's own key as it will be stored
+    /// (`w.key`, already through `key_or_drop`/the length cap in
+    /// `sync::to_write`), not necessarily the provider's raw key — an
+    /// over-long raw key that `to_write` drops journals as a bare "item"
+    /// instead, matching what the stored row actually shows.
+    ///
+    /// Must run inside [`Store::atomically`] (debug-asserted): this
+    /// method's rollback path assumes the bus is already holding events on
+    /// behalf of an enclosing `atomically`, so it has something to
+    /// [`StoreBus::discard_since`]. Called standalone (autocommit), a
+    /// savepoint failure's already-emitted event would have been delivered
+    /// immediately — nothing held to take back — so a rolled-back item
+    /// would still announce the write it just undid.
+    pub(crate) fn upsert_tracker_item_or_skip(
+        &self,
+        tracker_id: i64,
+        w: &TrackerItemWrite,
+    ) -> Result<ItemUpsertOutcome, IpcError> {
+        debug_assert!(
+            self.bus.is_holding(),
+            "upsert_tracker_item_or_skip must run inside Store::atomically"
+        );
+        let mark = self.bus.checkpoint();
+        match self.in_savepoint("sync_item", |_| -> Result<UpsertOutcome, IpcError> {
+            let out = self.upsert_tracker_item_batched(tracker_id, w)?;
+            if let Some((from, to)) = &out.status_change {
+                self.journal_status_change(out.id, w.key.as_deref(), from, to)?;
+            }
+            Ok(out)
+        }) {
+            Ok(out) => Ok(ItemUpsertOutcome::Stored(out)),
+            Err(e) => {
+                self.bus.discard_since(mark);
+                self.ensure_in_tx()?;
+                tracing::warn!(
+                    tracker_id,
+                    external_id = %w.external_id,
+                    error = %e,
+                    "[work] tracker sync: item failed; rolled back, retried next pass"
+                );
+                Ok(ItemUpsertOutcome::Skipped(e.to_string()))
+            }
+        }
+    }
+
+    fn upsert_tracker_item_impl(
+        &self,
+        tracker_id: i64,
+        w: &TrackerItemWrite,
+        touch_unchanged: bool,
     ) -> Result<UpsertOutcome, IpcError> {
         if w.external_id.is_empty() {
             return Err(IpcError::new(
@@ -406,7 +533,7 @@ impl Store {
                             id
                         ],
                     )?;
-                } else {
+                } else if touch_unchanged {
                     self.conn.execute(
                         "UPDATE work_items SET fetched_at = ?1 WHERE id = ?2",
                         rusqlite::params![now, id],
@@ -1041,6 +1168,80 @@ mod tests {
         assert_eq!(row.source, "jira");
     }
 
+    // ── Task 5: tracker sync batches unchanged items' `fetched_at` ──
+
+    #[test]
+    fn unchanged_items_batched_fetched_at_is_one_statement_and_leaves_rows_otherwise_identical() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        let mut ids = Vec::new();
+        for i in 1..=3 {
+            let out = s
+                .upsert_tracker_item(
+                    t,
+                    &write(&i.to_string(), &format!("ABC-{i}"), ("To Do", "todo")),
+                )
+                .unwrap();
+            ids.push(out.id);
+        }
+        bus.take();
+        let before: Vec<_> = ids
+            .iter()
+            .map(|id| s.get_work_item(*id).unwrap().unwrap())
+            .collect();
+        let changes_before = s.conn_for_test().total_changes();
+
+        // The batched upsert variant, used by tracker sync's `store_items`,
+        // defers the fetched_at write for an unchanged item: this loop must
+        // touch the database not at all (checked with `total_changes()`
+        // rather than comparing `fetched_at` values, since the real clock's
+        // one-second resolution could hide a same-second write).
+        let mut unchanged = Vec::new();
+        for i in 1..=3 {
+            let out = s
+                .upsert_tracker_item_batched(
+                    t,
+                    &write(&i.to_string(), &format!("ABC-{i}"), ("To Do", "todo")),
+                )
+                .unwrap();
+            assert!(!out.changed, "same item, no visible change");
+            unchanged.push(out.id);
+        }
+        assert!(
+            bus.names().is_empty(),
+            "no event for an unchanged batched pass"
+        );
+        assert_eq!(
+            s.conn_for_test().total_changes(),
+            changes_before,
+            "the batched upsert alone must not write fetched_at yet"
+        );
+        for (id, row) in ids.iter().zip(&before) {
+            let still = s.get_work_item(*id).unwrap().unwrap();
+            assert_eq!(
+                &still, row,
+                "the batched upsert alone must not touch fetched_at yet"
+            );
+        }
+
+        // One batched `UPDATE … WHERE id IN (…)` covers all three rows:
+        // `Connection::changes()` reports the row count of the most
+        // recently COMPLETED statement, so a real per-item loop (three
+        // separate single-row UPDATEs) would report 1 here, not 3.
+        s.touch_tracker_items_fetched_at(&unchanged).unwrap();
+        assert_eq!(
+            s.conn_for_test().changes(),
+            3,
+            "one statement touched all three rows"
+        );
+        for (id, before_row) in ids.iter().zip(&before) {
+            let after_row = s.get_work_item(*id).unwrap().unwrap();
+            assert!(after_row.fetched_at.is_some());
+            let mut before_norm = before_row.clone();
+            before_norm.fetched_at = after_row.fetched_at;
+            assert_eq!(after_row, before_norm, "identical except fetched_at");
+        }
+    }
+
     #[test]
     fn a_moved_key_becomes_an_alias_and_identity_stays() {
         let (s, t, _) = with_tracker(&["ABC", "NEW"]);
@@ -1425,5 +1626,136 @@ mod tests {
             )
             .unwrap();
         assert_eq!(body, "ABC-1: To Do → Done");
+    }
+
+    // ── tracker per-item tolerance (2026-09-26): a poison item's savepoint
+    //    must not leak a write, or an event for it, past its own rollback ──
+
+    #[test]
+    fn upsert_or_skip_rolls_back_only_the_poisoned_item_and_emits_nothing_for_it() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        s.conn_for_test()
+            .execute_batch(
+                "CREATE TEMP TRIGGER poison_insert BEFORE INSERT ON work_items \
+                 WHEN NEW.external_id = 'poison' \
+                 BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+            )
+            .unwrap();
+        // `upsert_tracker_item_or_skip` must run inside `Store::atomically`
+        // (debug-asserted): its rollback path discards events the bus is
+        // holding on the outer scope's behalf.
+        let (poisoned, good) = s
+            .atomically(|s| {
+                let poisoned = s
+                    .upsert_tracker_item_or_skip(t, &write("poison", "ABC-9", ("To Do", "todo")))
+                    .unwrap();
+                // The connection is left clean: a good item right after
+                // the poisoned one, in the same transaction, still works.
+                let good = s
+                    .upsert_tracker_item_or_skip(t, &write("1", "ABC-1", ("To Do", "todo")))
+                    .unwrap();
+                Ok((poisoned, good))
+            })
+            .unwrap();
+        assert!(
+            matches!(poisoned, ItemUpsertOutcome::Skipped(ref m) if m.contains("poison")),
+            "a per-item SQL failure is tolerated, not Err: {poisoned:?}"
+        );
+        assert!(matches!(good, ItemUpsertOutcome::Stored(_)), "{good:?}");
+        assert_eq!(
+            bus.names(),
+            vec!["work:item"],
+            "no event for the poison item, one for the good item: {:?}",
+            bus.names()
+        );
+        assert!(
+            s.tracker_item_for_key("ABC-9").unwrap().is_none(),
+            "the poisoned item's row must not exist"
+        );
+    }
+
+    /// The upsert and its status-change journal row share one savepoint: a
+    /// failure in the journal write, which comes AFTER the upsert already
+    /// wrote (and queued a `work:item` event while inside `atomically`'s
+    /// held scope), rolls the upsert back too — and discards the
+    /// already-queued event with it. Before this task, the journal write
+    /// was best-effort and a failure there left the upsert committed; the
+    /// brief now asks for the two to live or die together.
+    #[test]
+    fn upsert_or_skip_rolls_back_the_upsert_when_the_journal_write_after_it_fails() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        let sid = session(&s, "dev");
+        s.conn
+            .execute(
+                "UPDATE sessions SET claude_session_id = 'c-1' WHERE id = ?1",
+                [sid],
+            )
+            .unwrap();
+        let item = s
+            .upsert_tracker_item(t, &write("1", "ABC-1", ("To Do", "todo")))
+            .unwrap();
+        s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+            .unwrap();
+        bus.take();
+        s.conn_for_test()
+            .execute_batch(
+                "CREATE TEMP TRIGGER poison_journal BEFORE INSERT ON work_journal \
+                 BEGIN SELECT RAISE(ABORT, 'poison journal'); END;",
+            )
+            .unwrap();
+        // Run nested inside `atomically`, as the real batch does: the
+        // upsert's `work:item` (and `session:updated`) emit is held there,
+        // not delivered immediately, which is exactly what must be undone.
+        let out = s
+            .atomically(|s| {
+                Ok(
+                    s.upsert_tracker_item_or_skip(t, &write("1", "ABC-1", ("Done", "done")))
+                        .unwrap(),
+                )
+            })
+            .unwrap();
+        assert!(
+            matches!(out, ItemUpsertOutcome::Skipped(_)),
+            "the item's savepoint must roll back when its journal write fails: {out:?}"
+        );
+        assert!(
+            bus.names().is_empty(),
+            "the upsert's own already-queued event must not survive the \
+             item's rollback: {:?}",
+            bus.names()
+        );
+        let row = s.get_work_item(item.id).unwrap().unwrap();
+        assert_eq!(
+            row.status_category, "todo",
+            "the upsert itself rolls back together with the journal write"
+        );
+    }
+
+    /// A lost OUTER transaction (SQLite rolled the whole thing back, not
+    /// just the item's savepoint) is not a per-item failure: it must
+    /// propagate as `Err`, matching `Store::ensure_in_tx`'s contract.
+    #[test]
+    fn upsert_or_skip_propagates_a_lost_outer_transaction() {
+        let (s, t, _bus) = with_tracker(&["ABC"]);
+        s.conn_for_test()
+            .execute_batch(
+                "CREATE TEMP TRIGGER lose_tx BEFORE INSERT ON work_items \
+                 WHEN NEW.external_id = 'boom' \
+                 BEGIN SELECT RAISE(ROLLBACK, 'lost'); END;",
+            )
+            .unwrap();
+        let err = s
+            .atomically(|s| {
+                s.upsert_tracker_item_or_skip(t, &write("boom", "ABC-9", ("To Do", "todo")))
+            })
+            .unwrap_err();
+        assert!(
+            err.message.contains("rolled back"),
+            "names the lost transaction: {err:?}"
+        );
+        assert!(
+            s.conn_for_test().is_autocommit(),
+            "no transaction left open"
+        );
     }
 }

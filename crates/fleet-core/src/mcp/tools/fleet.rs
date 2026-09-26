@@ -9,20 +9,40 @@ impl FleetTools {
         readiness, the cached fleet roll-up, per-host reverse-tunnel health \
         (tunnels_flapping: supervised but crash-looping, so the Control API \
         is unreachable from that host), and ESTIMATED token usage and cost \
-        (micro-USD) per host and UTC day for 7 days. A per-host token's \
-        usage covers its own host only.")]
+        (micro-USD) per host and UTC day for 7 days, and trackers (each \
+        ok/degraded/failing, failures in a row, last error and success; \
+        detection_backlog: suggestions undecided for detection_backlog_days). \
+        A per-host token sees its own host's usage and its org's trackers.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
     ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
-        let mut h = health::health_check(&self.store);
+        let mut h = health::health_check(self.reader());
+        // On the hub the roll-up comes from a pooled connection, which says
+        // nothing about the writer. A poisoned writer fails every write tool
+        // (E_LOCK), and `db_ready: false` is how health reports that — so
+        // check it here too, without taking the lock.
+        if self.store.is_poisoned() {
+            h.db_ready = false;
+        }
         h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
-            if let Ok(s) = self.store.lock() {
-                health::scope_usage_to_host(&mut h, &s, host);
+            match self.reader().lock() {
+                Ok(s) => {
+                    health::scope_usage_to_host(&mut h, &s, host);
+                    // Work graph M12.4: its org's trackers, its host's backlog.
+                    // A scope that cannot be read shows no tracker at all.
+                    match caller.org_scope(&s) {
+                        Ok(scope) => health::scope_trackers(&mut h, &s, &scope),
+                        Err(_) => h.trackers = Default::default(),
+                    }
+                }
+                Err(_) => h.trackers = Default::default(),
             }
         }
+        // An agent reads it: a tracker's error is the tracker's text.
+        h.trackers.fence_errors();
         ok_json_compact(&h)
     }
 
@@ -60,7 +80,7 @@ impl FleetTools {
         versions, linked account.")]
     pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
-        ok_json_compact(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
+        ok_json_compact(&hosts::list_hosts(self.reader()).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Which agent hosts (transport \"agent\") have a \

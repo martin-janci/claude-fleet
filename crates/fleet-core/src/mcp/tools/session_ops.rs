@@ -37,22 +37,26 @@ impl FleetTools {
         // caller a refusal, not a reconcile pass whose result it then
         // cannot have.
         let view = p.view.as_deref().map(SessionView::parse).transpose()?;
+        // A forced pass reads its rows back through the writer that wrote
+        // them; a listing served from the store reads through the pool.
         let rows = if p.force {
             sessions::refresh_sessions(&self.store, &self.ssh).await
         } else {
-            sessions::list_sessions(&self.store, &self.ssh).await
+            sessions::list_sessions_reading(&self.store, self.reader(), &self.ssh).await
         }
         .map_err(to_mcp_err)?;
-        let controller = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.get_controller()
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?
-        };
+        let reader = if p.force { &*self.store } else { self.reader() };
         // Work graph M5: a per-host token lists only the sessions its org
         // may see (D7, `isolate_sessions`), and each row without the work
         // of other orgs — here, before `fresh_for` hashes the page, and not
         // only in the result gate.
-        let scope = self.org_scope(&caller)?;
+        let (controller, scope) = {
+            let s = lock(reader).map_err(to_mcp_err)?;
+            let controller = s
+                .get_controller()
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?;
+            (controller, caller.org_scope(&s).map_err(to_mcp_err)?)
+        };
         let tagged = rows
             .into_iter()
             .filter(|row| scope.sees_row(row))
@@ -263,7 +267,7 @@ impl FleetTools {
         // `stored_local_fleet_id` takes it again below — `Store` is a plain
         // (non-reentrant) `std::sync::Mutex`.
         let (row, is_controller) = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
             let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
             let row = sessions::find_session_by_tmux_name_scoped(&s, &p.tmux_name, &scope)
                 .map_err(to_mcp_err)?;
@@ -280,7 +284,7 @@ impl FleetTools {
         // means no address has yet needed a fleet comparison, which is the
         // only thing that mints one (`ensure_local_fleet_id`).
         let fleet_id =
-            crate::service::address::stored_local_fleet_id(&self.store).map_err(to_mcp_err)?;
+            crate::service::address::stored_local_fleet_id(self.reader()).map_err(to_mcp_err)?;
         let mut payload = serde_json::to_value(SessionWithController::new(is_controller, row))
             .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
         if let serde_json::Value::Object(map) = &mut payload {

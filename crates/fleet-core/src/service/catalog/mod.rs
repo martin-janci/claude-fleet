@@ -129,14 +129,16 @@ fn with_catalog<T>(f: impl FnOnce(&repo::Catalog) -> Result<T, IpcError>) -> Res
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostState {
     pub host_alias: String,
     pub harness: String,
     pub state: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` because a hub-client desktop reads this back from the hub's
+/// `list_assets` (see `catalog_list_assets`'s verdict).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetSummary {
     pub kind: String,
     pub name: String,
@@ -147,11 +149,11 @@ pub struct AssetSummary {
     /// The identifier this asset installs under when it differs from
     /// `name`; absent on the wire otherwise, so a listing reads the same as
     /// before for every asset that has no `install_as`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_as: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetListing {
     pub head: String,
     pub loaded_at: i64,
