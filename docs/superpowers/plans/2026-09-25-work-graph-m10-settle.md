@@ -252,3 +252,18 @@ M10.6 (independent; reuses M10.2's fake tracker)
     kill with a reason, and the e2e checks that reason is what is recorded.
   - Pass counts: 121 checks before (118 + 3 needing `ssh-keygen`); 122
     without `WBIN`, 177 with it, all passing.
+- 2026-09-26: **M10.3 written** (docs only):
+  `../../work-graph-acceptance.md`. 59 numbered steps in the order the work
+  is done (upgrade, no tracker, connect a tracker by the guide alone, sync
+  and tickets, start and multi-start, detection, *Name this work…*,
+  handover, resume with a deleted transcript, Today / standup / the card,
+  the operator's confirmations, tidy-up with `idle_unlinked` and Keep,
+  auto-tidy, retention with a 1-day window on a throw-away copy of the
+  hub, `fleet_health` with a revoked token, orgs and a per-host token,
+  GHES, the phone), each with an action, the expected result, pass / fail
+  and notes; the M11 and M12 *Acceptance (manual)* items and M12.6's *What
+  M10.3 should capture* are folded in, and D5 has its
+  `scripts/measure-session-start.sh` step. Names of settings, actions, UI
+  labels and `fleet-hub` commands were taken from the code on `main`
+  (v0.3.0). **Not run**: it waits on the user's run, whose filled-in copy
+  is committed as the record and updates the decisions table.
