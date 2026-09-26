@@ -154,6 +154,34 @@ mod tests {
         d
     }
 
+    /// A fixture built to trap a `gsub`-based (rather than `rep()`'s
+    /// `index`-based literal) rewrite: `/src/app.old` read as a REGEX also
+    /// matches `/src/appXold`, because `.` means "any character". A buggy
+    /// `gsub` implementation would clobber both lines; `rep()` must touch
+    /// only the one that is an exact literal match.
+    fn fixture_with_gsub_trap(dir: &std::path::Path) -> std::path::PathBuf {
+        let body = format!(
+            concat!(
+                r#"{{"type":"mode","sessionId":"{old}"}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"{a1}","sessionId":"{old}","cwd":"/src/app.old","message":{{"role":"user","content":"one"}}}}"#,
+                "\n",
+                r#"{{"type":"assistant","uuid":"bbbb","sessionId":"{old}","cwd":"/src/appXold","message":{{"role":"assistant","content":[]}}}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"{a2}","sessionId":"{old}","cwd":"/src/app.old","message":{{"role":"user","content":"two"}}}}"#,
+                "\n",
+                r#"{{"type":"assistant","uuid":"cccc","sessionId":"{old}","cwd":"/src/app.old","message":{{"role":"assistant","content":[]}}}}"#,
+                "\n",
+            ),
+            old = OLD,
+            a1 = A1,
+            a2 = A2
+        );
+        let p = dir.join(format!("{OLD}.jsonl"));
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
     #[test]
     fn keeps_everything_strictly_before_the_anchor() {
         let d = tmp();
@@ -262,11 +290,14 @@ mod tests {
 
     #[test]
     fn a_cross_worktree_fork_rewrites_cwd_literally() {
-        // `/src/app` contains no regex metacharacters, but a real path does
-        // (`.`, `+`), so the replacement must be literal. This asserts the
-        // behaviour; `rep()` in the script is what provides it.
+        // `/src/app.old` read as a REGEX also matches `/src/appXold` (`.`
+        // means "any character"), so a `gsub`-based rewrite would clobber
+        // both lines. `rep()` (index-based, literal) must touch only the
+        // exact match — this fixture is what actually discriminates the
+        // two implementations; a plain `/src/app` fixture would pass under
+        // either.
         let d = tmp();
-        let src = fixture(&d);
+        let src = fixture_with_gsub_trap(&d);
         let dest = d.join("elsewhere");
         let out = run(&rewind_script(
             None,
@@ -276,7 +307,7 @@ mod tests {
             NEW,
             Some(A2),
             Some(dest.to_str().unwrap()),
-            Some(("/src/app", "/src/app-fork")),
+            Some(("/src/app.old", "/src/app.new-fork")),
         ));
         assert!(
             out.status.success(),
@@ -284,8 +315,19 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         let written = std::fs::read_to_string(dest.join(format!("{NEW}.jsonl"))).unwrap();
-        assert!(written.contains(r#""cwd":"/src/app-fork""#));
-        assert!(!written.contains(r#""cwd":"/src/app""#));
+        assert!(
+            written.contains(r#""cwd":"/src/app.new-fork""#),
+            "the exact literal match is rewritten: {written}"
+        );
+        assert!(
+            !written.contains(r#""cwd":"/src/app.old""#),
+            "no copied line may still carry the un-rewritten old cwd: {written}"
+        );
+        assert!(
+            written.contains(r#""cwd":"/src/appXold""#),
+            "a `gsub` would treat '.' as 'any char' and clobber this line too; \
+             rep() must leave it untouched: {written}"
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -305,5 +347,43 @@ mod tests {
             s.contains("'/tmp/a b/t.jsonl'"),
             "paths with spaces must arrive quoted: {s}"
         );
+    }
+
+    #[test]
+    fn hostile_values_in_every_argument_this_function_owns_are_shell_quoted() {
+        // `every_interpolated_value_is_shell_quoted` above only exercises
+        // `stored_path`, which `locate_script` already owned and quoted
+        // before this task existed. This test covers the six values
+        // `rewind_script` itself interpolates: `new_id`, `anchor_uuid`,
+        // `dest_dir`, both halves of `cwd_rewrite`, and `claude_session_id`
+        // (embedded a second time here, into `-v oldid=...`, separately
+        // from locate_script's own use of it). None of these is validated
+        // at this layer — no caller exists yet (that's Task 3) — so a
+        // hostile value (a space, an embedded single quote) is a legitimate
+        // input to test here.
+        let claude_session_id = "sess d'e";
+        let new_id = "a b'c";
+        let anchor = "anchor f'g";
+        let dest_dir = "/tmp/dest h'i";
+        let oldcwd = "/old j'k";
+        let newcwd = "/new l'm";
+        let s = rewind_script(
+            None,
+            Some("/tmp/t.jsonl"),
+            None,
+            claude_session_id,
+            new_id,
+            Some(anchor),
+            Some(dest_dir),
+            Some((oldcwd, newcwd)),
+        );
+        for raw in [claude_session_id, new_id, anchor, dest_dir, oldcwd, newcwd] {
+            let quoted = crate::shell::quote(raw);
+            assert!(
+                s.contains(&quoted),
+                "expected the shell-quoted form of {raw:?} (i.e. {quoted}) \
+                 somewhere in the generated script, found none:\n{s}"
+            );
+        }
     }
 }
