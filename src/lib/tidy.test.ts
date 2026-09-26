@@ -26,6 +26,8 @@ import {
   reopenedBadge,
   reopenedByKey,
   splitArchived,
+  tidyEvidence,
+  tidyReasonLabel,
   type ReopenedWork,
   type TidyCandidate,
 } from './tidy';
@@ -64,8 +66,8 @@ describe('tidy choices', () => {
     expect(preselected(ghost)).toBe(false);
   });
 
-  it('an unlinked candidate offers no snooze, never or archive; an archived one no archive', () => {
-    expect(choicesFor(cand(4, { link_id: null, action: 'kill' }))).toEqual(['kill']);
+  it('an unlinked candidate offers keep instead of snooze, never or archive; an archived one no archive', () => {
+    expect(choicesFor(cand(4, { link_id: null, action: 'kill' }))).toEqual(['kill', 'keep']);
     expect(choicesFor(cand(5, { archived: true }))).toEqual(['safe_kill', 'snooze', 'never']);
   });
 
@@ -242,5 +244,43 @@ describe('refreshTidy', () => {
     expect(get(tidyReport)).toBe(report);
     expect(get(reopenedWork)).toBe(list);
     expect(get(reopenedLoads)).toBe(1);
+  });
+});
+
+describe('idle_unlinked (work graph M11.3)', () => {
+  const NOW = 2_000_000_000;
+  const lonely = cand(7, {
+    link_id: null,
+    reason: 'idle_unlinked',
+    action: 'safe_kill',
+    since: NOW - 9 * 86_400,
+    idle_secs: 12 * 86_400,
+  });
+
+  it('is labelled, offers Safe kill and Keep, and is never preselected', () => {
+    expect(tidyReasonLabel('idle_unlinked')).toBe('Idle, no work linked');
+    expect(choicesFor(lonely)).toEqual(['safe_kill', 'keep']);
+    expect(defaultChoice(lonely)).toBe('safe_kill');
+    expect(preselected(lonely)).toBe(false);
+    expect([...requestedTicks([lonely, cand(1)], { sessionIds: [7, 1], at: 0 })]).toEqual([1]);
+  });
+
+  it('shows its evidence: quiet since its last use, no work linked', () => {
+    expect(tidyEvidence(lonely, NOW)).toBe('idle 9 d · no work linked');
+    expect(tidyEvidence(cand(1), NOW)).toBe('idle 5 h');
+  });
+
+  it('keeps for 7 days per session, with no link', () => {
+    expect(applyItems([lonely], new Set([7]), new Map([[7, 'keep' as const]]))).toEqual([
+      { session_id: 7, action: 'keep', days: 7 },
+    ]);
+  });
+
+  it('ranks last, and is never in the auto-tidy dry run', () => {
+    expect(groupByReason([lonely, cand(1, { reason: 'ghost_expiring' })]).map((g) => g.reason)).toEqual([
+      'ghost_expiring',
+      'idle_unlinked',
+    ]);
+    expect(autoTidyPreview([lonely], new Set(['idle_unlinked', 'done_idle']))).toEqual([]);
   });
 });
