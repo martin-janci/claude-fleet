@@ -6,6 +6,7 @@
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
   import ScopeAttention from './ScopeAttention.svelte';
+  import TrackerAttention from './TrackerAttention.svelte';
   import { scopes, scopeSelectorShown, scopeFilter, effectiveScope, UNASSIGNED } from './orgs';
   import { scopeChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
@@ -297,6 +298,7 @@
   {/if}
   <Attention />
   <ScopeAttention />
+  <TrackerAttention />
   <LinkReview />
   <TidyReview />
   {#if $sessionFocus}

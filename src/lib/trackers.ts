@@ -245,6 +245,8 @@ export interface SyncMetrics {
   frames_emitted?: number;
   /** Redacted, one line, capped. */
   last_error?: string | null;
+  /** Failed passes in a row (work graph M12.4); 0 after an ok pass. */
+  consecutive_failures?: number;
 }
 
 /** The sync's counters per tracker. Admin (`work_admin { status }`):
@@ -627,8 +629,8 @@ export function trackerStale(t: TrackerRow, nowSec: number, intervalSecs: number
 }
 
 /** One line for a tracker's last sync pass ("last pass 1.2 s · 40 listed ·
- *  3 changed · 12 frames"), or null when no pass has run since the syncing
- *  process started. */
+ *  3 changed · 12 frames", plus "· 2 failed in a row" while it fails), or
+ *  null when no pass has run since the syncing process started. */
 export function describeSyncMetrics(m: SyncMetrics | null | undefined): string | null {
   if (!m || m.last_pass_at == null) return null;
   const ms = m.duration_ms ?? 0;
@@ -638,7 +640,46 @@ export function describeSyncMetrics(m: SyncMetrics | null | undefined): string |
     `${m.items_listed ?? 0} listed`,
     `${m.items_changed ?? 0} changed`,
     `${m.frames_emitted ?? 0} frames`,
+    ...(m.consecutive_failures ? [`${m.consecutive_failures} failed in a row`] : []),
   ].join(' · ');
+}
+
+/** Tracker states a person has to act on: the token expired or was
+ *  revoked, or the site wants a browser login. The same states make
+ *  `fleet_health` call a tracker failing (`tracker_status` in
+ *  `service/health.rs`); a transient failure is not one to reconnect. */
+export const RECONNECT_STATES: readonly string[] = ['auth_failed', 'captcha'];
+
+/** One Attention item for a tracker that needs a person (work graph M12.4). */
+export interface TrackerAttentionItem {
+  trackerId: number;
+  /** "Reconnect Jira (acme)". */
+  label: string;
+  /** Why, for the tooltip: the stored error or the state's badge. */
+  detail: string;
+}
+
+/** A provider's short name for a sentence: "Jira" for both Jira kinds. */
+function providerShortName(provider: string): string {
+  const label = providerInfo(provider)?.label ?? provider;
+  return label.replace(/ (Cloud|Data Center)$/, '');
+}
+
+/** The Attention items for `list`: one per tracker in a reconnect state,
+ *  in the list's order (a tracker is never listed twice). */
+export function trackerAttention(list: readonly TrackerRow[]): TrackerAttentionItem[] {
+  const seen = new Set<number>();
+  const out: TrackerAttentionItem[] = [];
+  for (const t of list) {
+    if (!RECONNECT_STATES.includes(t.state) || seen.has(t.id)) continue;
+    seen.add(t.id);
+    out.push({
+      trackerId: t.id,
+      label: `Reconnect ${providerShortName(t.provider)} (${t.name})`,
+      detail: t.last_error || trackerStateBadge(t.state).label,
+    });
+  }
+  return out;
 }
 
 /** "synced 4 min ago" / "never synced". */

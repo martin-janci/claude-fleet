@@ -43,6 +43,16 @@ export function requestCloseHosts(): void {
 /** Settings dialog visibility (mounted by the Sidebar; ⌘, sets it). */
 export const settingsOpen = writable(false);
 
+/** A Settings section to scroll to when the dialog next opens (`work`:
+ *  Settings → Work); the section clears it once shown. */
+export const settingsFocus = writable<'work' | null>(null);
+
+/** Open Settings at `section`. */
+export function openSettingsAt(section: 'work'): void {
+  settingsFocus.set(section);
+  settingsOpen.set(true);
+}
+
 /**
  * "Start a new session on this host": the Sidebar opens its project picker
  * and preselects the host in the NewSessionDialog that follows.

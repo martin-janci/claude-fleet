@@ -18,6 +18,8 @@
   // for a port); the row then shows the instance, and the owner of the fleet
   // sees each tracker's last sync pass (in the syncing process's memory).
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
+  import { settingsFocus } from './app_views';
   import {
     trackers,
     loadTrackers,
@@ -96,10 +98,18 @@
     return token.trim().length > 0;
   });
 
+  let sectionEl = $state<HTMLElement | null>(null);
+
   onMount(() => {
     void loadTrackers();
     if (owns) void loadMetrics();
     if (initialUrl) connecting = true;
+    // Opened from an Attention item ("Reconnect Jira (acme)"): show this
+    // section, then forget it so the next plain ⌘, opens at the top.
+    if (get(settingsFocus) === 'work') {
+      sectionEl?.scrollIntoView?.({ block: 'start' });
+      settingsFocus.set(null);
+    }
   });
 
   /** The last pass per tracker; quiet when this process cannot say (a
@@ -240,7 +250,7 @@
   }
 </script>
 
-<section class="block" data-testid="work-section">
+<section class="block" data-testid="work-section" bind:this={sectionEl}>
   <div class="section-header"><h4>Work</h4></div>
   <p class="blurb">
     Trackers add a ticket's title and status to the sessions working on it, and list your tickets

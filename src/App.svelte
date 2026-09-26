@@ -5,7 +5,7 @@
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
-  import { healthCheck, type Health } from './lib/ipc';
+  import { healthCheck, trackersHealthLine, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
@@ -47,6 +47,7 @@
     requestNewSessionOnHost,
     sessionViewChordLabel,
     settingsOpen,
+    openSettingsAt,
   } from './lib/app_views';
   import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
@@ -142,6 +143,14 @@
   });
 
   let health = $state<Health | null>(null);
+  // The footer's tracker line (work graph M12.4) moves with the sync, so the
+  // health read is repeated with the tracker refresh. Quiet: a failed
+  // re-read keeps the last health rather than toasting every two minutes.
+  async function refreshHealth(): Promise<void> {
+    const r = await healthCheck();
+    if (r.ok && health) health = r.value;
+  }
+  const trackerLine = $derived(trackersHealthLine(health?.trackers));
   let healthError = $state<string | null>(null);
   // Bootstrap (initial list_* fetches) failures. These used to be swallowed,
   // so a broken DB showed an innocent "No projects yet". Now they surface as
@@ -278,6 +287,7 @@
     trackerRefresh = setInterval(() => {
       void loadTrackers();
       void loadOrgs();
+      void refreshHealth();
     }, 120_000);
     // Account usage: same reasoning — not on the critical bootstrap path,
     // loaded after the subscription so no `account_usage:updated` is missed.
@@ -911,6 +921,16 @@
          this app's — `health_check` routes to the hub's `fleet_health`. The
          badge beside it is what says whose. -->
     <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
+    {#if trackerLine}
+      <button
+        type="button"
+        class="tracker-health"
+        class:err={(health.trackers?.failing ?? 0) > 0}
+        data-testid="footer-tracker-health"
+        title="Tracker sync health and suggestions waiting on you (fleet_health)"
+        onclick={() => openSettingsAt('work')}>{trackerLine}</button
+      >
+    {/if}
   {:else if $hubStatus.unavailable}
     <!-- Not "connecting…": nothing is, and nothing will until Settings. -->
     <button
@@ -982,6 +1002,18 @@
     gap: 1rem;
   }
   .status .err { color: #e64a4a; }
+  .tracker-health {
+    background: transparent;
+    border: none;
+    padding: 0 0.4rem;
+    font: inherit;
+    color: var(--fg-muted);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tracker-health.err {
+    color: var(--danger, #e64a4a);
+  }
   .hub-badge {
     background: transparent;
     border: 1px solid var(--border);
