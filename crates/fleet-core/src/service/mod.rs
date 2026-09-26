@@ -39,6 +39,7 @@ pub mod peer;
 pub mod playbooks;
 pub mod projects;
 pub mod provision;
+pub mod quick_replies;
 #[cfg(test)]
 mod reconcile_tests;
 pub mod repair;
