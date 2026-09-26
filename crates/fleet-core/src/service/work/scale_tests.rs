@@ -531,3 +531,46 @@ fn scale_retention_status_and_sweep_batches() {
     println!("[m12.3 scale] slowest batch (lock held): {slowest:.1} ms");
     budget("retention batch", slowest, 1_000.0);
 }
+
+/// Work graph M13.2: `work_admin { usage }` over a year of the fixture. It
+/// reads three big tables whole, on purpose (an index on their window
+/// columns would tax every write for an administrator's occasional read;
+/// see `store/work_usage.rs`), and nothing else: a scan of any other big
+/// table, or a p95 over budget, fails.
+#[test]
+fn scale_usage_summary() {
+    use crate::service::work::usage;
+    let f = fixture();
+    let f = f.lock().unwrap();
+    let no_metrics = |ids: &[i64]| crate::service::trackers::sync::metrics_for(ids);
+    let (u, sql) = traced(&f.store, || {
+        usage::usage(&lock(&f.store).unwrap(), 365, f.now, &no_metrics).unwrap()
+    });
+    assert!(u.links.created > 0, "{:?}", u.links);
+    let text = serde_json::to_string(&u).unwrap() + &u.lines().join("\n");
+    assert!(!text.contains(&f.hot_key), "a key reached the usage answer");
+    let allowed = ["work_links", "session_events", "work_journal"];
+    let s = lock(&f.store).unwrap();
+    for stmt in sql
+        .iter()
+        .filter(|q| q.trim_start().to_uppercase().starts_with("SELECT"))
+    {
+        let scans = s.full_scans(stmt);
+        let other: Vec<_> = scans
+            .iter()
+            .filter(|line| {
+                let table = line
+                    .strip_prefix("SCAN ")
+                    .and_then(|r| r.split_whitespace().next())
+                    .unwrap_or_default();
+                !allowed.contains(&table)
+            })
+            .collect();
+        assert!(other.is_empty(), "usage scans {other:?} in:\n    {stmt}");
+    }
+    drop(s);
+    let (_, p95) = measure("usage, 365 d", || {
+        usage::usage(&lock(&f.store).unwrap(), 365, f.now, &no_metrics).unwrap()
+    });
+    budget("usage", p95, 1_500.0);
+}
