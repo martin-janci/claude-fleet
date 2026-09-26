@@ -84,13 +84,21 @@ pub struct TrackerPass {
     pub skipped: bool,
     /// Items a batch's own `Store::upsert_tracker_item_or_skip` rolled back
     /// and tolerated (2026-09-26), accumulated across every batch in this
-    /// pass. Not `Serialize` (this struct never crosses the wire — see
+    /// pass — views, the linked-item refresh, and the unbound-key fetch
+    /// alike. Not `Serialize` (this struct never crosses the wire — see
     /// `SyncMetrics` for what a caller outside this module reads); purely
-    /// for the pass-level log line and tests. `store_items` still fails the
-    /// whole pass, as before this task, when a non-empty batch has zero
-    /// successes (every item failed, a systemic error, not a poison item
-    /// among good ones) — see `store_items`'s doc comment.
+    /// for the pass-level log line and tests. A single failed batch never
+    /// fails the pass by itself (see `store_items`'s doc comment); whether
+    /// the pass as a whole still must — nothing anywhere in it could be
+    /// stored — is decided once, at the end of `run_provider`, from this
+    /// field together with `seen`.
     pub failed: usize,
+    /// The most recent [`ItemUpsertOutcome::Skipped`] message this pass has
+    /// seen, across every batch. Transient plumbing for `run_provider`'s
+    /// end-of-pass check (the `TrackerError::Invalid` it raises when the
+    /// pass stored nothing at all), not a running log — a later item
+    /// overwrites it, and it says nothing about which item or view failed.
+    pub last_item_error: Option<String>,
 }
 
 /// One tracker's last sync pass (work graph M11.4), as `work_admin {
@@ -426,6 +434,19 @@ impl TrackerSync {
 
     /// The pass proper, over the provider `run_tracker` built (tests hand
     /// in their own).
+    ///
+    /// Every batch (each view's listing, the linked-item refresh, the
+    /// unbound-key fetch) tolerates its own per-item failures silently —
+    /// see `store_items`'s doc comment — so a poison item in one view never
+    /// stops the rest of the pass: later views, the linked-item refresh,
+    /// the unbound-key fetch and the bind all still run. Only once, at the
+    /// very end, does the pass decide whether it must fail *visibly*
+    /// anyway: if nothing anywhere in it could be stored (`pass.seen == 0`)
+    /// while at least one item did fail (`pass.failed > 0`), this returns
+    /// `Err` — a systemic error every item hit, not one poison item among
+    /// good ones — carrying `pass.last_item_error`, so the caller
+    /// (`sync_tracker`) records it on the tracker row and does not advance
+    /// `set_tracker_synced`, exactly as before per-item tolerance existed.
     async fn run_provider(
         &self,
         t: &TrackerRow,
@@ -593,6 +614,17 @@ impl TrackerSync {
                 tracing::debug!(error = %e.message, "[work] resolve after bind failed");
             }
         }
+        // The pass-wide visibility rule (see this method's doc comment):
+        // every batch above already tolerated its own per-item failures, so
+        // this is the one place that still fails the pass when NOTHING in
+        // it — no view, no linked item, no unbound key — could be stored.
+        if pass.seen == 0 && pass.failed > 0 {
+            return Err(TrackerError::Invalid(
+                pass.last_item_error
+                    .clone()
+                    .unwrap_or_else(|| "every item this pass tried to store failed".to_string()),
+            ));
+        }
         Ok(())
     }
 
@@ -631,24 +663,29 @@ impl TrackerSync {
     /// runs the upsert and its status-change journal row in their own
     /// nested `SAVEPOINT`, rolling back only that item on a per-item
     /// failure, [`ItemUpsertOutcome::Skipped`]. Such an item is not counted
-    /// in `pass.seen` / `pass.changed` (it is counted in `pass.failed`), and
-    /// is dropped from `seen` again so a later occurrence in the same pass
-    /// (a linked-item refresh after a view listing, say) may retry it. A
-    /// lost outer transaction (`Store::ensure_in_tx`, inside
-    /// `upsert_tracker_item_or_skip`) still propagates here as `Err`: the
-    /// whole batch aborts exactly as before, nothing of it persists.
+    /// in `pass.seen` / `pass.changed` (it is counted in `pass.failed`, and
+    /// its error kept in `pass.last_item_error`), and is dropped from `seen`
+    /// again so a later occurrence in the same pass (a linked-item refresh
+    /// after a view listing, say) may retry it.
     ///
-    /// A non-empty batch where EVERY item failed (a systemic error — a
-    /// constraint every row violates, say — not one poison item among good
-    /// ones) also returns `Err`, carrying the last item's error message:
-    /// silently reporting `Ok` here (as a batch with only *some* failures
-    /// does) would let the tracker settle on "ok" and `set_tracker_synced`
-    /// advance in `run_provider`'s caller with nothing actually refreshed,
-    /// which is the same silent-failure trade-off this task exists to
-    /// remove for a single item, now closed for the whole-batch case too.
-    /// The batch's own transaction still commits — nothing succeeded, so it
-    /// commits nothing beyond what was already true — only `store_items`'s
-    /// return value changes.
+    /// **Never returns `Err` for a per-item failure, however many items in
+    /// this batch fail** — not even every one of them: a batch is scoped to
+    /// one view's listing (or one linked/unbound-key fetch), and an
+    /// incremental listing often answers with exactly one changed item, so
+    /// treating "this one batch's only item failed" as a whole-tracker
+    /// failure would abort the rest of the pass (later views, the
+    /// linked-item refresh, the unbound-key fetch, the bind) on the very
+    /// poison item this task exists to route around, stalling the pass on
+    /// it every time — the same stall as before per-item tolerance existed.
+    /// Whether *the pass as a whole* still needs to fail visibly (nothing
+    /// anywhere in it could be stored) is decided once, at the end of
+    /// `run_provider`, from the pass-wide `pass.seen` / `pass.failed`
+    /// totals every batch call contributes to — see its doc comment.
+    ///
+    /// The only `Err` this returns is a lost outer transaction
+    /// (`Store::ensure_in_tx`, inside `upsert_tracker_item_or_skip`): the
+    /// whole batch aborts exactly as before per-item tolerance existed,
+    /// nothing of it persists.
     ///
     /// Returns how many items in THIS batch failed, for the caller (the
     /// view loop in `run_provider`) to gate the view's watermark / sync
@@ -666,8 +703,6 @@ impl TrackerSync {
             .lock(store)
             .map_err(|e| TrackerError::Invalid(e.message))?;
         let mut failed = 0usize;
-        let mut stored = 0usize;
-        let mut last_error: Option<String> = None;
         s.atomically(|s| {
             let mut unchanged_ids = Vec::new();
             for item in items {
@@ -677,7 +712,6 @@ impl TrackerSync {
                 }
                 match s.upsert_tracker_item_or_skip(tracker_id, &to_write(item))? {
                     ItemUpsertOutcome::Stored(out) => {
-                        stored += 1;
                         pass.seen += 1;
                         if out.changed {
                             pass.changed += 1;
@@ -689,7 +723,7 @@ impl TrackerSync {
                         // `upsert_tracker_item_or_skip` already warned with
                         // the tracker id, external id and the error.
                         failed += 1;
-                        last_error = Some(msg);
+                        pass.last_item_error = Some(msg);
                         seen.remove(&key);
                     }
                 }
@@ -698,11 +732,6 @@ impl TrackerSync {
         })
         .map_err(|e| TrackerError::Invalid(e.message))?;
         pass.failed += failed;
-        if stored == 0 && failed > 0 {
-            return Err(TrackerError::Invalid(
-                last_error.unwrap_or_else(|| "every item in the batch failed".to_string()),
-            ));
-        }
         Ok(failed)
     }
 }

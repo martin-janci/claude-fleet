@@ -1026,15 +1026,17 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
 
 /// The token moves only once the items it stands for are stored: a store
 /// write that fails leaves the token where it was, so the next pass reads
-/// the same changes again instead of skipping them. (2026-09-26 fix round
-/// 1: a batch with SOME good items tolerates a per-item failure — see
+/// the same changes again instead of skipping them. (2026-09-26: a batch
+/// with SOME good items tolerates a per-item failure silently — see
 /// `store_items_tolerates_one_poison_item_mid_batch` — but this provider's
-/// `changes` answers with exactly one item, so its failure IS the whole
-/// batch failing (zero successes): review Minor 2 requires that to still
-/// fail visibly, exactly as before per-item tolerance existed, rather than
-/// let the tracker settle on "ok" with nothing refreshed. Either way the
-/// token does not move — on `Err` the caller's mark/watermark update is
-/// never reached at all.)
+/// `changes` answers with exactly one item, and that is also the WHOLE
+/// PASS's only item (a single view, nothing linked or unbound): with
+/// nothing anywhere in the pass stored, `run_provider`'s end-of-pass check
+/// still fails it visibly, exactly as before per-item tolerance existed,
+/// rather than let the tracker settle on "ok" with nothing refreshed.
+/// Either way the token does not move: the view loop's own per-view gate
+/// (`failed == 0`) already skips the update for THIS view regardless of
+/// whether the pass later fails as a whole.)
 #[tokio::test]
 async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
     let fx = Fx::new();
@@ -1074,7 +1076,7 @@ async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
         .await;
     assert!(
         r.is_err(),
-        "the batch's only item failing IS the whole batch failing: {r:?}"
+        "the pass's only item failing means nothing in the pass was stored: {r:?}"
     );
     assert_eq!(
         mark(&fx).as_deref(),
@@ -1264,11 +1266,24 @@ async fn run_pass_does_not_advance_the_watermark_when_a_view_batch_has_a_poison_
 }
 
 // ── fix round 1 (2026-09-26 review): a systemic, every-item failure must
-//    still fail the pass visibly — silent tolerance is only for a poison
-//    item AMONG good ones, not for a batch with zero successes ──
+//    still fail the PASS visibly — silent tolerance is only for a poison
+//    item AMONG good ones, never for a batch, not even a whole pass, with
+//    zero successes. Fix round 2: the all-fail check moved from per-BATCH
+//    (which wrongly aborted the rest of the pass — later views, the
+//    linked-item refresh, the unbound-key fetch — whenever a single-item
+//    incremental batch was the poison one, stalling the pass on it every
+//    time) to per-PASS, decided once at the end of `run_provider` ──
 
+/// `store_items` itself never fails for a per-item cause any more, however
+/// many items in ONE batch fail — that used to be true only for a MIXED
+/// batch (`store_items_tolerates_one_poison_item_mid_batch`); fix round 2
+/// makes it true even when every item in the batch fails, because a batch
+/// is scoped to one view (or one fetch), and the pass-wide visibility rule
+/// now lives in `run_provider` instead (see
+/// `a_pass_fails_visibly_when_every_item_of_a_batch_fails` and
+/// `a_poison_view_does_not_stall_the_rest_of_the_pass` below).
 #[tokio::test]
-async fn store_items_fails_the_batch_when_every_item_fails() {
+async fn store_items_tolerates_every_item_in_a_batch_failing() {
     let fx = Fx::new();
     fx.store
         .lock()
@@ -1289,14 +1304,17 @@ async fn store_items_fails_the_batch_when_every_item_fails() {
         tracker_id: fx.tracker,
         ..Default::default()
     };
-    let err = sync
+    let failed = sync
         .store_items(fx.tracker, items, &fx.store, &mut seen, &mut pass)
-        .unwrap_err();
-    assert!(
-        matches!(&err, TrackerError::Invalid(m) if m.contains("systemic poison")),
-        "carries the last item's error message: {err:?}"
-    );
+        .unwrap();
+    assert_eq!(failed, 2, "{pass:?}");
     assert_eq!(pass.failed, 2, "{pass:?}");
+    assert!(
+        pass.last_item_error
+            .as_deref()
+            .is_some_and(|m| m.contains("systemic poison")),
+        "{pass:?}"
+    );
     assert_eq!(
         (pass.seen, pass.changed),
         (0, 0),
@@ -1585,4 +1603,113 @@ async fn a_failed_items_dedupe_key_is_freed_so_a_later_occurrence_in_the_same_pa
     );
     assert_eq!(pass.failed, 1, "{pass:?}");
     assert_eq!(pass.seen, 2, "marker-seed, then X on its retry: {pass:?}");
+}
+
+// ── fix round 2 (2026-09-26 review): a poison VIEW (its whole batch is one
+//    failed item) must not stall the rest of the pass — later views, the
+//    linked-item refresh, the unbound-key fetch, the bind ──
+
+/// A provider that answers view "a" with one poisoned item and view "b"
+/// with one good one, so the sole failure in view A's batch cannot be
+/// confused with "the pass stored nothing" — view B alone is proof enough.
+struct TwoViewProvider;
+
+#[async_trait::async_trait]
+impl TrackerProvider for TwoViewProvider {
+    fn caps(&self) -> crate::service::trackers::Caps {
+        crate::service::trackers::Caps {
+            incremental: Incremental::None,
+            ..Default::default()
+        }
+    }
+    async fn probe(&self) -> Result<crate::service::trackers::TrackerInfo, TrackerError> {
+        unreachable!()
+    }
+    async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+        unreachable!()
+    }
+    async fn list(
+        &self,
+        view: &ViewDef,
+        _: Option<i64>,
+        _: Option<String>,
+    ) -> Result<crate::service::trackers::Page, TrackerError> {
+        let items = if view.id == "a" {
+            vec![poison_snap("boom", "ABC-BOOM", 1)]
+        } else {
+            vec![poison_snap("good", "ABC-GOOD", 2)]
+        };
+        Ok(crate::service::trackers::Page { items, next: None })
+    }
+    async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+        Ok(vec![])
+    }
+    fn recognize(&self, _: &str, _: crate::service::trackers::RefCtx<'_>) -> Vec<ItemRef> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn a_poison_view_does_not_stall_the_rest_of_the_pass() {
+    let fx = Fx::new();
+    // `Fx::new` already wires a "mine" view; disable it so only "a" and
+    // "b" (below) are processed — otherwise its own fake-transport-shaped
+    // listing would collide with `TwoViewProvider`'s made-up items.
+    fx.store
+        .lock()
+        .unwrap()
+        .set_tracker_view_enabled(fx.tracker, "mine", false)
+        .unwrap();
+    fx.store
+        .lock()
+        .unwrap()
+        .sync_tracker_views(
+            fx.tracker,
+            &[
+                ("a".into(), "View A".into(), "qa".into()),
+                ("b".into(), "View B".into(), "qb".into()),
+            ],
+        )
+        .unwrap();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_boom BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'boom' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let views = fx
+        .store
+        .lock()
+        .unwrap()
+        .list_tracker_views(fx.tracker)
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let row = fx.row();
+    let mut pass = TrackerPass::default();
+    sync.run_provider(&row, &TwoViewProvider, views, &fx.store, T0, &mut pass)
+        .await
+        .unwrap();
+    assert_eq!(
+        pass.failed, 1,
+        "view A's one item failed; the pass is still Ok: {pass:?}"
+    );
+    assert!(
+        fx.item_opt("ABC-GOOD").is_some(),
+        "view B's item is stored despite view A's poison"
+    );
+    assert!(fx.item_opt("ABC-BOOM").is_none());
+    let after = fx
+        .store
+        .lock()
+        .unwrap()
+        .list_tracker_views(fx.tracker)
+        .unwrap();
+    let a = after.iter().find(|v| v.view_id == "a").unwrap();
+    let b = after.iter().find(|v| v.view_id == "b").unwrap();
+    assert_eq!(a.watermark, None, "view A's watermark must not advance");
+    assert_eq!(b.watermark, Some(2), "view B's watermark advances normally");
 }
