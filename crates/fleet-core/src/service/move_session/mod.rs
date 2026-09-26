@@ -176,6 +176,13 @@ pub struct MoveSessionArgs {
     /// wait).
     #[serde(default)]
     pub when: When,
+    /// Carry a live confirmed work link across the org boundary the target
+    /// host puts the session on, with a warning, instead of refusing the
+    /// move (`E_FORBIDDEN`, details `cross_org: true` — work graph M5's
+    /// rule, `orgs::check_cross_org`). Default false; off the wire when
+    /// false, so an unforced call reaches an older hub exactly as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_cross_org: bool,
 }
 
 /// What a completed move did.
@@ -2408,6 +2415,61 @@ pub(super) async fn target_paths(
     }
 }
 
+/// The source's live confirmed work links whose org is not the org the
+/// session will have on `target` (`Store::org_for_new_session`). A link or
+/// a confirm refuses such a crossing unless forced (`orgs::check_cross_org`,
+/// work graph M5), and so does a move: `E_FORBIDDEN` with the same
+/// `cross_org` details, before anything is copied. With `force`
+/// (`force_cross_org: true`) every link is carried as it is and each
+/// crossing is a warning the operator reads — nothing is dropped over it.
+fn cross_org_check(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    target: &str,
+    force: bool,
+) -> Result<Vec<String>, IpcError> {
+    let Some(pid) = row.project_id else {
+        return Ok(Vec::new());
+    };
+    let s = crate::ipc_error::lock(store)?;
+    let target_org = s.org_for_new_session(target, pid)?;
+    let mut links: Vec<crate::store::WorkLinkRow> = s
+        .session_work_links(row.id)?
+        .into_iter()
+        .filter(|l| l.state == "confirmed")
+        .collect();
+    s.fill_link_orgs(&mut links)?;
+    let mut out = Vec::new();
+    for l in &links {
+        let name = l
+            .ref_key
+            .clone()
+            .or_else(|| l.item_id.map(|i| format!("work item {i}")))
+            .unwrap_or_else(|| format!("work link {}", l.id));
+        match crate::service::orgs::check_cross_org(l.org_id, target_org, &name, false) {
+            Ok(()) => {}
+            Err(e) if force => out.push(format!(
+                "the work link to {name} crosses the org boundary on {target} and was carried as is: {}",
+                e.message
+            )),
+            // The same code and `details` (`cross_org`, `work_org_id`,
+            // `session_org_id`) as a refused link, so a client reads both
+            // the same way; only the sentence says it is the move.
+            Err(e) => {
+                return Err(IpcError {
+                    message: format!(
+                        "moving to {target} would carry the work link to {name} across the \
+                         org boundary: {}",
+                        e.message
+                    ),
+                    ..e
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The move's steps (see the module docs).
 async fn move_session_inner(
     args: MoveSessionArgs,
@@ -2430,6 +2492,12 @@ async fn move_session_inner(
         busy: _,
     } = gather(&args, store, ssh, hooks, Some(progress)).await?;
     let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(cross_org_check(
+        store,
+        &snap.row,
+        &target,
+        args.force_cross_org,
+    )?);
     let mut carried = carry::CarryReport {
         dirty_entries: state.dirty.clone(),
         ..Default::default()
@@ -3710,6 +3778,7 @@ mod tests {
             clean_target: false,
             dry_run: false,
             when: When::Now,
+            force_cross_org: false,
         }
     }
 
@@ -4539,6 +4608,104 @@ mod tests {
                 assert_eq!(links[0].id, link.id, "the same link, re-pointed");
             }
         }
+    }
+
+    /// A live link that would cross the org boundary on the target (the
+    /// source's host is in Company A, the target's in Company B) refuses the
+    /// move — `E_FORBIDDEN`, the same `cross_org` details a refused link
+    /// carries, before anything is copied — unless `force_cross_org`, which
+    /// carries it as is and warns, naming it. Unassigned hosts, or one org
+    /// for both, warn of nothing.
+    #[tokio::test]
+    async fn a_link_crossing_the_org_boundary_is_refused_unless_forced_and_then_warned() {
+        let f = fixture();
+        let (a, b) = {
+            let s = f.store.lock().unwrap();
+            let a = s.add_org("Company A", None, false).unwrap().id;
+            let b = s.add_org("Company B", None, false).unwrap().id;
+            s.set_host_org("alpha", Some(a)).unwrap();
+            s.link_session_work(
+                f.source_id,
+                crate::store::WorkTarget::Key("ABC-1"),
+                "manual",
+            )
+            .unwrap();
+            (a, b)
+        };
+        // Same org on both hosts: no crossing.
+        f.store
+            .lock()
+            .unwrap()
+            .set_host_org("beta", Some(a))
+            .unwrap();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let rep = run(&f, &hooks, true).await.expect("move");
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+
+        let f = fixture();
+        {
+            let s = f.store.lock().unwrap();
+            let a = s.add_org("Company A", None, false).unwrap().id;
+            let b = s.add_org("Company B", None, false).unwrap().id;
+            s.set_host_org("alpha", Some(a)).unwrap();
+            s.set_host_org("beta", Some(b)).unwrap();
+            s.link_session_work(
+                f.source_id,
+                crate::store::WorkTarget::Key("ABC-1"),
+                "manual",
+            )
+            .unwrap();
+        }
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let e = run(&f, &hooks, false)
+            .await
+            .expect_err("the crossing is refused unless forced");
+        assert_eq!(e.code, codes::E_FORBIDDEN, "{}", e.message);
+        assert!(
+            e.message.contains("ABC-1") && e.message.contains("beta"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("force_cross_org"), "{}", e.message);
+        assert_eq!(
+            e.details,
+            Some(serde_json::json!({
+                "cross_org": true, "work_org_id": a, "session_org_id": b
+            })),
+            "the shape `check_cross_org` gives a refused link"
+        );
+        assert_source_untouched(&f, &hooks);
+        assert_eq!(
+            f.store
+                .lock()
+                .unwrap()
+                .session_work_links(f.source_id)
+                .unwrap()
+                .len(),
+            1,
+            "the link stays on the source"
+        );
+        assert!(
+            !f.fake
+                .calls_for("beta")
+                .iter()
+                .any(|c| c.stdin.is_some()
+                    || c.script().is_some_and(|s| s.contains("tmux new-session"))),
+            "nothing was copied to or started on the target before the refusal"
+        );
+
+        let rep = run_with(&f, &hooks, |a| a.force_cross_org = true)
+            .await
+            .expect("forced, the move is not refused");
+        let w = rep
+            .warnings
+            .iter()
+            .find(|w| w.contains("ABC-1") && w.contains("org boundary"))
+            .unwrap_or_else(|| panic!("{:?}", rep.warnings));
+        assert!(w.contains("beta"), "{w}");
+        let s = f.store.lock().unwrap();
+        let links = s.session_work_links(rep.target_session_id).unwrap();
+        assert_eq!(links.len(), 1, "the link followed the move, as is");
     }
 
     #[tokio::test]
@@ -6533,6 +6700,7 @@ mod tests {
             clean_target: false,
             dry_run: false,
             when: When::Now,
+            force_cross_org: false,
         };
         assert_eq!(
             move_session_with(same, &f.store, &f.fake, &hooks, fast())

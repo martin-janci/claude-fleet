@@ -710,6 +710,32 @@ describe('retryMove', () => {
     expect(get(moves).get(7)!.cleanTarget).toBe(true);
   });
 
+  // Work graph M5: the org-boundary refusal (`E_FORBIDDEN`, `cross_org`) is
+  // retried with `force_cross_org`, which then sticks to the run: a cleanup
+  // retry after it must not run into the same refusal again.
+  it('retries with force_cross_org when asked, and keeps it for later retries', async () => {
+    const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
+    invoked.mockResolvedValueOnce(
+      err('E_FORBIDDEN', 'crosses', { cross_org: true, work_org_id: 1, session_org_id: 2 }),
+    );
+    startMove(session, 'beta', { keepSource: false });
+    await flush();
+    expect(get(moves).get(7)!.forceCrossOrg).toBe(false);
+    expect(invoked.mock.calls.at(-1)![1].args).not.toHaveProperty('force_cross_org');
+
+    invoked.mockResolvedValueOnce(err('E_MOVE_TARGET_DIRTY', 'dirty', { leftovers: 'ours', ours: ['a.txt'] }));
+    retryMove(7, { forceCrossOrg: true });
+    await flush();
+    expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({ force_cross_org: true });
+    expect(get(moves).get(7)!.forceCrossOrg).toBe(true);
+
+    invoked.mockResolvedValueOnce(ok({ kind: 'moved', ...report({ target_session_id: 8 }) }));
+    retryMove(7, { cleanTarget: true });
+    await flush();
+    expect(invoked.mock.calls.at(-1)![1].args).toMatchObject({ clean_target: true, force_cross_org: true });
+    expect(get(moves).get(7)!.status).toBe('done');
+  });
+
   it('refuses to retry a run that is running or partial', async () => {
     const session = row({ id: 7, tmux_name: 's', host_alias: 'alpha' });
     let resolveIt: (v: unknown) => void = () => {};
@@ -1046,7 +1072,7 @@ describe('a waiting run', () => {
         sessionId: 7, sessionName: 's', fromHost: 'alpha', toHost: 'beta', keepSource: null,
         origin: 'local', steps: MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null })),
         status: 'waiting', report: null, error: null, resolveError: null, startedAt: 1, settledAt: null,
-        cleanTarget: false, attempt: 1, resolving: false, awaitingStart: false,
+        cleanTarget: false, forceCrossOrg: false, attempt: 1, resolving: false, awaitingStart: false,
         deadlineUnix: 2_000_000_000, waitEnded: null, waitRefusal: null,
       });
       dismissMove(7);

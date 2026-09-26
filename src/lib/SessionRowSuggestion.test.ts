@@ -155,6 +155,31 @@ describe('a row with a link suggestion', () => {
     await tick();
     expect(screen.getByTestId('work-menu-panel')).toBeTruthy();
   });
+  it('Pick another… moves to the key box: what is typed there is the link, the suggestion is not decided, the row not selected', async () => {
+    const p = props(row());
+    render(SessionRowItem, { props: p });
+    await fireEvent.click(screen.getByTestId('work-suggestion'));
+    const pick = await screen.findByTestId('why-pick');
+    await fireEvent.click(pick);
+    const input = screen.getByTestId('work-input') as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+    expect(input.placeholder).toBe('ABC-123 or a name');
+    expect(p.onSelectSession).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith('confirm_session_work', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+    // The popover stays, with its suggestion, until the key is set.
+    expect(screen.getByTestId('why-link').dataset.state).toBe('suggested');
+    await fireEvent.input(input, { target: { value: 'ABC-100' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(invoke).toHaveBeenCalledWith('link_session_work', {
+      args: { session_id: 7, key: 'ABC-100' },
+    });
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+    await tick();
+    await tick();
+    expect(screen.queryByTestId('work-menu-panel')).toBeNull();
+    expect(p.onSelectSession).not.toHaveBeenCalled();
+  });
 });
 
 describe('the work chip of an automatic link', () => {

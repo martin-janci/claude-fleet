@@ -640,6 +640,22 @@ pub(super) fn persist_audit(
     if caller.mode == TokenMode::Peer {
         return;
     }
+    // Task 2: a read-only tool (`guard::READONLY_TOOLS` — the exact set a
+    // `readonly` token may call) writes NO audit row at all, not even a
+    // quiet one. The tracing `audit()` line above (called separately, from
+    // each tool body) already covers every call including reads; this is
+    // only the persisted `session_events` row. A poll like the desktop's
+    // conversation refresh alone produced ~720 of these an hour, each one
+    // an INSERT+prune under the store mutex for a call that changed
+    // nothing. This check runs BEFORE the store is even locked, so a read
+    // never pays for the lock either. A refused call to a MUTATING tool is
+    // still audited exactly as before: this only ever short-circuits reads,
+    // and `enforce_mode` / `enforce_admin` (which decide "refused") run
+    // after `persist_audit` returns in `call_tool` — see "Audit first so
+    // refused calls are on the timeline too" there.
+    if guard::is_readonly_tool(tool) {
+        return;
+    }
     let Ok(s) = store.lock() else { return };
     let Some(session_id) = find_audit_session(&s, args) else {
         return;
@@ -650,22 +666,7 @@ pub(super) fn persist_audit(
     } else {
         format!("{tool} by {}: {summary}", caller.label())
     };
-    // A read is written but not announced. The timeline and `session_history`
-    // still carry it; what goes away is one `session:event` frame per read to
-    // every connected client — measured at ~720 an hour from the desktop's
-    // own conversation poll alone, each 253 B, and each one telling a
-    // read-only paired phone what the operator was doing. A write keeps its
-    // announcement: those are the events a client is watching for.
-    let _ = if guard::READONLY_TOOLS.contains(&tool) {
-        s.insert_session_event_quietly(
-            session_id,
-            None,
-            "mcp_call",
-            Some(&guard::scrub_line(&detail)),
-        )
-    } else {
-        s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)))
-    };
+    let _ = s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)));
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.
@@ -1021,6 +1022,14 @@ pub(super) struct InboxSummary {
     pub(super) from_addr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) to_addr: Option<String>,
+    /// `true` for a row from another hub over a link (`from_addr` set): the
+    /// preview is that peer's text with the untrusted-content marker
+    /// stripped for room, so the flag carries what the marker would (D8:
+    /// every rendering of peer text says it is untrusted). Absent for a
+    /// local row. Unforgeable: a peer's own marker lines are neutralised in
+    /// `apply.rs`, and this field comes from the row, never the body.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) untrusted: bool,
 }
 
 pub(super) const INBOX_PREVIEW_CHARS: usize = 80;
@@ -1034,8 +1043,10 @@ impl From<crate::store::SessionMessage> for InboxSummary {
         // can run well past `INBOX_PREVIEW_CHARS`, so an unstripped preview
         // is all marker and no message. `from_addr` is set only for a
         // remote row, and the row is still flagged foreign via that same
-        // field either way, so stripping the marker here loses no signal.
-        let preview_source: &str = if m.from_addr.is_some() {
+        // field AND the `untrusted` flag below, so stripping the marker
+        // here loses no signal.
+        let untrusted = m.from_addr.is_some();
+        let preview_source: &str = if untrusted {
             guard::strip_marker(&m.body)
         } else {
             &m.body
@@ -1053,6 +1064,7 @@ impl From<crate::store::SessionMessage> for InboxSummary {
             body_preview,
             from_addr: m.from_addr,
             to_addr: m.to_addr,
+            untrusted,
         }
     }
 }
@@ -1262,8 +1274,16 @@ impl FleetTools {
     /// that dropped `org_id` cannot make a row look unassigned. Fails
     /// closed: if the scope or a row's org cannot be read, every work field
     /// goes.
-    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
-        let Ok(s) = self.store.lock() else {
+    ///
+    /// The orgs are read through `store`: the read pool for a tool that
+    /// wrote nothing (`POOLED_READ_TOOLS`), else the writer.
+    pub(super) fn redact_work_via(
+        &self,
+        store: &Mutex<Store>,
+        caller: &Caller,
+        result: &mut CallToolResult,
+    ) {
+        let Ok(s) = store.lock() else {
             strip_all_work(result);
             return;
         };
@@ -1294,6 +1314,13 @@ impl FleetTools {
             }
         };
         rewrite_json_content(result, |v| scope.redact_json(v, &org_of));
+    }
+
+    /// [`Self::redact_work_via`] through the writer, as `call_tool` gates a
+    /// tool that may have written.
+    #[cfg(test)]
+    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
+        self.redact_work_via(&self.store, caller, result)
     }
 
     /// [`Self::resolve_target`] returning the whole row.
@@ -1469,6 +1496,37 @@ impl FleetTools {
 }
 
 // ---- smart caching (`fresh_for`) --------------------------------------------
+
+/// The reader a `fresh_for` names is bound to the caller like a target
+/// session: the cursor it advances is that session's OWN view of a stream
+/// (migration 044, `docs/control-api.md`: "your own session id"), so a
+/// foreign caller writing it would blind the reader to deltas — the silent
+/// skip the design forbids. A per-host token may only name a session on its
+/// own host (`E_FORBIDDEN` otherwise, like every other write it makes) and
+/// inside its org scope; the master and a paired client are unbound.
+/// `Ok(false)` — no such session — keeps the `reader_unknown` answer, under
+/// which no cursor is ever written. The ONE helper every `fresh_for` tool
+/// calls, so the five cannot drift.
+pub(super) fn resolve_reader(s: &Store, caller: &Caller, reader: i64) -> Result<bool, McpError> {
+    let Some(row) = s
+        .get_session_by_id(reader)
+        .map_err(|e| to_mcp_err(IpcError::from(e)))?
+    else {
+        return Ok(false);
+    };
+    require_host(caller, &row.host_alias, "fresh_for's session")?;
+    if caller.host_alias.is_some() {
+        let scope = caller.org_scope(s).map_err(to_mcp_err)?;
+        if !scope.sees_row(&row) {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!("fresh_for's session {reader} is outside this token's org"),
+                None,
+            ));
+        }
+    }
+    Ok(true)
+}
 
 /// The gate every `fresh_for`-aware tool applies before
 /// [`fresh::decide_stream`] even sees the stored cursor: a `fresh_for` that

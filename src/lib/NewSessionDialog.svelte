@@ -6,7 +6,7 @@
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
-  import { hosts } from './hosts';
+  import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
   import { generateName, nameWords, tmuxNameSuffix } from './names';
@@ -106,16 +106,16 @@
 
   // A remembered host is only honoured while it is still pickable (visible,
   // and reachable unless it is `local`) — otherwise fall back to the global
-  // last-host, then `local`. Mirrors the chip `disabled` rule in HostChips.
+  // last-host, then `defaultHost` (`local`, or the first pickable host on a
+  // hub without one). Mirrors the chip `disabled` rule in HostChips.
   function usableHost(alias: string | null | undefined): alias is string {
-    return (
-      !!alias &&
-      $hosts.some((h) => h.alias === alias && !h.hidden && (h.reachable || h.alias === 'local'))
-    );
+    return isPickableHost($hosts, alias);
   }
   let chosenHost = $state<string>(
     untrack(
-      () => [initialHost, memory?.host, readPref('last-host', '', isString)].find(usableHost) ?? 'local',
+      () =>
+        [initialHost, memory?.host, readPref('last-host', '', isString)].find(usableHost) ??
+        defaultHost($hosts),
     ),
   );
   $effect(() => {
@@ -706,8 +706,12 @@
       ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
       project_ids: [projectId, ...extra],
       host_alias: host,
+      name: friendlyName.trim() || undefined,
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
       with_brief: briefOn,
+      // The brief and name as edited, the same as a single start: the
+      // backend applies them to every sibling.
+      brief: briefOn && briefEdited ? briefDraft : undefined,
     };
     const r = await startWorkMulti(args);
     busy = false;

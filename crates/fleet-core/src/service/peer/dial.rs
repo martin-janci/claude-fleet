@@ -515,14 +515,22 @@ async fn settle(
     check_batch(resp.messages.len(), resp.results.len())
         .map_err(|r| IpcError::new(r.code, format!("the peer's answer: {}", r.message)))?;
     // Only results for what this request sent: a peer settles the rows it
-    // was handed, not the rest of this link's outbox.
+    // was handed, not the rest of this link's outbox. An answer for an id
+    // this request did not carry is the peer's mistake (or its malice) and
+    // is dropped here, never applied.
     let sent: Vec<i64> = req.send.iter().map(|m| m.id).collect();
-    let results: Vec<WireResult> = resp
+    let (results, unsent): (Vec<WireResult>, Vec<WireResult>) = resp
         .results
         .iter()
-        .filter(|r| sent.contains(&r.id))
         .cloned()
-        .collect();
+        .partition(|r| sent.contains(&r.id));
+    if !unsent.is_empty() {
+        tracing::debug!(
+            link_id = link.id,
+            ids = ?unsent.iter().map(|r| r.id).collect::<Vec<_>>(),
+            "[peer] ignoring results for ids this request did not send"
+        );
+    }
     let unanswered = sent
         .iter()
         .filter(|id| !results.iter().any(|r| r.id == **id))
@@ -535,6 +543,13 @@ async fn settle(
         .into_iter()
         .filter(|r| r.status == ResultStatus::Rejected)
         .collect();
+    // The watermark is the peer's word: the ids are ITS outbox rows, so
+    // nothing here can bound them (a hostile peer answering `i64::MAX`
+    // plants a watermark that marks all it later queues accepted without
+    // delivery — its own loss). What must not happen is that watermark
+    // outliving the peer: a re-pair merge starts from 0 again
+    // (`Store::adopt_dialer_fleet`), so an honest peer on the same fleet id
+    // gets its outbox delivered.
     let after = resp
         .messages
         .iter()

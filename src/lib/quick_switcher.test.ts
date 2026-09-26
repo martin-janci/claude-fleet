@@ -383,6 +383,31 @@ describe('quick switcher tickets', () => {
     expect(place?.host).toBe('h1');
     expect(_placeForTicket('QQ-1', [s(1, 1, 'ABC-1', 5)], [p1] as never, keyOf as never)).toBeNull();
   });
+
+  it('a GitHub issue is placed by its repo, never by a Jira prefix that reads like its owner', () => {
+    const p1 = { project: { id: 1, owner: 'o', repo: 'a', base_path: '/a', last_session_at: 1, adopted: false, system: false }, worktrees: [] };
+    const p2 = { project: { id: 2, owner: 'o', repo: 'b', base_path: '/b', last_session_at: 9, adopted: false, system: false }, worktrees: [] };
+    const s = (id: number, pid: number, key: string, at: number) =>
+      ({ id, project_id: pid, host_alias: `h${id}`, last_activity_at: at, work: { key } }) as never;
+    const keyOf = (x: { work?: { key: string } }) => x.work?.key ?? null;
+    // `acme-corp/web#7` is not ACME-*: the Jira session must not place it…
+    expect(_placeForTicket('acme-corp/web#7', [s(1, 1, 'ACME-12', 5)], [p1] as never, keyOf as never)).toBeNull();
+    // …nor the other way round.
+    expect(_placeForTicket('ACME-3', [s(1, 1, 'acme-corp/web#7', 5)], [p1] as never, keyOf as never)).toBeNull();
+    // The same repo places it; another repo of the same owner does not.
+    const place = _placeForTicket(
+      'torvalds/linux#1',
+      [s(1, 1, 'torvalds/linux#5', 5), s(2, 2, 'torvalds/subsurface#2', 50)],
+      [p1, p2] as never,
+      keyOf as never,
+    );
+    expect(place?.project.project.id).toBe(1);
+    expect(place?.host).toBe('h1');
+    // Asana tasks are one family.
+    expect(
+      _placeForTicket('asana:1207000000000009', [s(1, 1, 'asana:1207000000000001', 5)], [p1] as never, keyOf as never)?.host,
+    ).toBe('h1');
+  });
 });
 
 describe('ticket rows across providers (work graph M6)', () => {

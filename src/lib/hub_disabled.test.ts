@@ -36,6 +36,7 @@ import {
   session as sessionFixture,
 } from './hosts_fixture';
 import { hosts } from './hosts';
+import { catalog } from './assets';
 import { projects, type ProjectTreeRow } from './projects';
 import { sessions as sessionsStore, type SessionRow } from './sessions';
 
@@ -160,6 +161,64 @@ describe('the asset catalog on a hub client', () => {
     expect(screen.queryByTestId('assets-sync')).toBeNull();
     expect(screen.queryByTestId('assets-secrets')).toBeNull();
     expect(screen.queryByTestId('assets-setup')).toBeNull();
+  });
+
+  // The list and the scan route (the hub's list_assets / scan_assets), so
+  // the panel is a read-only overview of the hub's catalog rather than a
+  // dead end.
+  const hubListing = {
+    head: 'abcdef1234567890', loaded_at: 1, problems: [],
+    unmanaged: [{ host_alias: 'nas', harness: 'claude', kind: 'skill', name: 'extra', state: 'unmanaged', catalog_hash: null, host_hash: null, scanned_at: 1, managed: false }],
+    assets: [
+      { kind: 'skill', name: 'worktree', version: '1.2', description: 'd', tags: [], hosts: [
+        { host_alias: 'nas', harness: 'claude', state: 'in_sync' },
+        { host_alias: 'mac', harness: 'claude', state: 'drifted' },
+      ] },
+    ],
+  };
+
+  it('shows the hub’s catalog read-only: where each asset is and in what state', async () => {
+    catalog.set(null);
+    hubStatus.set(remote);
+    inv().mockImplementation(async (cmd: string) => (cmd === 'catalog_list_assets' ? hubListing : null));
+    render(AssetsPanel, { props: { visible: true } });
+    const row = await screen.findByTestId('asset-row-skill-worktree');
+    expect(row.tagName).toBe('DIV');
+    expect(row.textContent).toContain('1 in sync');
+    expect(row.textContent).toContain('1 drifted');
+    expect(row.getAttribute('title')).toContain('mac: drifted');
+    expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1');
+    // Unmanaged rows are listed, with nothing to import them into.
+    expect(screen.getByTestId('unmanaged-row-nas-claude-skill-extra').textContent).not.toContain('Import');
+    expect(screen.getByTestId('assets-remote-note').textContent).toContain('Read-only');
+  });
+
+  it('scans the hosts through the hub and re-reads the overview', async () => {
+    catalog.set(null);
+    hubStatus.set(remote);
+    inv().mockImplementation(async (cmd: string) =>
+      cmd === 'catalog_list_assets'
+        ? hubListing
+        : cmd === 'assets_scan_hosts'
+          ? [{ host: 'nas', status: 'scanned', detail: null, rows: 3 }]
+          : null,
+    );
+    render(AssetsPanel, { props: { visible: true } });
+    await screen.findByTestId('asset-row-skill-worktree');
+    await fireEvent.click(screen.getByTestId('assets-scan'));
+    expect((await screen.findByTestId('assets-scan-result')).textContent).toContain('nas: scanned');
+    expect(inv().mock.calls.filter((c) => c[0] === 'catalog_list_assets')).toHaveLength(2);
+  });
+
+  it('says so when the hub has no catalog yet', async () => {
+    catalog.set(null);
+    hubStatus.set(remote);
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_list_assets') throw { code: 'E_CATALOG_NOT_CONFIGURED', message: 'catalog not loaded' };
+      return null;
+    });
+    render(AssetsPanel, { props: { visible: true } });
+    expect((await screen.findByTestId('assets-hub-failed')).textContent).toContain('no asset catalog yet');
   });
 
   it('standalone is untouched: it still loads the catalog', async () => {

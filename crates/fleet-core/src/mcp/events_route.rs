@@ -383,11 +383,8 @@ pub(crate) fn fence_frame(
         host,
         p.get("session_id").and_then(serde_json::Value::as_i64),
     ) {
-        (Some(h), _) => {
-            if !scope.sees_session(h, org) {
-                return None;
-            }
-        }
+        (Some(h), _) if !scope.sees_session(h, org) => return None,
+        (Some(_), _) => {}
         (None, Some(sid)) if isolating => {
             if let Some((h, o)) = lookup(sid) {
                 if !scope.sees_session(&h, o) {

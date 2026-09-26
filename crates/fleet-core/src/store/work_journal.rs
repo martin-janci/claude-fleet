@@ -105,8 +105,8 @@ fn cap_chars(s: &str, max: usize) -> String {
 
 /// Conversation ids that belong to work `key` (already normalised): every id
 /// an ENDED confirmed link snapshotted, plus every conversation of the
-/// session behind a LIVE confirmed link. The same set the retention sweep
-/// keeps.
+/// session behind a LIVE confirmed link. The retention sweep keeps these
+/// while the work is not done (`store::work_retention`).
 const KEY_CONVERSATIONS: &str = "\
     WITH links AS ( \
       SELECT l.* FROM work_links l LEFT JOIN work_items i ON i.id = l.item_id \
@@ -163,57 +163,65 @@ impl Store {
             return Ok(None);
         }
         let now = now_unix();
-        let tx = self.conn.unchecked_transaction()?;
-        if cap_kind(kind).is_some() {
-            let last: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT body FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
-                     ORDER BY at DESC, id DESC LIMIT 1",
-                    rusqlite::params![claude_session_id, kind],
-                    |r| r.get(0),
-                )
-                .ok()
-                .flatten();
-            if last.is_some() && last == body {
-                return Ok(None);
+        // SAVEPOINT (`Store::in_savepoint`), not a second `BEGIN`:
+        // `Store::atomically` cannot nest, and Task 3 calls this (via
+        // `journal_for_session`, from the Stop hook) from inside one. A
+        // SAVEPOINT works both standalone (autocommit — it starts an
+        // implicit transaction) and already inside an open transaction.
+        self.in_savepoint("append_journal", |_| -> Result<Option<i64>, IpcError> {
+            if cap_kind(kind).is_some() {
+                let last: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT body FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
+                         ORDER BY at DESC, id DESC LIMIT 1",
+                        rusqlite::params![claude_session_id, kind],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .flatten();
+                // Best-effort dedupe read, unless SQLite answered it by
+                // rolling the savepoint back: the INSERT below would then
+                // commit on its own.
+                self.ensure_in_savepoint()?;
+                if last.is_some() && last == body {
+                    return Ok(None);
+                }
             }
-        }
-        let id =
-            if kind == "conversation" {
+            let id = if kind == "conversation" {
                 self.conn.query_row(
-                "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
-                                           body, meta) \
-                 VALUES (?1, ?2, ?3, 'conversation', ?4, ?5, ?6) \
-                 ON CONFLICT(claude_session_id) WHERE kind = 'conversation' DO UPDATE SET \
-                   at = excluded.at, \
-                   body = COALESCE(excluded.body, work_journal.body), \
-                   meta = COALESCE(excluded.meta, work_journal.meta), \
-                   participant_id = COALESCE(work_journal.participant_id, excluded.participant_id) \
-                 RETURNING id",
-                rusqlite::params![claude_session_id, participant_id, now, source, body, meta],
-                |r| r.get(0),
-            )?
+                    "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
+                                               body, meta) \
+                     VALUES (?1, ?2, ?3, 'conversation', ?4, ?5, ?6) \
+                     ON CONFLICT(claude_session_id) WHERE kind = 'conversation' DO UPDATE SET \
+                       at = excluded.at, \
+                       body = COALESCE(excluded.body, work_journal.body), \
+                       meta = COALESCE(excluded.meta, work_journal.meta), \
+                       participant_id = COALESCE(work_journal.participant_id, excluded.participant_id) \
+                     RETURNING id",
+                    rusqlite::params![claude_session_id, participant_id, now, source, body, meta],
+                    |r| r.get(0),
+                )?
             } else {
                 self.conn.execute(
-                "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
-                                           body, meta) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![claude_session_id, participant_id, now, kind, source, body, meta],
-            )?;
+                    "INSERT INTO work_journal (claude_session_id, participant_id, at, kind, source, \
+                                               body, meta) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![claude_session_id, participant_id, now, kind, source, body, meta],
+                )?;
                 self.conn.last_insert_rowid()
             };
-        if let Some(cap) = cap_kind(kind) {
-            self.conn.execute(
-                "DELETE FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
-                   AND id NOT IN (SELECT id FROM work_journal \
-                                  WHERE claude_session_id = ?1 AND kind = ?2 \
-                                  ORDER BY at DESC, id DESC LIMIT ?3)",
-                rusqlite::params![claude_session_id, kind, cap as i64],
-            )?;
-        }
-        tx.commit()?;
-        Ok(Some(id))
+            if let Some(cap) = cap_kind(kind) {
+                self.conn.execute(
+                    "DELETE FROM work_journal WHERE claude_session_id = ?1 AND kind = ?2 \
+                       AND id NOT IN (SELECT id FROM work_journal \
+                                      WHERE claude_session_id = ?1 AND kind = ?2 \
+                                      ORDER BY at DESC, id DESC LIMIT ?3)",
+                    rusqlite::params![claude_session_id, kind, cap as i64],
+                )?;
+            }
+            Ok(Some(id))
+        })
     }
 
     /// Journal a harvested row for the session `session_id` is running
@@ -321,28 +329,6 @@ impl Store {
             )?;
         }
         Ok(())
-    }
-
-    /// Retention: drop rows older than `days` days (`0` keeps everything),
-    /// except those of a conversation a CONFIRMED link references (live or
-    /// ended) — linked work is kept for as long as its link exists.
-    pub fn sweep_work_journal(&self, now: i64, days: i64) -> Result<usize, IpcError> {
-        if days <= 0 {
-            return Ok(0);
-        }
-        let cutoff = now - days * 86_400;
-        Ok(self.conn.execute(
-            "DELETE FROM work_journal WHERE at < ?1 \
-               AND (claude_session_id IS NULL OR claude_session_id NOT IN ( \
-                 SELECT j.value FROM work_links l, json_each(l.snap_claude_ids) j \
-                   WHERE l.state = 'confirmed' AND l.snap_claude_ids IS NOT NULL \
-                 UNION \
-                 SELECT c.claude_session_id FROM work_links l \
-                   JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-                   JOIN conversations c ON c.session_id = p.session_id \
-                   WHERE l.state = 'confirmed' AND l.ended_at IS NULL))",
-            rusqlite::params![cutoff],
-        )?)
     }
 
     /// The live participant of an existing session (minted if missing).
@@ -545,35 +531,6 @@ mod tests {
         assert_eq!(
             s.enqueue_handover(999, "x", None).unwrap_err().code,
             codes::E_NOTFOUND
-        );
-    }
-
-    #[test]
-    fn retention_keeps_confirmed_work_and_sweeps_the_rest() {
-        let s = Store::open_in_memory().unwrap();
-        let linked = seed(&s, "linked", "c-linked");
-        let loose = seed(&s, "loose", "c-loose");
-        s.link_session_work(linked, WorkTarget::Key("ABC-1"), "manual")
-            .unwrap();
-        for (sid, c) in [(linked, "c-linked"), (loose, "c-loose")] {
-            s.journal_for_session(sid, c, "progress", "hook", "old")
-                .unwrap();
-        }
-        s.delete_session(linked).unwrap();
-        s.delete_session(loose).unwrap();
-        let later = now_unix() + 100 * 86_400;
-        assert_eq!(s.sweep_work_journal(later, 0).unwrap(), 0, "0 keeps all");
-        assert_eq!(s.sweep_work_journal(later, 90).unwrap(), 2);
-        assert!(s
-            .journal_for_conversations(&["c-loose".into()])
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            s.journal_for_conversations(&["c-linked".into()])
-                .unwrap()
-                .len(),
-            2,
-            "progress + conversation of linked work stay"
         );
     }
 

@@ -20,6 +20,15 @@
 //! - `Archive`: UI-only (`work_links.archived_at`); tmux keeps running.
 //! - `ResumeOrExpire`: a ghost whose resumable row is about to be reaped; no
 //!   kill, the row is already gone from tmux.
+//!
+//! `IdleUnlinked` (work graph M11.3) is the one reason with no work behind
+//! it: a work session nobody linked to anything, idle and unprompted for
+//! `work.tidy_idle_unlinked_days`. It only suggests (there is no link to
+//! archive under), auto-tidy never acts on it whatever its settings say
+//! (decision D19), and its kill is refused at apply time unless the
+//! worktree inspects clean and pushed (`service::work::tidy`). A person may
+//! keep any live session out of the sheet for N days
+//! ([`TidySession::kept_until`]).
 
 use crate::store::SessionRow;
 use serde::{Deserialize, Serialize};
@@ -48,6 +57,10 @@ pub enum TidyReason {
     DuplicateWorktree,
     /// A resumable ghost within a day of its `lost_ttl` reap.
     GhostExpiring,
+    /// A work session with no live or suggested link, idle and unprompted
+    /// for `work.tidy_idle_unlinked_days` (work graph M11.3). Never
+    /// automatic (D19).
+    IdleUnlinked,
     /// A reason a newer peer knows (wire enums never force a contract bump).
     #[serde(other)]
     Unknown,
@@ -61,7 +74,14 @@ impl TidyReason {
         TidyReason::NotPlanned,
         TidyReason::DuplicateWorktree,
         TidyReason::GhostExpiring,
+        TidyReason::IdleUnlinked,
     ];
+
+    /// Whether auto-tidy may ever act on this reason. `IdleUnlinked` never
+    /// (D19): no setting, org override or reason list reaches past this.
+    pub fn auto_allowed(self) -> bool {
+        !matches!(self, TidyReason::IdleUnlinked | TidyReason::Unknown)
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -70,6 +90,7 @@ impl TidyReason {
             TidyReason::NotPlanned => "not_planned",
             TidyReason::DuplicateWorktree => "duplicate_worktree",
             TidyReason::GhostExpiring => "ghost_expiring",
+            TidyReason::IdleUnlinked => "idle_unlinked",
             TidyReason::Unknown => "unknown",
         }
     }
@@ -91,9 +112,10 @@ impl TidyReason {
     /// What the sheet preselects for this reason.
     fn default_action(self) -> TidyAction {
         match self {
-            TidyReason::DoneIdle | TidyReason::PrMergedIdle | TidyReason::NotPlanned => {
-                TidyAction::SafeKill
-            }
+            TidyReason::DoneIdle
+            | TidyReason::PrMergedIdle
+            | TidyReason::NotPlanned
+            | TidyReason::IdleUnlinked => TidyAction::SafeKill,
             TidyReason::DuplicateWorktree => TidyAction::Kill,
             TidyReason::GhostExpiring => TidyAction::ResumeOrExpire,
             TidyReason::Unknown => TidyAction::Archive,
@@ -132,6 +154,9 @@ pub struct TidyConfig {
     pub done_secs: i64,
     /// `work.tidy_idle_hours`, in seconds.
     pub idle_secs: i64,
+    /// `work.tidy_idle_unlinked_days`, in seconds: how long an unlinked
+    /// session must have been idle, and unprompted, to be suggested.
+    pub unlinked_idle_secs: i64,
     /// `sessions.lost_ttl_secs`; `0` keeps lost rows forever (no ghost ever
     /// expires).
     pub lost_ttl_secs: i64,
@@ -162,6 +187,7 @@ impl Default for TidyConfig {
         TidyConfig {
             done_secs: 2 * 86_400,
             idle_secs: 4 * 3600,
+            unlinked_idle_secs: 7 * 86_400,
             lost_ttl_secs: 14 * 86_400,
             auto: false,
             auto_reasons: vec![TidyReason::DoneIdle, TidyReason::PrMergedIdle],
@@ -196,6 +222,11 @@ pub struct TidySession {
     pub link: Option<TidyLink>,
     /// Any live confirmed link of the session is to an `in_progress` item.
     pub in_progress: bool,
+    /// The latest snooze across ALL the session's live confirmed links (a
+    /// flag written to a secondary link counts as much as the primary's).
+    pub snoozed_until: Option<i64>,
+    /// Some live confirmed link of the session is marked never.
+    pub never: bool,
     /// The PR probe saw the branch's PR merged.
     pub pr_merged: bool,
     /// Last prompt or attach (`sessions.last_touch_at`).
@@ -204,6 +235,20 @@ pub struct TidySession {
     pub open_tasks: bool,
     /// The live branch, for the preview.
     pub branch: Option<String>,
+    /// The session has a live link of any kind other than a rejection —
+    /// confirmed (primary or not) or a suggestion no one has decided.
+    /// [`Self::link`] is only the primary confirmed one.
+    pub any_link: bool,
+    /// A person kept the session out of tidy-up until then (the latest
+    /// `tidy_kept` timeline event, work graph M11.3).
+    pub kept_until: Option<i64>,
+}
+
+impl TidySession {
+    /// No live link of any kind: nothing ties the session to work.
+    pub fn unlinked(&self) -> bool {
+        self.link.is_none() && !self.any_link
+    }
 }
 
 /// Who and what is off limits, and the clock.
@@ -321,10 +366,41 @@ fn idle_since(r: &SessionRow) -> Option<i64> {
     super::idle_reference(r)
 }
 
-/// Live `work` sessions grouped by worktree: `(host, project, worktree_key)`.
-/// Reviews share their source's worktree by design and are not duplicates.
+/// When an unlinked session's quiet started, if it qualifies for
+/// [`TidyReason::IdleUnlinked`]: a work session with a tracked worktree of
+/// its own (the apply-time clean check needs one), no live link of any kind,
+/// idle for the whole window, and nothing in the window that says a person
+/// used it — no prompt or attach (`last_touch_at`), no finished turn, and not
+/// created inside it. Returns the latest of those stamps: the evidence the
+/// sheet shows as "idle N days". A missing stamp is only ever read as "no
+/// such event", never as "long ago" for `idle_since`: a row with no idle
+/// stamp is not idle.
+fn idle_unlinked_since(s: &TidySession, cfg: &TidyConfig, now: i64) -> Option<i64> {
+    let r = &s.row;
+    if r.kind != "work" || r.worktree_id.is_none() || !s.unlinked() || cfg.unlinked_idle_secs <= 0 {
+        return None;
+    }
+    let idle = r.idle_since?;
+    let last_use = [
+        Some(idle),
+        s.last_touch_at,
+        r.last_turn_at,
+        r.last_stop_at,
+        r.started_at,
+        Some(r.created_at),
+    ]
+    .into_iter()
+    .flatten()
+    .max()?;
+    (now - last_use >= cfg.unlinked_idle_secs).then_some(last_use)
+}
+
+/// Live sessions grouped by worktree: `(host, project, worktree_key)`. Every
+/// kind but `shell` counts as using the tree — a review runs in its source's
+/// worktree by design (and is not a duplicate of it, see `plan_tidy`); a
+/// shell has no tree of its own.
 fn worktree_group(r: &SessionRow) -> Option<(String, Option<i64>, String)> {
-    (r.status == "running" && r.kind == "work")
+    (r.status == "running" && r.kind != "shell")
         .then(|| r.worktree_key.clone())
         .flatten()
         .map(|k| (r.host_alias.clone(), r.project_id, k))
@@ -352,8 +428,8 @@ pub fn plan_tidy(
     ctx: &TidyContext<'_>,
 ) -> Vec<TidyCandidate> {
     let now = ctx.now;
-    // Shared worktrees: every live work session counts, protected or not —
-    // a protected sibling is still using the tree.
+    // Shared worktrees: every live session in the tree counts, protected or
+    // not — a protected sibling, or a review, is still using the tree.
     let mut groups: HashMap<(String, Option<i64>, String), Vec<usize>> = HashMap::new();
     for (i, s) in sessions.iter().enumerate() {
         if let Some(g) = worktree_group(&s.row) {
@@ -364,12 +440,22 @@ pub fn plan_tidy(
     let mut duplicate: HashSet<usize> = HashSet::new();
     for members in groups.values().filter(|m| m.len() >= 2) {
         shared.extend(members.iter().copied());
-        let keep = members
+        // Duplicates are work sessions of one tree; a review sharing its
+        // source's tree is there by design.
+        let work: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&i| sessions[i].row.kind == "work")
+            .collect();
+        if work.len() < 2 {
+            continue;
+        }
+        let keep = work
             .iter()
             .copied()
             .max_by_key(|&i| (recency(&sessions[i], now), sessions[i].row.id))
-            .unwrap_or(members[0]);
-        duplicate.extend(members.iter().copied().filter(|&i| i != keep));
+            .unwrap_or(work[0]);
+        duplicate.extend(work.iter().copied().filter(|&i| i != keep));
     }
 
     let mut out = Vec::new();
@@ -378,10 +464,20 @@ pub fn plan_tidy(
         if protection(s, ctx).is_some() {
             continue;
         }
+        // A snooze or never on ANY live confirmed link of the session, not
+        // only its primary: `work_link { snooze | never, link_id }` accepts
+        // a secondary link, and a flag accepted must be honoured.
+        let snoozed = |t: Option<i64>| t.is_some_and(|t| t > now);
+        if s.never || snoozed(s.snoozed_until) {
+            continue;
+        }
         if let Some(l) = &s.link {
-            if l.never || l.snoozed_until.is_some_and(|t| t > now) {
+            if l.never || snoozed(l.snoozed_until) {
                 continue;
             }
+        }
+        if r.status == "running" && s.kept_until.is_some_and(|t| t > now) {
+            continue;
         }
         let mut reasons: Vec<(TidyReason, i64)> = Vec::new();
         let mut expires_at = None;
@@ -410,6 +506,11 @@ pub fn plan_tidy(
                     }
                     if duplicate.contains(&i) {
                         reasons.push((TidyReason::DuplicateWorktree, since));
+                    }
+                }
+                if !shared.contains(&i) {
+                    if let Some(since) = idle_unlinked_since(s, cfg, now) {
+                        reasons.push((TidyReason::IdleUnlinked, since));
                     }
                 }
             }
@@ -451,6 +552,7 @@ pub fn plan_tidy(
         }
         let auto = cfg.auto_for(r.org_id)
             && matches!(action, TidyAction::SafeKill | TidyAction::Archive)
+            && reason.auto_allowed()
             && cfg.auto_reasons.contains(&reason);
         out.push(TidyCandidate {
             session_id: r.id,
@@ -486,7 +588,12 @@ pub fn plan_tidy(
 /// ever set for `SafeKill` / `Archive` of an allowed reason with
 /// `work.auto_tidy` on.
 pub fn auto_selection(candidates: &[TidyCandidate]) -> Vec<&TidyCandidate> {
-    candidates.iter().filter(|c| c.auto).collect()
+    // `auto_allowed` again: a candidate read off the wire carries its own
+    // `auto` flag, and D19 holds whatever that says.
+    candidates
+        .iter()
+        .filter(|c| c.auto && c.reason.auto_allowed())
+        .collect()
 }
 
 #[cfg(test)]

@@ -149,6 +149,14 @@ pub fn session_start_command(hook_url: &str) -> String {
     )
 }
 
+/// The header only the SYNCHRONOUS SessionStart command sends. The two
+/// curl forms post the same body, and only this one lets Claude read the
+/// answer; the hub stamps a handover brief delivered on a SessionStart only
+/// when this header is present, so an async install (the default, and every
+/// host provisioned before the setting was on) can never consume a brief it
+/// discards. The value is fixed at `1`.
+pub const SYNC_START_HEADER: &str = "X-Fleet-Sync";
+
 /// Connect timeout of the synchronous SessionStart command (seconds).
 pub const SYNC_START_CONNECT_SECS: u32 = 1;
 /// Whole-request cap of the synchronous SessionStart command (seconds): the
@@ -160,12 +168,14 @@ pub const SYNC_START_MAX_SECS: u32 = 2;
 /// to stdout, where Claude Code reads `hookSpecificOutput.additionalContext`
 /// (review C15). Bounded by a 1 s connect and a 2 s total, and `|| true`
 /// with `-f` and `-s`: a hub that is down or erroring prints nothing, so the
-/// start is never failed and never shown an error body.
+/// start is never failed and never shown an error body. It carries
+/// [`SYNC_START_HEADER`], which the async form never sends.
 pub fn session_start_command_sync(hook_url: &str) -> String {
     format!(
         "curl -sf --connect-timeout {SYNC_START_CONNECT_SECS} -m {SYNC_START_MAX_SECS} -X POST \
          -H @\"$HOME/.claude/{HOOK_HEADERS_FILE}\" \
          -H \"X-Fleet-Pane: ${{TMUX_PANE:-}}\" \
+         -H '{SYNC_START_HEADER}: 1' \
          -H 'Content-Type: application/json' \
          --data-binary @- {} || true",
         crate::shell::quote(hook_url)
@@ -492,8 +502,13 @@ mod tests {
             "curl -sf --connect-timeout 1 -m 2 -X POST \
              -H @\"$HOME/.claude/fleet-hook.headers\" \
              -H \"X-Fleet-Pane: ${TMUX_PANE:-}\" \
+             -H 'X-Fleet-Sync: 1' \
              -H 'Content-Type: application/json' \
              --data-binary @- 'http://127.0.0.1:4180/hook' || true"
+        );
+        assert!(
+            !off["command"].as_str().unwrap().contains("X-Fleet-Sync"),
+            "only the synchronous form announces itself"
         );
         // Switching either way replaces fleet's entry, never duplicates it.
         let both = merge_hook_into_settings_json_with(

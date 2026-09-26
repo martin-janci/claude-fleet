@@ -22,21 +22,44 @@ cp fleet-hub.env.example fleet-hub.env
 # own domain (both point DNS at this machine; Caddy gets a cert automatically)
 ```
 
-**The image.** The compose file pulls `ghcr.io/martin-janci/fleet-hub:latest`.
-`hub-image.yml` has now run successfully on a pushed `v*` tag (v0.2.21 and
-later), so a `latest` tag should exist —
-[check the package page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
-if you are unsure, or if it still shows private (a manual `workflow_dispatch`
-run, rather than a tag push, only ever publishes a `sha-<commit>` tag, never
-`latest`). If you cannot pull the package for any reason, build the image
-locally from a checkout of the repository instead and point `image:` in
-`docker-compose.yml` at it:
+**The image.** The compose file pins one release —
+`ghcr.io/martin-janci/fleet-hub:0.2.41`-shaped, not `:latest`. `docker compose
+pull` then fetches exactly that version, so the hub you are running is the one
+you can name, and going back to it is editing one line. Upgrading is a
+deliberate act: see *Upgrade and rollback* below.
+
+Note the missing `v`: the git tag is `v0.2.41`, the image tag published for it
+is `0.2.41`. Every released version has one. There is no image for an
+arbitrary commit: a `sha-<commit>` tag is published too, but only ever
+alongside a release, because only a `v*` tag builds an image at all (see the
+next paragraph) — so it is a second name for the version tag, not a way to
+pull an unreleased commit. `latest` exists as well and is a convenience for
+"whatever the newest stable release is" — fine for a throwaway trial, wrong
+for anything you will have to roll back, because the tag moves under you on
+the next release and `docker compose pull` then silently changes your
+deployment. A release candidate (`0.3.0-rc.1`) never moves `latest`.
+
+Only a pushed `v*` tag publishes an image at all: `hub-image.yml`'s jobs are
+gated on the ref being a tag, and on the tag matching the version in the tree
+it points at, so nothing built from unreleased code can reach this namespace.
+[The package page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
+lists what exists. Each release also records the exact image digest its tag
+points at, on the release page — pin that instead of the version tag if you
+want an image that cannot be re-pointed even in principle:
+
+```yaml
+image: ghcr.io/martin-janci/fleet-hub@sha256:<digest from the release page>
+```
+
+If you cannot pull the package for any reason, build the image locally from a
+checkout of the repository instead and point `image:` in `docker-compose.yml`
+at it:
 
 **Platforms.** `linux/amd64` and `linux/arm64`. **arm64 is best-effort
 until it has a track record**: `hub-image.yml` builds each platform on its
 own native runner (no QEMU) and, if the `arm64` leg fails, still publishes
 `amd64` alone under the same tags rather than blocking the image on it —
-so a given `latest`/`vX.Y.Z` may, on such a run, carry only an amd64
+so a given `X.Y.Z`/`latest` may, on such a run, carry only an amd64
 manifest, and `docker pull --platform linux/arm64` (or any arm64 host
 pulling by tag) then fails outright rather than silently getting an amd64
 image. **The run itself still shows green** when this happens — an
@@ -44,8 +67,9 @@ amd64-only publish is a successful run, not a failed one, since amd64
 publishing must keep working regardless of arm64 — but it is not silent:
 the run carries a `::warning::` annotation and a job-summary note saying
 arm64 failed and the manifest is amd64-only. Check the `hub-image`
-workflow's own run history and summaries, or `docker buildx imagetools
-inspect ghcr.io/martin-janci/fleet-hub:latest`, if that matters to you.
+workflow's own run history and summaries (the release page says
+`linux/amd64 only` for such a version), or `docker buildx imagetools inspect
+ghcr.io/martin-janci/fleet-hub:<version>`, if that matters to you.
 
 ```bash
 docker build -f crates/fleet-hub/Dockerfile -t fleet-hub:local .
@@ -140,6 +164,115 @@ token. Probes therefore leave no rejected-request lines in the log.
 The check does not open `state.db` and does not read the stored `mcp.port`:
 if you run the hub on another port, set it with `FLEET_HUB_PORT`, not only
 `--port`.
+
+## Upgrade and rollback
+
+The compose file pins one version, so nothing changes under you: an upgrade is
+a line you edit, and a rollback is the same line edited back. Both are two
+commands and a check.
+
+**What am I running?** `/healthz` deliberately will not tell you — it answers a
+fixed `fleet-hub ok` and names no version, which is why it can sit outside the
+bearer token and the `Host` allowlist. Ask the binary instead, on the hub box,
+with no credential:
+
+```bash
+docker compose exec fleet-hub fleet-hub --version    # fleet-hub 0.2.41
+docker compose images fleet-hub                      # the tag and image id in use
+```
+
+Over the network, and only with the master token, `fleet_health` reports the
+same string in its `version` field (see the `curl` under *Setup* above). To see
+which exact image — not just which version — is running:
+
+```bash
+docker inspect --format '{{index .RepoDigests 0}}' "$(docker compose ps -q fleet-hub)"
+```
+
+**Back up `state.db` first.** It lives in the `hub-data` volume at
+`/var/lib/fleet-hub/state.db` and carries the master token, every host, every
+session and the asset catalog. Copy it with the container stopped, so you are
+not copying a database mid-write:
+
+```bash
+cd ~/fleet-hub
+docker compose stop fleet-hub
+docker compose cp fleet-hub:/var/lib/fleet-hub/state.db "state.db.$(date +%F).bak"
+```
+
+**Upgrade.**
+
+```bash
+# 1. read the new version's release notes, then point the pin at it
+#    (docker-compose.yml:  image: ghcr.io/martin-janci/fleet-hub:0.3.0)
+$EDITOR docker-compose.yml
+
+# 2. fetch exactly that version and restart on it
+docker compose pull fleet-hub
+docker compose up -d fleet-hub
+
+# 3. check it came up on the version you asked for
+docker compose exec fleet-hub fleet-hub --version
+docker compose ps           # STATUS should reach `healthy` within a minute
+```
+
+Step 3 is not ceremony: `up -d` recreates the container only if something
+actually changed, so a pin you forgot to edit produces a completely silent
+no-op.
+
+Refreshing the compose file itself (`curl -O …/deploy/hub/docker-compose.yml`)
+also upgrades you, because the copy on `main` carries the pin from the newest
+stable release. Diff it against yours before overwriting: it is the file your
+local edits live in.
+
+One window to know about. That pin is written in the release commit, which
+lands on `main` at the same moment the image build *starts* — so for the
+length of two container builds, and permanently if that build fails, the pin
+on `main` can name a tag ghcr does not have yet. A fresh install caught in it
+gets `manifest unknown` from `docker compose pull`. Nothing in CI can catch
+this (`check-version-consistency.sh` compares the pin with the repo's own
+version, not with the registry); what does is
+`scripts/check-release-drift.sh`, which asks ghcr daily whether the pin
+resolves and opens an issue when it does not. If you hit it, pin the previous
+version — [the package
+page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
+lists what actually exists — and try again later.
+
+**Roll back.** Put the old version back in `image:` and repeat the same two
+commands:
+
+```bash
+$EDITOR docker-compose.yml   # image: …/fleet-hub:0.2.41
+docker compose pull fleet-hub
+docker compose up -d fleet-hub
+docker compose exec fleet-hub fleet-hub --version
+```
+
+The one thing that can stop a rollback is the **database schema**. The hub
+migrates `state.db` forward on startup and refuses to open a database that a
+newer release has already migrated, rather than running against a shape it does
+not understand:
+
+```
+this database is at schema version <newer>, but this build of claude-fleet
+only knows up to <older>: it was last opened by a newer release. It is not
+corrupt; do not delete it. Run that release (or a newer one) again, or restore
+the copy of state.db you backed up before upgrading.
+```
+
+That message is the whole rollback procedure for a version that migrated:
+go forward again, or restore the backup you took above — with the hub stopped,
+`docker compose cp state.db.<date>.bak
+fleet-hub:/var/lib/fleet-hub/state.db`, then start the older version. Sessions
+that ran while the newer release was up are in the newer database, not in the
+restored one. Rolling back between two versions that share a schema needs
+none of this and loses nothing.
+
+**If a pull fails.** `manifest unknown` means the tag does not exist — check
+the spelling and, above all, that you did not write the `v`: the image tag for
+`v0.3.0` is `0.3.0`. `no matching manifest for linux/arm64` means that
+version's arm64 leg failed and the tag carries an amd64-only manifest (see
+*Platforms* above); pin the previous version, or a later one, instead.
 
 ## Add and provision hosts
 
@@ -597,6 +730,13 @@ What a client may do:
   `session_transcript`, `session_conversation`, `session_history`, `repo_*`,
   `wait_for_*`, …). Anything that sends, kills, deletes or writes answers
   `E_FORBIDDEN`.
+- **The composer's chip row is shared.** `quick_replies` is one tool that both
+  reads and replaces the fleet's quick replies — the prompt presets the
+  desktop composer and the phone both draw above their text box — so it is
+  classified as a write: a `full` client may call it and a `readonly` one is
+  not shown it (a readonly device draws no chip row to begin with). The list
+  itself is fleet state in the hub's database, not a device preference, so a
+  chip written on the laptop is on the phone and the other way round.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
@@ -661,10 +801,19 @@ hub), keep the old link — its waiting messages are what a re-pair keeps:
 1. On the listening hub: `fleet-hub client revoke <old peer client>`, then
    `fleet-hub pair --mode peer --name <label>` for a new code. (Without the
    revoke, the new code's first exchange is refused: `fleet <id> is already
-   linked to another peer token; revoke that client first`.)
+   linked to another peer token; revoke that client first (…), then mint a
+   new pairing code`.)
 2. On the dialing hub: `fleet-hub peer add https://<other-hub> <new code>`.
    Do **not** `peer remove` the old link: that fails its waiting messages
    back to their senders.
+
+The order matters. That refusal is final for the token it was given: the
+dialing hub's new link stops as `refused` and is never retried, so revoking
+the old client afterwards revives nothing. After a re-pair in the wrong
+order, revoke the old client, then mint a **new** pairing code and `peer add`
+it again; the refused row on the dialing hub can be `peer remove`d by its ID
+(it holds no messages), and the client the refused code minted on the
+listening hub is revoked like any other (`fleet-hub client revoke <label>`).
 
 The new link's first exchange reaches the other hub, but the old link may not
 have noticed its revoked token yet (it can be parked in a long-poll for up to
@@ -769,6 +918,7 @@ fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123   # Jira Cloud
 fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
 fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
 fleet-hub tracker list
+fleet-hub tracker status          # each tracker's last sync pass, and retention
 fleet-hub tracker remove 1        # its items stay, marked unavailable
 ```
 
@@ -819,16 +969,58 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
   trackers claim is never bound automatically.
 
+### GitHub Enterprise Server
+
+An enterprise instance is a GitHub tracker with a `hostname`: paste an issue
+URL on it and say it is GitHub (its host cannot be told from the URL), or
+give the host with `--hostname`, which implies `--provider github`:
+
+```sh
+fleet-hub tracker add https://ghe.corp.example/acme --via-cli devbox \
+  --hostname ghe.corp.example:8443
+fleet-hub tracker test 4
+```
+
+`gh` on that host must be logged in to the instance (`gh auth login
+--hostname ghe.corp.example:8443`); fleet runs `gh api --hostname <it>
+graphql` there, the hostname `shell::quote`d, and nothing but the instance's
+`https://<host>/api/graphql` is ever asked for. The hostname is admin-set
+(`work_admin` is master-only) and fenced by name: a DNS name of two or more
+labels with an optional port — no scheme, path, userinfo, IP literal,
+`localhost`, or github.com lookalike. Fleet itself never connects to it
+(`gh` on the host does, through that host's resolver), so there is no
+resolve-then-refuse step as for Data Center: the fence is the name. The
+site's host is the hostname's; its keys are `host/owner/repo#n`, so the same
+repository name on github.com and on the instance is never the same work, and
+only a configured instance's URLs and `host/owner/repo#n` references are
+recognised.
+
+### Sync metrics
+
+`fleet-hub tracker status` (`work_admin { action: status }`, master-only, and
+Settings → Work on the machine that syncs) shows each tracker's last pass:
+its duration, the items the tracker listed or fetched, the items that
+changed, the event frames the pass emitted, and the error it ended with
+(redacted, one line). They are kept in memory only and start empty after a
+restart.
+Since M12.3 the tool answers `{ trackers, retention }`, and the command
+also prints each retention table's rows, its dry-run count and the last
+sweep (see *Work retention*).
+
 ### Reaching a tracker from a host: `via_host`
 
 A tracker only one machine can reach (a VPN, an internal network), or one
 whose requests should leave from a particular host, is read with `curl` on
 that host: `fleet-hub tracker add <url> --via-host <host>`. The token goes to
-the host **on stdin** into a private temp file (`umask 077`, removed on
-exit) that `curl -q` reads with `-H @file`: it is in no argv on the host
-(`ps` shows only file names), no environment variable and no log. Requests
-are https only, never follow a redirect, and still go only to that
-tracker's own host. `curl` 7.55 or newer is needed on the host.
+the host **on stdin** into a private temp directory (`umask 077`, on
+`$XDG_RUNTIME_DIR` when there is one); the header file is unlinked as soon
+as the script holds it open, before `curl -q` reads it through
+`-H @/dev/fd/3`, so it is a file only for a moment, in no argv on the host
+(`ps` shows `/dev/fd/3` and file names), no environment variable and no
+log. The directory goes on exit, and one a killed shell left behind is
+swept by the next request after ten minutes. Requests are https only,
+never follow a redirect, and still go only to that tracker's own host.
+`curl` 7.55 or newer is needed on the host.
 
 ### Jira Data Center
 
@@ -850,7 +1042,7 @@ fleet-hub tracker test 3
 ### What to know
 
 - **Sites are fenced** per provider — `*.atlassian.net`, `api.github.com`
-  (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
+  or the enterprise instance's `/api/graphql` (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
   — and redirects are never followed: a tracker's URL is where the hub sends
   a credential from its own network position.
 - **States.** An expired or refused credential sets `auth_failed` and polling
@@ -926,7 +1118,11 @@ What else to know:
 - **Linking across orgs is refused for everyone**, the master included,
   unless `force_cross_org: true`: it is a data-integrity rule that stops
   Company B's ticket from being attached to a Company A session by mistake
-  (the desktop explains it and offers "Link anyway"). Detection never
+  (the desktop explains it and offers "Link anyway"). A `move_session` to a
+  host whose org the session's live links are not in is refused the same
+  way, before anything is copied; `force_cross_org: true` carries the links
+  as they are and the report's `warnings` names each crossing (the Transfer
+  sheet offers "Move anyway"). Detection never
   guesses across orgs, and the sync never binds (nor fetches) a bare key
   for another org's session.
 - **Sessions are not fenced by default.** `isolate_sessions` (per org, off
@@ -942,7 +1138,10 @@ What else to know:
   orgs' hosts (so a branch named after a ticket shows its key); turn
   `isolate_sessions` on for an org whose session names must not be seen.
 - **A host in no org sees only unassigned work.** Assign every host of a
-  company before connecting a second company's tracker.
+  company before connecting a second company's tracker: a bare key linked
+  on an unassigned host's session belongs to no org, so ANY org's tracker
+  may bind it (fetching the key with that org's credentials), which is why
+  hosts are assigned first.
 
 ## Tidy-up and auto-tidy
 
@@ -955,6 +1154,7 @@ under Settings → Work → Lifecycle or `set_fleet_setting`:
 |---|---|---|
 | `work.tidy_done_days` | `2` | a linked ticket must have been done this many days (from the tracker transition) |
 | `work.tidy_idle_hours` | `4` | a session must have been idle this long before any reason suggests it |
+| `work.tidy_idle_unlinked_days` | `7` | a session with no work linked is suggested (`idle_unlinked`) after this many days idle and unprompted (1–90) |
 | `work.auto_tidy` | `false` | the sweep acts on the allowed reasons by itself |
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | comma list of `done_idle`, `pr_merged_idle`, `not_planned` |
 
@@ -968,6 +1168,19 @@ blocked, stuck or dialog-waiting sessions, sessions linked to in-progress
 work, the controller and the operator, anything prompted or attached to in
 the last hour, and background agents with open tasks are never touched. The
 idle killer (`gc.enabled`, `gc.*_idle_secs`) is separate and unchanged.
+
+**Idle, no work linked** (`idle_unlinked`, work graph M11.3). A work
+session with its own worktree and no live or suggested link, idle and
+unprompted (no prompt, attach or finished turn) for
+`work.tidy_idle_unlinked_days`, is also suggested. It only ever suggests:
+auto-tidy never acts on it, whatever `work.auto_tidy`, the org override or
+the reason list say (decision D19; the setting cannot name it). Its kill is
+refused unless the worktree inspects clean and pushed — with no work linked,
+fleet does not guess what uncommitted work is for, so it is not safe-killed
+either — and only while the fresh plan still names it. **Keep** (`tidy_apply`
+item `{ action: "keep", days }`, 1–90, default 7) holds any live session out
+of tidy-up per session; it is a `tidy_kept` timeline event, no column. A
+per-host token keeps only its own host's and org's sessions.
 
 **Per organisation.** An org can override `work.auto_tidy` for its own
 sessions: `fleet-hub org set 1 --auto-tidy on|off|inherit` (or `work_admin
@@ -1372,13 +1585,34 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--tls-key` | `FLEET_HUB_TLS_KEY` | `hub.tls_key` | unset (required by `--tls cert`) |
 | — | — | `reports.max_rows` | `5000` |
 | — | — | `reports.max_age_secs` | `604800` |
-| — | — | `work.journal_days` | `90` |
+| — | — | `work.retention.journal_days` | `365` |
+| — | — | `work.retention.tracker_items_days` | `180` |
+| — | — | `work.retention.timeline_work_events_days` | `180` |
 | — | — | `work.recent_days` | `14` |
 
 The `reports.*` and `work.*` settings have no flag: set them over the API
-with `set_setting`. `work.journal_days` is how long work memory (the
-journal behind resume and the handover brief) is kept for conversations no
-confirmed work link references; `0` keeps it forever.
+with `set_setting` (master token; `get_settings` reads them all). It
+reaches only the settings registry, never the `hub.*` and `mcp.*` values
+in this table.
+
+**Work retention** (work graph M12.3). The GC tick deletes a row only when
+it is ended or done, older than its window, and nothing live points at it.
+`0` keeps a table forever.
+
+- `journal_days`: work memory (the journal behind resume and the handover
+  brief). Kept regardless of age: an open conversation's rows, a live-linked
+  session's, and those of work that is not done or still has a live link.
+  Also kept: an undelivered handover, and one addressed to a live session.
+  Replaces `work.journal_days`. While this key is unset, an old `0` still
+  keeps forever and an old window longer than 365 still stands.
+- `tracker_items_days`: cached tickets in `done`. Kept while any link, live
+  or ended, names one, and while it is the parent of a kept ticket.
+- `timeline_work_events_days`: handover, nudge and tidy events. The newest
+  of each kind per session stays.
+
+At most 2,000 rows per table per tick, 200 per store lock.
+`work_admin { action: status }` (master) shows row counts, a dry-run count
+and the last sweep; `work_admin { action: sweep_now }` runs one sweep.
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
 `https://` public URL — one with an `http://` public URL or with none at all
@@ -1469,7 +1703,14 @@ rotated one, and see *Trackers* above.
 The desktop's `state.db` carries a `local` host row for the machine it ran
 on. Since the hub defaults `hub.local_host` to `false`, that copied `local`
 row is hidden and marked unreachable automatically on first start — not
-deleted, just no longer listed, counted, probed or polled for usage.
+deleted, just no longer listed, counted, probed or polled for usage. The
+sessions that were live on it are ghosted with `lost_reason =
+local_disabled` on every start (nothing probes `local` on such a hub, so
+they would otherwise stay live and refuse every action); they stay
+dismissable and are pruned like any other ghost. `refresh_projects` has no
+local projects directory to scan there and returns the stored list, and the
+new-session, add-project and background-session dialogs start on the first
+pickable host instead of `local`.
 
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a
@@ -1616,11 +1857,14 @@ standalone exactly as before.
   such a host, which is the whole reason it dials the hub instead — so the tab
   says that rather than showing a command that cannot work. Dropping files on
   the pane (`upload_to_session`) follows the same rule, for the same reason.
-- **The asset catalog and the setup checklist** are about the machine that
-  owns the fleet, so they show the reason instead of their panels. (The hub
-  does serve the catalog's asset list, `list_assets`, to any paired client;
-  what it does not serve is the configuration and git checkout the Assets
-  panel is built on.)
+- **The asset catalog** is a read-only overview: the hub's catalog through
+  `list_assets` (each asset's per-host state, unmanaged assets, problems) and
+  a Scan hosts button through `scan_assets`, both open to any paired client.
+  Editing assets, Sync and Secrets need the catalog's git checkout and the
+  sync secrets, which live on the hub's machine, so the panel does not offer
+  them.
+- **The setup checklist** is about the machine that owns the fleet, so it
+  shows the reason instead of its panel.
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
   the error says to pair again in Settings → Hub.
 
@@ -1641,7 +1885,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 181 commands, 77 route to a hub tool, 1 routes except for one argument shape, 82 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1651,7 +1895,6 @@ Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument sh
 | `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `assets_scan_hosts` | the hub has this as its scan_assets tool, but its result feeds an inventory panel built on the catalog checkout, which only the machine that owns the fleet has; call scan_assets on the hub, or scan from that machine |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
@@ -1669,7 +1912,6 @@ Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument sh
 | `catalog_layer_template` | a template is the first step of authoring a layer into the catalog's git checkout, and catalog_write_layer refuses here for want of that checkout; the hub exposes no layer-authoring tool, so author on the machine that owns the fleet |
 | `catalog_lint_all` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_lint_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_list_assets` | the hub does serve this list (its read-only list_assets tool, open to any paired client), but the Assets panel is built on the catalog's configuration and git checkout, which only the machine that owns the fleet has; call list_assets on the hub, or browse the catalog on that machine |
 | `catalog_list_layers` | the hub does serve this (its read-only list_layers tool), but the layer definitions live in the catalog's git checkout, which only the machine that owns the fleet has; call list_layers on the hub, or work on the catalog there |
 | `catalog_list_secrets` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_load` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
@@ -1689,7 +1931,7 @@ Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument sh
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
-| `get_fleet_settings` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; read and change them on the hub |
+| `get_fleet_settings` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; read them on the hub with get_settings (master token) |
 | `hide_host` | hiding a host is fleet administration, which the hub reserves for its own operator — hide it there with `fleet-hub` |
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
@@ -1720,13 +1962,16 @@ Of the 173 commands, 70 route to a hub tool, 1 routes except for one argument sh
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
 | `session_tool_detail` | the hub exposes no tool for one tool call's input and result; the Conversation tab's tool lines still come from session_conversation |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
-| `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
+| `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub with set_setting (master token) |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
 | `update_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `work_retention_status` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
+| `work_retention_sweep` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew
@@ -1885,8 +2130,10 @@ deliberately.
 - **A peer's own words cannot forge the marker that quotes them.** If a
   message body from another fleet happens to contain a line matching
   fleet's own untrusted-content marker, that line is neutralised (prefixed
-  `> `) before it is ever stored — a peer cannot close the marked block
-  early and have the rest of its text read back as fleet's own.
+  `> `, and every `[claude-fleet` in the body defused to `(claude-fleet`,
+  whatever invisible character sits in front of it) before it is ever
+  stored — a peer cannot close the marked block early and have the rest of
+  its text read back as fleet's own.
 - **Trust in a link is decided once, at pairing, by identity — not by a
   fleet-id allowlist.** The pairing code itself is the credential: only
   someone who can already run commands on the other hub can mint one, and
@@ -1924,7 +2171,10 @@ deliberately.
   action for master, clients and hosts in two orgs and in none. See
   *Organisations and isolation*.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
-  the desktop.
+  the desktop — the file is created owner-only before SQLite opens it, so
+  the WAL sidecars `state.db-wal` and `state.db-shm` (which hold every
+  recent commit, tokens included, while the daemon runs) inherit `0600`
+  too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
   UI confirmation dialog. A hub has no UI to show that dialog to — leave the

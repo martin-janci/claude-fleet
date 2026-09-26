@@ -19,10 +19,15 @@ import { writable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
 import type { FilterRow, RowFilters, SessionPredicate } from './sidebar_index';
-import { rowMatches, sessionFilterRow } from './sidebar_index';
+import { rowMatches, sessionFilterRow, STATUS_NAME_PREFIX } from './sidebar_index';
 import { trackerForKey, workTickets, type TrackerRow } from './trackers';
 
-export type StatusFilter = 'all' | 'todo' | 'in_progress' | 'done';
+export type StatusCategoryFilter = 'all' | 'todo' | 'in_progress' | 'done';
+/** One tracker status by name ("QA Review"): the categories lump a Jira
+ *  workflow's many columns into three, and the one a team cares about is
+ *  often a column in the middle. */
+export type StatusNameFilter = `name:${string}`;
+export type StatusFilter = StatusCategoryFilter | StatusNameFilter;
 export type HasSessionFilter = 'any' | 'yes' | 'no';
 
 export interface WorkFilters {
@@ -42,13 +47,39 @@ export const DEFAULT_WORK_FILTERS: WorkFilters = {
   archived: true,
 };
 
-export const STATUS_FILTERS: readonly StatusFilter[] = ['all', 'todo', 'in_progress', 'done'];
-export const STATUS_FILTER_LABELS: Record<StatusFilter, string> = {
+export const STATUS_FILTERS: readonly StatusCategoryFilter[] = ['all', 'todo', 'in_progress', 'done'];
+export const STATUS_FILTER_LABELS: Record<StatusCategoryFilter, string> = {
   all: 'any status',
   todo: 'to do',
   in_progress: 'in progress',
   done: 'done',
 };
+export function statusNameFilter(name: string): StatusNameFilter {
+  return `${STATUS_NAME_PREFIX}${name.trim()}` as StatusNameFilter;
+}
+
+export function isStatusNameFilter(v: unknown): v is StatusNameFilter {
+  return typeof v === 'string' && v.startsWith(STATUS_NAME_PREFIX) && v.slice(STATUS_NAME_PREFIX.length).trim() !== '';
+}
+
+const CATEGORY_ORDER: Record<string, number> = { todo: 0, in_progress: 1, done: 2 };
+
+/** The tracker status names the live sessions' work is in, one per name
+ *  (case-insensitively), in workflow order — to do, in progress, done —
+ *  then by name. These are the extra status chips: whatever columns the
+ *  team's tracker has, with nothing to configure. */
+export function statusNamesOf(sessions: readonly Pick<SessionRow, 'work'>[]): string[] {
+  const seen = new Map<string, { name: string; rank: number }>();
+  for (const s of sessions) {
+    const name = s.work?.status_name?.trim();
+    if (!name) continue;
+    const k = name.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.set(k, { name, rank: CATEGORY_ORDER[s.work?.status_category ?? ''] ?? 3 });
+  }
+  return [...seen.values()].sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name)).map((v) => v.name);
+}
+
 export const HAS_SESSION_FILTERS: readonly HasSessionFilter[] = ['any', 'yes', 'no'];
 export const HAS_SESSION_LABELS: Record<HasSessionFilter, string> = {
   any: 'any',
@@ -66,7 +97,7 @@ export function isWorkFilters(v: unknown): v is WorkFilters {
   const f = v as Record<string, unknown>;
   return (
     (f.tracker === 'all' || (typeof f.tracker === 'number' && Number.isInteger(f.tracker))) &&
-    STATUS_FILTERS.includes(f.status as StatusFilter) &&
+    (STATUS_FILTERS.includes(f.status as StatusCategoryFilter) || isStatusNameFilter(f.status)) &&
     (f.assignee === 'all' || f.assignee === 'mine') &&
     HAS_SESSION_FILTERS.includes(f.hasSession as HasSessionFilter) &&
     typeof f.archived === 'boolean'
@@ -80,16 +111,23 @@ export const workFilters = writable<WorkFilters>(readPref(PREF_KEY, DEFAULT_WORK
 workFilters.subscribe((v) => writePref(PREF_KEY, v));
 
 /** The filters as they apply: a tracker that no longer exists is "all"
- *  (a removed tracker must not leave the sidebar empty), and has-session
- *  only in work mode. */
+ *  (a removed tracker must not leave the sidebar empty), so is a status
+ *  name no session's work is in any more (when `statusNames` is given),
+ *  and has-session only in work mode. */
 export function effectiveWorkFilters(
   f: WorkFilters,
   trackers: readonly Pick<TrackerRow, 'id'>[],
   workMode: boolean,
+  statusNames?: readonly string[],
 ): WorkFilters {
+  const goneName =
+    statusNames !== undefined &&
+    isStatusNameFilter(f.status) &&
+    !statusNames.some((n) => statusNameFilter(n).toLowerCase() === f.status.toLowerCase());
   return {
     ...f,
     tracker: f.tracker !== 'all' && !trackers.some((t) => t.id === f.tracker) ? 'all' : f.tracker,
+    status: goneName ? 'all' : f.status,
     hasSession: workMode ? f.hasSession : 'any',
   };
 }

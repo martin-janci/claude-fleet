@@ -89,9 +89,19 @@ impl PrSignals {
                 .and_then(|o| o.get("login"))
                 .and_then(|l| l.as_str());
             let name = repo.and_then(|x| x.get("name")).and_then(|n| n.as_str());
+            // An issue on an enterprise instance (M11.4) says so by its URL's
+            // host: its key carries that host, so it can never be taken for
+            // the same-named github.com repository's.
+            let instance = r
+                .get("url")
+                .and_then(|u| u.as_str())
+                .and_then(site_host)
+                .filter(|h| crate::store::ghes_host_ok(h))
+                .map(|h| format!("{h}/"))
+                .unwrap_or_default();
             let key = match (owner, name, n) {
                 (Some(o), Some(nm), Some(n)) => Some(format!(
-                    "{}/{}#{n}",
+                    "{instance}{}/{}#{n}",
                     o.to_ascii_lowercase(),
                     nm.to_ascii_lowercase()
                 )),
@@ -214,7 +224,8 @@ fn tracker_view(s: &Store, repo: Option<String>) -> Result<TrackerView, IpcError
         repo,
         ..Default::default()
     };
-    for t in s.list_trackers()? {
+    let trackers = s.list_trackers()?;
+    for t in &trackers {
         for p in &t.config.key_prefixes {
             let p = p.to_ascii_uppercase();
             *owners.entry(p.clone()).or_default() += 1;
@@ -222,14 +233,8 @@ fn tracker_view(s: &Store, repo: Option<String>) -> Result<TrackerView, IpcError
                 ctx.prefixes.push(p);
             }
         }
-        if let Some(host) = site_host(&t.site_url) {
-            ctx.trackers.push(TrackerHost {
-                id: t.id,
-                host,
-                provider: t.provider.clone(),
-            });
-        }
     }
+    ctx.trackers = tracker_hosts(&trackers);
     Ok(TrackerView {
         ctx,
         shared_prefixes: owners
@@ -238,6 +243,21 @@ fn tracker_view(s: &Store, repo: Option<String>) -> Result<TrackerView, IpcError
             .map(|(p, _)| p)
             .collect(),
     })
+}
+
+/// Configured trackers as recognition sees them: each one's site host (an
+/// enterprise GitHub tracker's names its instance, M11.4).
+pub(crate) fn tracker_hosts(trackers: &[crate::store::TrackerRow]) -> Vec<TrackerHost> {
+    trackers
+        .iter()
+        .filter_map(|t| {
+            site_host(&t.site_url).map(|host| TrackerHost {
+                id: t.id,
+                host,
+                provider: t.provider.clone(),
+            })
+        })
+        .collect()
 }
 
 fn site_host(url: &str) -> Option<String> {
@@ -251,6 +271,24 @@ fn prefix_of(key: &str) -> Option<&str> {
 }
 
 impl TrackerView {
+    /// A GitHub tracker of `r`'s instance is configured: github.com's for
+    /// `owner/repo#n`, the enterprise host's for `host/owner/repo#n`.
+    fn github_instance_tracked(&self, r: &str) -> bool {
+        let host = crate::store::github_ref(r)
+            .and_then(|(repo, _)| crate::store::split_github_repo(repo))
+            .map(|(h, _)| h.map(str::to_ascii_lowercase));
+        let Some(host) = host else {
+            return false;
+        };
+        self.ctx.trackers.iter().any(|t| {
+            t.provider == "github"
+                && match &host {
+                    None => t.host == "github.com" || t.host == "www.github.com",
+                    Some(h) => t.host.eq_ignore_ascii_case(h),
+                }
+        })
+    }
+
     /// A key whose prefix two trackers claim (R8). A URL's host settles it.
     fn ambiguous(&self, key: &str, tracker_id: Option<i64>) -> bool {
         tracker_id.is_none()
@@ -346,8 +384,8 @@ fn state_candidates(
         }
     }
     // A GitHub issue ref is only a bare `owner/repo#n` until a GitHub
-    // tracker exists (M6): never auto-linked before then (R3u).
-    let github_tracker = tv.ctx.trackers.iter().any(|t| t.provider == "github");
+    // tracker of ITS instance exists (M6; github.com or the enterprise host,
+    // M11.4): never auto-linked before then (R3u).
     for r in sig.closing.iter().filter(|r| tv.admits(r)) {
         let mut c = candidate(
             r.clone(),
@@ -355,7 +393,7 @@ fn state_candidates(
             Strength::Strong,
             evidence(Signal::PrClosing, r, now, conv),
         );
-        c.untracked = r.contains('#') && !github_tracker;
+        c.untracked = r.contains('#') && !tv.github_instance_tracked(r);
         pr.push(c);
     }
     // A PR text naming more than the dump guard's worth of work (a release
@@ -492,7 +530,9 @@ fn prompt_candidates(
         .collect())
 }
 
-/// The trusted-projects setting as a set.
+/// The trusted-projects setting as a set. Best-effort (a failed read is the
+/// empty set): a caller inside `Store::atomically` checks
+/// `Store::ensure_in_tx` after it.
 pub fn trusted_projects(s: &Store) -> BTreeSet<i64> {
     crate::service::settings::parse_id_set(&crate::service::settings::get_string(
         s,
@@ -542,8 +582,22 @@ fn run(
     mut events: Vec<Candidate>,
 ) -> Result<bool, IpcError> {
     let now = crate::service::catalog::now_secs();
-    let (branch, pr, pr_events) = state_candidates(st, tv, now);
+    let (mut branch, mut pr, pr_events) = state_candidates(st, tv, now);
     events.extend(pr_events);
+    // One spelling per target: a candidate naming a tracker item by an
+    // alias (a moved issue) reads as the item's current key, the same key
+    // `detection_links` labels its links with.
+    for c in branch
+        .iter_mut()
+        .flatten()
+        .chain(pr.iter_mut().flatten())
+        .chain(events.iter_mut())
+    {
+        let canonical = s.canonical_work_target(&c.target, c.tracker_id)?;
+        if canonical != c.target {
+            c.target = canonical;
+        }
+    }
     let links = s
         .detection_links(st.participant)?
         .into_iter()
@@ -559,15 +613,20 @@ fn run(
             source: l.source,
         })
         .collect();
+    let trusted = st
+        .project_id
+        .is_some_and(|p| trusted_projects(s).contains(&p));
+    // `trusted_projects` swallows its settings read, and a resolve with no
+    // changes never reaches `apply_link_changes`' savepoint: a read SQLite
+    // answered by rolling the caller's transaction back stops here.
+    s.ensure_in_tx()?;
     let input = ResolveInput {
         conversation: st.claude_session_id.clone(),
         branch,
         pr,
         events,
         links,
-        trusted: st
-            .project_id
-            .is_some_and(|p| trusted_projects(s).contains(&p)),
+        trusted,
     };
     let changes = resolve(&input);
     s.apply_link_changes(
@@ -610,6 +669,8 @@ pub fn on_prompt(
                 s,
                 crate::service::settings::WORK_EVIDENCE_SNIPPETS,
             );
+            // A swallowed settings read, like `trusted_projects` in `run`.
+            s.ensure_in_tx()?;
             let now = crate::service::catalog::now_secs();
             prompt_candidates(s, &st, &tv, prompt, first_prompt, snippets, now)?
         }

@@ -6,7 +6,18 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { hosts, loadHosts, addHost, probeHost, deleteHost, hideHost, applyHostEvents, resetTombstonesForTests } from './hosts';
+import {
+  hosts,
+  loadHosts,
+  addHost,
+  probeHost,
+  deleteHost,
+  hideHost,
+  applyHostEvents,
+  resetTombstonesForTests,
+  isPickableHost,
+  defaultHost,
+} from './hosts';
 
 const sampleLocal = {
   alias: 'local',
@@ -102,5 +113,36 @@ describe('hosts store', () => {
       { args: { alias: 'mefistos', hidden: true } },
     ]);
     expect(get(hosts)[0].hidden).toBe(true);
+  });
+});
+
+describe('defaultHost', () => {
+  const row = (alias: string, over: Partial<typeof sampleLocal> = {}) => ({
+    ...sampleLocal,
+    alias,
+    ssh_alias: alias === 'local' ? null : alias,
+    ...over,
+  });
+
+  it('is local while local is pickable', () => {
+    expect(defaultHost([row('devbox'), row('local')])).toBe('local');
+    // `local` counts as pickable even unreachable: its state is this machine's.
+    expect(defaultHost([row('devbox'), row('local', { reachable: false })])).toBe('local');
+  });
+
+  it('skips the hidden local row of a hub with hub.local_host=false', () => {
+    const list = [
+      row('local', { hidden: true, reachable: false }),
+      row('offline', { reachable: false }),
+      row('hidden', { hidden: true }),
+      row('devbox'),
+    ];
+    expect(isPickableHost(list, 'local')).toBe(false);
+    expect(defaultHost(list)).toBe('devbox');
+  });
+
+  it('falls back to local when nothing is pickable', () => {
+    expect(defaultHost([])).toBe('local');
+    expect(defaultHost([row('local', { hidden: true })])).toBe('local');
   });
 });

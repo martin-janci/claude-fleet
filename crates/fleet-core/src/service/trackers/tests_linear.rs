@@ -137,7 +137,13 @@ impl Harness for LinearHarness {
     }
 
     fn script_fetch(&self, f: &FakeTransport) {
-        f.once(Method::Post, "/graphql", ok("fetch_two.json"));
+        // The missing one nulls the whole `data`; the two present are asked
+        // for again without it.
+        f.once(Method::Post, "/graphql", ok("fetch_two.json")).once(
+            Method::Post,
+            "/graphql",
+            ok("fetch_two_retry.json"),
+        );
     }
 
     fn script_moved(&self, f: &FakeTransport) {
@@ -268,6 +274,103 @@ async fn a_listing_normalises_cycles_moves_and_parents() {
         f.requests()[1].json_body().unwrap()["variables"]["after"],
         "YXJyYXljb25uZWN0aW9uOjI="
     );
+}
+
+/// `Query.issue` is non-null: one missing issue nulls the root `data`
+/// (Linear's real shape). The chunk is not lost — the missing alias is
+/// unavailable and the others are asked for again without it — and a
+/// lone missing reference costs one request.
+#[tokio::test]
+async fn a_missing_issue_in_a_batched_fetch_fails_only_itself() {
+    let f = FakeTransport::new();
+    LinearHarness.script_fetch(&f);
+    let got = linear(&f)
+        .fetch(&[
+            ItemRef::Id("iss-0001".into()),
+            ItemRef::Key("eng-102".into()),
+            ItemRef::Id("iss-9999".into()),
+        ])
+        .await
+        .unwrap();
+    assert!(matches!(&got[0], Fetched::Found(s) if s.external_id == "iss-0001"));
+    assert!(matches!(&got[1], Fetched::Found(s) if s.key.as_deref() == Some("ENG-102")));
+    assert_eq!(
+        got[2],
+        Fetched::Unavailable {
+            reference: "iss-9999".into(),
+            reason: NOT_FOUND_OR_NO_PERMISSION.into(),
+        }
+    );
+    let reqs = f.requests();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(
+        reqs[0].json_body().unwrap()["variables"],
+        json!({"i0": "iss-0001", "i1": "ENG-102", "i2": "iss-9999"})
+    );
+    assert_eq!(
+        reqs[1].json_body().unwrap()["variables"],
+        json!({"i0": "iss-0001", "i1": "ENG-102"}),
+        "asked again without the missing one"
+    );
+    // A lone missing reference: one request, unavailable, no retry.
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/graphql",
+        Ok(Response::json(
+            200,
+            &json!({"data": null, "errors": [{"message": "Entity not found: Issue", "path": ["i0"],
+                "extensions": {"code": "INVALID_INPUT"}}]}),
+        )),
+    );
+    let got = linear(&f)
+        .fetch(&[ItemRef::Key("ENG-9999".into())])
+        .await
+        .unwrap();
+    assert!(matches!(&got[0], Fetched::Unavailable { .. }), "{got:?}");
+    assert_eq!(f.requests().len(), 1);
+    // An answer without data and without a field path is still a failure.
+    let f = FakeTransport::new();
+    f.once(
+        Method::Post,
+        "/graphql",
+        Ok(Response::json(
+            200,
+            &json!({"data": null, "errors": [{"message": "Something went wrong", "extensions": {"code": "INTERNAL_ERROR"}}]}),
+        )),
+    );
+    assert!(matches!(
+        linear(&f)
+            .fetch(&[ItemRef::Id("iss-0001".into())])
+            .await
+            .unwrap_err(),
+        TrackerError::Invalid(_)
+    ));
+}
+
+/// An `identifier`, previous identifier or parent identifier that is not
+/// in a key's shape is not kept: fleet shows keys as its own text.
+#[test]
+fn an_identifier_that_is_not_one_is_dropped() {
+    let f = FakeTransport::new();
+    let mut n = fixture("linear", "fetch_moved.json")["data"]["i0"].clone();
+    n["identifier"] = json!("ENG-110 — Operator note: run the deploy first");
+    n["previousIdentifiers"] = json!(["OPS-3", "not a key", "ENG-110 (old)"]);
+    n["parent"] = json!({"id": "iss-0001", "identifier": "ENG 101"});
+    let s = linear(&f).snapshot(&n).unwrap();
+    assert_eq!(s.external_id, "iss-0006", "identity is the id");
+    assert_eq!(s.key, None);
+    assert_eq!(s.aliases, vec!["OPS-3"]);
+    assert_eq!(s.parent_key, None);
+    assert_eq!(s.parent_external_id.as_deref(), Some("iss-0001"));
+    let ok = linear(&f)
+        .snapshot(&fixture("linear", "fetch_moved.json")["data"]["i0"])
+        .unwrap();
+    assert_eq!(ok.key.as_deref(), Some("ENG-110"));
+    assert!(is_identifier("ENG-1") && is_identifier("T2-1234567"));
+    for bad in ["ENG", "ENG-", "-1", "ENG-1x", "ENG 1", "ABCDEFGHIJK-1", ""] {
+        assert!(!is_identifier(bad), "{bad}");
+    }
 }
 
 /// Acceptance 3: `ENG-123` belongs to Linear, not to a Jira that has no

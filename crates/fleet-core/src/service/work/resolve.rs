@@ -229,10 +229,13 @@ pub enum LinkChange {
     /// A suggestion whose state signal moved on: it was never decided, so it
     /// goes.
     Withdraw { link_id: i64 },
-    /// A suggestion that now meets an automatic rule.
+    /// A suggestion that now meets an automatic rule. It becomes the link
+    /// the promoting signal makes (`source` `branch` / `pr` / `url`), so R7
+    /// can end it when that signal moves on.
     Promote {
         link_id: i64,
         rule: &'static str,
+        source: &'static str,
         strength: Strength,
         evidence: Vec<Evidence>,
     },
@@ -429,6 +432,7 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
                     changes.push(LinkChange::Promote {
                         link_id: l.id,
                         rule,
+                        source: c.signal.source(),
                         strength: c.strength,
                         evidence: evidence_of(m, rule),
                     });
@@ -504,6 +508,7 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
                     changes.push(LinkChange::Promote {
                         link_id: l.id,
                         rule,
+                        source: c.signal.source(),
                         strength: c.strength,
                         evidence: evidence_of(m, rule),
                     });

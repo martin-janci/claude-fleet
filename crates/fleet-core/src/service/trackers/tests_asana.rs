@@ -423,6 +423,61 @@ async fn a_confirmed_section_map_wins_and_stops_inference() {
     );
 }
 
+/// A per-action failure inside a 200 `/batch` answer is the batch's, not a
+/// deleted task: a 5xx fails the fetch, and an events read whose batch
+/// failed keeps its mark (the change is read again next time) and asks
+/// for a whole listing meanwhile. Only 403 / 404 mean "not visible".
+#[tokio::test]
+async fn a_failed_batch_action_is_not_a_missing_task() {
+    let with_status = |status: u64| {
+        let mut b = fixture("asana", "batch_changed.json");
+        b["data"][0]["status_code"] = json!(status);
+        b["data"][0]["body"] = json!({"errors": [{"message": "Server Error"}]});
+        Ok(Response::json(200, &b))
+    };
+    for status in [500u64, 502, 503, 412, 400] {
+        let f = FakeTransport::new();
+        f.once(Method::Post, "/batch", with_status(status));
+        let e = asana(&f)
+            .fetch(&[ItemRef::Id("1207000000000002".into())])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TrackerError::Invalid(m) if m.contains(&status.to_string())),
+            "{status}: {e:?}"
+        );
+        assert_eq!(
+            e.state(),
+            None,
+            "{status}: the tracker's state is untouched"
+        );
+    }
+    // 403 and 404 are the task's: unavailable, never gone.
+    for status in [403u64, 404] {
+        let f = FakeTransport::new();
+        f.once(Method::Post, "/batch", with_status(status));
+        let got = asana(&f)
+            .fetch(&[ItemRef::Id("1207000000000002".into())])
+            .await
+            .unwrap();
+        assert!(
+            matches!(&got[0], Fetched::Unavailable { .. }),
+            "{status}: {got:?}"
+        );
+    }
+    // An events read whose batch failed keeps the old mark.
+    let f = FakeTransport::new();
+    f.once(Method::Get, "/events?resource=", ok("events_p1.json"))
+        .once(Method::Post, "/batch", with_status(503));
+    let ch = asana(&f)
+        .changes(&view(&format!("project:{P1}")), Some("tok-1"))
+        .await
+        .unwrap();
+    assert!(ch.expired, "{ch:?}");
+    assert!(ch.items.is_empty());
+    assert_eq!(ch.mark.as_deref(), Some("tok-1"), "not advanced");
+}
+
 #[tokio::test]
 async fn an_expired_sync_token_hands_back_a_fresh_one_and_asks_for_a_whole_listing() {
     let f = FakeTransport::new();

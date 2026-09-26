@@ -1,6 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+import { invoke } from '@tauri-apps/api/core';
 import {
+  loadTrackers,
   parseJiraTicketUrl,
   trackerForKey,
   trackerStateBadge,
@@ -132,11 +135,67 @@ describe('work events', () => {
     expect(get(trackers)).toEqual([]);
   });
 
+  it('a frame for a tracker the store has not loaded yet is not a first sync', () => {
+    // Startup: the sync tick's frame (unreachable → ok, last_sync_at from
+    // last week) lands before list_trackers answers.
+    const known = tracker({ last_sync_at: 1_700_000_000 });
+    expect(applyWorkEvents([{ type: 'tracker', row: known }])).toEqual([]);
+    expect(get(trackers).map((t) => t.id)).toEqual([1]);
+  });
+
+  it('a stale list answer never overwrites a newer one', async () => {
+    const mocked = vi.mocked(invoke);
+    let first: (v: unknown) => void = () => {};
+    mocked.mockImplementationOnce(() => new Promise((r) => (first = r)));
+    mocked.mockResolvedValueOnce([tracker({ id: 2, name: 'newer' })]);
+    const a = loadTrackers();
+    const b = loadTrackers();
+    await b;
+    expect(get(trackers).map((t) => t.name)).toEqual(['newer']);
+    first([tracker({ id: 1, name: 'older' })]);
+    await a;
+    expect(get(trackers).map((t) => t.name)).toEqual(['newer']);
+  });
+
+  it('a frame that lands while the list is in flight keeps its row over the answer', async () => {
+    const mocked = vi.mocked(invoke);
+    trackers.set([tracker({ id: 1, state: 'ok' }), tracker({ id: 3, name: 'gone' })]);
+    let answer: (v: unknown) => void = () => {};
+    mocked.mockImplementationOnce(() => new Promise((r) => (answer = r)));
+    const load = loadTrackers();
+    // The 120 s refresh is in flight; the hub flips J to auth_failed,
+    // removes tracker 3 and adds tracker 4 in the meantime.
+    applyWorkEvents([
+      { type: 'tracker', row: tracker({ id: 1, state: 'auth_failed' }) },
+      { type: 'tracker_removed', id: 3 },
+      { type: 'tracker', row: tracker({ id: 4, name: 'added' }) },
+    ]);
+    answer([tracker({ id: 1, state: 'ok' }), tracker({ id: 2, name: 'listed' }), tracker({ id: 3, name: 'gone' })]);
+    await load;
+    const byId = new Map(get(trackers).map((t) => [t.id, t]));
+    expect(byId.get(1)?.state).toBe('auth_failed');
+    expect(byId.get(2)?.name).toBe('listed');
+    expect(byId.has(3)).toBe(false);
+    expect(byId.get(4)?.name).toBe('added');
+    // The next load, with no frame in between, takes the list as is.
+    mocked.mockResolvedValueOnce([tracker({ id: 1, state: 'ok' })]);
+    await loadTrackers();
+    expect(get(trackers).map((t) => [t.id, t.state])).toEqual([[1, 'ok']]);
+  });
+
   it('the retro-link reveal counts the sessions a tracker owns', () => {
     expect(sessionsMentioning(tracker(), ['ABC-1', 'abc-2', 'TEAM-3', 'ZED-1', null])).toEqual({
       count: 3,
       prefixes: ['ABC', 'TEAM'],
     });
+  });
+
+  it('the retro-link reveal never counts a GitHub or Asana key as a Jira prefix', () => {
+    const t = tracker({ config: { key_prefixes: ['ACME'] } });
+    expect(
+      sessionsMentioning(t, ['acme-corp/api#3', 'acme-corp/web#9', 'acme-corp/web#10', 'asana:1207000000000001']),
+    ).toEqual({ count: 0, prefixes: [] });
+    expect(sessionsMentioning(t, ['acme-corp/web#9', 'ACME-4'])).toEqual({ count: 1, prefixes: ['ACME'] });
   });
 });
 
@@ -273,5 +332,101 @@ describe('keys across providers', () => {
       { section: 'done', category: 'done', confirmed: true },
       { section: 'in progress', category: 'todo', confirmed: false },
     ]);
+  });
+});
+
+// --- work graph M11.4: GitHub Enterprise Server and sync metrics -------------
+
+import { ghesHostOk, ghesHostname, describeSyncMetrics } from './trackers';
+
+describe('GitHub Enterprise Server', () => {
+  it('a GitHub-shaped issue URL on another host is offered with its hostname', () => {
+    expect(inferProvider('https://GHE.corp.example/Acme/API/issues/42')).toEqual({
+      provider: 'github',
+      site: 'https://ghe.corp.example/acme',
+      key: 'ghe.corp.example/acme/api#42',
+      hostname: 'ghe.corp.example',
+    });
+    expect(inferProvider('https://ghe.corp.example:8443/acme/api/issues/7')).toEqual({
+      provider: 'github',
+      site: 'https://ghe.corp.example/acme',
+      key: 'ghe.corp.example/acme/api#7',
+      hostname: 'ghe.corp.example:8443',
+    });
+    for (const bad of [
+      'https://ghe.corp.example/acme',
+      'https://ghe.corp.example/acme/api/pull/7',
+      'https://ghe.corp.example/.x/api/issues/7',
+      'https://127.0.0.1/acme/api/issues/7',
+      'https://[::1]/acme/api/issues/7',
+      'https://localhost/acme/api/issues/7',
+      'https://ghe/acme/api/issues/7',
+      'http://ghe.corp.example/acme/api/issues/7',
+      'https://u:p@ghe.corp.example/acme/api/issues/7',
+      'https://acme.atlassian.net:8443/acme/api/issues/7',
+      'https://github.com:8443/acme/api/issues/7',
+    ]) {
+      expect(inferProvider(bad), bad).toBeNull();
+    }
+  });
+
+  it('the host fence mirrors the backend', () => {
+    for (const ok of ['ghe.corp.example', 'git-hub.x1.example']) expect(ghesHostOk(ok), ok).toBe(true);
+    for (const bad of [
+      'localhost',
+      'a.localhost',
+      '127.0.0.1',
+      'ghe',
+      'github.com',
+      'api.github.com',
+      'github.com.evil.example',
+      'x.github.com',
+      'metadata.google.internal',
+      'a;b.example',
+      '-a.example',
+      'GHE.example',
+    ]) {
+      expect(ghesHostOk(bad), bad).toBe(false);
+    }
+  });
+
+  it('claims keep github.com and each enterprise instance apart', () => {
+    const gh = tracker({ id: 2, provider: 'github', site_url: 'https://github.com/acme', config: {} });
+    const ghe = tracker({
+      id: 5,
+      provider: 'github',
+      site_url: 'https://ghe.corp.example/acme',
+      settings: { hostname: 'ghe.corp.example:8443' },
+      config: {},
+    });
+    const list = [gh, ghe];
+    expect(trackerClaims('acme/api#42', list).map((t) => t.id)).toEqual([2]);
+    expect(trackerClaims('ghe.corp.example/acme/api#42', list).map((t) => t.id)).toEqual([5]);
+    expect(trackerClaims('ghe.other.example/acme/api#42', list)).toEqual([]);
+    expect(trackerClaims('ghe.corp.example/other/api#42', list)).toEqual([]);
+    expect(ghesHostname(ghe)).toBe('ghe.corp.example:8443');
+    expect(ghesHostname({ ...ghe, settings: {} })).toBe('ghe.corp.example');
+    expect(ghesHostname(gh)).toBeNull();
+    expect(ghesHostname(tracker())).toBeNull();
+  });
+});
+
+describe('describeSyncMetrics', () => {
+  it('one line for a pass, nothing before the first one', () => {
+    expect(describeSyncMetrics(null)).toBeNull();
+    expect(describeSyncMetrics({ tracker_id: 1, last_pass_at: null })).toBeNull();
+    expect(
+      describeSyncMetrics({
+        tracker_id: 1,
+        last_pass_at: 5,
+        duration_ms: 950,
+        items_listed: 3,
+        items_changed: 1,
+        frames_emitted: 2,
+      }),
+    ).toBe('last pass 950 ms · 3 listed · 1 changed · 2 frames');
+    expect(describeSyncMetrics({ tracker_id: 1, last_pass_at: 5, duration_ms: 61_000 })).toBe(
+      'last pass 61.0 s · 0 listed · 0 changed · 0 frames',
+    );
   });
 });

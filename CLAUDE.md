@@ -50,7 +50,9 @@ Releases are cut manually with `scripts/release.sh <new-version>` — it bumps
 the six version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
 from the Conventional Commits since the last tag, commits, and creates the
 `vX.Y.Z` tag. Never edit the version fields by hand; run the script from a
-clean `main`. See `docs/RELEASING.md`.
+clean `main`. See `docs/RELEASING.md`. Once the release is pushed,
+`scripts/release-mobile.sh <same-version>` tags fleet-mobile's `main` so its
+own workflow builds the signed APK under the same version.
 
 `docs/control-api-reference.md` is generated from the MCP tool router. After
 editing any `#[tool(...)]` description or the `generate_handler!` list,
@@ -180,6 +182,9 @@ read-only over `fleet-core::net`, the sync tick, `work_admin`, tickets /
 lookup / start — `service/trackers/`, `store/trackers.rs`,
 `store/tracker_items.rs`); read
 `docs/superpowers/2026-09-24-work-graph-roadmap.md` before touching them.
+The user guide is `docs/work-graph.md`: update it with any change a user
+sees, and add every new `work.*` setting to its table
+(`work_settings_are_in_the_user_guide` fails otherwise).
 Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
 Work graph M4 (detection) is landed: one recogniser in Rust and TS over a
 shared fixture (`service/work/recognize.rs`, `src/lib/work_keys.ts`), the
@@ -193,7 +198,7 @@ user's to take with `scripts/measure-session-start.sh`). M4.6, the opt-in classi
 nudge, is landed OFF behind `work.classify_nudge`: after three turns with no
 link and 1–5 candidates in the host's scope, one UserPromptSubmit per
 conversation carries a ≤400-char note after the mail
-(`service/work/nudge.rs`, migration 056 `conversations.classify_nudged_at`);
+(`service/work/nudge.rs`, migration 056 `conversations.classify_nudged_at`; migration 057 re-issues the read-cursor delete trigger that a rewrite of 044 left out of some databases);
 Claude's answer, `work_link { source: agent_inferred }`, is only ever a
 pre-selected suggestion (rule R11, strength `inferred`).
 Work graph M5 (organisations) is landed: migration 050 (`orgs`, text-keyed

@@ -470,6 +470,91 @@ fn crud_and_refusals() {
     assert!(!s.remove_org_rule(r.id).unwrap());
 }
 
+/// Removing an org also unassigns its past links (`snap_org_id`, no FK):
+/// the ended link of a removed org reads as unassigned, not as a fence to
+/// an org that no longer exists. One transaction: nothing changes when the
+/// org does not exist.
+#[test]
+fn remove_org_unassigns_its_past_links_too() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let b = s.add_org("B", None, false).unwrap().id;
+    s.set_host_org("h", Some(a)).unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    s.delete_session(sid).unwrap();
+    let ended = s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(s.link_org(&ended[0]).unwrap(), Some(a), "snapshotted");
+    // Another org's snapshot, for contrast.
+    s.conn
+        .execute(
+            "INSERT INTO work_links (ref_key, state, source, is_primary, created_at, ended_at, snap_org_id) \
+             VALUES ('XYZ-1', 'confirmed', 'manual', 1, 1, 2, ?1)",
+            [b],
+        )
+        .unwrap();
+    assert!(
+        !s.remove_org(a + b + 100).unwrap(),
+        "no such org: nothing changes"
+    );
+    assert_eq!(s.link_org(&ended[0]).unwrap(), Some(a));
+    assert!(s.remove_org(a).unwrap());
+    let ended = s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(s.link_org(&ended[0]).unwrap(), None, "unassigned now");
+    let other: Option<i64> = s
+        .conn
+        .query_row(
+            "SELECT snap_org_id FROM work_links WHERE ref_key = 'XYZ-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(other, Some(b), "B's snapshot is untouched");
+}
+
+/// `announce_org_moves` bumps exactly the rows whose org changed, in one
+/// transaction (one commit, not one per row), ghosts included, and answers
+/// how many it announced.
+#[test]
+fn announce_org_moves_bumps_only_the_moved_rows() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    s.upsert_host("g").unwrap();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let on_h = s
+        .upsert_session("dev-h", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let ghost_h = s
+        .upsert_session("old-h", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.mark_session_killed(ghost_h, 5).unwrap();
+    let on_g = s
+        .upsert_session("dev-g", "g", None, None, 1, 1, "running", None)
+        .unwrap();
+    let version = |id: i64| -> i64 {
+        s.conn
+            .query_row(
+                "SELECT row_version FROM sessions WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let before = s.session_orgs().unwrap();
+    assert_eq!(s.announce_org_moves(&before).unwrap(), 0, "nothing moved");
+    let (vh, vg, vghost) = (version(on_h), version(on_g), version(ghost_h));
+    s.set_host_org("h", Some(a)).unwrap();
+    assert_eq!(s.announce_org_moves(&before).unwrap(), 2);
+    assert!(version(on_h) > vh && version(ghost_h) > vghost);
+    assert_eq!(version(on_g), vg, "g's row did not move");
+    assert_eq!(s.get_session_by_id(on_h).unwrap().unwrap().org_id, Some(a));
+    assert!(s.conn.is_autocommit(), "the transaction was committed");
+}
+
 /// The migration over a database from before M5: every row lands
 /// unassigned (the default org is "none"), and nothing reads differently.
 #[test]

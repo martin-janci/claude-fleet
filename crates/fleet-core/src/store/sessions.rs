@@ -201,6 +201,10 @@ impl Store {
     /// [`Store::ghost_and_clean`], shared with the tmux-keyed reconcile pass;
     /// this wrapper only owns the transaction and the post-commit emit.
     ///
+    /// The transaction is a SAVEPOINT ([`Store::in_savepoint`]), so this
+    /// also runs inside reconcile's per-host `Store::atomically`
+    /// transaction; nested, its events are held until that commits.
+    ///
     /// The one-cycle grace matters because a failed
     /// `claude agents` probe is indistinguishable from "no agents" (both come
     /// back as an empty list): a transient miss only ghosts, and
@@ -215,20 +219,22 @@ impl Store {
         now: i64,
         lost_ttl_cutoff: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
-        let tx = self.conn.unchecked_transaction()?;
-        let mut changes: Vec<RowChange> = Vec::new();
-        Self::ghost_and_clean(
-            &tx,
-            host_alias,
-            keep_names,
-            now,
-            KIND_PANE_LESS,
-            None,
-            lost_ttl_cutoff,
-            &mut changes,
-        )?;
-        tx.commit()?;
-        // Emit only after the commit so no event fires for a rolled-back write.
+        let changes = self.in_savepoint("ghost_and_clean_bg_sessions", |tx| {
+            let mut changes: Vec<RowChange> = Vec::new();
+            Self::ghost_and_clean(
+                tx,
+                host_alias,
+                keep_names,
+                now,
+                KIND_PANE_LESS,
+                None,
+                lost_ttl_cutoff,
+                &mut changes,
+            )?;
+            Ok::<_, rusqlite::Error>(changes)
+        })?;
+        // Emit only after the release so no event fires for a rolled-back
+        // write (nested, `atomically` holds them until its own commit).
         for change in &changes {
             self.bus.emit_change(change);
         }
@@ -270,7 +276,8 @@ impl Store {
     /// the distinct lifecycle kind `"reclassified"`.
     ///
     /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
-    /// `unchecked_transaction`, collect the affected rows, commit, and only
+    /// SAVEPOINT ([`Store::in_savepoint`], so it nests inside reconcile's
+    /// per-host transaction), collect the affected rows, release, and only
     /// THEN emit one `SessionUpdated` per newly marked row.
     ///
     /// `probe_started_at` is the BE-3 guard, identical to
@@ -302,49 +309,49 @@ impl Store {
             format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
         };
         let cutoff = super::reconcile::ghost_cutoff(probe_started_at);
-        let tx = self.conn.unchecked_transaction()?;
-        let fetch_all = |ids: &[i64]| -> Result<Vec<SessionRow>, rusqlite::Error> {
-            let mut rows = Vec::new();
-            for id in ids {
-                if let Some(row) = fetch_session_by_id(&tx, *id)? {
-                    rows.push(row);
+        let out = self.in_savepoint("mark_host_sessions_lost", |tx| {
+            let fetch_all = |ids: &[i64]| -> Result<Vec<SessionRow>, rusqlite::Error> {
+                let mut rows = Vec::new();
+                for id in ids {
+                    if let Some(row) = fetch_session_by_id(tx, *id)? {
+                        rows.push(row);
+                    }
                 }
-            }
-            Ok(rows)
-        };
-        // Reclassify FIRST, while the rows the main mark is about to ghost
-        // are still live: those get `reason` directly and must not be
-        // counted twice. `lost_at` is deliberately left untouched.
-        let reclassify_sql = format!(
-            "UPDATE sessions SET lost_reason=?1
-             WHERE host_alias=?2 AND status='ghost'
-               AND COALESCE(lost_reason, 'missing')='missing' AND {kind_filter}
-               AND COALESCE(last_reconciled_at, 0) < ?3{not_in}
-             RETURNING id"
-        );
-        let head: Vec<&dyn rusqlite::ToSql> = vec![&reason, &host_alias, &cutoff];
-        let params = params_then(&head, keep_names);
-        let reclassified_ids: Vec<i64> = tx
-            .prepare(&reclassify_sql)?
-            .query_map(params.as_slice(), |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let sql = format!(
-            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
-             WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
-               AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
-             RETURNING id"
-        );
-        let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias, &cutoff];
-        let params = params_then(&head, keep_names);
-        let ids: Vec<i64> = tx
-            .prepare(&sql)?
-            .query_map(params.as_slice(), |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let out = MarkedLost {
-            marked: fetch_all(&ids)?,
-            reclassified: fetch_all(&reclassified_ids)?,
-        };
-        tx.commit()?;
+                Ok(rows)
+            };
+            // Reclassify FIRST, while the rows the main mark is about to ghost
+            // are still live: those get `reason` directly and must not be
+            // counted twice. `lost_at` is deliberately left untouched.
+            let reclassify_sql = format!(
+                "UPDATE sessions SET lost_reason=?1
+                 WHERE host_alias=?2 AND status='ghost'
+                   AND COALESCE(lost_reason, 'missing')='missing' AND {kind_filter}
+                   AND COALESCE(last_reconciled_at, 0) < ?3{not_in}
+                 RETURNING id"
+            );
+            let head: Vec<&dyn rusqlite::ToSql> = vec![&reason, &host_alias, &cutoff];
+            let params = params_then(&head, keep_names);
+            let reclassified_ids: Vec<i64> = tx
+                .prepare(&reclassify_sql)?
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let sql = format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
+                 WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
+                   AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
+                 RETURNING id"
+            );
+            let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias, &cutoff];
+            let params = params_then(&head, keep_names);
+            let ids: Vec<i64> = tx
+                .prepare(&sql)?
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(MarkedLost {
+                marked: fetch_all(&ids)?,
+                reclassified: fetch_all(&reclassified_ids)?,
+            })
+        })?;
         for row in &out.reclassified {
             // `lost_reason` is on the wire now, so this IS a change the
             // frontend sees — emit it, re-reading the committed row the same
@@ -545,6 +552,40 @@ impl Store {
         rows.collect()
     }
 
+    /// Every session named `tmux_name` (optionally on just one host), by a
+    /// direct `WHERE tmux_name=?` — used by `whoami`'s resolution
+    /// (`find_session_by_tmux_name_scoped`), which used to call
+    /// [`Self::list_all_sessions`] and filter every row in Rust. Deliberately
+    /// NOT filtered by `lost_at`: a ghosted row must still be considered (a
+    /// live match is preferred over one, but two ghosts of the same name are
+    /// still `E_AMBIGUOUS`, not silently invisible). Ordered like
+    /// [`Self::list_all_sessions`] (`last_activity_at DESC`), so the
+    /// ambiguity's candidates list is the one the old path produced.
+    pub fn find_sessions_by_tmux_name(
+        &self,
+        tmux_name: &str,
+        host_alias: Option<&str>,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        match host_alias {
+            Some(host) => {
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2 \
+                     ORDER BY last_activity_at DESC"
+                ))?;
+                let rows = stmt.query_map(rusqlite::params![tmux_name, host], map_session_row)?;
+                rows.collect()
+            }
+            None => {
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 \
+                     ORDER BY last_activity_at DESC"
+                ))?;
+                let rows = stmt.query_map(rusqlite::params![tmux_name], map_session_row)?;
+                rows.collect()
+            }
+        }
+    }
+
     pub fn list_related_sessions(
         &self,
         session_id: i64,
@@ -648,6 +689,17 @@ impl Store {
         uuid: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
         self.rebind_conversation(id, uuid, StartSource::Fleet, None, None)?;
+        Ok(())
+    }
+
+    /// Link a session to its worktree row (`sessions.worktree_id`), which
+    /// reconcile never sets. Emits `session_updated`.
+    pub fn link_session_worktree(&self, id: i64, worktree_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET worktree_id = ?1 WHERE id = ?2",
+            rusqlite::params![worktree_id, id],
+        )?;
+        self.emit_session(id)?;
         Ok(())
     }
 
@@ -866,6 +918,21 @@ impl Store {
         self.emit_session(id)
     }
 
+    /// Put `last_prompt` back to an earlier value (possibly none): the send
+    /// it was stamped ahead of failed, so the prompt never reached the pane.
+    /// Emits `session_updated`.
+    pub fn restore_last_prompt(
+        &self,
+        id: i64,
+        prompt: Option<&str>,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET last_prompt=?1 WHERE id=?2",
+            rusqlite::params![prompt, id],
+        )?;
+        self.emit_session(id)
+    }
+
     /// Stamp when fleet created this session (migration 019). Only sets the
     /// value once — a re-create keeps the original start. Emits
     /// `session_updated` so the sidebar's elapsed label does not wait for a
@@ -923,18 +990,35 @@ impl Store {
     /// * `old` is remembered like a kill: that same stale pass still lists
     ///   `old`, and with no row left under that name it would insert the
     ///   session a second time.
+    ///
+    /// A `lost` row under `new` that is still restorable (host reboot
+    /// survival: `lost_at` set and a conversation to resume) is NOT a ghost
+    /// to dismiss: the rename is refused with `E_EXISTS` naming it, so its
+    /// timeline, participant and restore entry survive. The service refuses
+    /// before tmux renames anything (`reject_lost_session_name`); this is
+    /// the store's own guard. The dismissal and the rename are one
+    /// transaction.
     pub fn rename_session_row(
         &self,
         host_alias: &str,
         old: &str,
         new: &str,
         now: i64,
-    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         if old == new {
-            return self.get_session(old, host_alias);
+            return Ok(self.get_session(old, host_alias)?);
         }
-        let stale: Option<i64> = self
-            .conn
+        if let Some(lost) = self.lost_resumable_session_named(host_alias, new)? {
+            return Err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_EXISTS,
+                format!(
+                    "{new} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
+                    lost.id
+                ),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let stale: Option<i64> = tx
             .query_row(
                 "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
                 rusqlite::params![host_alias, new],
@@ -942,10 +1026,20 @@ impl Store {
             )
             .optional()?;
         if let Some(id) = stale {
-            self.delete_session(id)?;
+            // A dead ghost gives way: what `delete_session` does, inside
+            // this transaction (its event is emitted after the commit).
+            tx.execute(
+                "DELETE FROM session_events WHERE session_id=?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL \
+                 WHERE session_id = ?2 AND retired_at IS NULL",
+                rusqlite::params![now_unix(), id],
+            )?;
+            tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         }
-        let id: Option<i64> = self
-            .conn
+        let id: Option<i64> = tx
             .query_row(
                 "UPDATE sessions SET tmux_name=?3, last_reconciled_at=?4 \
                  WHERE host_alias=?1 AND tmux_name=?2 RETURNING id",
@@ -953,9 +1047,13 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
+        tx.commit()?;
+        if let Some(gone) = stale {
+            self.bus.session_killed(gone);
+        }
         self.note_kill(host_alias, old, now);
         match id {
-            Some(id) => self.emit_session(id),
+            Some(id) => Ok(self.emit_session(id)?),
             None => Ok(None),
         }
     }
@@ -1097,6 +1195,19 @@ impl Store {
         &self,
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        self.record_prompt_submit_hook_for_row_with(row_id, true)
+    }
+
+    /// [`Self::record_prompt_submit_hook_for_row`] with the touch decided by
+    /// the caller: `touch = false` for a prompt fleet itself typed (a peer's
+    /// wake nudge, the safe-kill instructions, an inbox delivery), which
+    /// marks the session working like any other but is nobody's touch and
+    /// must not keep a done session out of tidy-up or un-archive it.
+    pub fn record_prompt_submit_hook_for_row_with(
+        &self,
+        row_id: i64,
+        touch: bool,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
@@ -1108,9 +1219,11 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        // A prompt is a person's touch (work graph M7): it protects the
+        // A person's prompt is a touch (work graph M7): it protects the
         // session from tidy-up for an hour and un-archives it.
-        self.touch_for_prompt(row_id)?;
+        if touch {
+            self.touch_for_prompt(row_id)?;
+        }
         Ok(self.emit_session(row_id)?)
     }
 
@@ -1376,7 +1489,11 @@ impl Store {
     }
 
     /// [`Self::set_transcript_path_by_claude_id`] for one row, and only while
-    /// `claude_session_id` is still its current conversation.
+    /// `claude_session_id` is still its current conversation. A repeat of
+    /// the same path is a no-op write (Task 3: every hook of a conversation
+    /// resends the same `transcript_path`, and an unconditional write here
+    /// bumped `row_version` — see migration 042's trigger — on every one of
+    /// them).
     pub fn set_transcript_path_for_row(
         &self,
         row_id: i64,
@@ -1384,7 +1501,8 @@ impl Store {
         path: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
         self.conn.execute(
-            "UPDATE sessions SET transcript_path = ?1 WHERE id = ?2 AND claude_session_id = ?3",
+            "UPDATE sessions SET transcript_path = ?1 WHERE id = ?2 AND claude_session_id = ?3 \
+             AND transcript_path IS NOT ?1",
             rusqlite::params![path, row_id, claude_session_id],
         )?;
         Ok(())
@@ -1451,6 +1569,50 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// `find_sessions_by_tmux_name` is a direct `WHERE tmux_name=?` (plus an
+    /// optional host filter) — this pins that it finds every host's row of
+    /// that name (including a lost one, which `whoami`'s ambiguity fallback
+    /// still needs to see), names none of a different name, and that the
+    /// host filter narrows to just that host's row.
+    #[test]
+    fn find_sessions_by_tmux_name_matches_every_host_or_just_one() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        s.upsert_host("beta").unwrap();
+        let a = s
+            .upsert_session("dev-a", "alpha", None, None, 0, 0, "running", None)
+            .unwrap();
+        let b = s
+            .upsert_session("dev-a", "beta", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.upsert_session("dev-other", "alpha", None, None, 0, 0, "running", None)
+            .unwrap();
+        // A lost row must still be found — `whoami`'s ambiguity fallback
+        // treats "only ghosts left" as one match, not zero.
+        s.conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=5 WHERE id=?1",
+                rusqlite::params![b],
+            )
+            .unwrap();
+
+        let mut all = s.find_sessions_by_tmux_name("dev-a", None).unwrap();
+        all.sort_by_key(|r| r.id);
+        assert_eq!(all.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
+        assert!(all.iter().any(|r| r.id == b && r.lost_at.is_some()));
+
+        let scoped = s
+            .find_sessions_by_tmux_name("dev-a", Some("alpha"))
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, a);
+
+        assert!(s
+            .find_sessions_by_tmux_name("no-such-name", None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

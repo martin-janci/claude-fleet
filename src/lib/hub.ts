@@ -175,6 +175,8 @@ const REASONS = {
     'the hub tests its trackers with its own credentials, and a client is never the fleet’s administrator — use `fleet-hub tracker test`',
   remove_tracker:
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
+  tracker_sync_metrics:
+    'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
   // Organisations (work graph M5): the per-host tokens' boundary is set on
   // the hub only; `work_admin` is master-only.
   add_org:
@@ -206,7 +208,7 @@ const REASONS = {
   catalog_config:
     'the asset catalog is a git checkout on the machine that owns the fleet; the hub serves its asset list to any paired client (list_assets), but not the configuration and checkout this panel is built on',
   get_fleet_settings:
-    'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not',
+    'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; the hub’s master token reads and changes them (get_settings, set_setting)',
   list_account_usage:
     'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:
@@ -322,6 +324,8 @@ export const ROUTED_ACTIONS = [
   'snooze_tidy',
   'never_tidy',
   'dismiss_reopened',
+  'name_session_work',
+  'rename_work_item',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

@@ -8,6 +8,273 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.3.0] - 2026-09-26
+
+A faster hub. On a NAS with spinning disks every store write held the one
+database lock for ~200 ms, so even read-only MCP calls queued behind it: 0.4–2 s
+for `whoami` / `list_hosts`, and ~15 s spikes for `list_sessions` /
+`list_worktrees`. Reads now come off the writer, and writes are batched into
+single transactions. The WAL change in v0.2.40 fixed the fsync cost; this
+release fixes the queueing.
+
+**Upgrading:** this release adds migrations 059 and 060. Back up `state.db`,
+together with any `state.db-wal` / `state.db-shm` next to it, before
+upgrading. See `docs/RELEASING.md`.
+
+### Added
+- **hub:** a read-only connection pool on the WAL database serves the listing
+  tools (`list_hosts`, `list_projects`, `list_worktrees`, `whoami`,
+  `fleet_health`, and the final read of `list_sessions`) without waiting on
+  the writer.
+- **hub:** `authorize` checks tokens against an in-memory cache. Migration 060
+  adds triggers that bump an auth epoch on every token change except the
+  `last_seen_at` stamp, and the epoch is re-read on every request. A revoked,
+  rotated or re-scoped client or host token is refused on the very next
+  request, even when another process changed it (the `fleet-hub` CLI via
+  `docker exec`).
+- **release:** releases publish themselves once every asset is verified. The
+  hub image is pinned to the release in `deploy/hub/docker-compose.yml`, and
+  drift is watched (#311).
+
+### Changed
+- **sessions:** `list_sessions` no longer probes every host inline when its
+  cache is stale. It answers from the stored rows and refreshes in the
+  background; only a cold start or `force` waits for the probe.
+- **reconcile:**
+  - `claude agents --json` runs at most once a minute per host, as intended;
+    before, it ran on every pass.
+  - Each host's writes commit in one transaction and unchanged host identity
+    is not rewritten.
+  - The GC sweep no longer runs inside the tick.
+- **hooks:** each hook's writes commit in one transaction, and updates that
+  change nothing are skipped.
+- **audit:** read-only tools no longer write an audit row on every call.
+- **usage / trackers:**
+  - Usage collection commits once per host and skips sessions with no new
+    usage.
+  - Tracker sync commits once per batch and stamps `fetched_at` in one
+    statement.
+- **store:**
+  - Migration 059 indexes live sessions by worktree.
+  - `list_worktrees` no longer queries once per worktree.
+  - `whoami` looks the session up by its name instead of loading every
+    session.
+
+### Fixed
+- **store:** a transaction that SQLite aborts midway (I/O error, full disk, out
+  of memory) no longer half-commits. The writes after the failure stop
+  instead of committing on their own without their events, and a failed
+  savepoint release can no longer leave the connection inside an open
+  transaction.
+- **store:** transactions begin `IMMEDIATE`, so a CLI writer next to the hub
+  makes the transaction wait instead of failing at once.
+- **usage:** a pass with no new usage no longer clears the usage cursor's last
+  message id.
+- **mcp:** `fleet_health` still reports a failed database lock when it reads
+  through the pool.
+
+## [0.2.42] - 2026-09-26
+
+### Added
+- **mcp:** tell paired clients about tool-list changes too
+- **mcp:** advertise tools.listChanged and send it on the next call
+- **assets:** read-only catalog overview on a hub client
+- **work:** filter by the tracker's own status name (QA Review)
+- **agent:** resize and maximize the agent sheet
+- **ui:** reconnect Attention item for failing trackers (work graph M12.4, D22)
+- **health:** tracker roll-up and detection backlog in fleet_health (work graph M12.4)
+- **settings:** work retention windows, status and dry run in Settings (M12.3)
+- **work_admin:** status and sweep_now for retention (M12.3)
+- **work:** retention sweep for journal, done tickets and work events (M12.3)
+- **store:** refuse a database a newer build has migrated
+- **composer:** the quick-reply chips are the fleet's, not each device's
+- **mcp:** get_settings / set_setting, so a hub's settings can be changed
+- **mcp:** get_settings / set_setting, so a hub's settings can be changed
+- **work-graph:** M11.3 tidy reason idle_unlinked and per-session keep
+
+### Changed
+- Revert "docs(work-graph): start the work graph user guide (M12.5, in progress)"
+- **e2e:** use a live key in the set_setting scenario
+- **mcp:** set BUDGET_BYTES to the M12.3 measurement plus 100
+- **routing:** record the two retention refusals in the local-only fixture
+- **store:** name the upgrade test's fingerprint type
+- **release:** release fleet-mobile under the same version
+- **work:** satisfy clippy's is_multiple_of in the scale fixture
+- **ui:** use a real ClaudeStatus in the scale fixture
+- **store:** prove the upgrade into the work graph on a generated database (M12.1)
+- **ui:** group-by-work, rowMatches and the Today view at 2,000 rows
+- **work:** seeded scale fixture and budget tests for the work graph
+- **store:** index ended work links and the handover guard; key lookup by index
+
+### Fixed
+- **composer:** More keeps the chip row open; Send stays right; center the loader
+- **hub:** self-heal leftovers of a disabled local host
+- **safe-kill:** never remove the main checkout; read a wrapped FAILED echo
+- **store:** read the tidy keep without scanning session_events
+- **work:** index-backed tidy_kept lookup
+- **lint:** collapse the nested if clippy 1.95 now reads as a guard
+
+### Documentation
+- **net:** describe the tracker SSRF fence as it is since M6
+- **net:** stop promising an acli transport in https.rs
+- **work:** restate D15 as multi-start on the phone only
+- **work:** revisit the decided-against list (work graph M12.6)
+- **hub:** the Assets tab is a read-only overview on a hub client
+- **control-api:** name fleet_health's trackers roll-up (work graph M12.4)
+- **work-graph:** start the work graph user guide (M12.5, in progress)
+- **work:** add the work graph user guide (M12.5)
+- **plan:** add the M12 plan with the M12.3 revision
+- upgrading into the work graph, and the M12 plan with M12.1's revision
+- **plan:** add the M12 plan with the M12.2 scale numbers
+## [0.2.41] - 2026-09-26
+
+### Added
+- **ui:** Settings → Work connects GitHub Enterprise and shows sync metrics
+- **desktop:** tracker_sync_metrics command, LocalOnly like the tracker admin
+- **trackers:** GitHub Enterprise Server and per-tracker sync metrics (M11.4)
+- **ui:** "Name this work…" dialog, row menu and group header
+- **desktop:** Routed commands for local work items
+- **work:** name local work items (work graph M11.1)
+- **work:** resume planning probes that the transcript is still on the host
+- **move:** refuse a cross-org move unless force_cross_org
+- **trackers:** a test-only loopback override for the e2e fake tracker
+- **work:** show the latest handover outcome and offer Start anyway on a cross-org multi-start
+
+### Changed
+- **transcript:** a one-turn window stops costing a megabyte of SSH
+- **work:** ignore tracker_sync_metrics in the Data Center re-connect command list
+- **e2e:** name local work on hub W (work graph M11.1)
+- **mcp:** pay back the tool-description budget (M11.5, M0.6)
+- **sidebar:** the past-work header's Resume continues the last conversation, or opens the dialog
+- **work:** startWorkMulti takes the started rows into the store, refreshTidy keeps the last report on an error
+- **orgs:** the colour picker, the host / tracker assign selects and createFromSuggestion's tracker branch
+- **session-row:** Pick another… goes to the key box, Escape closes the work menu
+- **work:** TicketCard reload on a key change, TodayView's Refresh / Close / links, ResumeDialog's last mode
+- **work:** the hub-blocked state of both review sheets, the tidy refresh tick and the Reopened pill
+- **sheets:** navigation from a focused control and a refused focus never claiming ownership
+- **org-settings:** the add form, rules, unassign, remove and a failure
+- **work-settings:** Test and Remove on a listed tracker
+- **resume:** the host override reaches the plan, the brief and the start
+- **tidy-review:** reopened toast, partial failure and hub refusal
+- **link-review:** a decided row leaves the list and the sheet closes itself
+- **quick-switcher:** Ctrl+Enter on a ticket opens what it started
+- **new-session:** the E_EXISTS jump asserts the session it lands on
+- **http_client:** pin the transport-side half of the moved trust-store assertion and the TLS-handshake prefix
+- **settings:** the lifecycle test reads off-default thresholds and reasons
+- **peer:** read B's pending outbox before the restarted dialer can drain it
+- **trackers:** rustfmt and clippy over the tests of the review fixes
+- **e2e:** detection on a session with no work yet, after M4.6
+- **gc:** feed the tidy planner offline rows, not only a remote host
+- **trackers:** fail the extra_ca TLS test loudly without openssl
+- **trackers:** reach the per-host start fence on another host
+- **peer:** pin the supervisor's own stop of a revoked link
+- **trackers:** prove the 429 wait expires on the same sync
+- **isolation:** check row redaction on rows that carry work
+- **orgs:** announce org moves in one transaction
+- **tidy:** bundle apply_one's caller context
+- **e2e:** the work graph end to end in scripts/hub-e2e.sh (M10.2)
+- **isolation:** compare the link-id oracle against a live link
+- **work:** measure and guard replay-ring pressure under tracker sync
+- **mcp:** assert per-caller outcomes for handover and multi-start in the isolation matrix
+
+### Fixed
+- **clippy:** collapse the org-scope guard into its match arm
+- **review:** six follow-ups from the M5/M6 second-round review
+- **safe-kill:** read the marker below the prompt's echo, not the echo
+- **orgs:** run the org admin commands off the main thread
+- **peer:** drop a useless format! in the marker-defusing test
+- **trackers:** a lost start race names the winner only when the caller may see it
+- **trackers:** the row's 429 deadline alone decides whether the sync waits
+- **trackers:** a Jira key's shape bounds the prefix at 50 chars, not Cloud's 10
+- **trackers:** a key over KEY_MAX_CHARS is dropped, not cut to another item's key
+- **store:** a removed tracker's rows come last in work_item_by_key and never make a key known
+- **via_host:** the curl script also unsets tr, break and continue
+- **sheets:** navigation keys still work from a focused control; focus ownership only when set
+- **hooks:** a prompt fleet typed is nobody's touch on the hook path either
+- **peer:** a re-pair merge sheds the old watermark instead of keeping it
+- **sessions:** only a person's prompt touches a session, never fleet's own
+- **resume:** key the in-flight resume registry per store
+- **mcp:** keep the inbox description inside the served-definition budget
+- **net:** unlink the curl header file before curl runs and sweep stale dirs
+- **hub:** open state.db read-only for peer list and say a re-pair needs a new code
+- **trackers:** a Retry-After from the tracker is capped at an hour
+- **github:** the issue URL is built from the validated repository and number
+- **trackers:** a tracker key is kept only in a key's shape
+- **jira_dc:** a URL is this site's only with the exact host and context path
+- **github:** a RATE_LIMITED GraphQL error waits until the reset
+- **trackers:** the key in a brief and a start prompt is tracker text
+- **net:** refuse a truncated body in parse_response instead of returning it
+- **store:** migration 057 re-issues the read_cursors session-delete trigger
+- **trackers:** a lookup honours the sync's Retry-After back-off
+- **trackers:** bound every short tracker field before it is stored
+- **trackers:** a start re-checks for a live session before it links
+- **net:** let the curl transport report an over-cap body as TooLarge
+- **peer:** defuse every fleet marker in a peer body, not only the listed prefixes
+- **trackers:** refuse a via_host / via_cli transport on a fleet-agent host
+- **trackers:** clamp a 429's wait and add it without overflow
+- **net:** anchor the via-host parsers on a start marker, not byte 0
+- **trackers:** a lookup by URL reads the cache of that URL's tracker
+- **mcp:** flag peer-originated inbox summaries as untrusted
+- **jira:** a key inside another site's URL is not recognised as ours
+- **asana:** a failed batch action is a batch error, never a missing task
+- **jira_dc:** a moved key is found next to other references in a fetch
+- **jira:** a moved key is found next to other references in a bulkfetch
+- **store:** a removed tracker's rows no longer shadow the re-added one
+- **trackers:** write a view's sync mark only after its items are stored
+- **trackers:** a successful test re-enables the views a 403 disabled
+- **trackers:** a bare link from another org is not live work on a ticket
+- **mcp:** bind a fresh_for reader to the caller's host before touching its cursor
+- **ssh:** run a stdin-fed command on `local` locally, never `ssh local`
+- **hooks:** stamp a handover delivered on SessionStart only for the sync curl form
+- **linear:** a missing issue in a batched fetch no longer fails the chunk
+- **orgs:** remove_org unassigns the org's past links, in one transaction
+- **sessions:** never dismiss a restorable lost session on a rename
+- **move:** warn when a carried work link crosses the org boundary
+- **tidy:** a tree a live review uses is only ever plain-killed
+- **resume:** refuse a concurrent resume of the same key
+- **tidy:** honour a snooze or never on any live confirmed link
+- **sessions:** link a new session to the worktree it was started in
+- **work:** percent-decode ticket URLs all or nothing, like the TS twin
+- **sessions:** stamp last_prompt before the tmux send, roll back on failure
+- **work:** match a carried or merged link by item under either spelling
+- **work:** snapshot the branch, not a closing ref, when R7 ends a link
+- **work:** key detection candidates by the item's current key
+- **work:** a promoted suggestion takes the promoting signal's source
+- **work:** keep the session's primary when a cross-org candidate is skipped
+- **store:** create state.db owner-only before the open so the WAL sidecars inherit 0600
+- **net:** refuse a curl answer whose exit is non-zero even with a status
+- **resume:** a blank edited brief is no brief, and a brief never fails the resume after the spawn
+- **work:** refresh session rows that show a tracker item as a suggestion or rejection
+- **trackers:** first-sync needs a known tracker; list loads never overwrite newer frames
+- **session-focus:** never focus a session the store does not have
+- **work:** check the primary link's visibility for snooze, never and archive
+- **tidy:** never write gc_failed to a session outside the caller's scope
+- **sheets:** Escape closes the tidy and link-review sheets from any focused control
+- **today:** a hub without work_today is the plain empty state, not an error
+- **work-settings:** forget the token and email on Cancel and failure
+- **new-session:** multi-repo start carries the edited brief and name
+- **sidebar:** a focused session is never hidden under a work group's Done
+- **work-settings:** re-connecting a site keeps its transport and settings
+- **trackers:** retro-link reveal skips GitHub and Asana keys before taking a prefix
+- **link-review:** sheet chords ignore keydowns from focused buttons
+- **quick-switcher:** place a ticket by its key family, not the text before the first dash
+- **tidy:** sheet chords ignore keydowns from focused controls
+- **work:** send session:updated for a tracker item only when the row shows the change
+- **work:** bind a handover request to its turn and keep the markers out of the timeline
+- **work:** settle the multi-repo start's leftovers (M10.1)
+- **pane_intel:** OOM text above a live REPL is scrollback, not a crash
+
+### Documentation
+- M11 plan with the M11.4 revision line; regenerate the control API reference
+- **plan:** add the M11 plan with the M11.5 revision
+- **plan:** add the M11 plan with the M11.1 revision
+- **review:** record the second-round review, the test audits and the workspace-wide validation
+- **claude-md:** name migration 057 next to the classify-nudge note
+- **review:** record the fix status, the deliberate non-changes and the final validation
+- **hub:** say why hosts are assigned before a second tracker
+- **review:** deep code review of the 48 hours ending 2026-09-25
+- **work:** record the M10.6 replay-ring pressure numbers and decision
+- **store:** put list_session_events' doc comment back on it
 ## [0.2.40] - 2026-09-25
 
 ### Added
@@ -1519,6 +1786,9 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.3.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.0
+[0.2.42]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.42
+[0.2.41]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.41
 [0.2.40]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.40
 [0.2.39]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.39
 [0.2.38]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.38

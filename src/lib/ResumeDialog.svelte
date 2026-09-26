@@ -170,6 +170,10 @@
       {/if}
     {/if}
 
+    {#each plan.warnings ?? [] as w (w)}
+      <p class="warn" data-testid="resume-warning">{w}</p>
+    {/each}
+
     <ul class="modes" role="radiogroup" aria-label="Resume mode">
       {#each ['last', 'brief', 'fresh'] as const as m (m)}
         {@const info = modes.find((x) => x.mode === m)}
@@ -276,6 +280,10 @@
   }
   .muted {
     color: var(--fg-muted, #999);
+  }
+  .warn {
+    margin: 0 0 0.5rem;
+    color: var(--warn, #f59e0b);
   }
   .linkish {
     background: none;

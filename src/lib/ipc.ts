@@ -1,9 +1,12 @@
 import { invokeCmd, type Result } from './result';
+import type { TrackersHealth } from './tracker_health';
 
 export interface Health {
   version: string;
   db_ready: boolean;
   schema_version: number;
+  /** Work graph M12.4: the tracker roll-up; absent from an older hub. */
+  trackers?: TrackersHealth;
 }
 
 /**

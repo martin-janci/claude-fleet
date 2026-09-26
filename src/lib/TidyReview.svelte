@@ -8,6 +8,10 @@
   //   the footer "Tidy n · Cancel". Keyboard: j/k move, space toggles, ↵
   //   applies, esc closes. Clicking a row narrows the sidebar to that
   //   session and opens it, to look before tidying; closing lifts that.
+  // - "Idle, no work linked" (M11.3) rows start unticked and carry their own
+  //   Keep 7 d and Safe kill buttons; Safe kill arms first and acts on the
+  //   second click. The backend kills such a session only when its worktree
+  //   is clean and pushed, and auto-tidy never does (D19).
   // - "Reopened · n" (accent) lists work that came back after being done,
   //   with its past sessions and Resume; it stays until resumed, done again
   //   or dismissed. A newly reopened item also toasts once.
@@ -34,6 +38,9 @@
     tidyReasonLabel,
     tidyReport,
     TIDY_CHOICE_LABELS,
+    KEEP_DAYS,
+    tidyEvidence,
+    type TidyApplyItem,
     type TidyCandidate,
     type TidyChoice,
   } from './tidy';
@@ -110,8 +117,7 @@
     if ((e.target as HTMLElement | null)?.closest('input, select, a, button')) return;
     const c = ordered[i];
     if (!c) return;
-    focused = true;
-    focusSession(c.session_id, rowName(c));
+    if (focusSession(c.session_id, rowName(c))) focused = true;
   }
 
   function toggle(id: number) {
@@ -125,6 +131,37 @@
     const next = new Map(choice);
     next.set(id, value as TidyChoice);
     choice = next;
+  }
+
+  // The one row whose Safe kill button is armed (a second click applies).
+  let armed = $state<number | null>(null);
+
+  /** One row's own button: Keep, or an armed Safe kill. */
+  async function applyRow(c: TidyCandidate, action: 'keep' | 'safe_kill') {
+    if (busy || blocked !== null) return;
+    if (action === 'safe_kill' && armed !== c.session_id) {
+      armed = c.session_id;
+      return;
+    }
+    armed = null;
+    const item: TidyApplyItem = { session_id: c.session_id, action };
+    if (action === 'keep') item.days = KEEP_DAYS;
+    busy = true;
+    const r = await applyTidy([item]);
+    busy = false;
+    if (!r.ok) {
+      pushError(r.error, action === 'keep' ? 'Keep failed' : 'Safe kill failed');
+      return;
+    }
+    const res = r.value.results[0];
+    if (res && !res.ok) {
+      push({ kind: 'error', message: `${rowName(c)}: ${res.error ?? action}` });
+      return;
+    }
+    push({
+      kind: 'info',
+      message: action === 'keep' ? `Kept ${rowName(c)} for ${KEEP_DAYS} days` : `Killed ${rowName(c)}`,
+    });
   }
 
   async function apply() {
@@ -155,7 +192,26 @@
 
   function onSheetKey(e: KeyboardEvent) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    if ((e.target as HTMLElement | null)?.tagName === 'SELECT') return;
+    // The chords act only from the sheet itself or a row. A keydown that
+    // bubbles up from a focused control (Cancel, Resume, the PR link, a
+    // checkbox, the choice select) keeps that control's own meaning: Enter
+    // activates it and Space toggles the checkbox under the caret, never the
+    // cursor row's — and never applies the tidy.
+    // Escape closes the sheet from anywhere inside it; it is never destructive.
+    if (e.key === 'Escape') {
+      closeSheet();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const target = e.target as HTMLElement | null;
+    if (target !== e.currentTarget && !target?.classList.contains('tidy-row')) {
+      // A select owns its keys; any other control keeps its activating keys
+      // (Enter, Space, y/n/Backspace) but j/k and the arrows have no meaning
+      // on a checkbox, link or button, so they still move the cursor.
+      if (target?.tagName === 'SELECT') return;
+      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+    }
     const n = ordered.length;
     switch (e.key) {
       case 'j':
@@ -349,12 +405,33 @@
           {#if c.expires_at}
             <span class="meta">expires {formatIdle(c.expires_at - Math.floor(Date.now() / 1000))}</span>
           {:else}
-            <span class="meta">idle {formatIdle(c.idle_secs)}</span>
+            <span class="meta" data-testid="tidy-evidence">{tidyEvidence(c)}</span>
           {/if}
           {#if (c.secondary ?? []).length > 0}
             <span class="meta">also: {(c.secondary ?? []).map(tidyReasonLabel).join(', ')}</span>
           {/if}
-          {#if c.action === 'safe_kill'}
+          {#if c.reason === 'idle_unlinked'}
+            <span class="warn" title="No work is linked, so fleet will not guess what uncommitted work is for: a dirty or unpushed worktree is refused, not killed"
+              >only if clean &amp; pushed</span
+            >
+            <button
+              class="pill"
+              data-testid="tidy-keep"
+              disabled={busy || blocked !== null}
+              title="Leave it out of Tidy up for {KEEP_DAYS} days"
+              onkeydown={(e) => e.stopPropagation()}
+              onclick={() => void applyRow(c, 'keep')}>Keep {KEEP_DAYS} d</button
+            >
+            <button
+              class="pill"
+              class:armed={armed === c.session_id}
+              data-testid="tidy-safe-kill"
+              disabled={busy || blocked !== null}
+              onkeydown={(e) => e.stopPropagation()}
+              onclick={() => void applyRow(c, 'safe_kill')}
+              >{armed === c.session_id ? 'Confirm safe kill' : 'Safe kill'}</button
+            >
+          {:else if c.action === 'safe_kill'}
             <span class="warn" title="Claude is asked to commit and push first; the worktree is removed only if that succeeds"
               >commits &amp; pushes first</span
             >
@@ -465,5 +542,9 @@
   }
   .primary {
     font-weight: 600;
+  }
+  .armed {
+    color: var(--usage-warn, #b7791f);
+    border-color: var(--usage-warn, #b7791f);
   }
 </style>

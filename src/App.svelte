@@ -6,6 +6,7 @@
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
+  import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
@@ -47,6 +48,7 @@
     requestNewSessionOnHost,
     sessionViewChordLabel,
     settingsOpen,
+    openSettingsAt,
   } from './lib/app_views';
   import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
@@ -60,6 +62,7 @@
   import { agentPanelOpen, closeAgent, toggleAgent } from './lib/operator';
   import type { AgentContextInput } from './lib/agent_context';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
+  import { loadComposerPresets } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection } from './lib/hub_connection';
@@ -142,6 +145,7 @@
   });
 
   let health = $state<Health | null>(null);
+  const trackersLine = $derived(trackersSummary($trackersHealth));
   let healthError = $state<string | null>(null);
   // Bootstrap (initial list_* fetches) failures. These used to be swallowed,
   // so a broken DB showed an innocent "No projects yet". Now they surface as
@@ -210,6 +214,7 @@
     let healthFailure: string | null = null;
     if (hr0.ok) {
       health = hr0.value;
+      trackersHealth.set(hr0.value.trackers ?? null);
     } else if (hr0.error.code === 'E_HUB_CONTRACT') {
       healthFailure = `health: ${hr0.error.code}`;
     } else {
@@ -268,6 +273,11 @@
     // Trackers (work graph M3): their state badges, chip staleness and the
     // quick switcher's tickets. A hub older than M3 has no answer.
     void loadTrackers();
+    // The composer's chip row. Fleet state since it moved off `localStorage`
+    // (so the phone and this window share one list), and never on the
+    // critical path: the cached copy is already on screen, and a failed read
+    // leaves those chips up rather than an error toast about buttons.
+    void loadComposerPresets();
     // Orgs (work graph M5): the scope selector, colour bars and Settings.
     // Org changes arrive as `session:updated` for the rows they move; the
     // list itself is refreshed with the trackers.
@@ -911,6 +921,17 @@
          this app's — `health_check` routes to the hub's `fleet_health`. The
          badge beside it is what says whose. -->
     <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
+    {#if trackersLine}
+      <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
+      <button
+        type="button"
+        class="hub-badge"
+        class:err={($trackersHealth?.failing ?? 0) > 0}
+        data-testid="footer-trackers"
+        title="Tracker sync health. Settings → Work to reconnect."
+        onclick={() => openSettingsAt('work')}>{trackersLine}</button
+      >
+    {/if}
   {:else if $hubStatus.unavailable}
     <!-- Not "connecting…": nothing is, and nothing will until Settings. -->
     <button

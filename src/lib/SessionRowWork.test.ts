@@ -126,4 +126,26 @@ describe('SessionRowItem work menu', () => {
       args: { session_id: 7, key: 'ABC-1' },
     });
   });
+  it('Escape in the key box closes the menu without setting anything, and is not the row’s key', async () => {
+    const onKeySession = vi.fn();
+    render(SessionRowItem, { props: props(live(), null, { onKeySession }) });
+    await openMenu();
+    const input = screen.getByTestId('work-input') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'ABC-1' } });
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(screen.queryByTestId('work-menu-panel')).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith('link_session_work', expect.anything());
+    expect(onKeySession).not.toHaveBeenCalled();
+    // Reopened, the box starts empty: the abandoned draft is gone.
+    await openMenu();
+    expect((screen.getByTestId('work-input') as HTMLInputElement).value).toBe('');
+    // Other keys in the box are the box's own, never the row's.
+    await fireEvent.keyDown(screen.getByTestId('work-input'), { key: 'j' });
+    expect(onKeySession).not.toHaveBeenCalled();
+    // The # button is a toggle: a second click closes it too.
+    await fireEvent.click(screen.getByTestId('work-menu'));
+    await tick();
+    expect(screen.queryByTestId('work-menu-panel')).toBeNull();
+  });
 });

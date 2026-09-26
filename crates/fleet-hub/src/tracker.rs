@@ -47,7 +47,16 @@ pub enum TrackerCmd {
         /// GitHub: only these repositories (owner/repo; repeatable).
         #[arg(long = "repo")]
         repos: Vec<String>,
+        /// GitHub Enterprise Server: the instance `gh --hostname` is
+        /// pointed at (host[:port]); implies --provider github. [default:
+        /// the URL's host, when it is not github.com]
+        #[arg(long)]
+        hostname: Option<String>,
     },
+    /// Each tracker's last sync pass: duration, items listed and changed,
+    /// event frames, and the error it ended with. Kept in the hub's memory
+    /// only, so empty after a restart.
+    Status,
     /// Set a tracker's credential. The API token is read from stdin (one
     /// line) unless --from-env or --ref says otherwise; it is never an
     /// argument.
@@ -104,12 +113,14 @@ fn add_args(
     via_cli: Option<String>,
     via_host: Option<String>,
     repos: Vec<String>,
+    hostname: Option<String>,
 ) -> Value {
     let mut args = json!({ "action": "add", "site_url": url });
     if let Some(n) = name {
         args["name"] = Value::String(n);
     }
-    if let Some(p) = provider {
+    // An enterprise host cannot be told from its URL: say it is GitHub.
+    if let Some(p) = provider.or_else(|| hostname.as_ref().map(|_| "github".to_string())) {
         args["provider"] = Value::String(p);
     }
     if let Some(h) = via_cli {
@@ -117,10 +128,77 @@ fn add_args(
     } else if let Some(h) = via_host {
         args["transport"] = Value::String(format!("via_host:{h}"));
     }
+    let mut settings = serde_json::Map::new();
     if !repos.is_empty() {
-        args["settings"] = json!({ "repos": repos });
+        settings.insert("repos".into(), json!(repos));
+    }
+    if let Some(h) = hostname {
+        settings.insert("hostname".into(), Value::String(h));
+    }
+    if !settings.is_empty() {
+        args["settings"] = Value::Object(settings);
     }
     args
+}
+
+/// One line per tracker's last sync pass (work graph M11.4).
+fn status_line(m: &Value) -> String {
+    let id = m["tracker_id"].as_i64().unwrap_or_default();
+    if m["last_pass_at"].is_null() {
+        return format!("{id:>4}  no pass since the hub started");
+    }
+    let err = m["last_error"]
+        .as_str()
+        .map(|e| format!("  — {e}"))
+        .unwrap_or_default();
+    format!(
+        "{id:>4}  last pass {}  {} ms  listed {}  changed {}  frames {}{err}",
+        fmt_time(m["last_pass_at"].as_i64()),
+        m["duration_ms"].as_u64().unwrap_or_default(),
+        m["items_listed"].as_u64().unwrap_or_default(),
+        m["items_changed"].as_u64().unwrap_or_default(),
+        m["frames_emitted"].as_u64().unwrap_or_default(),
+    )
+}
+
+/// The retention half of `status` (work graph M12.3): one line per swept
+/// table, then the last sweep. Nothing for an older hub.
+fn retention_lines(r: &Value) -> Vec<String> {
+    let Some(tables) = r["tables"].as_array() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = tables
+        .iter()
+        .map(|t| {
+            let days = t["days"].as_i64().unwrap_or_default();
+            let window = if days == 0 {
+                "kept forever".to_string()
+            } else {
+                format!(
+                    "{} would go now (older than {days} d, nothing live on them)",
+                    t["would_delete"].as_i64().unwrap_or_default()
+                )
+            };
+            format!(
+                "retention {}: {} rows, {window}",
+                t["table"].as_str().unwrap_or("?"),
+                t["rows"].as_i64().unwrap_or_default()
+            )
+        })
+        .collect();
+    let s = &r["last_sweep"];
+    out.push(if s.is_null() {
+        "retention: no sweep since the hub started keeping a record".to_string()
+    } else {
+        format!(
+            "retention: last sweep {} deleted {} journal, {} tickets, {} events",
+            fmt_time(s["at"].as_i64()),
+            s["journal"].as_u64().unwrap_or_default(),
+            s["tracker_items"].as_u64().unwrap_or_default(),
+            s["timeline_work_events"].as_u64().unwrap_or_default(),
+        )
+    });
+    out
 }
 
 /// The `work_admin` arguments for `set-credential`, the secret read from its
@@ -220,8 +298,9 @@ pub async fn run(
             via_cli,
             via_host,
             repos,
+            hostname,
         } => {
-            let args = add_args(url, name, provider, via_cli, via_host, repos);
+            let args = add_args(url, name, provider, via_cli, via_host, repos, hostname);
             let t = call_tool(&conn, "work_admin", args).await?;
             out::line(&tracker_line(&t));
             let id = t["id"].as_i64().unwrap_or_default();
@@ -272,6 +351,24 @@ pub async fn run(
                 out::line(&format!("ok — views: {}", views.join(", ")));
             } else {
                 return Err(r["error"].as_str().unwrap_or("the test failed").to_string());
+            }
+        }
+        TrackerCmd::Status => {
+            let v = call_tool(&conn, "work_admin", json!({ "action": "status" })).await?;
+            // `{ trackers, retention }` since M12.3; a bare array before.
+            let rows = v["trackers"]
+                .as_array()
+                .or(v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                out::line("no trackers; add one with `fleet-hub tracker add <ticket-url>`");
+            }
+            for m in rows {
+                out::line(&status_line(&m));
+            }
+            for l in retention_lines(&v["retention"]) {
+                out::line(&l);
             }
         }
         TrackerCmd::Remove { id } => {
@@ -348,10 +445,80 @@ mod tests {
             Some("devbox".into()),
             None,
             vec!["acme/api".into()],
+            None,
         );
         assert_eq!(a["transport"], "via_cli:devbox");
         assert_eq!(a["settings"]["repos"], json!(["acme/api"]));
         assert!(a.get("provider").is_none(), "inferred by the hub");
+    }
+
+    #[test]
+    fn an_enterprise_hostname_makes_it_github_and_rides_in_settings() {
+        let a = add_args(
+            "https://ghe.corp.example/acme".into(),
+            None,
+            None,
+            Some("devbox".into()),
+            None,
+            vec![],
+            Some("ghe.corp.example:8443".into()),
+        );
+        assert_eq!(a["provider"], "github");
+        assert_eq!(a["settings"], json!({"hostname": "ghe.corp.example:8443"}));
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            cmd: TrackerCmd,
+        }
+        assert!(T::try_parse_from(["t", "status"]).is_ok());
+        assert!(T::try_parse_from([
+            "t",
+            "add",
+            "https://ghe.corp.example/acme",
+            "--hostname",
+            "h"
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn retention_lines_show_rows_the_dry_run_and_the_last_sweep() {
+        assert!(retention_lines(&Value::Null).is_empty(), "an older hub");
+        let lines = retention_lines(&json!({
+            "tables": [
+                {"table": "work_journal", "days": 365, "rows": 40, "would_delete": 3},
+                {"table": "session_events", "days": 0, "rows": 9, "would_delete": 0},
+            ],
+            "last_sweep": null,
+        }));
+        assert_eq!(
+            lines,
+            [
+                "retention work_journal: 40 rows, 3 would go now (older than 365 d, nothing live on them)",
+                "retention session_events: 9 rows, kept forever",
+                "retention: no sweep since the hub started keeping a record",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_status_line_says_what_the_last_pass_did() {
+        let line = status_line(&json!({
+            "tracker_id": 3, "last_pass_at": 1_790_000_000, "duration_ms": 1234,
+            "items_listed": 40, "items_changed": 3, "frames_emitted": 12,
+            "last_error": "the tracker could not be reached"
+        }));
+        assert!(
+            line.contains("1234 ms  listed 40  changed 3  frames 12"),
+            "{line}"
+        );
+        assert!(
+            line.ends_with("— the tracker could not be reached"),
+            "{line}"
+        );
+        let none = status_line(&json!({"tracker_id": 4, "last_pass_at": null}));
+        assert!(none.contains("no pass since the hub started"), "{none}");
     }
 
     /// No flag or positional takes the token: an extra argument is refused

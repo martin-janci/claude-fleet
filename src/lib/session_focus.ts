@@ -1,6 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { selectSessionExplicitly } from './selection';
 import { sessions } from './sessions';
+import { push } from './toasts';
 
 // A one-session view of the sidebar, set by clicking a suggestion (a link
 // suggestion, a tidy-up candidate) so it can be looked at in detail. While
@@ -18,11 +19,20 @@ export interface SessionFocus {
 
 export const sessionFocus = writable<SessionFocus | null>(null);
 
-/** Narrow the sidebar to one session and open it in the center pane. */
-export function focusSession(id: number, label: string): void {
-  sessionFocus.set({ id, label });
+/** Narrow the sidebar to one session and open it in the center pane.
+ *  Returns false — and sets no focus — when the store has no such row (a
+ *  review sheet's list can outlive the session it names: killed, dismissed,
+ *  not yet refreshed), since a focus on nothing would leave an empty
+ *  "Showing only …" tree behind until some later store change. */
+export function focusSession(id: number, label: string): boolean {
   const row = get(sessions).find((s) => s.id === id);
-  if (row) selectSessionExplicitly(row);
+  if (!row) {
+    push({ kind: 'info', message: `${label} is gone: the session is no longer in the fleet.` });
+    return false;
+  }
+  sessionFocus.set({ id, label });
+  selectSessionExplicitly(row);
+  return true;
 }
 
 export function clearSessionFocus(): void {

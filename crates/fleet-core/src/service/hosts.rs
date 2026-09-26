@@ -98,15 +98,11 @@ pub fn list_accounts(store: &Mutex<Store>) -> Result<Vec<crate::store::AccountRo
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "AddHostParams")]
 pub struct AddHostArgs {
-    /// claude-fleet alias to register the host under (must be a safe
-    /// identifier — letters, digits, dashes).
+    /// Fleet alias: letters, digits, dashes.
     pub alias: String,
-    /// SSH config alias used to reach the host (from `~/.ssh/config`).
+    /// Its `~/.ssh/config` alias.
     pub ssh_alias: String,
-    /// `"ssh"` (the default) or `"agent"` — how the host is reached.
-    /// Anything else is rejected before the host is persisted. An `"agent"`
-    /// host is added without an SSH probe: it is reachable only through a
-    /// `fleet-agent` that has yet to dial in.
+    /// `"ssh"` (default) or `"agent"`; see the tool.
     #[serde(default)]
     pub transport: Option<String>,
 }
@@ -132,6 +128,13 @@ pub async fn add_host(
                 format!("unknown transport {t:?}: must be \"ssh\" or \"agent\""),
             ));
         }
+    }
+    // A host some tracker runs curl or gh on cannot become an agent host,
+    // which can run neither: the trackers' rule, asked from this side too,
+    // before the probe and any write.
+    if args.transport.as_deref() == Some("agent") {
+        let s = lock(store)?;
+        crate::service::trackers::admin::refuse_agent_transport_on_tracker_host(&s, &args.alias)?;
     }
     // An agent host is, by definition, one the hub cannot dial — that is the
     // whole reason it needs an agent — so an SSH probe must not be the price
@@ -229,7 +232,7 @@ pub async fn probe_ssh_alias(
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "HostAliasParams")]
 pub struct HostAliasArgs {
-    /// The claude-fleet host alias (e.g. "local", "mefistos").
+    /// Host alias.
     pub alias: String,
 }
 
@@ -300,9 +303,9 @@ pub fn remove_host(args: HostAliasArgs, store: &Mutex<Store>) -> Result<HostRow,
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "HideHostParams")]
 pub struct HideHostArgs {
-    /// The claude-fleet host alias.
+    /// Host alias.
     pub alias: String,
-    /// `true` to hide the host (skipped during reconcile), `false` to show it.
+    /// true hides, false shows.
     pub hidden: bool,
 }
 

@@ -92,9 +92,13 @@ fn run(args: WorkAdminArgs, store: &Mutex<Store>) -> Result<serde_json::Value, I
 }
 
 // --- administration (LocalOnly) ------------------------------------------------
+//
+// `async` so the transactional store work runs on the async runtime and not
+// on the macOS main thread, where a sync command would run it (CLAUDE.md: no
+// blocking I/O on a sync Tauri command).
 
 #[tauri::command]
-pub fn add_org(
+pub async fn add_org(
     backend: State<'_, Arc<FleetBackend>>,
     args: AddOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -113,7 +117,7 @@ pub fn add_org(
 }
 
 #[tauri::command]
-pub fn update_org(
+pub async fn update_org(
     backend: State<'_, Arc<FleetBackend>>,
     args: UpdateOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -134,7 +138,7 @@ pub fn update_org(
 }
 
 #[tauri::command]
-pub fn remove_org(
+pub async fn remove_org(
     backend: State<'_, Arc<FleetBackend>>,
     args: OrgIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -152,7 +156,7 @@ pub fn remove_org(
 }
 
 #[tauri::command]
-pub fn add_org_rule(
+pub async fn add_org_rule(
     backend: State<'_, Arc<FleetBackend>>,
     args: AddOrgRuleArgs,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -173,7 +177,7 @@ pub fn add_org_rule(
 }
 
 #[tauri::command]
-pub fn remove_org_rule(
+pub async fn remove_org_rule(
     backend: State<'_, Arc<FleetBackend>>,
     args: RuleIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -191,7 +195,7 @@ pub fn remove_org_rule(
 }
 
 #[tauri::command]
-pub fn assign_host_org(
+pub async fn assign_host_org(
     backend: State<'_, Arc<FleetBackend>>,
     args: AssignHostOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -215,7 +219,7 @@ pub fn assign_host_org(
 }
 
 #[tauri::command]
-pub fn assign_tracker_org(
+pub async fn assign_tracker_org(
     backend: State<'_, Arc<FleetBackend>>,
     args: AssignTrackerOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,

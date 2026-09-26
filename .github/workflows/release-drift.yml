@@ -1,0 +1,137 @@
+name: release-drift
+
+# Does every released tag still have a complete release behind it?
+#
+# release.yml proves a release is complete at the moment it is built and can
+# say nothing about the days after. Releases have been deleted by hand while
+# their tags stayed (v0.2.22, v0.2.24, v0.2.25), a version has been bumped
+# without ever being tagged (v0.2.27), and six drafts sat unpublished for
+# days. Nothing noticed any of it. This does, once a day.
+#
+# The whole assertion lives in scripts/check-release-drift.sh, which drives
+# scripts/verify-release.sh — the same gate release.yml runs, against the same
+# scripts/release-assets.sh manifest. This file only turns its report into an
+# issue.
+#
+# ONE ISSUE, NOT ONE PER RUN. Every finding goes into a single issue labelled
+# `release-drift`, found by that label, and the body is rewritten in place. The
+# script's report is deliberately free of anything that changes between two
+# runs over the same state (no timestamps, no ages), so an unchanged problem
+# produces a body byte-identical to the one already on the issue, the edit is
+# skipped, and nobody is notified again. When the drift clears, the issue is
+# closed with a comment. A daily cron therefore costs zero notifications while
+# nothing changes, one when something breaks, and one when it is fixed.
+#
+# STATUS, stated so nobody reads the paragraph above as a report of observed
+# behaviour: the issue create/update/close steps have never run against
+# GitHub — they are reviewed YAML, and no offline test can exercise them. The
+# step that feeds them WAS executed: its body, extracted verbatim, run under
+# `bash -e` (the runner's default shell) against the live script on a repo
+# that is currently drifting, writes `drift=1`, appends the whole report to
+# the summary and exits 0. That is the part that used to be broken, silently,
+# on exactly the path this workflow exists for. The first scheduled run is
+# still the first real test of the rest.
+
+on:
+  schedule:
+    # 06:17 UTC — off the hour, where GitHub's scheduled-run backlog is
+    # shortest, and before a European working day.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  # `contents: write` for a job that writes no content: GitHub only lists DRAFT
+  # releases to a token with push access, and an unpublished draft is one of
+  # the two things this check exists to find. With `contents: read` the draft
+  # check would silently see nothing and pass. The script asserts the access it
+  # actually got (`repos/{repo}.permissions.push`) and reports "not checked"
+  # rather than "clean" if it is ever downgraded.
+  contents: write
+  issues: write
+
+concurrency:
+  group: release-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look for drift
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        # `|| code=$?`, not a bare call followed by `code=$?`. A `run:` with no
+        # `shell:` key is executed as `bash -e {0}`, and `set -uo pipefail`
+        # does NOT clear that inherited `-e` (verified: `bash -e -c 'set -uo
+        # pipefail; false; echo reached'` prints nothing). A bare call would
+        # therefore abort this step on the script's exit 1 — which is its
+        # NORMAL output, "drift found" — never writing the output, never
+        # appending the report to the summary, and skipping the issue step
+        # below (it has no `if:`, so it defaults to `success()`). Putting the
+        # call on the left of `||` suspends `-e` for it, which is what makes
+        # exit 1 survivable here.
+        run: |
+          set -uo pipefail
+          code=0
+          scripts/check-release-drift.sh >report.md || code=$?
+          echo "drift=$code" >>"$GITHUB_OUTPUT"
+          cat report.md >>"$GITHUB_STEP_SUMMARY"
+          # Exit 2 is a tooling failure (no gh, no network, no repo) and must
+          # fail the job: a check that cannot run has not passed — and it must
+          # fail BEFORE the issue step, so a half-written report can never be
+          # published as if it were the state of the repo. Exit 1 is the check
+          # working correctly and finding something, which is this workflow's
+          # normal output, not an error.
+          if [ "$code" -gt 1 ]; then exit "$code"; fi
+
+      # No `if:` — the default `success()` is deliberate. The step above now
+      # survives exit 1 (drift) and fails only on exit 2 (the check could not
+      # run), and a check that could not run must not rewrite the issue.
+      - name: Open, update or close the drift issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DRIFT: ${{ steps.check.outputs.drift }}
+          TITLE: 'Release drift: a tag has no complete release'
+        run: |
+          set -euo pipefail
+          gh label create release-drift \
+            --description 'Opened by .github/workflows/release-drift.yml' \
+            --color 'B60205' >/dev/null 2>&1 || true
+
+          number="$(gh issue list --label release-drift --state open --limit 1 --json number --jq '.[0].number // empty')"
+
+          if [ "$DRIFT" = "0" ]; then
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --body 'Clean: every release-shaped tag now has a complete release. Closing; the daily check will reopen a new issue if it drifts again.'
+              gh issue close "$number"
+              echo "closed #$number"
+            else
+              echo "no drift, no open issue — nothing to do"
+            fi
+            exit 0
+          fi
+
+          if [ -z "$number" ]; then
+            gh issue create --title "$TITLE" --label release-drift --body-file report.md
+            exit 0
+          fi
+
+          # Only touch the issue when the report actually changed, so a
+          # standing problem does not email the owner every morning. Compared
+          # after normalising line endings and trailing whitespace: GitHub
+          # stores issue bodies with CRLF, so a byte comparison against the
+          # file we uploaded would differ on every single run and defeat the
+          # whole point.
+          gh issue view "$number" --json body --jq .body >current.md
+          norm() { tr -d '\r' <"$1" | sed 's/[[:space:]]*$//'; }
+          if [ "$(norm current.md)" = "$(norm report.md)" ]; then
+            echo "#$number is already up to date — not editing"
+          else
+            gh issue edit "$number" --body-file report.md
+            echo "updated #$number"
+          fi

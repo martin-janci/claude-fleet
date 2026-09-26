@@ -92,7 +92,12 @@ fn summary(changes: &[LinkChange]) -> Vec<String> {
             ),
             LinkChange::End { link_id, reason } => format!("end {link_id} {reason}"),
             LinkChange::Withdraw { link_id } => format!("withdraw {link_id}"),
-            LinkChange::Promote { link_id, rule, .. } => format!("promote {link_id} {rule}"),
+            LinkChange::Promote {
+                link_id,
+                rule,
+                source,
+                ..
+            } => format!("promote {link_id} {rule} {source}"),
             LinkChange::Decay { link_id } => format!("decay {link_id}"),
             LinkChange::Touch {
                 link_id,
@@ -424,7 +429,33 @@ fn the_rule_table() {
                 trusted: true,
                 ..input()
             },
-            expect: &["promote 1 R3", "primary 1"],
+            expect: &["promote 1 R3 branch", "primary 1"],
+        },
+        Row {
+            name: "a prompt suggestion the branch promotes becomes a branch link (R7 can end it)",
+            input: ResolveInput {
+                branch: Some(vec![branch("ABC-1")]),
+                links: vec![link(1, "ABC-1", "suggested", "prompt")],
+                trusted: true,
+                ..input()
+            },
+            expect: &["promote 1 R3 branch", "primary 1"],
+        },
+        Row {
+            // The events path's Promote carries the promoting signal's
+            // source too: the link is then a `url` link, which R7 (a
+            // branch that moved on) can no longer end.
+            name: "a branch suggestion the first prompt's URL confirms becomes a url link",
+            input: ResolveInput {
+                branch: None,
+                events: vec![Candidate {
+                    first_prompt_sole: true,
+                    ..cand("ABC-1", Signal::PromptUrl, Strength::Strong)
+                }],
+                links: vec![link(1, "ABC-1", "suggested", "branch")],
+                ..input()
+            },
+            expect: &["promote 1 R5 url", "primary 1"],
         },
         Row {
             name: "PR text re-read in the same window is not news",

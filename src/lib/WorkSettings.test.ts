@@ -6,8 +6,10 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import WorkSettings from './WorkSettings.svelte';
+import { get } from 'svelte/store';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { trackers, type TrackerRow } from './trackers';
+import { toasts } from './toasts';
 
 const TOKEN = 'ATATT3xFfGF0-ui-test-token';
 
@@ -53,6 +55,7 @@ function route(listed: TrackerRow[], extra: Record<string, unknown> = {}) {
 beforeEach(() => {
   hubStatus.set({ ...STANDALONE });
   trackers.set([]);
+  toasts.set([]);
 });
 
 describe('Settings → Work, standalone', () => {
@@ -65,6 +68,28 @@ describe('Settings → Work, standalone', () => {
     expect(screen.getByTestId('tracker-expired').textContent).toMatch(/expire within a year/);
     expect(screen.getAllByTestId('tracker-row')[0].textContent).toContain('synced 4 min ago');
     expect(screen.getAllByTestId('tracker-test')).toHaveLength(2);
+  });
+
+  it('Test and Remove act on that tracker and re-read the list; a failed test is a toast', async () => {
+    const inv = route([row()], {
+      test_tracker: { tracker: row({ state: 'auth_failed' }), ok: false, error: 'the tracker refused the credential' },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    const listed = () => inv.mock.calls.filter((c) => c[0] === 'list_trackers').length;
+    const before = listed();
+    await fireEvent.click(screen.getByTestId('tracker-test'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('test_tracker', { args: { tracker_id: 4 } }));
+    await waitFor(() =>
+      expect(get(toasts).map((t) => [t.kind, t.message])).toEqual([['error', 'the tracker refused the credential']]),
+    );
+    await waitFor(() => expect(listed()).toBe(before + 1));
+    expect(screen.getByTestId('tracker-test')).toHaveTextContent('Test');
+    await fireEvent.click(screen.getByTestId('tracker-remove'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('remove_tracker', { args: { tracker_id: 4 } }));
+    await waitFor(() => expect(listed()).toBe(before + 2));
+    // Neither ever carries a credential.
+    for (const [cmd] of inv.mock.calls) expect(cmd).not.toBe('set_tracker_credential');
   });
 
   it('connects Jira from a pasted ticket URL, an email and a token — in that order', async () => {
@@ -84,10 +109,16 @@ describe('Settings → Work, standalone', () => {
     await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
     await fireEvent.click(screen.getByTestId('connect-submit'));
     await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
-    // The Organisations section (work graph M5) reads its own lists on mount.
+    // The Organisations section (work graph M5) reads its own lists on mount,
+    // and the sync metrics (M11.4) are read on mount and after a test.
     const cmds = inv.mock.calls
       .map((c) => c[0])
-      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions'].includes(c as string));
+      .filter(
+        (c) =>
+          !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(
+            c as string,
+          ),
+      );
     expect(cmds).toEqual(['add_tracker', 'set_tracker_credential', 'test_tracker']);
     const cred = inv.mock.calls.find((c) => c[0] === 'set_tracker_credential')![1] as {
       args: { tracker_id: number; username: string; secret: string };
@@ -112,8 +143,37 @@ describe('Settings → Work, standalone', () => {
     expect(
       inv.mock.calls
         .map((c) => c[0])
-        .filter((c) => !['list_orgs', 'org_suggestions'].includes(c as string)),
+        .filter((c) => !['list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(c as string)),
     ).toEqual(['list_trackers']);
+  });
+
+  it('forgets the token and email on Cancel and on a failed add, so nothing is pre-filled next time', async () => {
+    const inv = route([]);
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), { target: { value: 'https://acme.atlassian.net' } });
+    await fireEvent.input(screen.getByTestId('connect-email'), { target: { value: 'me@acme.com' } });
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('connect-cancel'));
+    await tick();
+    expect(screen.queryByTestId('connect-form')).toBeNull();
+    await fireEvent.click(screen.getByTestId('connect-jira'));
+    await tick();
+    expect((screen.getByTestId('connect-token') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-email') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-submit') as HTMLButtonElement).disabled).toBe(true);
+    // A failed add_tracker keeps the form open with the error, but not the secret.
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'add_tracker') throw { code: 'E_INVALID', message: 'not a tracker site' };
+      if (cmd === 'list_trackers') return [];
+      return null;
+    });
+    await fireEvent.input(screen.getByTestId('connect-email'), { target: { value: 'me@acme.com' } });
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(screen.getByTestId('connect-error').textContent).toMatch(/not a tracker site/));
+    expect((screen.getByTestId('connect-token') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('connect-email') as HTMLInputElement).value).toBe('');
   });
 
   it('shows a failed test in the form', async () => {
@@ -183,6 +243,84 @@ describe('Settings → Work, other providers (work graph M6)', () => {
     expect(inv.mock.calls.some((c) => c[0] === 'set_tracker_credential')).toBe(false);
   });
 
+  it('re-connecting an existing Data Center site updates its CA and private-network flag on the row', async () => {
+    const dc = row({
+      id: 9,
+      provider: 'jira_dc',
+      name: 'corp',
+      site_url: 'https://jira.corp.example',
+      state: 'unreachable',
+      has_credential: true,
+      settings: { allow_private_network: false },
+    });
+    const inv = route([dc], {
+      update_tracker: { ...dc, settings: { extra_ca: 'PEM', allow_private_network: true } },
+      set_tracker_credential: dc,
+      test_tracker: { tracker: { ...dc, state: 'ok' }, ok: true, views: ['My work'] },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await fireEvent.click(screen.getByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), { target: { value: 'https://jira.corp.example' } });
+    await fireEvent.change(screen.getByTestId('connect-provider'), { target: { value: 'jira_dc' } });
+    await tick();
+    await fireEvent.input(screen.getByTestId('connect-token'), { target: { value: TOKEN } });
+    await fireEvent.input(screen.getByTestId('connect-ca'), { target: { value: 'PEM' } });
+    await fireEvent.click(screen.getByTestId('connect-private'));
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
+    const cmds = inv.mock.calls
+      .map((c) => c[0])
+      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(c as string));
+    // No second row; the settings reach the existing one before the credential.
+    expect(cmds).toEqual(['update_tracker', 'set_tracker_credential', 'test_tracker']);
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toEqual({
+      tracker_id: 9,
+      transport: undefined,
+      settings: { extra_ca: 'PEM', allow_private_network: true },
+    });
+    const cred = inv.mock.calls.find((c) => c[0] === 'set_tracker_credential')!;
+    expect((cred[1] as { args: Record<string, unknown> }).args).toMatchObject({ tracker_id: 9, secret: TOKEN });
+  });
+
+  it('re-connecting an existing GitHub site with another gh host updates its transport', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([
+      { alias: 'devbox', ssh_alias: null, reachable: true } as never,
+      { alias: 'other', ssh_alias: null, reachable: true } as never,
+    ]);
+    const gh = row({
+      id: 7,
+      provider: 'github',
+      name: 'acme (GitHub)',
+      site_url: 'https://github.com/acme',
+      transport: 'via_cli:devbox',
+      has_credential: false,
+      state: 'unreachable',
+    });
+    const inv = route([gh], {
+      update_tracker: { ...gh, transport: 'via_cli:other' },
+      test_tracker: { tracker: { ...gh, transport: 'via_cli:other', state: 'ok' }, ok: true, views: ['My issues'] },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await fireEvent.click(screen.getByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://github.com/acme/api/issues/42' },
+    });
+    await tick();
+    await fireEvent.change(screen.getByTestId('connect-gh-host'), { target: { value: 'other' } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'test_tracker')).toBe(true));
+    expect(inv.mock.calls.some((c) => c[0] === 'add_tracker')).toBe(false);
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toMatchObject({
+      tracker_id: 7,
+      transport: 'via_cli:other',
+    });
+  });
+
   it('connects Asana with a token and no email', async () => {
     const asana = row({ id: 8, provider: 'asana', name: 'Asana', site_url: 'https://app.asana.com', state: 'unconfigured' });
     const inv = route([], {
@@ -230,5 +368,139 @@ describe('Settings → Work, other providers (work graph M6)', () => {
         section_map_confirmed: true,
       },
     });
+  });
+});
+
+describe('Settings → Work, GitHub Enterprise Server and sync metrics (work graph M11.4)', () => {
+  const ghe = (over: Partial<TrackerRow> = {}): TrackerRow =>
+    row({
+      id: 9,
+      provider: 'github',
+      name: 'acme (ghe.corp.example)',
+      site_url: 'https://ghe.corp.example/acme',
+      transport: 'via_cli:devbox',
+      has_credential: false,
+      settings: { hostname: 'ghe.corp.example:8443' },
+      ...over,
+    });
+
+  it('offers a pasted enterprise issue URL as GitHub with the hostname prefilled', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([{ alias: 'devbox', ssh_alias: null, reachable: true } as never]);
+    const inv = route([], {
+      add_tracker: ghe({ state: 'unconfigured' }),
+      test_tracker: { tracker: ghe(), ok: true, views: ['My issues'] },
+    });
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://ghe.corp.example:8443/Acme/api/issues/42' },
+    });
+    await tick();
+    expect(screen.getByTestId('connect-site').textContent).toContain('https://ghe.corp.example/acme');
+    expect(screen.getByTestId('connect-site').textContent).toContain('ghe.corp.example/acme/api#42');
+    const field = screen.getByTestId('connect-ghes-hostname') as HTMLInputElement;
+    expect(field.value).toBe('ghe.corp.example:8443');
+    expect(screen.queryByTestId('connect-token')).toBeNull();
+    await fireEvent.change(screen.getByTestId('connect-gh-host'), { target: { value: 'devbox' } });
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'test_tracker')).toBe(true));
+    const add = inv.mock.calls.find((c) => c[0] === 'add_tracker')!;
+    expect((add[1] as { args: Record<string, unknown> }).args).toMatchObject({
+      url: 'https://ghe.corp.example:8443/Acme/api/issues/42',
+      provider: 'github',
+      transport: 'via_cli:devbox',
+      settings: { hostname: 'ghe.corp.example:8443' },
+    });
+    expect(inv.mock.calls.some((c) => c[0] === 'set_tracker_credential')).toBe(false);
+  });
+
+  it('sends the hostname as edited, and cannot connect without one', async () => {
+    const { hosts } = await import('./hosts');
+    hosts.set([{ alias: 'devbox', ssh_alias: null, reachable: true } as never]);
+    const inv = route([], {
+      add_tracker: ghe({ state: 'unconfigured' }),
+      test_tracker: { tracker: ghe(), ok: true, views: ['My issues'] },
+    });
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    await fireEvent.input(screen.getByTestId('connect-url'), {
+      target: { value: 'https://ghe.corp.example/acme/api/issues/42' },
+    });
+    await tick();
+    await fireEvent.change(screen.getByTestId('connect-gh-host'), { target: { value: 'devbox' } });
+    const field = screen.getByTestId('connect-ghes-hostname');
+    expect((field as HTMLInputElement).value).toBe('ghe.corp.example');
+    await fireEvent.input(field, { target: { value: '' } });
+    await tick();
+    expect((screen.getByTestId('connect-submit') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(field, { target: { value: 'ghe.corp.example:9443' } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('connect-submit'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'add_tracker')).toBe(true));
+    const add = inv.mock.calls.find((c) => c[0] === 'add_tracker')!;
+    expect((add[1] as { args: { settings: unknown } }).args.settings).toEqual({
+      hostname: 'ghe.corp.example:9443',
+    });
+  });
+
+  it('a URL on an unknown host that is not GitHub-shaped is still not recognised', async () => {
+    route([]);
+    render(WorkSettings);
+    await fireEvent.click(await screen.findByTestId('connect-jira'));
+    for (const value of [
+      'https://intranet.corp.example/wiki/page',
+      'https://127.0.0.1/acme/api/issues/1',
+      'https://localhost/acme/api/issues/1',
+    ]) {
+      await fireEvent.input(screen.getByTestId('connect-url'), { target: { value } });
+      await tick();
+      expect(screen.getByTestId('connect-url-error'), value).toBeInTheDocument();
+      expect(screen.queryByTestId('connect-ghes-hostname')).toBeNull();
+    }
+  });
+
+  it('shows the enterprise host badge and each tracker’s last sync pass', async () => {
+    const inv = route([ghe(), row()], {
+      tracker_sync_metrics: [
+        {
+          tracker_id: 9,
+          last_pass_at: 1000,
+          duration_ms: 1234,
+          items_listed: 40,
+          items_changed: 3,
+          frames_emitted: 12,
+          last_error: null,
+        },
+        { tracker_id: 4, last_pass_at: null },
+      ],
+    });
+    render(WorkSettings, { props: { now: () => 1000 } });
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(2));
+    expect(screen.getByTestId('tracker-ghes-host').textContent).toBe('GHES ghe.corp.example:8443');
+    await waitFor(() => expect(screen.getAllByTestId('tracker-metrics')).toHaveLength(1));
+    expect(screen.getByTestId('tracker-metrics').textContent).toContain(
+      'last pass 1.2 s · 40 listed · 3 changed · 12 frames',
+    );
+    expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(true);
+  });
+
+  it('shows a failed pass’s error, and asks for no metrics on a paired desktop', async () => {
+    route([ghe()], {
+      tracker_sync_metrics: [
+        { tracker_id: 9, last_pass_at: 1000, duration_ms: 80, last_error: 'the tracker could not be reached' },
+      ],
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('tracker-metrics-error')).toBeInTheDocument());
+    expect(screen.getByTestId('tracker-metrics').textContent).toContain('last pass 80 ms');
+    expect(screen.getByTestId('tracker-metrics-error').textContent).toContain('could not be reached');
+
+    hubStatus.set(remote);
+    trackers.set([]);
+    const inv = route([ghe()]);
+    render(WorkSettings);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'list_trackers')).toBe(true));
+    expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 //! The field-name contract tests. See [`super`] for why they exist.
 
 use super::*;
-use fleet_core::service::health::Health;
+use fleet_core::service::health::{Health, TrackerHealth, TrackersHealth};
 use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
     Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
@@ -276,6 +276,31 @@ fn sample_health() -> Health {
         )]),
         tunnels_flapping: 1,
         peer_links_down: 1,
+        trackers: sample_trackers_health(),
+    }
+}
+
+/// `Health.trackers` (work graph M12.4): the desktop's Attention item reads
+/// `health`, `provider`, `name`, `org_name` and `tracker_id` off each row.
+fn sample_trackers_health() -> TrackersHealth {
+    TrackersHealth {
+        trackers: vec![TrackerHealth {
+            tracker_id: 3,
+            provider: "jira".into(),
+            name: "acme".into(),
+            org_id: Some(1),
+            org_name: Some("Acme".into()),
+            health: "failing".into(),
+            state: "auth_failed".into(),
+            consecutive_failures: 3,
+            last_error: Some("token expired".into()),
+            last_success_at: Some(1_726_000_000),
+            last_pass_at: Some(1_726_000_300),
+        }],
+        failing: 1,
+        degraded: 0,
+        detection_backlog: 2,
+        detection_backlog_days: 7,
     }
 }
 
@@ -418,6 +443,7 @@ fn sample_resume_plan() -> ResumePlan {
         }],
         hosts: vec!["trn".into()],
         brief: Some("# Handover".into()),
+        warnings: vec!["could not check the transcript on trn".into()],
     }
 }
 
@@ -476,6 +502,9 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         }),
     );
     put("Health", wire_keys(&sample_health()));
+    let trackers = sample_trackers_health();
+    put("Health.trackers", wire_keys(&trackers));
+    put("Health.trackers.trackers", wire_keys(&trackers.trackers[0]));
     put("UsageTotals", wire_keys(&sample_totals()));
     put(
         "DayUsage",

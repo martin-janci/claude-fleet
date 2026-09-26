@@ -39,31 +39,10 @@ pub fn list_worktrees(
     store: &Mutex<Store>,
 ) -> Result<Vec<WorktreeOccupancy>, IpcError> {
     let s = lock(store)?;
-    let projects = s.list_projects()?;
-    let mut out = Vec::new();
-    for proj in projects {
-        if let Some(pid) = args.project_id {
-            if proj.id != pid {
-                continue;
-            }
-        }
-        let worktrees = s.list_worktrees_for_project(proj.id)?;
-        for wt in worktrees {
-            let occupants = s
-                .alive_sessions_for_worktree(wt.id)?
-                .into_iter()
-                .map(|(host_alias, tmux_name)| WorktreeOccupant {
-                    host_alias,
-                    tmux_name,
-                })
-                .collect();
-            out.push(WorktreeOccupancy {
-                worktree: wt,
-                occupants,
-            });
-        }
-    }
-    Ok(out)
+    // One joined query (`Store::worktree_occupancy`) instead of one query per
+    // project plus one per worktree.
+    s.worktree_occupancy(args.project_id)
+        .map_err(IpcError::from)
 }
 
 #[derive(Serialize, Deserialize)]

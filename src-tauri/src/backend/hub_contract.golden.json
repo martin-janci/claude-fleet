@@ -174,11 +174,32 @@
       "schema_version",
       "sessions_total",
       "stuck",
+      "trackers",
       "tunnels",
       "tunnels_flapping",
       "usage_by_day",
       "usage_by_host",
       "version"
+    ],
+    "Health.trackers": [
+      "degraded",
+      "detection_backlog",
+      "detection_backlog_days",
+      "failing",
+      "trackers"
+    ],
+    "Health.trackers.trackers": [
+      "consecutive_failures",
+      "health",
+      "last_error",
+      "last_pass_at",
+      "last_success_at",
+      "name",
+      "org_id",
+      "org_name",
+      "provider",
+      "state",
+      "tracker_id"
     ],
     "HostRow": [
       "account_uuid",
@@ -231,6 +252,7 @@
       "modes",
       "project_id",
       "title",
+      "warnings",
       "worktree",
       "worktree_present"
     ],

@@ -30,6 +30,7 @@ use crate::service::settings;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub mod tidy;
@@ -252,12 +253,17 @@ pub struct GcReport {
     /// shipped outage against an older hub.
     #[serde(default)]
     pub swept_read_cursors: usize,
-    /// Work-journal rows past `work.journal_days` swept this sweep
-    /// (`Store::sweep_work_journal`; rows of confirmed work are kept). Not
-    /// gated on `gc.enabled`, like the two sweeps above. `#[serde(default)]`
-    /// for the same wire reason.
+    /// Work-journal rows past `work.retention.journal_days` swept this
+    /// sweep (`service::work::retention`). Not gated on `gc.enabled`, like
+    /// the two sweeps above. `#[serde(default)]` for the same wire reason.
     #[serde(default)]
     pub swept_journal: usize,
+    /// Done, unlinked tracker items past `work.retention.tracker_items_days`.
+    #[serde(default)]
+    pub swept_tracker_items: usize,
+    /// Work timeline events past `work.retention.timeline_work_events_days`.
+    #[serde(default)]
+    pub swept_work_events: usize,
     /// Sessions auto-tidy acted on this sweep (work graph M7: only with
     /// `work.auto_tidy` on; safe kill or archive of the allowed reasons).
     /// `#[serde(default)]` for the same wire reason.
@@ -396,25 +402,51 @@ pub async fn sweep_with(
             tracing::warn!(error = %e, "[gc] peer outbox sweep failed");
         }
     }
-    // Work memory retention (work graph M2.1): same best-effort, ungated
-    // shape. Journal rows of a conversation a confirmed link references are
-    // never swept.
-    report.swept_journal = match store.lock() {
-        Ok(s) => {
-            let days = crate::service::settings::resolve(
-                crate::service::settings::WORK_JOURNAL_DAYS,
-                s.get_setting(crate::service::settings::WORK_JOURNAL_DAYS)
-                    .ok()
-                    .flatten()
-                    .as_deref(),
-            )
-            .parse::<i64>()
-            .unwrap_or(90);
-            s.sweep_work_journal(now, days).unwrap_or(0)
-        }
-        Err(_) => 0,
-    };
+    // Work graph retention (M12.3): the journal, done tracker items and
+    // work timeline events, by `work.retention.*` (0 = forever). Ungated
+    // like the sweeps above; bounded per tick, one batch per lock.
+    let r = crate::service::work::retention::sweep(store, now);
+    report.swept_journal = r.journal;
+    report.swept_tracker_items = r.tracker_items;
+    report.swept_work_events = r.timeline_work_events;
     report
+}
+
+/// Single-flight guard mirroring `service::usage`'s: at most one sweep pass
+/// runs at a time. The interval gate in `maybe_sweep` below already makes
+/// two back-to-back calls a no-op in the common case (the second finds
+/// itself not due, since `LAST` is stamped before the sweep runs) — but a
+/// `gc.sweep_interval_secs` of `0` would otherwise let two ticks race into
+/// overlapping sweeps, so this guard is unconditional, not just interval-based.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Held while a sweep runs; clears [`RUNNING`] on drop (also on panic).
+struct Flight;
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn begin_flight() -> Option<Flight> {
+    RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| Flight)
+}
+
+/// Reconcile-tick hook: spawn [`maybe_sweep`] as its own task so a slow GC
+/// sweep (it does SSH work — safe-kill inspections, kills) never stretches
+/// the tick body past its period. Mirrors `service::usage::spawn_collect`
+/// exactly: unconditional spawn, single-flight enforced inside the spawned
+/// call, so a second spawn while one is still running is a no-op. Must be
+/// called from inside the tokio runtime.
+pub fn spawn_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
+    let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
+    tokio::spawn(async move {
+        let _ = maybe_sweep(&store, &ssh).await;
+    });
 }
 
 /// Tick entry point: sweeps once the sweep interval has elapsed since the
@@ -426,6 +458,7 @@ pub async fn sweep_with(
 pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Option<GcReport> {
     static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
         std::sync::LazyLock::new(|| Mutex::new(None));
+    let _flight = begin_flight()?;
     let cfg = {
         let s = store.lock().ok()?;
         GcConfig::from_store(&s)
@@ -462,6 +495,8 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             swept_participants = report.swept_participants,
             swept_read_cursors = report.swept_read_cursors,
             swept_journal = report.swept_journal,
+            swept_tracker_items = report.swept_tracker_items,
+            swept_work_events = report.swept_work_events,
             tidied = report.tidied,
             "[gc] sweep"
         );
@@ -480,6 +515,18 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Task 1(c): the tick no longer awaits `maybe_sweep` inline — it is
+    /// spawned single-flight (`spawn_sweep`), mirroring
+    /// `service::usage`'s `only_one_collection_pass_is_in_flight`. A second
+    /// spawn while one sweep is still running must do nothing.
+    #[test]
+    fn only_one_sweep_pass_is_in_flight() {
+        let first = begin_flight().expect("no pass running");
+        assert!(begin_flight().is_none(), "a second pass is refused");
+        drop(first);
+        assert!(begin_flight().is_some(), "released on drop");
+    }
 
     pub(super) fn row(
         id: i64,
@@ -774,6 +821,8 @@ mod tests {
                 swept_participants: 0,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                swept_tracker_items: 0,
+                swept_work_events: 0,
                 tidied: 0,
             }
         );
@@ -800,6 +849,8 @@ mod tests {
                 swept_participants: 0,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                swept_tracker_items: 0,
+                swept_work_events: 0,
                 tidied: 0,
             }
         );
@@ -856,6 +907,8 @@ mod tests {
                 swept_participants: 1,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                swept_tracker_items: 0,
+                swept_work_events: 0,
                 tidied: 0,
             }
         );
@@ -913,6 +966,8 @@ mod tests {
                 swept_participants: 1,
                 swept_read_cursors: 0,
                 swept_journal: 0,
+                swept_tracker_items: 0,
+                swept_work_events: 0,
                 tidied: 0,
             },
             "the retention sweep must run regardless of gc.enabled"

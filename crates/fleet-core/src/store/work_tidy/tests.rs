@@ -93,6 +93,43 @@ fn snooze_and_never_are_per_link_and_idempotent() {
         .unwrap();
     let link = t.link.unwrap();
     assert_eq!((link.snoozed_until, link.never), (Some(900), true));
+    assert_eq!((t.snoozed_until, t.never), (Some(900), true));
+}
+
+/// A flag written to a secondary confirmed link (accepted by `tidy_link`)
+/// reaches the planner through the session's own flags, so it is honoured
+/// although the primary carries none.
+#[test]
+fn a_secondary_links_snooze_or_never_reaches_the_planner() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = seed(&s, "dev");
+    s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    s.link_session_work(sid, WorkTarget::Key("ABC-2"), "manual")
+        .unwrap();
+    // The newest link is the primary; the first one is secondary now.
+    let links = s.session_work_links(sid).unwrap();
+    let pick = |p: bool| links.iter().find(|l| l.is_primary == p).unwrap().id;
+    let (primary, secondary) = (pick(true), pick(false));
+    assert_eq!(s.snooze_tidy(sid, Some(secondary), 700).unwrap(), secondary);
+    let read = |s: &Store| {
+        s.tidy_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.row.id == sid)
+            .unwrap()
+    };
+    let t = read(&s);
+    let link = t.link.clone().unwrap();
+    assert_eq!(link.link_id, primary, "the planner's link is the primary");
+    assert_eq!((link.snoozed_until, link.never), (None, false));
+    assert_eq!((t.snoozed_until, t.never), (Some(700), false));
+    assert_eq!(s.never_tidy(sid, Some(secondary)).unwrap(), secondary);
+    assert!(read(&s).never);
+    // Ending the flagged link ends its flag.
+    s.unlink_session_work(sid, secondary).unwrap();
+    let t = read(&s);
+    assert_eq!((t.snoozed_until, t.never), (None, false));
 }
 
 #[test]

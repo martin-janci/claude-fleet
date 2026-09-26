@@ -125,16 +125,15 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   ],
   // Gated by AssetsPanel.svelte's own `catalog_config` gate: `{#if
   // catalogBlocked}` swaps the ENTIRE panel body (Sync, Secrets, asset
-  // list/detail, import, lint, layers-adjacent…) for the remote note, so
-  // none of these ever fires — `catalog_config` already carries the
-  // REASONS entry that disables the panel.
+  // detail, import, lint, layers-adjacent…) for the hub's read-only
+  // overview, which calls only the two routed commands (catalog_list_assets,
+  // assets_scan_hosts), so none of these ever fires — `catalog_config`
+  // already carries the REASONS entry that disables the panel.
   gatedByAssetsPanel: [
     'catalog_configure',
     'catalog_load',
-    'catalog_list_assets',
     'catalog_get_asset',
     'catalog_import_host',
-    'assets_scan_hosts',
     'assets_inventory',
     'catalog_plan_sync',
     'catalog_apply_sync',
@@ -156,8 +155,9 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     'catalog_spawn_author_session',
   ],
   // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
-  // !ownsFleet}` swaps the whole Projects section for the remote note.
-  gatedBySettingsDialog: ['set_fleet_setting'],
+  // !ownsFleet}` swaps the whole Projects section for the remote note, and
+  // the Limits section (with WorkRetention.svelte, work graph M12.3) too.
+  gatedBySettingsDialog: ['set_fleet_setting', 'work_retention_status', 'work_retention_sweep'],
   // (`pty_open` and `upload_to_session` used to be listed here, gated by
   // TerminalView's `ownsTheFleet` check. They are `same_in_both` now: both
   // are this machine's own `ssh`, addressed by the alias passed in, reading

@@ -225,6 +225,15 @@ impl Store {
     /// [`Adopted::Waiting`] — the caller asks again later, and merges once
     /// that row has stopped (a re-pair racing the old loop's refusal). A
     /// fleet this hub already listens for is `E_EXISTS`.
+    ///
+    /// The merge keeps the old row's outbox, not its watermark: `after` is
+    /// the peer's word (the highest message id it ever answered with), and a
+    /// hostile peer that once answered `i64::MAX` would otherwise have every
+    /// row the honest peer queues after the re-pair marked accepted without
+    /// delivery, until `peer remove` + `peer add`. Starting from 0 costs
+    /// nothing — the peer hands over only rows still `pending`, and a row
+    /// this hub already stored comes back as a duplicate (accepted, stored
+    /// once) — so a re-pair is as clean as a fresh link.
     pub fn adopt_dialer_fleet(&self, id: i64, fleet_id: &str) -> Result<Adopted, IpcError> {
         self.atomically(|s| {
             let other: Option<(i64, String)> = s
@@ -266,7 +275,7 @@ impl Store {
                             "UPDATE peer_links SET \
                                url = (SELECT url FROM peer_links WHERE id = ?1), \
                                token = (SELECT token FROM peer_links WHERE id = ?1), \
-                               state = '{LINK_RETRYING}', last_error = NULL \
+                               state = '{LINK_RETRYING}', last_error = NULL, after = 0 \
                              WHERE id = ?2"
                         ),
                         rusqlite::params![id, keep],
@@ -335,7 +344,10 @@ impl Store {
                             codes::E_FORBIDDEN,
                             format!(
                                 "fleet {fleet_id} is already linked to another peer token; \
-                                 revoke that client first (fleet-hub client revoke <name>)"
+                                 revoke that client first (fleet-hub client revoke <name>), \
+                                 then mint a new pairing code (fleet-hub pair --mode peer) \
+                                 for the other hub to add — this refusal is final for the \
+                                 token that was refused"
                             ),
                         ));
                     }
@@ -1035,6 +1047,10 @@ mod tests {
             "{}",
             e.message
         );
+        // The refusal is terminal for the dialer that got it (E_FORBIDDEN
+        // is never retried), so revoking afterwards revives nothing: the
+        // message must say a NEW code is needed once the revoke is done.
+        assert!(e.message.contains("new pairing code"), "{}", e.message);
         assert_eq!(s.peer_link(link.id).unwrap().unwrap().client_id, Some(c1));
     }
 
@@ -1146,6 +1162,31 @@ mod tests {
         assert_eq!(row.token.as_deref(), Some("t2"));
         assert_eq!(row.state, LINK_RETRYING);
         assert!(s.peer_link(new).unwrap().is_none());
+    }
+
+    /// A re-pair merge keeps the old row's outbox but sheds its watermark:
+    /// `after` is the peer's word, and a hostile peer that once answered
+    /// `i64::MAX` would otherwise have every row the honest peer queues
+    /// after the re-pair marked accepted without delivery.
+    #[test]
+    fn a_re_pair_merge_sheds_the_old_watermark() {
+        let s = Store::open_in_memory().unwrap();
+        let old = s.insert_dialer_link("https://b.example", "t1").unwrap();
+        assert_eq!(s.adopt_dialer_fleet(old, B).unwrap(), Adopted::Link(old));
+        assert!(s
+            .set_dialer_link_progress(old, "t1", i64::MAX, None, 1)
+            .unwrap());
+        assert_eq!(s.peer_link(old).unwrap().unwrap().after, i64::MAX);
+        s.set_peer_link_state(old, LINK_REFUSED, Some("401"), 2)
+            .unwrap();
+        let new = s.insert_dialer_link("https://b2.example", "t2").unwrap();
+        assert_eq!(s.adopt_dialer_fleet(new, B).unwrap(), Adopted::Link(old));
+        let row = s.peer_link(old).unwrap().unwrap();
+        assert_eq!(
+            row.after, 0,
+            "the planted watermark does not survive a re-pair"
+        );
+        assert_eq!(row.token.as_deref(), Some("t2"));
     }
 
     /// C1: a newly paired hub whose handshake claims a fleet that already has

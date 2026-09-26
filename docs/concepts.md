@@ -31,8 +31,17 @@ brief. A **tracker** (Jira Cloud, GitHub Issues through `gh`, Asana, Linear
 or Jira Data Center, configured on the hub) only enriches
 this: titles and status on the chips, tickets in ⌘K, and starting a session
 from a ticket in one step. Trackers are polled, read-only, and never gate
-anything. See [control-api.md](control-api.md) (`work`, `work_link`,
-`work_admin`) and [hub.md](hub.md) → *Trackers*.
+anything.
+
+Detection keeps this current without anyone typing it: a key or ticket URL
+in a branch, a prompt or a pull request becomes a link only when it is
+unambiguous, and otherwise a **suggestion** that never regroups a session
+until a person confirms it. Every link carries the evidence it came from,
+shown in the work chip's popover. **Today** (⌘⇧T) digests the day, and a
+ticket's card shows its acceptance criteria. The whole feature, with every
+`work.*` setting, is in the [work guide](work-graph.md); the tools are in
+[control-api.md](control-api.md) (`work`, `work_link`, `work_admin`) and the
+hub's side in [hub.md](hub.md) → *Trackers*.
 
 **Organisations** are optional. A session belongs to at most one: the most
 specific text rule (path, `owner/repo`, owner, host) else its host's org; a
@@ -67,7 +76,7 @@ a confirm (or opt-in auto-tidy):
 | tmux session | kill it through **safe kill** (Claude commits and pushes first); plain-kill a session that shares its worktree with another | kill a dirty or unpushed worktree any other way |
 | Claude conversation / transcript | — | delete it |
 | worktree / branch | — (safe kill removes the worktree only after the push succeeded) | delete a branch with unpushed commits |
-| journal / history | — (retention is `work.journal_days`) | delete it |
+| journal / history | — (retention is `work.retention.*`, see `docs/hub.md`) | delete it while anything live points at it |
 
 **Archive** collapses a live session into its work group's Done; tmux keeps
 running, and the next prompt or attach brings it back. **Snooze 7 d** and

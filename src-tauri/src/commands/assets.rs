@@ -170,12 +170,11 @@ pub fn catalog_load(
 }
 
 #[tauri::command]
-pub fn catalog_list_assets(
+pub async fn catalog_list_assets(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<AssetListing, IpcError> {
-    backend.refuse_local_only("catalog_list_assets")?;
-    catalog::list_assets(&store)
+    routed::catalog_list_assets(&backend, &store).await
 }
 
 #[tauri::command]
@@ -290,8 +289,7 @@ pub async fn assets_scan_hosts(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<inventory::HostScanResult>, IpcError> {
-    backend.refuse_local_only("assets_scan_hosts")?;
-    inventory::scan_hosts(&store, &ssh, args.host_alias.as_deref()).await
+    routed::assets_scan_hosts(&backend, &store, &ssh, args.host_alias).await
 }
 
 #[tauri::command]
@@ -512,4 +510,33 @@ pub async fn catalog_spawn_author_session(
         check_name(name)?;
     }
     author_session::spawn_author_session(args, &store, &ssh, &reg).await
+}
+
+/// The two catalog commands that route: the overview's read and the scan
+/// that refreshes it. Everything else here refuses in hub-client mode —
+/// see `backend::verdicts`.
+pub(crate) mod routed {
+    use super::*;
+
+    pub async fn catalog_list_assets(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<AssetListing, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.catalog_list_assets().await,
+            None => catalog::list_assets(store),
+        }
+    }
+
+    pub async fn assets_scan_hosts(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+        host_alias: Option<String>,
+    ) -> Result<Vec<inventory::HostScanResult>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.assets_scan_hosts(host_alias).await,
+            None => inventory::scan_hosts(store, ssh, host_alias.as_deref()).await,
+        }
+    }
 }

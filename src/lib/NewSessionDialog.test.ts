@@ -1586,6 +1586,9 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     const also = await screen.findByTestId('ticket-also-in-2');
     expect(screen.getByTestId('ticket-also-in').textContent).toContain('martin-janci/web');
     await fireEvent.click(also);
+    // The edited brief and name go with the multi start, as with a single one.
+    await fireEvent.input(screen.getByTestId('ticket-brief'), { target: { value: 'my own words' } });
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'ABC-7 login, both' } });
     await fireEvent.click(screen.getByTestId('create-btn'));
     await vi.waitFor(() => expect(onCreate).toHaveBeenCalledWith(started));
     const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
@@ -1593,7 +1596,11 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     expect((call[1] as { args: { project_ids: number[]; worktree: string } }).args).toMatchObject({
       item_id: 42,
       project_ids: [1, 2],
-      worktree: 'abc-7-fix-login',
+      // The worktree slug follows the edited name, as in a single start.
+      worktree: 'abc-7-login-both',
+      with_brief: true,
+      brief: 'my own words',
+      name: 'ABC-7 login, both',
     });
     expect(calls.some((c) => c[0] === 'start_work')).toBe(false);
     projects.set([]);
@@ -1661,6 +1668,12 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     await tick();
     await fireEvent.click(screen.getByTestId('create-btn'));
     await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+    // The jump is the point: the live session is opened, nothing is shown
+    // as an error and no plain session is created instead.
+    expect(get(selectedSession)?.id).toBe(5);
+    expect(screen.queryByRole('alert')).toBeNull();
+    const cmds = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(cmds).not.toContain('new_session');
     sessionsModule.sessions.set([]);
   });
 });

@@ -224,6 +224,45 @@ async fn a_shared_worktree_is_plain_killed_and_archive_keeps_tmux() {
     assert!(row.work.unwrap().archived_at.is_some());
 }
 
+/// A review session runs in its source's worktree: the source is only ever
+/// plain-killed while the review lives, never safe-killed (whose completion
+/// removes the tree the review is using).
+#[tokio::test]
+async fn a_tree_a_live_review_uses_is_only_plain_killed() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let a = seed(&store, "a", "done");
+    {
+        let s = store.lock().unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let review = s
+            .upsert_session("a-review", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET kind = 'review', worktree_key = 'a' WHERE id = ?1",
+                [review],
+            )
+            .unwrap();
+    }
+    let exec = FakeExec {
+        dirty: vec!["a".into()],
+        ..Default::default()
+    };
+    let plan = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = plan
+        .candidates
+        .iter()
+        .find(|c| c.session_id == a)
+        .expect("the done source is still a candidate");
+    assert_eq!(c.action, TidyAction::Kill);
+    let report = tidy_apply(&store, &exec, &[item(a, "safe_kill")], &OrgScope::All, NOW)
+        .await
+        .unwrap();
+    assert!(report.results[0].ok, "{report:?}");
+    assert_eq!(exec.calls(), vec!["kill a"]);
+    assert_eq!(exec.inspects.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn host_scope_and_bad_requests_are_per_item_or_refused() {
     let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -267,6 +306,53 @@ async fn host_scope_and_bad_requests_are_per_item_or_refused() {
             .len(),
         1
     );
+}
+
+/// A refused item never writes to the session it named: a per-host token
+/// could otherwise flood (and so evict, at the timeline's cap) the history
+/// of any session on any host, or of an id that does not exist at all.
+#[tokio::test]
+async fn a_refused_item_writes_no_event_to_the_foreign_session() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let a = seed(&store, "a", "done");
+    let count = |kind: &str| -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT count(*) FROM session_events WHERE kind = ?1",
+                [kind],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let exec = FakeExec::default();
+    let items: Vec<TidyApplyItem> = (0..5)
+        .map(|_| item(a, "snooze"))
+        .chain(std::iter::once(item(999_999, "kill")))
+        .collect();
+    let r = tidy_apply(&store, &exec, &items, &host("other"), NOW)
+        .await
+        .unwrap();
+    assert!(r
+        .results
+        .iter()
+        .all(|r| !r.ok && r.error.as_deref().unwrap().contains("not found")));
+    assert_eq!(count("gc_failed"), 0, "a refused id gets no timeline row");
+    assert!(store
+        .lock()
+        .unwrap()
+        .list_session_events(999_999, 10)
+        .unwrap()
+        .is_empty());
+    // A failure on a session the caller does see is still recorded.
+    let r = tidy_apply(&store, &exec, &[item(a, "explode")], &host("local"), NOW)
+        .await
+        .unwrap();
+    assert!(!r.results[0].ok);
+    assert_eq!(count("gc_failed"), 1);
+    assert!(exec.calls().is_empty());
 }
 
 const GC_OFF: GcConfig = GcConfig {
@@ -491,6 +577,68 @@ async fn a_per_host_token_never_sees_or_touches_another_orgs_candidates() {
     assert!(exec.calls().is_empty());
 }
 
+/// `work_link { snooze | never | archive }` without `link_id` resolves the
+/// primary first and checks it: B's forced link on A's own session is never
+/// flagged by A's token, with or without the id, and archive stamps only
+/// what the scope sees.
+#[test]
+fn lifecycle_flags_without_link_id_never_reach_another_orgs_primary() {
+    use crate::service::work::{work_link, WorkLinkArgs};
+    let o = orgs();
+    let (scope, b_link) = {
+        let s = o.store.lock().unwrap();
+        (
+            OrgScope::for_host(&s, "local").unwrap(),
+            s.session_work_links(o.x_sess).unwrap()[0].id,
+        )
+    };
+    let args = |sid: i64, action: &str, link_id: Option<i64>| WorkLinkArgs {
+        session_id: Some(sid),
+        action: action.into(),
+        link_id,
+        ..Default::default()
+    };
+    for (action, link_id) in [
+        ("never", None),
+        ("snooze", None),
+        ("never", Some(b_link)),
+        ("snooze", Some(b_link)),
+    ] {
+        let err = work_link(&args(o.x_sess, action, link_id), &o.store, &scope).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND, "{action} {link_id:?}");
+        assert!(!err.message.contains("BB-"));
+    }
+    assert_eq!(
+        work_link(&args(o.x_sess, "archive", None), &o.store, &scope)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID,
+        "no visible linked work to archive under"
+    );
+    let flags = |sid: i64| -> (i64, Option<i64>, Option<i64>) {
+        o.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT tidy_never, tidy_snoozed_until, archived_at FROM work_links \
+                 WHERE ended_at IS NULL AND participant_id = \
+                   (SELECT id FROM participants WHERE session_id = ?1 AND retired_at IS NULL)",
+                [sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(flags(o.x_sess), (0, None, None), "B's link is untouched");
+    // The same calls on A's own link work, and the master flags B's.
+    work_link(&args(o.a_sess, "never", None), &o.store, &scope).unwrap();
+    work_link(&args(o.a_sess, "archive", None), &o.store, &scope).unwrap();
+    let (never, _, archived) = flags(o.a_sess);
+    assert!(never == 1 && archived.is_some());
+    work_link(&args(o.x_sess, "never", None), &o.store, &OrgScope::All).unwrap();
+    assert_eq!(flags(o.x_sess).0, 1);
+}
+
 #[tokio::test]
 async fn auto_tidy_follows_the_org_override() {
     let o = orgs();
@@ -518,4 +666,245 @@ async fn auto_tidy_follows_the_org_override() {
     let s = o.store.lock().unwrap();
     assert_eq!(s.set_org_auto_tidy(o.org_a, None).unwrap().auto_tidy, None);
     let _ = o.a;
+}
+
+// ── idle_unlinked and keep (work graph M11.3) ─────────────────────────
+
+/// An idle work session on `local` with its own worktree and NO work
+/// linked, created (and last used) long before `NOW`.
+fn seed_unlinked(store: &Mutex<Store>, name: &str) -> i64 {
+    let s = store.lock().unwrap();
+    s.upsert_host("local").unwrap();
+    s.update_host_probe("local", true, None, None, 1).unwrap();
+    let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+    let wid = s
+        .upsert_worktree(pid, name, &format!("/p/o/r/.worktrees/{name}"), Some(name))
+        .unwrap();
+    let id = s
+        .upsert_session(name, "local", Some(pid), Some(wid), 1, 1, "running", None)
+        .unwrap();
+    s.set_claude_session_id(id, &format!("c-{name}")).unwrap();
+    s.set_claude_status_by_session_id(&format!("c-{name}"), "idle")
+        .unwrap();
+    s.conn_ref()
+        .execute_batch(&format!(
+            "UPDATE sessions SET idle_since = 0, worktree_key = '{name}', created_at = 0, \
+               started_at = NULL, last_turn_at = NULL, last_stop_at = NULL, \
+               last_touch_at = NULL WHERE id = {id};"
+        ))
+        .unwrap();
+    id
+}
+
+fn reason_of(store: &Mutex<Store>, id: i64) -> Option<TidyReason> {
+    work_tidy(store, &OrgScope::All, NOW)
+        .unwrap()
+        .candidates
+        .iter()
+        .find(|c| c.session_id == id)
+        .map(|c| c.reason)
+}
+
+#[tokio::test]
+async fn idle_unlinked_is_suggested_and_killed_only_when_clean() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let clean = seed_unlinked(&store, "clean");
+    let dirty = seed_unlinked(&store, "dirty");
+    assert_eq!(reason_of(&store, clean), Some(TidyReason::IdleUnlinked));
+    assert_eq!(reason_of(&store, dirty), Some(TidyReason::IdleUnlinked));
+    let report = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    assert_eq!(report.idle_unlinked_days, 7);
+    let exec = FakeExec {
+        dirty: vec!["dirty".into()],
+        ..Default::default()
+    };
+    let r = tidy_apply(
+        &store,
+        &exec,
+        &[item(clean, "safe_kill"), item(dirty, "safe_kill")],
+        &OrgScope::All,
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert!(r.results[0].ok, "{r:?}");
+    assert_eq!(r.results[0].outcome.as_deref(), Some("killed"));
+    assert!(!r.results[1].ok);
+    assert!(
+        r.results[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("uncommitted or unpushed"),
+        "{r:?}"
+    );
+    assert_eq!(
+        exec.calls(),
+        vec!["kill clean"],
+        "dirty unlinked work is refused, never safe-killed"
+    );
+}
+
+#[tokio::test]
+async fn an_unlinked_session_that_is_no_longer_a_candidate_is_not_killed() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let used = seed_unlinked(&store, "used");
+    // Prompted two days ago: out of the window (and past the 1 h touch).
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute_batch(&format!(
+            "UPDATE sessions SET last_touch_at = {} WHERE id = {used};",
+            NOW - 2 * 86_400
+        ))
+        .unwrap();
+    assert_eq!(reason_of(&store, used), None);
+    let exec = FakeExec::default();
+    let r = tidy_apply(&store, &exec, &[item(used, "kill")], &OrgScope::All, NOW)
+        .await
+        .unwrap();
+    assert!(!r.results[0].ok);
+    assert!(r.results[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("no longer a tidy-up candidate"));
+    assert!(exec.calls().is_empty());
+    assert_eq!(exec.inspects.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_suggested_link_keeps_a_session_out_of_idle_unlinked() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let id = seed_unlinked(&store, "guessed");
+    assert_eq!(reason_of(&store, id), Some(TidyReason::IdleUnlinked));
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute_batch(&format!(
+            "INSERT INTO work_links (ref_key, participant_id, state, source, created_at) \
+             SELECT 'ABC-9', p.id, 'suggested', 'branch', 1 FROM participants p \
+             WHERE p.session_id = {id} AND p.retired_at IS NULL;"
+        ))
+        .unwrap();
+    assert_eq!(reason_of(&store, id), None, "a guess is still work");
+}
+
+#[tokio::test]
+async fn keep_holds_a_session_out_for_n_days_per_session() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let id = seed_unlinked(&store, "keepme");
+    let other = seed_unlinked(&store, "other");
+    let exec = FakeExec::default();
+    let keep = |days: Option<u32>| TidyApplyItem {
+        days,
+        ..item(id, "keep")
+    };
+    // Bounds first: nothing written.
+    for bad in [Some(0), Some(91)] {
+        let r = tidy_apply(&store, &exec, &[keep(bad)], &OrgScope::All, NOW)
+            .await
+            .unwrap();
+        assert!(!r.results[0].ok, "{bad:?}");
+    }
+    assert_eq!(reason_of(&store, id), Some(TidyReason::IdleUnlinked));
+    // Another host's token: the session does not exist for it.
+    let r = tidy_apply(&store, &exec, &[keep(None)], &host("elsewhere"), NOW)
+        .await
+        .unwrap();
+    assert!(r.results[0].error.as_deref().unwrap().contains("not found"));
+    assert_eq!(reason_of(&store, id), Some(TidyReason::IdleUnlinked));
+    // Its own host's token keeps it (no link needed), for 3 days.
+    let r = tidy_apply(&store, &exec, &[keep(Some(3))], &host("local"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(r.results[0].outcome.as_deref(), Some("kept"), "{r:?}");
+    assert_eq!(reason_of(&store, id), None);
+    assert_eq!(
+        reason_of(&store, other),
+        Some(TidyReason::IdleUnlinked),
+        "per session"
+    );
+    // It is on the timeline, and back once the keep ends.
+    let ev = store.lock().unwrap().list_session_events(id, 10).unwrap();
+    assert!(ev
+        .iter()
+        .any(|e| e.kind == "tidy_kept"
+            && e.detail.as_deref() == Some(&*(NOW + 3 * 86_400).to_string())));
+    let later = NOW + 3 * 86_400 + 1;
+    assert!(work_tidy(&store, &OrgScope::All, later)
+        .unwrap()
+        .candidates
+        .iter()
+        .any(|c| c.session_id == id));
+    // The latest keep wins, shorter or not.
+    tidy_apply(&store, &exec, &[keep(Some(1))], &OrgScope::All, NOW)
+        .await
+        .unwrap();
+    assert!(work_tidy(&store, &OrgScope::All, NOW + 86_400 + 1)
+        .unwrap()
+        .candidates
+        .iter()
+        .any(|c| c.session_id == id));
+    assert!(exec.calls().is_empty(), "keep never kills");
+}
+
+#[tokio::test]
+async fn a_keep_does_not_survive_its_session_row() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let id = seed_unlinked(&store, "gone");
+    {
+        let s = store.lock().unwrap();
+        s.keep_tidy(id, NOW + 30 * 86_400).unwrap();
+        // A keep written before the row was (re)created does not apply.
+        s.conn_ref()
+            .execute_batch(&format!(
+                "UPDATE session_events SET at = 0 WHERE session_id = {id}; \
+                 UPDATE sessions SET created_at = 5 WHERE id = {id};"
+            ))
+            .unwrap();
+    }
+    assert_eq!(reason_of(&store, id), Some(TidyReason::IdleUnlinked));
+}
+
+#[tokio::test]
+async fn auto_tidy_never_kills_an_idle_unlinked_session() {
+    // D19: every switch on, every reason allowed in the planner — still
+    // nothing. (The setting cannot even name idle_unlinked.)
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let id = seed_unlinked(&store, "lonely");
+    {
+        let s = store.lock().unwrap();
+        settings::set(&s, settings::WORK_AUTO_TIDY, "true").unwrap();
+        settings::set(
+            &s,
+            settings::WORK_AUTO_TIDY_REASONS,
+            "done_idle,pr_merged_idle,not_planned",
+        )
+        .unwrap();
+        assert!(settings::set(&s, settings::WORK_AUTO_TIDY_REASONS, "idle_unlinked").is_err());
+    }
+    let exec = FakeExec::default();
+    let report = sweep_with(&store, &exec, &GC_OFF, NOW).await;
+    assert_eq!(report.tidied, 0);
+    assert!(exec.calls().is_empty());
+    assert_eq!(reason_of(&store, id), Some(TidyReason::IdleUnlinked));
+    // And the executor itself refuses an automatic idle_unlinked kill, were
+    // a candidate ever to reach it.
+    let snap = Snapshot::take(&store).unwrap();
+    let plan = snap.plan(NOW);
+    let s = resolve(&snap, &OrgScope::All, id).unwrap();
+    let ctx = ApplyCtx {
+        scope: &OrgScope::All,
+        source: "auto:idle_unlinked",
+        now: NOW,
+        plan: &plan,
+    };
+    let err = apply_one(&store, &exec, &snap, s, &item(id, "safe_kill"), ctx)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("auto-tidy never"), "{}", err.message);
+    assert!(exec.calls().is_empty());
 }

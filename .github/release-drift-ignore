@@ -1,0 +1,14 @@
+# Tags scripts/check-release-drift.sh does not report on.
+#
+# One tag per line; everything after a `#` is a comment and the comment is the
+# point — a line here is a standing decision that this tag will never have a
+# complete release, and the next person needs to know why without doing the
+# archaeology. Anything not listed here is expected to have a release with the
+# full set of assets from scripts/release-assets.sh.
+#
+# This is the ONLY way to silence a line in the drift report. Do not widen the
+# script's tag pattern to make a tag disappear: `vX.Y.Z-suffix` is now a legal
+# release tag (the RC channel), so the pattern cannot tell a release candidate
+# from a marker ref.
+
+v0.2.0-phase2   # a milestone marker from the phase-2 rewrite, never a release

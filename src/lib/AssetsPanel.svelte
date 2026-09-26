@@ -86,6 +86,42 @@
   // should be.
   const catalogBlocked = $derived(hubBlock('catalog_config', $hubStatus));
 
+  // ...but the list itself, and the scan that refreshes it, DO route: on a
+  // hub-backed desktop the panel is a read-only overview of the hub's
+  // catalog — which asset is installed where, what drifted, what is on a
+  // host but not in the catalog. Loaded once the window is known to be a
+  // hub client (the status can resolve after mount).
+  const hubOverview = $derived($hubStatus.remote && !$hubStatus.unavailable);
+  let overviewLoad = $state<'idle' | 'loading' | 'loaded' | 'failed'>('idle');
+  let overviewError = $state<string | null>(null);
+  let overviewNotConfigured = $state(false);
+  async function loadOverview() {
+    overviewLoad = 'loading';
+    overviewError = null;
+    overviewNotConfigured = false;
+    const r = await loadAssets();
+    if (r.ok) {
+      overviewLoad = 'loaded';
+      return;
+    }
+    overviewLoad = 'failed';
+    overviewNotConfigured = r.error.code === 'E_CATALOG_NOT_CONFIGURED';
+    overviewError = r.error.message;
+  }
+  $effect(() => {
+    if (!hubOverview || !visible) return;
+    if (untrack(() => overviewLoad) !== 'idle') return;
+    void loadOverview();
+  });
+  async function scanOnHub() {
+    busy = 'scan'; error = null; scanResults = null;
+    const r = await scanHosts();
+    busy = '';
+    if (!r.ok) { error = r.error.message; return; }
+    scanResults = r.value;
+    await loadOverview();
+  }
+
   onMount(async () => {
     if (!ownsTheFleet($hubStatus)) return;
     const c = await loadCatalogConfig();
@@ -219,15 +255,54 @@
 
 <div class="assets-panel">
   {#if catalogBlocked}
-    <div class="setup" data-testid="assets-remote">
-      <h3>Asset catalog</h3>
-      <p class="muted">{catalogBlocked}</p>
-      <p class="muted">
-        Sync and secrets are fleet administration besides: a paired client
-        does not write to the hosts, and the sync secrets belong to whichever
-        machine runs the sync.
-      </p>
-    </div>
+    {#if hubOverview}
+      <div class="hub-overview" data-testid="assets-remote">
+        <div class="toolbar">
+          <span class="path">Asset catalog on the hub{$hubStatus.url ? ` (${$hubStatus.url})` : ''}</span>
+          {#if $catalog}<span class="head" data-testid="assets-head">@ {$catalog.head.slice(0, 7) || '—'}</span>{/if}
+          <button onclick={() => void loadOverview()} disabled={busy !== '' || overviewLoad === 'loading'} data-testid="assets-hub-refresh">{overviewLoad === 'loading' ? 'Loading…' : 'Refresh'}</button>
+          <button onclick={scanOnHub} disabled={busy !== '' || overviewNotConfigured} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
+          {#if $catalog && $catalog.problems.length > 0}
+            <button class="badge" onclick={() => (showProblems = !showProblems)} data-testid="assets-problems">{$catalog.problems.length} problems</button>
+          {/if}
+          <input class="filter" placeholder="filter" bind:value={filter} />
+        </div>
+        <p class="muted note" data-testid="assets-remote-note">
+          Read-only here. Editing assets, Sync and Secrets are fleet
+          administration: they run where the catalog's git checkout and the
+          sync secrets live — on the hub's machine. A paired client never
+          writes to the hosts.
+        </p>
+        {#if error}<p class="error">{error}</p>{/if}
+        {#if scanResults}
+          <p class="scan-result" data-testid="assets-scan-result">{scanResults.map((r) => `${r.host}: ${r.status}${r.detail ? ` (${r.detail})` : ''}`).join(' · ')}</p>
+        {/if}
+        {#if showProblems && $catalog}
+          <ul class="problems">{#each $catalog.problems as p}<li><code>{p.path}</code> {p.message}</li>{/each}</ul>
+        {/if}
+        {#if overviewLoad === 'failed'}
+          <div class="load-failed" data-testid="assets-hub-failed">
+            {#if overviewNotConfigured}
+              <p class="muted">The hub has no asset catalog yet. Point it at one on the hub's machine, then Refresh.</p>
+            {:else}
+              <p class="muted">The hub's asset catalog could not be loaded.</p>
+              {#if overviewError}<p class="error">{overviewError}</p>{/if}
+            {/if}
+          </div>
+        {:else if $catalog}
+          <div class="overview-list">
+            <AssetList listing={$catalog} selected={null} {filter} readonly onselect={() => {}} onimport={() => {}} />
+          </div>
+        {:else}
+          <p class="muted">Loading…</p>
+        {/if}
+      </div>
+    {:else}
+      <div class="setup" data-testid="assets-remote">
+        <h3>Asset catalog</h3>
+        <p class="muted">{catalogBlocked}</p>
+      </div>
+    {/if}
   {:else if !$catalogConfig}
     <div class="setup" data-testid="assets-setup">
       <h3>Asset catalog</h3>
@@ -365,6 +440,9 @@
   .last-sync { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
   .repo-status { font-size: 11px; color: var(--fg-muted); margin: 0; padding: 2px 10px; font-family: ui-monospace, monospace; }
   .filter { margin-left: auto; width: 160px; }
+  .hub-overview { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .hub-overview .note { margin: 6px 10px; font-size: 12px; }
+  .overview-list { flex: 1; min-height: 0; }
   .body { display: grid; grid-template-columns: 300px 1fr; flex: 1; min-height: 0; }
   .left { border-right: 1px solid var(--border); min-height: 0; overflow: auto; }
   .right { min-height: 0; overflow: auto; }

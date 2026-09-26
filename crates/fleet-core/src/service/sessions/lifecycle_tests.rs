@@ -359,9 +359,9 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
             registers: "reconcile_one_host(",
         },
         CreateSite {
-            what: "rename_session",
+            what: "rename_session_with",
             source: LIFECYCLE,
-            signature: "pub async fn rename_session(",
+            signature: "pub(super) async fn rename_session_with(",
             tmux: &["tmux.rename_session(&args.old_name, &args.new_name)"],
             registers: "reconcile_one_host(",
         },
@@ -637,6 +637,105 @@ async fn a_lost_session_with_a_conversation_blocks_its_name() {
     assert_eq!(row.claude_session_id.as_deref(), Some(RESUME_ID));
 }
 
+/// A tmux executor for the rename race: renaming into `dev-new` lands a
+/// lost session of that name in the store, as a reconcile pass running
+/// beside the rename (with the store lock released) would.
+struct RacingTmux {
+    store: std::sync::Arc<Mutex<crate::store::Store>>,
+    renames: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl crate::tmux::TmuxExec for RacingTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        Ok(Vec::new())
+    }
+    async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
+        self.renames.lock().unwrap().push((old.into(), new.into()));
+        if new == "dev-new" {
+            lost_row(&self.store.lock().unwrap(), "dev-new", Some(RESUME_ID));
+        }
+        Ok(())
+    }
+    async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        None
+    }
+}
+
+/// The lost-name guard runs twice: under the lock before tmux renames, and
+/// again inside `Store::rename_session_row`. A lost row named `new` that
+/// lands between the two is refused by the second — rightly — but by then
+/// tmux already answers to `new`: the pane is renamed back before the
+/// refusal is reported, so tmux and the row agree, and the lost row is
+/// left as it was.
+#[tokio::test]
+async fn a_lost_name_that_lands_during_the_tmux_rename_is_refused_and_renamed_back() {
+    let store = std::sync::Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-old", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+    }
+    let tmux = RacingTmux {
+        store: std::sync::Arc::clone(&store),
+        renames: Mutex::new(Vec::new()),
+    };
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let err = rename_session_with(
+        RenameSessionArgs {
+            host_alias: "local".into(),
+            old_name: "dev-old".into(),
+            new_name: "dev-new".into(),
+        },
+        &store,
+        &ssh,
+        &tmux,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert!(
+        err.message.starts_with("dev-new belongs to a lost session"),
+        "{}",
+        err.message
+    );
+    assert_eq!(
+        *tmux.renames.lock().unwrap(),
+        vec![
+            ("dev-old".to_string(), "dev-new".to_string()),
+            ("dev-new".to_string(), "dev-old".to_string()),
+        ],
+        "renamed, refused, renamed back"
+    );
+    let s = store.lock().unwrap();
+    assert!(
+        s.get_session("dev-old", "local").unwrap().is_some(),
+        "the row keeps its name"
+    );
+    assert!(
+        s.lost_resumable_session_named("local", "dev-new")
+            .unwrap()
+            .is_some(),
+        "the lost row is untouched"
+    );
+}
+
 /// A lost row with no conversation has nothing to resume, so the name is
 /// free: the call gets past the guard and fails later on the unknown project.
 #[tokio::test]
@@ -775,4 +874,104 @@ async fn an_unheld_resume_id_gets_past_the_guards() {
         .await
         .unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+}
+
+/// Work graph M10.2 (found by the hub e2e): a session started in a worktree
+/// is linked to that worktree's row, which reconcile never does — tidy-up,
+/// safe kill and the idle killer inspect a work session's tree only through
+/// it. A new worktree gets its row (for the session's host); a system
+/// project, or a start in the main checkout (by path or by its `main` row),
+/// links nothing.
+#[test]
+fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    s.upsert_host("h").unwrap();
+    let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+    let row = |name: &str, host: &str| {
+        s.upsert_session(name, host, Some(pid), None, 0, 0, "running", None)
+            .unwrap()
+    };
+    let args = |host: &str, worktree_id: Option<i64>, new_worktree: Option<&str>| NewSessionArgs {
+        host_alias: host.into(),
+        project_id: pid,
+        worktree_id,
+        name: "n".into(),
+        call_id: None,
+        new_worktree: new_worktree.map(str::to_string),
+        base_branch: None,
+        kind: None,
+        start_command: None,
+        friendly_name: None,
+        resume_claude_session_id: None,
+    };
+
+    // A new worktree on local: its row is created and linked.
+    let a = row("a", "local");
+    let wid = link_new_session_worktree(
+        &s,
+        a,
+        &args("local", None, Some("abc-1-fix")),
+        "/p/o/r/.worktrees/abc-1-fix",
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let w = s.get_worktree_row(wid).unwrap().unwrap();
+    assert_eq!(
+        (w.name.as_str(), w.path.as_str(), w.host_alias.as_str()),
+        ("abc-1-fix", "/p/o/r/.worktrees/abc-1-fix", "local")
+    );
+    assert_eq!(w.branch.as_deref(), Some("abc-1-fix"));
+    assert_eq!(
+        s.get_session_by_id(a).unwrap().unwrap().worktree_id,
+        Some(wid)
+    );
+
+    // On a remote host: that host's row, never the local one of that name.
+    let b = row("b", "h");
+    let rid = link_new_session_worktree(
+        &s,
+        b,
+        &args("h", None, Some("abc-1-fix")),
+        "/home/u/projects/github.com/o/r/.worktrees/abc-1-fix",
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(rid, wid);
+    assert_eq!(s.get_worktree_row(rid).unwrap().unwrap().host_alias, "h");
+
+    // An existing worktree: that one.
+    let c = row("c", "local");
+    assert_eq!(
+        link_new_session_worktree(&s, c, &args("local", Some(wid), None), "/x", false).unwrap(),
+        Some(wid)
+    );
+    assert_eq!(
+        s.get_session_by_id(c).unwrap().unwrap().worktree_id,
+        Some(wid)
+    );
+
+    // The main checkout, or a system project: nothing — not even when the
+    // start names the `main` row (discover hands one over for a remote
+    // project root): safe kill and discard `git worktree remove` a linked
+    // tree, and the clone itself is not one.
+    let d = row("d", "local");
+    assert_eq!(
+        link_new_session_worktree(&s, d, &args("local", None, None), "/p/o/r", false).unwrap(),
+        None
+    );
+    let mid = s
+        .upsert_worktree(pid, "main", "/p/o/r", Some("main"))
+        .unwrap();
+    assert_eq!(
+        link_new_session_worktree(&s, d, &args("local", Some(mid), None), "/p/o/r", false).unwrap(),
+        None
+    );
+    assert_eq!(
+        link_new_session_worktree(&s, d, &args("local", None, Some("x")), "/sys", true).unwrap(),
+        None
+    );
+    assert_eq!(s.get_session_by_id(d).unwrap().unwrap().worktree_id, None);
 }

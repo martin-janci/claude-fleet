@@ -3,10 +3,10 @@
 //!
 //! Routes in remote mode: `MoveSessionArgs` is exactly the tool's parameter
 //! set (`session_id`, `target_host_alias`, `keep_source`, `strict`,
-//! `clean_target`, `dry_run`, `when`), and the tool answers the same
-//! `MoveOutcome` (a `MoveReport` for a real move, a `MovePreview` for
-//! `dry_run: true`, a `MoveWaiting` for `when: idle` on a busy source, a
-//! `MoveWaitCancelled` for `when: cancel`).
+//! `clean_target`, `dry_run`, `when`, `force_cross_org`), and the tool
+//! answers the same `MoveOutcome` (a `MoveReport` for a real move, a
+//! `MovePreview` for `dry_run: true`, a `MoveWaiting` for `when: idle` on a
+//! busy source, a `MoveWaitCancelled` for `when: cancel`).
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
@@ -46,7 +46,9 @@ pub(crate) mod routed {
                 // frame has been judged, so any request an older hub could
                 // misread this way waits for a positive in-range judgement
                 // on this launch. A plain move (`when: now`, not a dry run)
-                // stays ungated.
+                // stays ungated, and so is `force_cross_org`: a hub that
+                // predates it ignores the flag and does what the flag asks
+                // (carry the link, warn), so an old hub cannot misread it.
                 if args.dry_run || args.when != move_session::When::Now {
                     hub.require_confirmed_contract(
                         "This transfer request",

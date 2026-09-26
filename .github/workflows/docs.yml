@@ -1,5 +1,30 @@
 name: docs
 
+# rustdoc for the workspace, published to GitHub Pages for a released tag.
+#
+# HOW THIS ACTUALLY GETS STARTED. The `release: published` trigger below only
+# fires for a release a PERSON publishes: since T10 the publication is done by
+# release.yml's `publish` job using the default GITHUB_TOKEN, and GitHub does
+# not start workflow runs from events that token creates. That job therefore
+# also dispatches this workflow explicitly (`gh workflow run docs.yml --ref
+# <tag>`), as a best-effort step that cannot fail the release. The
+# `release: published` trigger is kept because it still covers the hand-
+# published case and costs nothing.
+#
+# THIS WORKFLOW HAS NEVER SUCCEEDED — 11 of 11 runs red, and every single one
+# for the same reason, which is not the Rust build: `cargo doc` completes,
+# then `actions/configure-pages` fails with
+#
+#   Get Pages site failed. Please verify that the repository has Pages
+#   enabled ... Error: Not Found
+#
+# because GitHub Pages was never enabled on this repository at all
+# (`gh api repos/martin-janci/claude-fleet/pages` -> 404). The consequence was
+# perverse: publishing a release was the trigger, so every publication earned
+# a red X, and publication was already the manual step nobody was pressing.
+# `enablement: true` below is the code half of the fix; see the comment there
+# for the half that is a repository setting.
+
 on:
   release:
     types: [published]
@@ -21,7 +46,13 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # The tag being released, not the default branch: on `release:
+      # published` a bare checkout takes whatever main happens to be, so the
+      # published docs would describe code the release does not contain.
+      # `github.ref` (a workflow_dispatch's branch) is the fallback.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -30,6 +61,21 @@ jobs:
       - name: Add index redirect
         run: echo '<meta http-equiv="refresh" content="0;url=fleet_core/index.html">' > target/doc/index.html
       - uses: actions/configure-pages@v5
+        with:
+          # Create the Pages site if it does not exist, instead of 404ing on
+          # it. The action POSTs /repos/{owner}/{repo}/pages with
+          # `build_type: workflow`, using the `pages: write` permission this
+          # workflow already declares.
+          #
+          # HYPOTHESIS, NOT A VERIFIED FIX. Nobody can prove this from a
+          # branch: the workflow only runs on `release: published` or a
+          # dispatch from the Actions tab, and enablement depends on the
+          # repository's own settings as well as the token. If the first run
+          # after this lands is still red on this step, the fix is one click
+          # and no code: Settings -> Pages -> Source: GitHub Actions. If Pages
+          # is not wanted at all, delete the `release: published` trigger
+          # instead, so publishing stops being punished with a red run.
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: target/doc

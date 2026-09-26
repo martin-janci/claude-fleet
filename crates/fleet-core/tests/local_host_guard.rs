@@ -69,7 +69,7 @@ async fn a_disabled_local_host_refuses_explicit_local_targets() {
         .is_none());
 
     // Defence in depth past the alias check: provisioning's local file I/O,
-    // the catalog's local script runner and the local project scan.
+    // the catalog's local script runner; the local project scan is a no-op.
     let e = fleet_core::service::provision::read_host_file(&ssh, "local", "~/.tmux.conf")
         .await
         .unwrap_err();
@@ -98,10 +98,12 @@ async fn a_disabled_local_host_refuses_explicit_local_targets() {
         )
         .unwrap(),
     );
-    let e = fleet_core::service::projects::refresh_projects(&store)
+    // The local project scan has nothing to scan: the stored tree comes back
+    // (empty here) instead of a refusal, and no `git` runs.
+    let tree = fleet_core::service::projects::refresh_projects(&store)
         .await
-        .unwrap_err();
-    assert_eq!(e.code, codes::E_NOTFOUND);
+        .unwrap();
+    assert!(tree.is_empty());
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!marker.exists(), "no local script may run");
 

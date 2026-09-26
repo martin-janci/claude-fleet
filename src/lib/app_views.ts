@@ -43,6 +43,17 @@ export function requestCloseHosts(): void {
 /** Settings dialog visibility (mounted by the Sidebar; ⌘, sets it). */
 export const settingsOpen = writable(false);
 
+/** The Settings section to scroll to when the dialog opens (`work`: the
+ *  work section, e.g. from a "Reconnect Jira (acme)" Attention item). The
+ *  dialog clears it once it has scrolled. */
+export const settingsSection = writable<string | null>(null);
+
+/** Open Settings at `section`. */
+export function openSettingsAt(section: string): void {
+  settingsSection.set(section);
+  settingsOpen.set(true);
+}
+
 /**
  * "Start a new session on this host": the Sidebar opens its project picker
  * and preselects the host in the NewSessionDialog that follows.

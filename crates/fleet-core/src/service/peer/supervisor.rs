@@ -169,6 +169,8 @@ mod tests {
     use super::*;
     use crate::ipc_error::codes;
     use crate::service::peer::testkit::hub;
+    use crate::service::peer::wire::{ExchangeRequest, ExchangeResponse, PROTO};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct NoTransport;
 
@@ -227,5 +229,134 @@ mod tests {
         // The control: a listing that really lacks the link does stop it.
         reconcile(&ctx, &mut running, Ok(vec![])).await;
         assert!(child.is_cancelled());
+    }
+
+    /// A peer that answers the handshake at once, as `fleet-b` with nothing
+    /// to carry, and then holds every parked long-poll until the caller
+    /// drops it — what a listener does with a poll. A parked call is only
+    /// ever dropped, so `dropped` counts the loop's cancellations as the
+    /// peer sees them.
+    #[derive(Default)]
+    struct ParksThePoll {
+        handshakes: AtomicUsize,
+        parked: AtomicUsize,
+        dropped: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl HubTransport for ParksThePoll {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _bearer: &str,
+            body: String,
+        ) -> Result<crate::http_client::HubResponse, String> {
+            let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let req: ExchangeRequest =
+                serde_json::from_value(envelope["params"]["arguments"].clone()).unwrap();
+            if req.wait_ms > 0 {
+                struct Dropped<'a>(&'a ParksThePoll);
+                impl Drop for Dropped<'_> {
+                    fn drop(&mut self) {
+                        self.0.dropped.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let _dropped = Dropped(self);
+                self.parked.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+                unreachable!("a parked poll is only ever dropped");
+            }
+            self.handshakes.fetch_add(1, Ordering::SeqCst);
+            let resp = ExchangeResponse {
+                proto: PROTO,
+                fleet_id: "fleet-b".into(),
+                results: vec![],
+                messages: vec![],
+                more: false,
+            };
+            let answer = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": serde_json::to_string(&resp).unwrap()}],
+                },
+            });
+            Ok(crate::http_client::HubResponse {
+                status: 200,
+                body: format!("event: message\ndata: {answer}\n\n"),
+            })
+        }
+    }
+
+    /// Waits for `cond` (bounded; a condition, not a window).
+    async fn until(what: &str, cond: impl Fn() -> bool) {
+        for _ in 0..400 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
+    /// The supervisor's own stop of a revoked link. The loop is parked in
+    /// the peer's long-poll, so it cannot have read the revocation itself:
+    /// on this single-threaded runtime nothing runs between the revoke and
+    /// the rescan that cancels it. The loop then ends `Cancelled` (the
+    /// supervisor's doing — `Revoked` is the loop's own exit on its next
+    /// read) within `STOP_WAIT`, the parked call is dropped, and the rescan
+    /// after that reaps it and does not start it again.
+    #[tokio::test]
+    async fn a_revoked_link_is_stopped_by_the_rescan_and_not_restarted() {
+        let (store, ssh) = hub("fleet-a");
+        let link = store
+            .lock()
+            .unwrap()
+            .insert_dialer_link("https://b.example", "t")
+            .unwrap();
+        let peer = Arc::new(ParksThePoll::default());
+        let ctx = Ctx {
+            store,
+            ssh,
+            transport: peer.clone(),
+            cancel: CancellationToken::new(),
+        };
+        let listed = |ctx: &Ctx| lock(&ctx.store).and_then(|s| s.live_dialer_links());
+        let mut running = HashMap::new();
+        reconcile(&ctx, &mut running, listed(&ctx)).await;
+        assert!(running.contains_key(&link), "started by the rescan");
+        until("the loop to park", || {
+            peer.parked.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        let row = ctx.store.lock().unwrap().peer_link(link).unwrap().unwrap();
+        assert_eq!(row.state, "connected", "{:?}", row.last_error);
+        assert_eq!(peer.handshakes.load(Ordering::SeqCst), 1);
+
+        ctx.store.lock().unwrap().revoke_peer_link(link, 1).unwrap();
+        reconcile(&ctx, &mut running, listed(&ctx)).await;
+        let r = running.remove(&link).expect("tracked until reaped");
+        assert!(r.cancel.is_cancelled(), "the rescan cancelled it");
+        let exit = tokio::time::timeout(STOP_WAIT, r.handle)
+            .await
+            .expect("the loop stops within STOP_WAIT")
+            .unwrap();
+        assert_eq!(exit, LinkExit::Cancelled, "stopped by the supervisor");
+        assert_eq!(
+            peer.dropped.load(Ordering::SeqCst),
+            1,
+            "the parked poll was dropped"
+        );
+
+        // The rescan after: nothing to reap, and the revoked link is not
+        // started again.
+        reap(&mut running).await;
+        reconcile(&ctx, &mut running, listed(&ctx)).await;
+        assert!(running.is_empty(), "a revoked link is not restarted");
+        assert_eq!(
+            peer.handshakes.load(Ordering::SeqCst),
+            1,
+            "not dialled again"
+        );
+        assert_eq!(peer.parked.load(Ordering::SeqCst), 1);
     }
 }

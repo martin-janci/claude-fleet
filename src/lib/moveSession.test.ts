@@ -112,6 +112,29 @@ beforeEach(() => {
   merged.mockReset();
 });
 
+describe('moveSession force_cross_org', () => {
+  // Work graph M5: a move whose live links would cross the org boundary on
+  // the target is refused (E_FORBIDDEN, `cross_org: true`) unless forced.
+  // The flag travels only when set, so an older hub sees the same
+  // arguments it always did.
+  it('sends force_cross_org only when asked', async () => {
+    invoked.mockResolvedValue(ok({ kind: 'moved', ...reportFixture }));
+    await moveSession(7, 'beta');
+    expect(invoked.mock.calls[0][1].args).not.toHaveProperty('force_cross_org');
+    await moveSession(7, 'beta', { forceCrossOrg: true });
+    expect(invoked.mock.calls[1][1].args).toMatchObject({ force_cross_org: true });
+  });
+
+  it('passes the cross-org refusal through untouched', async () => {
+    const details = { cross_org: true, work_org_id: 1, session_org_id: 2 };
+    invoked.mockResolvedValueOnce(err('E_FORBIDDEN', 'crosses', details));
+    const r = await moveSession(7, 'beta');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toEqual({ code: 'E_FORBIDDEN', message: 'crosses', details });
+    expect(merged).not.toHaveBeenCalled();
+  });
+});
+
 describe('previewMove', () => {
   it('sends dry_run and returns the preview', async () => {
     invoked.mockResolvedValueOnce(ok({ kind: 'preview', ...previewFixture }));

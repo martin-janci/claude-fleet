@@ -117,6 +117,11 @@ export type MoveOutcome =
  *  `E_MOVE_TARGET_DIRTY`, `E_MOVE_TOO_LARGE`, `E_MOVE_CARRY`; `E_MOVE_PARTIAL`
  *  leaves both sessions. `cleanTarget` replaces a stale attempt's leftovers on
  *  the target instead of refusing with `E_MOVE_TARGET_DIRTY` again.
+ *  `forceCrossOrg` carries a live work link across the org boundary the
+ *  target host would put the session on, with a warning, instead of the
+ *  refusal (`E_FORBIDDEN`, details `cross_org: true` — `crossOrgOf` in
+ *  `work.ts` reads it); sent only when set, so an older hub sees the same
+ *  arguments as before.
  *  `when` defaults to `'idle'` — an idle source moves at once, a busy one
  *  yields a pending wait. That default is this wrapper's own; the wire's
  *  own default (an omitted `when`) is `'now'` (`MoveSessionArgs::when`,
@@ -127,7 +132,13 @@ export type MoveOutcome =
 export async function moveSession(
   sessionId: number,
   targetHostAlias: string,
-  opts: { keepSource?: boolean; strict?: boolean; cleanTarget?: boolean; when?: 'now' | 'idle' } = {},
+  opts: {
+    keepSource?: boolean;
+    strict?: boolean;
+    cleanTarget?: boolean;
+    forceCrossOrg?: boolean;
+    when?: 'now' | 'idle';
+  } = {},
 ): Promise<Result<({ kind: 'moved' } & MoveReport) | ({ kind: 'waiting' } & MoveWaiting)>> {
   const r = await invokeCmd<MoveOutcome>('move_session', {
     args: {
@@ -136,6 +147,7 @@ export async function moveSession(
       keep_source: opts.keepSource ?? false,
       strict: opts.strict ?? false,
       clean_target: opts.cleanTarget ?? false,
+      ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
       dry_run: false,
       when: opts.when ?? 'idle',
     },
