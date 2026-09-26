@@ -6189,6 +6189,73 @@ fn a_host_write_lost_at_the_host_paths_read_writes_no_account() {
     assert!(announced.is_empty(), "announced {announced:?}");
 }
 
+/// Residual I1, round 2: work detection's `trusted_projects` swallows its
+/// settings read, and a resolve with nothing to change never reaches a
+/// savepoint. When SQLite answers that read by rolling the host's
+/// transaction back, the next session's PR-signal UPDATE (a plain write)
+/// must not commit on its own.
+#[test]
+fn a_host_write_lost_at_the_trusted_projects_read_writes_no_pr_signals() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    s.upsert_project("o", "r", "/srv/o/r").unwrap();
+    let projects = s.list_projects().unwrap();
+    s.set_setting(crate::service::settings::WORK_TRUSTED_BRANCH_PROJECTS, "[]")
+        .unwrap();
+    // Both sessions sit in the project, so whichever the PR loop resolves
+    // first loses the transaction and the other's UPDATE is the tail.
+    let in_project = |name: &str| crate::tmux::TmuxSession {
+        path: PathBuf::from("/home/u/projects/github.com/o/r"),
+        ..tmux_session(name)
+    };
+    let live = vec![in_project("dev-a"), in_project("dev-b")];
+    let probe = vps_probe(&s, live.clone(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert!(
+        s.get_session("dev-a", "vps")
+            .unwrap()
+            .unwrap()
+            .project_id
+            .is_some(),
+        "the session resolves to the project, so detection reads the trust set"
+    );
+    s.arm_read_ioerr_for_test("settings", "key = 'work.trusted_branch_projects'");
+    bus.take();
+    let mut pr_info = PrInfoMap::new();
+    for name in ["dev-a", "dev-b"] {
+        pr_info.insert(
+            name.into(),
+            crate::service::outcome::PrInfo {
+                pr_url: Some(format!("https://github.com/o/r/pull/{name}")),
+                ci_status: None,
+                signals: Some(crate::service::work::detect::PrSignals {
+                    head: Some("feat/x".into()),
+                    ..Default::default()
+                }),
+            },
+        );
+    }
+    let probe = vps_probe(&s, live, None, vec![], pr_info);
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    let stored: i64 = s
+        .conn_for_test()
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE pr_signals IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored, 0,
+        "a PR-signal write after the lost transaction must not autocommit"
+    );
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
 /// M1: `whoami`'s E_AMBIGUOUS candidates come in `list_all_sessions` order
 /// (most recent activity first), as they did before the direct lookup.
 #[test]
