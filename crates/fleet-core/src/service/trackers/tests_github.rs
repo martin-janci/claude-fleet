@@ -642,6 +642,8 @@ mod flow {
             "items_listed",
             "items_changed",
             "frames_emitted",
+            "items_failed",
+            "consecutive_partial",
         ] {
             assert!(rows[0][k].is_u64(), "{k}: {v}");
         }
