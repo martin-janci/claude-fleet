@@ -118,14 +118,18 @@ pub(crate) fn lifecycle_kind(change: &RowChange) -> Option<&'static str> {
 }
 
 impl Store {
-    // ---- Reconcile write-burst: single transaction + emit-after-commit ----
+    // ---- Reconcile write-burst: one SAVEPOINT + emit-after-release ----
     //
-    // The `*_in_tx` helpers below run ONLY their SQL against an ambient
-    // `&Transaction` and return a `RowChange` describing the event to emit —
-    // they do NOT touch `self.bus`. `apply_host_reconcile` drives them inside
-    // one transaction, commits, and only THEN flushes the collected changes to
-    // the bus. A mid-batch error rolls the whole transaction back, so no event
-    // fires for a write that didn't persist.
+    // The `*_in_tx` helpers below run ONLY their SQL against the
+    // `&Connection` that [`Store::in_savepoint`] hands them and collect a
+    // `RowChange` describing the event to emit — they do NOT touch
+    // `self.bus`. `apply_host_reconcile_in_tx` drives them under one
+    // SAVEPOINT, releases it, and only THEN hands the collected changes to
+    // the bus. Nested in reconcile's per-host `Store::atomically` (the
+    // service path) the bus holds them until that transaction commits;
+    // standalone (`apply_host_reconcile`) the RELEASE is the commit. A
+    // mid-batch error rolls the savepoint back, so no event fires for a
+    // write that didn't persist.
     //
     // The public `update_host_probe` / `upsert_session` /
     // `touch_project_last_session_at` / `delete_sessions_not_in` methods are
@@ -134,16 +138,21 @@ impl Store {
     //
     // MAINTENANCE: each `*_in_tx` helper deliberately mirrors the SQL of its
     // public twin (same column lists, same upsert ON CONFLICT clause, same
-    // SELECT-ids-before-DELETE). They differ ONLY in: (a) `tx` vs `self.conn`,
-    // and (b) collecting a `RowChange` vs emitting via `self.bus`. If you change
-    // a schema/SQL detail in a public method, change its `_in_tx` twin too.
+    // SELECT-ids-before-DELETE). They differ in: (a) `tx` vs `self.conn`,
+    // and (b) collecting a `RowChange` vs emitting via `self.bus` — plus one
+    // deliberate SQL divergence: `upsert_session_in_tx` also writes
+    // `last_reconciled_at` (the pass's freshness stamp, folded into the
+    // upsert so a pass bumps `row_version` once), which the public
+    // `upsert_session` never touches. If you change a schema/SQL detail in a
+    // public method, change its `_in_tx` twin too.
     // Both paths are test-covered (direct: the `*_emits_*` event tests; tx: the
     // `apply_host_reconcile` rollback + happy-path tests), so a divergence will
     // surface as a test failure rather than silent corruption. The ghost /
     // reap pass is the exception: `ghost_and_clean` is ONE function shared by
     // this write-burst (tmux rows, stale-probe guard on) and by the public
-    // `ghost_and_clean_bg_sessions` (pane-less rows, own transaction), so the
-    // two prunes cannot drift apart.
+    // `ghost_and_clean_bg_sessions` (pane-less rows, its own SAVEPOINT —
+    // nested in reconcile's per-host transaction on the service path), so
+    // the two prunes cannot drift apart.
     //
     // `worktree_key` is written by `upsert_session_in_tx` ONLY — the public
     // `upsert_session` intentionally omits it (reconcile is the only path that
