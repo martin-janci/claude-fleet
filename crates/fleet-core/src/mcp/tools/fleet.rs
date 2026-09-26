@@ -14,6 +14,13 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
         let mut h = health::health_check(self.reader());
+        // On the hub the roll-up comes from a pooled connection, which says
+        // nothing about the writer. A poisoned writer fails every write tool
+        // (E_LOCK), and `db_ready: false` is how health reports that — so
+        // check it here too, without taking the lock.
+        if self.store.is_poisoned() {
+            h.db_ready = false;
+        }
         h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
             if let Ok(s) = self.reader().lock() {

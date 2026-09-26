@@ -154,3 +154,28 @@ async fn the_read_tools_answer_the_same_through_the_pool() {
         assert_eq!(a, b, "{tool} answered differently through the pool");
     }
 }
+
+/// `db_ready: false` is how `fleet_health` reports a poisoned store mutex
+/// (every write tool then fails `E_LOCK`). Reading through the pool must not
+/// hide a poisoned WRITER: the pooled connections are fine, the writer is not.
+#[tokio::test]
+async fn fleet_health_reports_a_poisoned_writer_even_through_the_pool() {
+    let (_dir, path, store) = seeded();
+    let t = tools(&store, pool(&path));
+    let healthy = json(&call(&t, "fleet_health").await.unwrap());
+    assert_eq!(healthy["db_ready"], true, "{healthy}");
+
+    let writer = Arc::clone(&store);
+    let _ = std::thread::spawn(move || {
+        let _guard = writer.lock().unwrap();
+        panic!("poison the writer");
+    })
+    .join();
+    assert!(store.is_poisoned());
+
+    let sick = json(&call(&t, "fleet_health").await.unwrap());
+    assert_eq!(
+        sick["db_ready"], false,
+        "a poisoned writer reported as ready: {sick}"
+    );
+}

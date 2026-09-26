@@ -72,8 +72,6 @@ async fn hub() -> Hub {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.db");
     let store = Store::open_with_bus(&path, Arc::new(NoopEventBus)).unwrap();
-    // The master token as `serve` leaves it: stored, and passed to the app.
-    store.set_setting(SETTING_TOKEN, MASTER_TOK).unwrap();
     store.upsert_host("box").unwrap();
     store.upsert_host_token("box", HOST_TOK).unwrap();
     store
