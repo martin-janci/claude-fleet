@@ -22,21 +22,44 @@ cp fleet-hub.env.example fleet-hub.env
 # own domain (both point DNS at this machine; Caddy gets a cert automatically)
 ```
 
-**The image.** The compose file pulls `ghcr.io/martin-janci/fleet-hub:latest`.
-`hub-image.yml` has now run successfully on a pushed `v*` tag (v0.2.21 and
-later), so a `latest` tag should exist —
-[check the package page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
-if you are unsure, or if it still shows private (a manual `workflow_dispatch`
-run, rather than a tag push, only ever publishes a `sha-<commit>` tag, never
-`latest`). If you cannot pull the package for any reason, build the image
-locally from a checkout of the repository instead and point `image:` in
-`docker-compose.yml` at it:
+**The image.** The compose file pins one release —
+`ghcr.io/martin-janci/fleet-hub:0.2.41`-shaped, not `:latest`. `docker compose
+pull` then fetches exactly that version, so the hub you are running is the one
+you can name, and going back to it is editing one line. Upgrading is a
+deliberate act: see *Upgrade and rollback* below.
+
+Note the missing `v`: the git tag is `v0.2.41`, the image tag published for it
+is `0.2.41`. Every released version has one. There is no image for an
+arbitrary commit: a `sha-<commit>` tag is published too, but only ever
+alongside a release, because only a `v*` tag builds an image at all (see the
+next paragraph) — so it is a second name for the version tag, not a way to
+pull an unreleased commit. `latest` exists as well and is a convenience for
+"whatever the newest stable release is" — fine for a throwaway trial, wrong
+for anything you will have to roll back, because the tag moves under you on
+the next release and `docker compose pull` then silently changes your
+deployment. A release candidate (`0.3.0-rc.1`) never moves `latest`.
+
+Only a pushed `v*` tag publishes an image at all: `hub-image.yml`'s jobs are
+gated on the ref being a tag, and on the tag matching the version in the tree
+it points at, so nothing built from unreleased code can reach this namespace.
+[The package page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
+lists what exists. Each release also records the exact image digest its tag
+points at, on the release page — pin that instead of the version tag if you
+want an image that cannot be re-pointed even in principle:
+
+```yaml
+image: ghcr.io/martin-janci/fleet-hub@sha256:<digest from the release page>
+```
+
+If you cannot pull the package for any reason, build the image locally from a
+checkout of the repository instead and point `image:` in `docker-compose.yml`
+at it:
 
 **Platforms.** `linux/amd64` and `linux/arm64`. **arm64 is best-effort
 until it has a track record**: `hub-image.yml` builds each platform on its
 own native runner (no QEMU) and, if the `arm64` leg fails, still publishes
 `amd64` alone under the same tags rather than blocking the image on it —
-so a given `latest`/`vX.Y.Z` may, on such a run, carry only an amd64
+so a given `X.Y.Z`/`latest` may, on such a run, carry only an amd64
 manifest, and `docker pull --platform linux/arm64` (or any arm64 host
 pulling by tag) then fails outright rather than silently getting an amd64
 image. **The run itself still shows green** when this happens — an
@@ -44,8 +67,9 @@ amd64-only publish is a successful run, not a failed one, since amd64
 publishing must keep working regardless of arm64 — but it is not silent:
 the run carries a `::warning::` annotation and a job-summary note saying
 arm64 failed and the manifest is amd64-only. Check the `hub-image`
-workflow's own run history and summaries, or `docker buildx imagetools
-inspect ghcr.io/martin-janci/fleet-hub:latest`, if that matters to you.
+workflow's own run history and summaries (the release page says
+`linux/amd64 only` for such a version), or `docker buildx imagetools inspect
+ghcr.io/martin-janci/fleet-hub:<version>`, if that matters to you.
 
 ```bash
 docker build -f crates/fleet-hub/Dockerfile -t fleet-hub:local .
@@ -140,6 +164,115 @@ token. Probes therefore leave no rejected-request lines in the log.
 The check does not open `state.db` and does not read the stored `mcp.port`:
 if you run the hub on another port, set it with `FLEET_HUB_PORT`, not only
 `--port`.
+
+## Upgrade and rollback
+
+The compose file pins one version, so nothing changes under you: an upgrade is
+a line you edit, and a rollback is the same line edited back. Both are two
+commands and a check.
+
+**What am I running?** `/healthz` deliberately will not tell you — it answers a
+fixed `fleet-hub ok` and names no version, which is why it can sit outside the
+bearer token and the `Host` allowlist. Ask the binary instead, on the hub box,
+with no credential:
+
+```bash
+docker compose exec fleet-hub fleet-hub --version    # fleet-hub 0.2.41
+docker compose images fleet-hub                      # the tag and image id in use
+```
+
+Over the network, and only with the master token, `fleet_health` reports the
+same string in its `version` field (see the `curl` under *Setup* above). To see
+which exact image — not just which version — is running:
+
+```bash
+docker inspect --format '{{index .RepoDigests 0}}' "$(docker compose ps -q fleet-hub)"
+```
+
+**Back up `state.db` first.** It lives in the `hub-data` volume at
+`/var/lib/fleet-hub/state.db` and carries the master token, every host, every
+session and the asset catalog. Copy it with the container stopped, so you are
+not copying a database mid-write:
+
+```bash
+cd ~/fleet-hub
+docker compose stop fleet-hub
+docker compose cp fleet-hub:/var/lib/fleet-hub/state.db "state.db.$(date +%F).bak"
+```
+
+**Upgrade.**
+
+```bash
+# 1. read the new version's release notes, then point the pin at it
+#    (docker-compose.yml:  image: ghcr.io/martin-janci/fleet-hub:0.3.0)
+$EDITOR docker-compose.yml
+
+# 2. fetch exactly that version and restart on it
+docker compose pull fleet-hub
+docker compose up -d fleet-hub
+
+# 3. check it came up on the version you asked for
+docker compose exec fleet-hub fleet-hub --version
+docker compose ps           # STATUS should reach `healthy` within a minute
+```
+
+Step 3 is not ceremony: `up -d` recreates the container only if something
+actually changed, so a pin you forgot to edit produces a completely silent
+no-op.
+
+Refreshing the compose file itself (`curl -O …/deploy/hub/docker-compose.yml`)
+also upgrades you, because the copy on `main` carries the pin from the newest
+stable release. Diff it against yours before overwriting: it is the file your
+local edits live in.
+
+One window to know about. That pin is written in the release commit, which
+lands on `main` at the same moment the image build *starts* — so for the
+length of two container builds, and permanently if that build fails, the pin
+on `main` can name a tag ghcr does not have yet. A fresh install caught in it
+gets `manifest unknown` from `docker compose pull`. Nothing in CI can catch
+this (`check-version-consistency.sh` compares the pin with the repo's own
+version, not with the registry); what does is
+`scripts/check-release-drift.sh`, which asks ghcr daily whether the pin
+resolves and opens an issue when it does not. If you hit it, pin the previous
+version — [the package
+page](https://github.com/martin-janci/claude-fleet/pkgs/container/fleet-hub)
+lists what actually exists — and try again later.
+
+**Roll back.** Put the old version back in `image:` and repeat the same two
+commands:
+
+```bash
+$EDITOR docker-compose.yml   # image: …/fleet-hub:0.2.41
+docker compose pull fleet-hub
+docker compose up -d fleet-hub
+docker compose exec fleet-hub fleet-hub --version
+```
+
+The one thing that can stop a rollback is the **database schema**. The hub
+migrates `state.db` forward on startup and refuses to open a database that a
+newer release has already migrated, rather than running against a shape it does
+not understand:
+
+```
+this database is at schema version <newer>, but this build of claude-fleet
+only knows up to <older>: it was last opened by a newer release. It is not
+corrupt; do not delete it. Run that release (or a newer one) again, or restore
+the copy of state.db you backed up before upgrading.
+```
+
+That message is the whole rollback procedure for a version that migrated:
+go forward again, or restore the backup you took above — with the hub stopped,
+`docker compose cp state.db.<date>.bak
+fleet-hub:/var/lib/fleet-hub/state.db`, then start the older version. Sessions
+that ran while the newer release was up are in the newer database, not in the
+restored one. Rolling back between two versions that share a schema needs
+none of this and loses nothing.
+
+**If a pull fails.** `manifest unknown` means the tag does not exist — check
+the spelling and, above all, that you did not write the `v`: the image tag for
+`v0.3.0` is `0.3.0`. `no matching manifest for linux/arm64` means that
+version's arm64 leg failed and the tag carries an amd64-only manifest (see
+*Platforms* above); pin the previous version, or a later one, instead.
 
 ## Add and provision hosts
 

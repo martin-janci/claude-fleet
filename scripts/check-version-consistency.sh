@@ -2,17 +2,23 @@
 # Assert that every version carrier in this repo agrees, and (optionally) that
 # a release tag agrees with them too.
 #
-# Nothing in CI used to check this: `scripts/release.sh` rewrites six files and
-# syncs four Cargo.lock entries, and a hand bump of one of them (as happened
-# for 0.2.27, commit fa8f3a30) went unnoticed — while `release.yml` never
-# compared the pushed tag against `src-tauri/tauri.conf.json`, the file the
-# desktop bundle filenames come from (F-C5, F-C6, F-C10).
+# Nothing in CI used to check this: `scripts/release.sh` rewrites seven files
+# (six version carriers plus the hub image pin — see below) and syncs four
+# Cargo.lock entries, and a hand bump of one of them (as happened for 0.2.27,
+# commit fa8f3a30) went unnoticed — while `release.yml` never compared the
+# pushed tag against `src-tauri/tauri.conf.json`, the file the desktop bundle
+# filenames come from (F-C5, F-C6, F-C10).
 #
 # The carrier list is NOT copied here: it is `scripts/release.sh --list`, i.e.
 # that script's own VERSION_FILES, so a carrier added there is checked here the
 # same day. `package.json` is the source of truth (docs/RELEASING.md); every
 # other carrier, and every Cargo.lock entry for a crate this repo versions,
 # must hold the byte-identical string.
+#
+# One more file is checked by a different rule: the hub image pin in
+# `deploy/hub/docker-compose.yml` (path from `release.sh --list-image-pin`).
+# Its version lives in a Docker tag, which carries no `v` and must not follow a
+# pre-release — see section 5.
 #
 # Usage:
 #   scripts/check-version-consistency.sh                       # carriers only
@@ -204,7 +210,72 @@ for entry in "${EXEMPT[@]}"; do
   [[ "$got_lock" == "$pinned" ]] || problem "Cargo.lock entry for '$name' is '${got_lock:-<none>}', but the allowlist pins it at '$pinned'"
 done
 
-# --- 5. on a release tag: the tag name too -----------------------------------
+# --- 5. the shipped hub deployment pins a real, published image --------------
+# deploy/hub/docker-compose.yml is the file operators curl and run, and its
+# `image:` tag is a version carrier in everything but syntax (F-C9). Its rule
+# differs from the carriers above in two ways, both deliberate:
+#   * the image tag has no `v` prefix (`v1.2.3` -> `1.2.3`), and
+#   * on a PRE-RELEASE the pin must NOT follow. `main` is where docs/hub.md
+#     tells operators to fetch this file from, so a `0.3.0-rc.1` pin there
+#     would hand a release candidate to the next hub that is set up. The pin
+#     stays on the last stable release until the finalising tag moves it —
+#     the same rule hub-image.yml applies to `latest`.
+#
+# "the last stable release" is asserted, not merely "some plain X.Y.Z". The
+# looser rule let any stable-shaped string through during an rc window — pin
+# 0.1.0 under version 0.3.0-rc.1 passed, and 0.1.0 has never been published as
+# a hub image — which is precisely the window where the pin gets hand-edited.
+# The oracle is CHANGELOG.md, newest-first and in this same tree, so the check
+# stays offline: its newest heading without a pre-release suffix IS the last
+# stable release.
+#
+# WHAT THIS DOES AND DOES NOT PROVE. It proves the pin agrees with the rest of
+# the tree. It does NOT prove the image is in the registry — nothing here
+# touches ghcr, and the pin is written into the release commit BEFORE
+# hub-image.yml has built anything. `scripts/check-release-drift.sh` check 5
+# is what asks the registry, daily.
+# The path comes from `scripts/release.sh --list-image-pin`, not a copy here.
+PIN_FILE="$(scripts/release.sh --list-image-pin)"
+if [[ ! -f "$PIN_FILE" ]]; then
+  echo "check-version-consistency: scripts/release.sh --list-image-pin names a missing file: $PIN_FILE" >&2
+  exit 1
+fi
+# The `image:` line for fleet-hub, in `name:tag` form, ignoring comments.
+PIN="$(sed -n 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/[^:@[:space:]]*/fleet-hub:\([^[:space:]#]*\).*|\1|p' "$PIN_FILE" | head -n1)"
+if [[ -z "$PIN" ]]; then
+  echo "check-version-consistency: no 'image: ghcr.io/<owner>/fleet-hub:<tag>' line in $PIN_FILE" >&2
+  echo "  (a digest pin is not checkable here — if that is intended, teach this script about it)" >&2
+  exit 1
+fi
+if [[ "$VERSION" == *-* ]]; then
+  # Pre-release: the pin must be the LAST STABLE release. The newest
+  # `## [X.Y.Z]` heading in CHANGELOG.md with no pre-release suffix — the
+  # pattern cannot match `## [0.3.0-rc.1]`, because a `-` stands where the `]`
+  # has to be, so pre-release sections are skipped without a second rule.
+  LAST_STABLE="$(sed -n 's/^## \[\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\].*/\1/p' CHANGELOG.md | head -n1)"
+  if [[ -z "$LAST_STABLE" ]]; then
+    # Nothing stable has ever been released. Fall back to the shape rule and
+    # say so, rather than inventing an expectation out of an empty CHANGELOG.
+    if [[ "$PIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf '  ok    %-32s %s (pre-release %s; CHANGELOG.md records no stable release to compare with)\n' "$PIN_FILE" "$PIN" "$VERSION"
+    else
+      printf '  WRONG %-32s %s\n' "$PIN_FILE" "$PIN"
+      problem "$PIN_FILE pins the hub image at '$PIN'; during the pre-release $VERSION it must stay on a stable X.Y.Z"
+    fi
+  elif [[ "$PIN" == "$LAST_STABLE" ]]; then
+    printf '  ok    %-32s %s (pre-release %s does not move the pin off the last stable release)\n' "$PIN_FILE" "$PIN" "$VERSION"
+  else
+    printf '  WRONG %-32s %s\n' "$PIN_FILE" "$PIN"
+    problem "$PIN_FILE pins the hub image at '$PIN'; during the pre-release $VERSION it must stay on the last stable release, '$LAST_STABLE' (newest stable section in CHANGELOG.md)"
+  fi
+elif [[ "$PIN" == "$VERSION" ]]; then
+  printf '  ok    %-32s %s\n' "$PIN_FILE" "$PIN"
+else
+  printf '  WRONG %-32s %s\n' "$PIN_FILE" "$PIN"
+  problem "$PIN_FILE pins the hub image at '$PIN', expected '$VERSION' (no 'v' prefix) — scripts/release.sh rewrites this line"
+fi
+
+# --- 6. on a release tag: the tag name too -----------------------------------
 if [[ -n "$EXPECT_TAG" ]]; then
   if [[ "$EXPECT_TAG" == "v$VERSION" ]]; then
     printf '  ok    %-32s %s\n' "git tag" "$EXPECT_TAG"

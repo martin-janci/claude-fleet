@@ -224,8 +224,16 @@ enum PeerCmd {
 #[tokio::main]
 async fn main() -> ExitCode {
     // Mandatory and first: fleet-core keeps no default app version, so
-    // `app_version::get()` — /healthz, the agent handshake, the MCP hello —
-    // panics until this line has run. This crate's version is the hub's.
+    // `app_version::get()` — `fleet_health`, the agent handshake, the MCP
+    // hello, the outbound User-Agent, the diagnostics bundle — panics until
+    // this line has run. This crate's version is the hub's.
+    //
+    // NOT /healthz: that route answers a fixed `fleet-hub ok` and names no
+    // version on purpose (see `mcp::HEALTHZ_BODY`), which is what lets it sit
+    // outside the token and the Host allowlist. Reading the running version
+    // back out of a container is `fleet-hub --version` (clap, from this same
+    // constant) or an authenticated `fleet_health` — docs/hub.md, "Upgrade
+    // and rollback".
     fleet_core::app_version::set(env!("CARGO_PKG_VERSION"));
     let cli = Cli::parse();
     let env: std::collections::HashMap<String, String> = std::env::vars().collect();

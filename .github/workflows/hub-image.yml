@@ -6,8 +6,66 @@ on:
 permissions:
   contents: read
   packages: write
+
+# EVERY job here is gated on `github.ref_type == 'tag'`, the same gate
+# release.yml carries. `workflow_dispatch` stays in the trigger list as the
+# re-run path for a tag whose image build failed — but it must be dispatched
+# AT a tag (`gh workflow run hub-image.yml --ref v1.2.3`), not at a branch.
+# Dispatched from a branch that CONTAINS THIS FILE, every job below skips and
+# the run publishes nothing.
+#
+# That qualifier is load-bearing and cannot be engineered away here:
+# `workflow_dispatch` runs the workflow file as it exists on the SELECTED ref.
+# Dispatching at a branch cut before this gate landed still runs that branch's
+# ungated copy, which pushes by digest and hangs a `sha-<commit>` tag on it.
+# The gate protects the ref it is on, not the repository, and no YAML in this
+# file can change that. The durable closure is branch-protection / ref rules on
+# who may dispatch, or letting the old branches age out — not a comment here
+# claiming more than the code does.
+#
+# Without the gate, a branch dispatch pushed a real image built from
+# unreleased code into the namespace operators pull from: the `build` legs
+# push BY DIGEST unconditionally, before any tag logic runs, so blobs landed
+# in ghcr regardless of ref and `merge` then hung a `sha-<commit>` tag on
+# them. `latest` and the semver tag were already safe (both are disabled off
+# a tag ref by `docker/metadata-action`), but a `sha-` tag in the registry is
+# still an image someone can pull and run, with no release, no CHANGELOG
+# entry and no version anyone can name (F-C9). Gating only `merge` would not
+# have been enough — it has to gate `build`, where the push happens.
+#
+# docs/hub.md used to offer that branch dispatch to operators as a reassurance
+# ("only ever publishes a sha-<commit> tag, never latest"); it now describes
+# this gate instead.
 jobs:
+  # Gate. The image reports `crates/fleet-hub/Cargo.toml`'s version at runtime
+  # (`main.rs`'s `app_version::set(env!("CARGO_PKG_VERSION"))`), while the
+  # image's own semver TAG comes from the git ref — and nothing compared the
+  # two (F-C10). On a plain tag push they agree by construction, because the
+  # Dockerfile builds `--locked` from the checked-out tree; the reachable drift
+  # is a re-tag, a dispatch at a tag that does not match the tree, or a
+  # hand-bumped carrier (F-C5, as happened for 0.2.27).
+  #
+  # This is the same script and the same invocation ci.yml and release.yml use
+  # — called, not reimplemented: `--expect-tag` asserts the tag equals
+  # `v<package.json version>`, and every carrier (including
+  # `crates/fleet-hub/Cargo.toml` and the `fleet-hub` Cargo.lock entry, and
+  # now the hub image pin in deploy/hub/docker-compose.yml) agrees with it.
+  # It needs nothing but a checkout and `node`.
+  #
+  # The tag name arrives through `env:`, never interpolated into a `run:` body.
+  version-consistency:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert the carriers and the tag agree
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: scripts/check-version-consistency.sh --expect-tag "$REF_NAME"
+
   meta:
+    if: github.ref_type == 'tag'
+    needs: version-consistency
     runs-on: ubuntu-24.04
     # This job only renders tag/label strings — it does not check out the
     # repository and it does not touch the registry, so it needs none of the
@@ -22,9 +80,24 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/fleet-hub
+          # `latest` is gated on the tag having NO pre-release suffix.
+          # deploy/hub/docker-compose.yml no longer pins `latest` — it pins an
+          # exact version — so the operators this protects are the ones who
+          # chose `latest` themselves: the tag is documented (docs/hub.md, and
+          # the compose file's own comment) as "whatever the newest STABLE
+          # release is", and an rc moving it would hand those hubs a release
+          # candidate on their next `docker compose pull`, silently, since
+          # nothing about the tag they wrote changed. The rc still gets its
+          # own `…:0.3.0-rc.1` tag from the semver line above. A pre-release
+          # is a tag with a `-` in its version, the same test release.yml
+          # uses to set `prerelease:` and scripts/release.sh uses to decide
+          # whether to move the compose pin.
+          #
+          # (The comment lives out here rather than inside the block scalar
+          # below: every line in there is an input value to the action.)
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=sha
 
   # One native leg per platform — no QEMU. A Rust release build the size of
@@ -52,7 +125,8 @@ jobs:
   # `merge` publishes nothing at all and fails visibly rather than leaving
   # a stale `latest`.
   build:
-    needs: meta
+    if: github.ref_type == 'tag'
+    needs: [version-consistency, meta]
     strategy:
       fail-fast: false
       matrix:
@@ -126,10 +200,20 @@ jobs:
   # annotation on the run, and a line in the job summary, both emitted only
   # on the amd64-only path (`steps.digests.outputs.status`, set from
   # merge-hub-digests.sh's own `STATUS=` line).
+  # `!cancelled()` deliberately lets this job run past a FAILED build leg (see
+  # above) — but not past a failed gate. `version-consistency` is therefore
+  # spelled out here rather than left to `needs:`: an unchecked version or a
+  # branch ref must publish nothing, and `!cancelled()` on its own would
+  # happily run this job after either. (`needs['version-consistency']` and not
+  # `needs.version-consistency`: a hyphen cannot appear in dotted property
+  # access — the same form release.yml uses.)
   merge:
-    if: ${{ !cancelled() }} # bare `!cancelled()` is invalid YAML here (leading `!`), so this one keeps the wrapper
-    needs: [meta, build]
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success' }}
+    needs: [version-consistency, meta, build]
     runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.inspect.outputs.digest }}
+      status: ${{ steps.digests.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -178,8 +262,132 @@ jobs:
             echo
             echo "The arm64 build leg failed. The manifest just published for this tag covers **linux/amd64 only** for \`$IMAGE\`. An arm64 host pulling it will fail until a later run publishes both platforms."
           } >>"$GITHUB_STEP_SUMMARY"
+      # Two calls on purpose: the bare one for the log (the whole manifest,
+      # both platforms, readable), and the `--format` one for the index
+      # digest alone, which `record-digest` below writes onto the release.
+      # `.Manifest.Digest` is the digest of the multi-arch index just pushed
+      # — the thing an operator puts after `@` to pin a deployment to an
+      # image that cannot be re-pointed.
       - name: Inspect the pushed manifest
+        id: inspect
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
           VERSION: ${{ needs.meta.outputs.version }}
-        run: docker buildx imagetools inspect "$IMAGE:$VERSION"
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          {
+            echo "### fleet-hub image"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tag | \`$IMAGE:$VERSION\` |"
+            echo "| Digest | \`$digest\` |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # The version -> digest mapping, written where an operator will look for it:
+  # the release page for this tag. Without it, "which image is 0.3.0?" is only
+  # answerable by querying ghcr, which needs a token with `read:packages`.
+  #
+  # Deliberately soft. The release is created by release.yml, a different
+  # workflow triggered by the same tag push; this job runs after two container
+  # builds, so in practice the release exists long before it — but if it does
+  # not, this warns and succeeds rather than failing a run whose image was
+  # published perfectly well. Re-running the tag then fills it in.
+  #
+  # The block is delimited by HTML comments and rewritten in place, so a re-run
+  # replaces it instead of appending a second copy, and nothing the owner has
+  # edited into the body above it is touched (create-release makes the same
+  # promise about the body on reuse). Body text never goes through a `run:`.
+  #
+  # This is the only job here that needs `contents: write`, so it is the only
+  # one that has it — and it is a separate job from `merge` precisely so the
+  # job that pushes images does not also hold a token that can rewrite
+  # releases.
+  record-digest:
+    if: ${{ github.ref_type == 'tag' && needs.merge.result == 'success' }}
+    needs: [meta, merge]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
+          VERSION: ${{ needs.meta.outputs.version }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+          STATUS: ${{ needs.merge.outputs.status }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace(/^refs\/tags\//, '');
+            const { IMAGE, VERSION, DIGEST, STATUS } = process.env;
+            if (!DIGEST) {
+              core.warning('The merge job reported no manifest digest; nothing to record.');
+              return;
+            }
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const release = releases.find(r => r.tag_name === tag);
+            if (!release) {
+              core.warning(`No release exists for ${tag} yet — the image digest was not recorded on it. Re-run this workflow once release.yml has created it.`);
+              return;
+            }
+            const START = '<!-- fleet-hub-image -->';
+            const END = '<!-- /fleet-hub-image -->';
+            const block = [
+              START,
+              '### Hub image',
+              '',
+              `\`${IMAGE}:${VERSION}\` — digest \`${DIGEST}\``,
+              '',
+              STATUS === 'amd64-only'
+                ? '> **linux/amd64 only.** The arm64 build leg failed on this run; an arm64 host pulling this tag will fail until a later run publishes both platforms.'
+                : 'Platforms: `linux/amd64`, `linux/arm64`.',
+              '',
+              'The version tag is what `deploy/hub/docker-compose.yml` pins. To pin an image that can never be re-pointed, use the digest instead:',
+              '',
+              '```yaml',
+              `image: ${IMAGE}@${DIGEST}`,
+              '```',
+              END,
+            ].join('\n');
+            // PAIR-AWARE, because this job holds `contents: write` and the
+            // text it is editing is the release notes a human wrote.
+            // `indexOf(START)` + `indexOf(END)` taken independently deletes
+            // everything between a STRAY marker and the real block's END:
+            // with `<!-- fleet-hub-image -->` mentioned once in prose, run 1
+            // appends a proper block (no END yet) and run 2 splices from the
+            // prose mention to the appended END, destroying the paragraphs in
+            // between (reproduced in node against this exact algorithm).
+            //
+            // So: find the END, then the LAST START before it — that is the
+            // real block's opening, whatever is quoted earlier — and refuse
+            // outright if anything marker-shaped survives after the END, since
+            // a body with two pairs is one this job did not write and must not
+            // guess at. Refusing leaves the notes intact and says so; the
+            // digest is still in the run's job summary.
+            const body = release.body || '';
+            const endAt = body.indexOf(END);
+            const startAt = endAt === -1 ? -1 : body.lastIndexOf(START, endAt);
+            let next;
+            if (startAt !== -1) {
+              const tail = body.slice(endAt + END.length);
+              if (tail.includes(START) || tail.includes(END)) {
+                core.warning(`The release body for ${tag} contains more than one fleet-hub-image marker pair; leaving it untouched rather than guessing which one to replace. The digest is in this run's job summary.`);
+                return;
+              }
+              next = body.slice(0, startAt) + block + tail;
+              if (next === body) {
+                core.info('The release already records this digest; nothing to do.');
+                return;
+              }
+            } else {
+              if (body.includes(START)) {
+                core.warning(`The release body for ${tag} mentions ${START} with no closing ${END}; appending a fresh block instead of splicing into it.`);
+              }
+              next = `${body.trimEnd()}\n\n${block}\n`;
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, body: next });
+            core.info(`Recorded ${IMAGE}:${VERSION}@${DIGEST} on release ${release.id} (${tag}).`);

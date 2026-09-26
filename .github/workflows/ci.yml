@@ -43,6 +43,18 @@ jobs:
           for leg in $(scripts/release-assets.sh legs); do
             scripts/release-assets.sh assets "$v" "$leg" >/dev/null
           done
+      # A release's notes are CHANGELOG.md's section for its version, lifted
+      # verbatim, and release.yml refuses to create a release without one.
+      # Catching that at tag time would mean deleting a tag to fix it; catch
+      # it on the PR instead. scripts/release.sh always writes the section, so
+      # this can only fire on a version that was bumped by hand — which is
+      # exactly the mistake that produced the untagged, changelog-less 0.2.27.
+      - name: The current version has release notes
+        run: |
+          set -euo pipefail
+          v="$(node -p 'require("./package.json").version')"
+          scripts/changelog-section.sh "$v" >/dev/null
+          echo "CHANGELOG.md has a section for $v"
 
   rust:
     strategy:
