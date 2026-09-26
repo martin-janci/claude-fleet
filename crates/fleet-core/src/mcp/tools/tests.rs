@@ -1563,6 +1563,48 @@ async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
         .is_none());
 }
 
+/// `rewind_conversation` truncates a transcript, rebinds a row and restarts
+/// a pane — a session-addressed WRITE, so it must be fenced to the caller's
+/// host exactly as `restart_session` and `recreate_session` above are. The
+/// service layer is caller-agnostic, so the fence lives in the handler.
+#[tokio::test]
+async fn per_host_callers_cannot_rewind_another_hosts_session() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
+        .unwrap();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    for mode in ["rewind", "fork"] {
+        forbidden(
+            t.rewind_conversation(
+                Extension(a.clone()),
+                Parameters(RewindConversationParams {
+                    session_id: on_b,
+                    anchor_uuid: None,
+                    mode: mode.into(),
+                    new_worktree: None,
+                    confirm_nonce: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+    }
+    // The row still names the original conversation: the refusal landed
+    // before the engine could rebind anything.
+    assert_eq!(
+        t.store
+            .lock()
+            .unwrap()
+            .get_session_by_id(on_b)
+            .unwrap()
+            .unwrap()
+            .claude_session_id
+            .as_deref(),
+        Some("0f8fad5b-d9cb-469f-a165-70867728950e")
+    );
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
     let (s, _pid, on_b) = two_host_store();

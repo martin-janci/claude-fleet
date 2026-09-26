@@ -225,6 +225,19 @@ impl FleetTools {
                 )))
             }
         };
+        // Fence the target the way every other session-addressed write does
+        // (`restart_session` above, `move_session`, `spawn_review`): resolve
+        // the row through the store FIRST, so a per-host token cannot rewind
+        // another host's session, and apply D7's org boundary on top — a
+        // session the caller may not see answers as a missing one.
+        self.require_visible_session(&caller, p.session_id)?;
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            "the session to rewind",
+        )?;
         // Rewind rebuilds a live pane, so it needs a person (D12), the same
         // rule restart_session follows. Fork starts something new and does not.
         if mode == rewind::RewindMode::Rewind {
@@ -237,7 +250,7 @@ impl FleetTools {
         }
         let row = rewind::rewind_conversation(
             rewind::RewindArgs {
-                session_id: p.session_id,
+                session_id: row.id,
                 anchor_uuid: p.anchor_uuid,
                 mode,
                 new_worktree: p.new_worktree,
