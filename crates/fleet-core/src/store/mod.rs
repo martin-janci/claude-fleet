@@ -28,6 +28,8 @@ mod sessions;
 mod tasks;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+pub(crate) mod testgen;
 mod timeline;
 mod tracker_items;
 mod trackers;

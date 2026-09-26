@@ -186,15 +186,16 @@ M12.6        docs; after the user's M10.3 acceptance run
 
 ## Revisions
 - 2026-09-25: first version.
-- 2026-09-25: plan copied onto the M12.2 branch (it was not on `main` yet).
-  **M12.2 (scale) landed**, with its numbers:
+- 2026-09-25: M12.1 landed. `store::testgen` builds the pre-work-graph database from the historical files 001–044. That is v0.2.37, not v0.2.38: v0.2.38 already shipped 045–055, peer links included, so 054/055 run after the work graph and belong to the chain. `store::schema::tests_upgrade` runs every later migration (045–057, read from `MIGRATIONS`). Measured: ~120 ms in debug and ~44 ms in release, against a 5 s budget. No migration was slow or wrong on the generated data. There was no downgrade guard: M12.1 adds one in `migrate()`. It is a behaviour change: an older build now refuses a newer database instead of running against it. The `docs/RELEASING.md` section *Upgrading into the work graph* covers the upgrade.
+- 2026-09-25: **M12.2 (scale) landed**, with its numbers:
   - **Fixture.** `store/scale_fixture.rs` (test-only, seeded splitmix64):
     20 hosts, 3 orgs (4 placement rules, one org isolating), 40 projects,
     2,000 sessions with worktrees and participants, 3 trackers with 5,000
     items, 20,000 work links (≈4,000 live in every state, the rest ended on
     4,000 retired participants), 50,000 journal rows of every kind, 4,000
     conversations, 40,000 timeline events. Built in ≈3.6 s by plain SQL in one
-    transaction; the M12.1 generator was not used.
+    transaction. It is independent of M12.1's `store::testgen`, which was
+    built in parallel.
   - **Budget tests.** `service/work/scale_tests.rs` (plain `cargo test`;
     `-- --nocapture` prints p50/p95). Every call is timed over 11 runs, and its
     statements are traced (`rusqlite`'s `trace` feature, dev-only) and put
