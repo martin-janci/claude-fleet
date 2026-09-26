@@ -69,11 +69,11 @@ derive_next() {
   fi
   bodies="$(git log --no-merges --format='%b' "$range")"
   if grep -qE '^[a-z]+(\([^)]*\))?!: ' <<<"$subjects" || grep -qE '^BREAKING[ -]CHANGE' <<<"$bodies"; then
-    level=major
+    level="major"
   elif grep -qE '^feat(\([^)]*\))?: ' <<<"$subjects"; then
-    level=minor
+    level="minor"
   else
-    level=patch
+    level="patch"
   fi
   IFS=. read -r major minor patch <<<"$base"
   case "$level" in
