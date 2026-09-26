@@ -1265,6 +1265,94 @@ async fn run_pass_does_not_advance_the_watermark_when_a_view_batch_has_a_poison_
     );
 }
 
+/// Work graph M13.1 / D25: a pass that skips an item records it in the
+/// metrics (and in `fleet_health`: degraded, then failing after N passes in
+/// a row, never a credential reason); a clean pass zeroes it again.
+#[tokio::test]
+async fn skipped_items_fill_the_metrics_walk_health_to_failing_and_a_clean_pass_resets_them() {
+    use crate::service::health::{
+        trackers_from_store, TRACKER_FAILING_AFTER, TRACKER_REASON_ITEMS_SKIPPED,
+    };
+    use crate::service::orgs::OrgScope;
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_10104 BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = '10104' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let health = |sync: &TrackerSync| {
+        let s = fx.store.lock().unwrap();
+        trackers_from_store(&s, &OrgScope::All, &|ids| sync.metrics(ids), T0)
+            .trackers
+            .remove(0)
+    };
+    for n in 1..=TRACKER_FAILING_AFTER {
+        fx.fake.clear_routes();
+        fx.fake
+            .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+            .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+        let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+        assert_eq!((p.error.as_deref(), p.failed), (None, 1), "{p:?}");
+        let m = sync.metrics(&[fx.tracker]).remove(0);
+        assert_eq!((m.items_failed, m.consecutive_partial), (1, n), "{m:?}");
+        assert_eq!((m.consecutive_failures, m.last_error.as_deref()), (0, None));
+        assert!(
+            m.last_item_error
+                .as_deref()
+                .is_some_and(|e| e.contains("poison")),
+            "{m:?}"
+        );
+        let h = health(&sync);
+        let want = if n >= TRACKER_FAILING_AFTER {
+            "failing"
+        } else {
+            "degraded"
+        };
+        assert_eq!(h.health, want, "pass {n}: {h:?}");
+        assert_eq!(
+            h.reason, TRACKER_REASON_ITEMS_SKIPPED,
+            "not a credential problem"
+        );
+        assert_eq!(h.state, "ok");
+        assert!(h
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("poison")));
+    }
+
+    // The item stores again: a clean pass zeroes both counts, health is ok.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch("DROP TRIGGER poison_10104")
+        .unwrap();
+    fx.fake.clear_routes();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!(
+        (
+            m.items_failed,
+            m.consecutive_partial,
+            m.last_item_error.as_deref()
+        ),
+        (0, 0, None),
+        "{m:?}"
+    );
+    let h = health(&sync);
+    assert_eq!((h.health.as_str(), h.reason.as_str()), ("ok", ""));
+    assert_eq!(h.last_error, None);
+}
+
 // ── fix round 1 (2026-09-26 review): a systemic, every-item failure must
 //    still fail the PASS visibly — silent tolerance is only for a poison
 //    item AMONG good ones, never for a batch, not even a whole pass, with

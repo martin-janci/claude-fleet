@@ -26,6 +26,7 @@ it.
 | Need logs / reporting a bug | n/a | **Settings → Diagnostics → Copy diagnostics**; logs under `<app data>/logs/`. See [Logs](#logs-where-they-live-and-how-to-raise-verbosity). |
 | Session's **worktree directory vanished** (git errors in the pane, `cd: no such directory`, new panes fail) | The worktree was deleted, pruned, or moved on disk while the fleet row (and possibly the tmux session) survived | New session, Restart, Recreate and opening the terminal re-create only what is confirmed missing; anything more (a stale git entry, a moved checkout, a deleted branch, a pane in a removed directory) needs **Repair workspace** in the session details (or the `repair_session` tool). See [Repairing a session whose directory vanished](#repairing-a-session-whose-directory-vanished). (`E_REPAIR_REQUIRED`, `E_REPO_MISSING`, `E_BRANCH_CHECKED_OUT`, `E_WORKSPACE_LOCKED`, `E_REPAIR_FAILED`) |
 | A tracker shows **auth_failed** / **unreachable** / **rate_limited**, or chips show ◷ | The token expired or was revoked, the site or the `gh` host cannot be reached, or the tracker is throttling | Read the tracker's error in **Settings → Work** (or `fleet-hub tracker status`). See [Tracker sync fails](#tracker-sync-fails). |
+| **⚠ Sync skipping items — <tracker>**, or a tracker's last pass says `… skipped` | One item (or a few) cannot be stored; the rest of the tracker syncs, the item is retried every pass | Find the item in the log (the view and the external id) and the reason in `last_error`. See [Sync skips items](#sync-skips-items). |
 | A phone or `/events` client got **`lagged`** (or `resumed: false`) right after a tracker was added | The first sync of a new tracker sends one `work:item` frame per ticket and briefly fills the replay ring | Expected once per tracker (decision D18): the client re-lists and carries on. See [`lagged` after a first sync](#lagged-after-a-trackers-first-sync). |
 | **Why is this session linked to X?** | Detection linked or suggested it from a branch, a URL, a prompt or the PR | Click the work chip: the popover lists each link's evidence and rule. See [Why is this session linked to X?](#why-is-this-session-linked-to-x) |
 | *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
@@ -435,6 +436,40 @@ a chip shows ◷ once the tracker has not synced for two intervals.
   sync off, and it is read at start: restart after changing it).
 - A ticket that was deleted or hidden is marked **unavailable** (a
   struck-through chip). It is never deleted, and its links stay.
+
+#### Sync skips items
+
+A pass stores each ticket on its own. When one cannot be stored (a
+constraint, a database trigger, a value the tracker should never have
+sent), that ticket is rolled back and **skipped**, the rest of the pass
+carries on, and the ticket is retried on every later pass. The view it came
+from keeps its watermark until the ticket stores, so nothing is lost.
+
+What you see:
+
+- Settings → Work: the tracker's last pass ends `· 2 skipped (3 passes in a
+  row)`, then `skipped: <reason>`. `fleet-hub tracker status` prints the
+  same (`skipped 2 (3 pass(es) in a row): <reason>`), and `work_admin {
+  action: status }` has `items_failed`, `consecutive_partial` and
+  `last_item_error`.
+- `fleet_health.trackers`: `degraded` after one such pass, `failing` after
+  three in a row (the same item is stuck), with `reason: items_skipped` and
+  the reason in `last_error`. A failing one raises **⚠ Sync skipping items
+  — <tracker> →**, never *Reconnect*: the credential is fine.
+
+To find the item, search the syncing process's log (the hub's, or the
+desktop's `<app data>/logs/`) for `tracker sync:`. Two warnings name it:
+
+- `[work] tracker sync: view skipped item(s); its watermark waits` names
+  the tracker and the **view**;
+- `[work] tracker sync: item failed; rolled back, retried next pass` names
+  the **external id** and the database error.
+
+`last_error` carries the same reason, redacted and capped at 300
+characters; it names no ticket. Once the cause is gone (a fixed trigger, a
+corrected ticket), the next pass stores the item and the tracker is `ok`
+again. If every item a pass tries fails, the pass itself fails as before
+(the tracker's error is set), still with `reason: items_skipped`.
 
 #### `lagged` after a tracker's first sync
 

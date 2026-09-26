@@ -2249,6 +2249,66 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
     }
 }
 
+/// Work graph M13.1: a tracker skipping items reads through the same org
+/// fence — a per-host token sees only its own org's trackers, their counts
+/// and the skipped item's reason, never another org's; and the reason is
+/// `items_skipped` for every caller, never a credential one.
+#[test]
+fn a_skipping_trackers_health_is_fenced_by_org_too() {
+    use crate::service::health::{trackers_from_store, TRACKER_REASON_ITEMS_SKIPPED};
+    use crate::service::trackers::sync::SyncMetrics;
+    let fx = fixture(false);
+    let (ta, tb) = (fx.tracker_a, fx.tracker_b);
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.set_tracker_state(ta, "ok", None).unwrap();
+        s.set_tracker_state(tb, "ok", None).unwrap();
+    }
+    let metrics = move |ids: &[i64]| -> Vec<SyncMetrics> {
+        ids.iter()
+            .map(|&id| SyncMetrics {
+                tracker_id: id,
+                last_pass_at: Some(1),
+                items_failed: 1,
+                consecutive_partial: 1,
+                last_item_error: Some(
+                    if id == ta {
+                        "SECRET-A poison"
+                    } else {
+                        "SECRET-B poison"
+                    }
+                    .into(),
+                ),
+                ..Default::default()
+            })
+            .collect()
+    };
+    for who in EVERYONE {
+        let s = fx.t.store.lock().unwrap();
+        // The scope `fleet_health` fences a caller's roll-up by.
+        let scope = who.caller().org_scope(&s).unwrap();
+        let h = trackers_from_store(&s, &scope, &metrics, 1);
+        let body = serde_json::to_string(&h).unwrap();
+        for m in who.forbidden_markers() {
+            assert!(!body.contains(m), "{who:?} read {m}: {body}");
+        }
+        let want = match who {
+            Who::HostA => vec![ta],
+            Who::HostB => vec![tb],
+            Who::HostNone => vec![],
+            _ => vec![ta, tb],
+        };
+        let got: Vec<i64> = h.trackers.iter().map(|t| t.tracker_id).collect();
+        assert_eq!(got, want, "{who:?}");
+        for t in &h.trackers {
+            assert_eq!(t.health, "degraded", "{who:?}");
+            assert_eq!(t.reason, TRACKER_REASON_ITEMS_SKIPPED, "{who:?}");
+            assert_eq!((t.items_failed, t.consecutive_partial), (1, 1));
+        }
+        assert_eq!(h.degraded as usize, want.len(), "{who:?}");
+    }
+}
+
 #[tokio::test]
 async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
     let fx = fixture(false);
