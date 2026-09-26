@@ -691,7 +691,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always** |
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
-| D15 | Handover and multi-start on the phone (M10.5)? | read-only M9 only · also the actions | Read-only only (Today + card) |
+| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens; Today and the card are read-only, M10.5) | desktop only · also on the phone | Desktop only; decide after M10.3 |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done: hub-e2e already runs in CI** (`hub-headless` job, `.github/workflows/ci.yml`, every PR and `main` push). The M10.2 work-graph leg needs an `e2e`-feature hub and is skipped there; `ci-local.sh --hub-e2e` runs it |
 
 ## Risks to watch
@@ -811,3 +811,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   done: hub-e2e already runs in CI's `hub-headless` job. The note also
   records that D15's row understates the phone (M8.6.3 built *Ask for a
   handover*); the row is left for the user to restate.
+- 2026-09-26: D15 restated by the user to cover multi-start only. *Ask for
+  a handover* is already on the phone (M8.6.3, full token), and Today and
+  the ticket card stay read-only (M10.5). Only multi-start is still open;
+  the default stays desktop only until M10.3.

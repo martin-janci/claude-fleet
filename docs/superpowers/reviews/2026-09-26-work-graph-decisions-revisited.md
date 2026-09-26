@@ -538,3 +538,5 @@ record, besides pass / fail:
 
 - 2026-09-26: first version (M12.6). No decision changed. D16 corrected in
   the roadmap.
+- 2026-09-26: the user restated D15 in the roadmap as "multi-start on the
+  phone?" (handover recorded as built), as recommended above.
