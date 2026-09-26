@@ -3341,9 +3341,8 @@ fn the_served_definition_budget_stays_bounded() {
     // item action. Measured at 55,615 on 2026-09-26 (+5); plus 100.
     // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
     // description; `set_setting`'s example key now `work.recent_days`),
-    // merged over M11.3: measured at 55,635 on 2026-09-26 (+20), inside the
-    // headroom, not raised.
-    const BUDGET_BYTES: usize = 55_715;
+    // merged over M11.3: measured at 55,635 on 2026-09-26 (+20); plus 100.
+    const BUDGET_BYTES: usize = 55_735;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
