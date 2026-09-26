@@ -1717,11 +1717,14 @@ standalone exactly as before.
   such a host, which is the whole reason it dials the hub instead — so the tab
   says that rather than showing a command that cannot work. Dropping files on
   the pane (`upload_to_session`) follows the same rule, for the same reason.
-- **The asset catalog and the setup checklist** are about the machine that
-  owns the fleet, so they show the reason instead of their panels. (The hub
-  does serve the catalog's asset list, `list_assets`, to any paired client;
-  what it does not serve is the configuration and git checkout the Assets
-  panel is built on.)
+- **The asset catalog** is a read-only overview: the hub's catalog through
+  `list_assets` (each asset's per-host state, unmanaged assets, problems) and
+  a Scan hosts button through `scan_assets`, both open to any paired client.
+  Editing assets, Sync and Secrets need the catalog's git checkout and the
+  sync secrets, which live on the hub's machine, so the panel does not offer
+  them.
+- **The setup checklist** is about the machine that owns the fleet, so it
+  shows the reason instead of its panel.
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
   the error says to pair again in Settings → Hub.
 
