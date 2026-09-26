@@ -1088,6 +1088,25 @@ pub(super) fn agent_row_name(session_id: &str) -> String {
     format!("bg:{session_id}")
 }
 
+/// The label an `external` row takes from its agent's `name`: trimmed and
+/// capped to the 80 characters `validate::friendly_name` allows. `None` for a
+/// missing or blank name, and for one carrying a control character (the CLI
+/// output is not ours; `set_friendly_name` refuses those too), so such a pass
+/// keeps the row's current label.
+pub(super) fn agent_display_name(raw: Option<&str>) -> Option<String> {
+    let name = raw?.trim();
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return None;
+    }
+    Some(
+        name.chars()
+            .take(80)
+            .collect::<String>()
+            .trim_end()
+            .to_string(),
+    )
+}
+
 /// The row names [`reconcile_agent_rows`] keys this probe's live pane-less
 /// agents under: every [`unmatched_bg_agents`] entry with a session id.
 /// Dismissed agents are included — their row was deleted on dismissal, so
@@ -1228,6 +1247,21 @@ pub(super) fn reconcile_agent_rows(
                 "[reconcile] bg upsert failed"
             );
             s.ensure_in_tx()?;
+            continue;
+        }
+        // Without it an external row reads as its `bg:<uuid>` sentinel.
+        if kind == "external" {
+            if let Some(name) = agent_display_name(agent.name.as_deref()) {
+                if let Err(e) = s.set_external_agent_name(host_alias, &tmux_name, &name) {
+                    tracing::warn!(
+                        host = %host_alias,
+                        claude_session_id = %session_id,
+                        error = %e,
+                        "[reconcile] external agent label failed"
+                    );
+                    s.ensure_in_tx()?;
+                }
+            }
         }
     }
     // Same TTL cutoff as the tmux-keyed prune in `reconcile_write_one_host`

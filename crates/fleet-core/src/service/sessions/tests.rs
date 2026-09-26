@@ -743,6 +743,72 @@ fn interactive_agents_land_as_external_and_background_as_bg() {
     assert_eq!(bg.claude_status.as_deref(), Some("working"));
 }
 
+fn interactive(session_id: &str, name: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
+    crate::claude_agents::ClaudeAgentRow {
+        kind: crate::claude_agents::AgentKind::Interactive,
+        ..agent(session_id, name, None)
+    }
+}
+
+fn friendly_of(s: &Store, session_id: &str) -> Option<String> {
+    s.get_session(&format!("bg:{session_id}"), "local")
+        .unwrap()
+        .expect("agent row")
+        .friendly_name
+}
+
+#[test]
+fn an_external_row_is_labelled_with_the_name_claude_shows() {
+    let s = local_store();
+    let pass = |agents: &[crate::claude_agents::ClaudeAgentRow], t: i64| {
+        reconcile_agent_rows(&s, "local", &[], &[], agents, Some(&no_mtimes()), t, t).unwrap()
+    };
+    pass(&[interactive("ext-1", Some("  Release cut "))], 100);
+    assert_eq!(friendly_of(&s, "ext-1").as_deref(), Some("Release cut"));
+
+    // Claude Desktop retitles a session: the label follows.
+    pass(&[interactive("ext-1", Some("Release cut v0.3"))], 101);
+    assert_eq!(
+        friendly_of(&s, "ext-1").as_deref(),
+        Some("Release cut v0.3")
+    );
+
+    // A pass without a name (or a blank / control-char one) keeps the label.
+    pass(&[interactive("ext-1", None)], 102);
+    pass(&[interactive("ext-1", Some("   "))], 103);
+    pass(&[interactive("ext-1", Some("bad\u{1b}[2Jname"))], 104);
+    assert_eq!(
+        friendly_of(&s, "ext-1").as_deref(),
+        Some("Release cut v0.3")
+    );
+
+    // Capped to what `validate::friendly_name` accepts.
+    pass(&[interactive("ext-2", Some(&"x".repeat(200)))], 105);
+    assert_eq!(
+        friendly_of(&s, "ext-2").map(|n| n.chars().count()),
+        Some(80)
+    );
+}
+
+#[test]
+fn a_bg_row_is_not_labelled_from_the_agent_name() {
+    // fleet labels its own bg agents from the launch prompt; the `--name`
+    // it passed must not beat that label to the row.
+    let s = local_store();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &[agent("bg-1", Some("review-pr-42"), None)],
+        Some(&no_mtimes()),
+        100,
+        100,
+    )
+    .unwrap();
+    assert_eq!(friendly_of(&s, "bg-1"), None);
+}
+
 #[test]
 fn misfiled_bg_row_flips_to_external() {
     // Rows stored by the old reconcile as `bg` flip on the first new pass.

@@ -1660,6 +1660,18 @@ describe('Outside fleet group', () => {
     expect(JSON.parse(localStorage.getItem('cf:pref:outside-fleet-open')!)).toBe(false);
   });
 
+  it('an external row shows the name Claude gives it, the bg:<uuid> only as its tooltip', async () => {
+    const ext = { ...sessionFor(null, 'bg:c9b22749-d2fd'), kind: 'external', friendly_name: 'Release cut' };
+    mockBackend(fakeProjects, [ext]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('outside-fleet'));
+    await tick();
+    const name = screen.getByText('Release cut');
+    expect(name).toHaveAttribute('title', 'bg:c9b22749-d2fd');
+    expect(screen.queryByText('bg:c9b22749-d2fd')).toBeNull();
+  });
+
   it('renders external rows read-only: no label/rename/recreate/kill actions', async () => {
     const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
     mockBackend(fakeProjects, [ext]);
