@@ -1,6 +1,6 @@
 [package]
 name = "fleet-hub"
-version = "0.2.40"
+version = "0.2.41"
 description = "Headless claude-fleet hub: runs the fleet without the desktop app"
 authors = ["martin-janci"]
 edition = "2021"
@@ -9,6 +9,13 @@ license = "MIT"
 [[bin]]
 name = "fleet-hub"
 path = "src/main.rs"
+
+[features]
+default = []
+# Test-only: the loopback fake-tracker override for `scripts/hub-e2e.sh`'s
+# work-graph leg (see fleet-core's `e2e` feature). The CI hub build
+# (`cargo build -p fleet-hub --locked`) never enables it.
+e2e = ["fleet-core/e2e"]
 
 [dependencies]
 fleet-core = { path = "../fleet-core" }

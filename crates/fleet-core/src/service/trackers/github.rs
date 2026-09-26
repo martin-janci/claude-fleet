@@ -4,13 +4,19 @@
 //!   through `gh` on a host (`via_cli:<alias>`,
 //!   [`crate::net::via_host::GhCliTransport`]): the host's own `gh` login
 //!   is used and fleet never reads, stores or sends a GitHub token.
+//! * **Enterprise Server** (M11.4): `settings.hostname` names the instance
+//!   (`ghe.corp.example[:port]`, admin-fenced); GraphQL is then
+//!   `https://<hostname>/api/graphql`, reached by `gh --hostname`.
 //! * **Scope.** The site is `https://github.com/<owner>` (or all of
-//!   `https://github.com`); `settings.repos` narrows it to named
-//!   repositories. Views are `assignee:@me` searches inside that scope —
-//!   never an org-wide crawl.
+//!   `https://github.com`; an enterprise site is the same on its own host);
+//!   `settings.repos` narrows it to named repositories. Views are
+//!   `assignee:@me` searches inside that scope — never an org-wide crawl.
 //! * **Identity** is the issue's node id, which survives a transfer; the
-//!   key is `owner/repo#n` (lower case). A by-number fetch answered from
-//!   another repository is a transfer, and the old key becomes an alias.
+//!   key is `owner/repo#n` (lower case) on github.com and
+//!   `host/owner/repo#n` on an enterprise instance, so the same repository
+//!   name on two instances never shares a key. A by-number fetch answered
+//!   from another repository is a transfer, and the old key becomes an
+//!   alias.
 //! * **Status**: `OPEN` is todo, or in_progress when GitHub itself links a
 //!   branch or an open pull request that closes it (never guessed);
 //!   `CLOSED` is done with `stateReason` → completed / not_planned /
@@ -18,8 +24,8 @@
 //! * **Hierarchy**: sub-issues' `parent`.
 
 use super::{
-    check_http, map_transport, CallKind, Caps, Fetched, Incremental, ItemRef, Page, RefCtx,
-    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
+    check_http, map_transport, retry_after, CallKind, Caps, Fetched, Incremental, ItemRef, Page,
+    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
     DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
@@ -45,18 +51,18 @@ const ISSUE_FIELDS: &str = "fragment I on Issue { id number title url state stat
 pub struct GitHub {
     /// `Some(owner)` for `https://github.com/<owner>`.
     owner: Option<String>,
+    /// An enterprise instance (M11.4): `gh`'s `hostname` (with its port, if
+    /// any) and the lower-case host its keys carry. `None`: github.com.
+    enterprise: Option<(String, String)>,
     config: TrackerConfig,
     settings: TrackerSettings,
     transport: Arc<dyn HttpTransport>,
 }
 
-/// `https://github.com[/<owner>]` → the owner, if any.
+/// `https://github.com[/<owner>]` (or an enterprise site) → the owner, if
+/// any.
 pub fn site_owner(site_url: &str) -> Option<String> {
-    site_url
-        .trim_end_matches('/')
-        .strip_prefix("https://github.com/")
-        .filter(|o| !o.is_empty())
-        .map(str::to_ascii_lowercase)
+    crate::store::github_site(site_url).and_then(|(_, o)| o)
 }
 
 /// An owner or repository name: `[A-Za-z0-9_.-]`, not starting with a dot
@@ -87,17 +93,56 @@ impl GitHub {
         settings: TrackerSettings,
         transport: Arc<dyn HttpTransport>,
     ) -> Self {
+        let site_host = crate::store::github_site(site_url).and_then(|(h, _)| h);
+        let enterprise = match (&settings.hostname, site_host) {
+            (Some(h), _) => Some((
+                h.clone(),
+                crate::store::ghes_host_part(h).to_ascii_lowercase(),
+            )),
+            (None, Some(h)) => Some((h.clone(), h)),
+            (None, None) => None,
+        };
         GitHub {
             owner: site_owner(site_url),
+            enterprise,
             config,
             settings,
             transport,
         }
     }
 
-    /// The repository `repo` is inside this tracker's scope.
+    /// `host/` for an enterprise instance's keys, empty for github.com's.
+    fn key_prefix(&self) -> String {
+        match &self.enterprise {
+            Some((_, h)) => format!("{h}/"),
+            None => String::new(),
+        }
+    }
+
+    /// The key of issue `n` of `repo` (`owner/repo`) on this instance.
+    pub fn key(&self, repo: &str, n: u64) -> String {
+        issue_key(&format!("{}{repo}", self.key_prefix()), n)
+    }
+
+    /// A reference's repository part (`owner/repo`, or `host/owner/repo`)
+    /// → `owner/repo` lower case, when it is on this tracker's instance.
+    pub fn local_repo(&self, repo: &str) -> Option<String> {
+        let (host, or) = crate::store::split_github_repo(repo.trim())?;
+        let same = match (host, &self.enterprise) {
+            (None, None) => true,
+            (Some(h), Some((_, mine))) => h.eq_ignore_ascii_case(mine),
+            _ => false,
+        };
+        same.then(|| normalize_repo(or)).flatten()
+    }
+
+    /// The repository `repo` (as a reference writes it: `owner/repo`, or
+    /// `host/owner/repo` on an enterprise instance) is inside this
+    /// tracker's scope.
     pub fn in_scope(&self, repo: &str) -> bool {
-        let repo = repo.to_ascii_lowercase();
+        let Some(repo) = self.local_repo(repo) else {
+            return false;
+        };
         if !self.settings.repos.is_empty() {
             return self
                 .settings
@@ -135,10 +180,11 @@ impl GitHub {
         variables: Value,
         call: CallKind,
     ) -> Result<Value, TrackerError> {
-        let req = Request::post_json(
-            GRAPHQL_URL,
-            &json!({ "query": query, "variables": variables }),
-        );
+        let url = match &self.enterprise {
+            Some((h, _)) => format!("https://{h}/api/graphql"),
+            None => GRAPHQL_URL.to_string(),
+        };
+        let req = Request::post_json(url, &json!({ "query": query, "variables": variables }));
         let resp = self.transport.send(req).await.map_err(map_transport)?;
         check_http(&resp, call)?;
         let v: Value = resp.parse_json().map_err(TrackerError::Invalid)?;
@@ -149,9 +195,10 @@ impl GitHub {
         // only the ones that say something about the whole call count.
         for e in v["errors"].as_array().into_iter().flatten() {
             match e["type"].as_str() {
+                // The primary limit: a 200 with the reset in the headers.
                 Some("RATE_LIMITED") => {
                     return Err(TrackerError::RateLimited {
-                        retry_after_secs: None,
+                        retry_after_secs: retry_after(&resp),
                     })
                 }
                 Some("FORBIDDEN") if call == CallKind::View => {
@@ -181,9 +228,11 @@ impl GitHub {
     pub fn snapshot(&self, n: &Value) -> Option<WorkItemSnapshot> {
         let id = n["id"].as_str()?.to_string();
         let number = n["number"].as_u64()?;
-        let repo = n["repository"]["nameWithOwner"]
-            .as_str()?
-            .to_ascii_lowercase();
+        // Both halves validated by `normalize_repo`, so the URL is built
+        // from them rather than taken from the answer (`gh` runs on a
+        // fleet host, which controls what comes back).
+        let name_with_owner = n["repository"]["nameWithOwner"].as_str()?.trim();
+        let repo = normalize_repo(name_with_owner)?;
         let assignees: Vec<String> = n["assignees"]["nodes"]
             .as_array()
             .into_iter()
@@ -199,10 +248,12 @@ impl GitHub {
         let parent = &n["parent"];
         Some(WorkItemSnapshot {
             external_id: id,
-            key: Some(issue_key(&repo, number)),
+            key: Some(self.key(&repo, number)),
             aliases: Vec::new(),
             title: n["title"].as_str().unwrap_or_default().to_string(),
-            url: n["url"].as_str().map(str::to_string),
+            url: Some(format!(
+                "https://github.com/{name_with_owner}/issues/{number}"
+            )),
             kind: Some(
                 n["issueType"]["name"]
                     .as_str()
@@ -216,10 +267,10 @@ impl GitHub {
                 parent["repository"]["nameWithOwner"].as_str(),
                 parent["number"].as_u64(),
             ) {
-                (Some(r), Some(k)) => Some(issue_key(r, k)),
+                (Some(r), Some(k)) => Some(self.key(r, k)),
                 _ => None,
             },
-            containers: vec![repo],
+            containers: vec![format!("{}{repo}", self.key_prefix())],
             assignees,
             assignee_id,
             iteration: None,
@@ -245,7 +296,7 @@ impl GitHub {
             },
             ItemRef::Id(_) => return None,
         };
-        let repo = normalize_repo(&repo)?;
+        let repo = self.local_repo(&repo)?;
         let (o, name) = repo.split_once('/')?;
         Some((o.to_string(), name.to_string(), n))
     }
@@ -321,7 +372,10 @@ impl TrackerProvider for GitHub {
             }
         }
         Ok(TrackerInfo {
-            instance_id: Some("github.com".into()),
+            instance_id: Some(match &self.enterprise {
+                Some((h, _)) => h.clone(),
+                None => "github.com".into(),
+            }),
             config: TrackerConfig {
                 account_id: Some(login.to_string()),
                 display_name: Some(login.to_string()),
@@ -451,7 +505,7 @@ impl TrackerProvider for GitHub {
             for (k, (i, (o, name, n))) in chunk.iter().enumerate() {
                 out[*i] = self.snapshot(&data[format!("i{k}")]["issue"]).map(|mut s| {
                     // Answered from another repository or number: transferred.
-                    let asked = issue_key(&format!("{o}/{name}"), *n);
+                    let asked = self.key(&format!("{o}/{name}"), *n);
                     if s.key.as_deref() != Some(asked.as_str()) && !s.aliases.contains(&asked) {
                         s.aliases.push(asked);
                     }
@@ -473,9 +527,23 @@ impl TrackerProvider for GitHub {
     }
 
     fn recognize(&self, text: &str, ctx: RefCtx<'_>) -> Vec<ItemRef> {
-        use crate::service::work::recognize::{recognize, RecognizeCtx};
+        use crate::service::work::recognize::{recognize, RecognizeCtx, TrackerHost};
         let rctx = RecognizeCtx {
-            repo: ctx.repo.and_then(normalize_repo),
+            repo: ctx
+                .repo
+                .and_then(|r| crate::store::split_github_repo(r.trim()).map(|_| r.trim()))
+                .map(str::to_ascii_lowercase),
+            // An enterprise tracker recognises its own host's URLs and
+            // `host/owner/repo#n`; nothing else ever names one of its items.
+            trackers: self
+                .enterprise
+                .iter()
+                .map(|(_, h)| TrackerHost {
+                    id: 0,
+                    host: h.clone(),
+                    provider: "github".into(),
+                })
+                .collect(),
             ..Default::default()
         };
         let mut out = Vec::new();
@@ -486,13 +554,16 @@ impl TrackerProvider for GitHub {
             let Some((repo, n)) = m.key.rsplit_once('#') else {
                 continue;
             };
-            let (Some(repo), Ok(n)) = (normalize_repo(repo), n.parse::<u64>()) else {
+            let (Some(local), Ok(n)) = (self.local_repo(repo), n.parse::<u64>()) else {
                 continue;
             };
-            if !self.in_scope(&repo) {
+            if !self.in_scope(repo) {
                 continue;
             }
-            let r = ItemRef::RepoNumber { repo, n };
+            let r = ItemRef::RepoNumber {
+                repo: format!("{}{local}", self.key_prefix()),
+                n,
+            };
             if !out.contains(&r) {
                 out.push(r);
             }

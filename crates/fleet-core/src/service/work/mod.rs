@@ -8,6 +8,7 @@ pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
+pub mod local;
 pub mod nudge;
 pub mod recognize;
 pub mod resolve;
@@ -132,6 +133,9 @@ pub struct WorkLinkArgs {
     /// Approved nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
+    /// Name: the work's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -218,6 +222,8 @@ pub enum WorkAction {
     Tidy,
     /// Work open again that has past sessions (work graph M7).
     Reopened,
+    /// Local work items: named work with no ticket (work graph M11.1).
+    LocalItems,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -238,6 +244,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("card", WorkAction::Card),
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
+    ("local_items", WorkAction::LocalItems),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -258,6 +265,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "never",
     "dismiss",
     "tidy_apply",
+    "name",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -292,6 +300,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("never_tidy", "work_link", "never"),
     ("tidy_apply", "work_link", "tidy_apply"),
     ("dismiss_reopened", "work_link", "dismiss"),
+    ("list_local_work_items", "work", "local_items"),
+    ("name_session_work", "work_link", "name"),
+    ("rename_work_item", "work_link", "name"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -513,7 +524,7 @@ pub fn work_link<'a>(
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply"
+        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply" | "name"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -565,11 +576,43 @@ pub fn work_link<'a>(
         }
         Ok(l)
     };
+    // The live link a tidy flag goes to — `link_id`, else the primary —
+    // resolved BEFORE the visibility check, so that omitting `link_id` never
+    // reaches a primary the scope does not see (a forced cross-org link on
+    // the caller's own session). Such a session answers as one with no
+    // linked work, as the store does for a session without any.
+    let tidy_target = || -> Result<i64, IpcError> {
+        let link_id = s.tidy_link(session_id, args.link_id)?;
+        if !scope.is_all() && visible_link(link_id).is_err() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                match args.link_id {
+                    Some(l) => format!("session {session_id} has no live work link {l}"),
+                    None => format!("session {session_id} has no linked work"),
+                },
+            ));
+        }
+        Ok(link_id)
+    };
     // The lifecycle actions (work graph M7) write flags, not decisions: no
     // resolver run after them.
     match args.action.as_str() {
         "archive" => {
-            s.archive_session_work(session_id)?;
+            // A per-host token stamps only the links it sees.
+            let only = if scope.is_all() {
+                None
+            } else {
+                let mut links = s.session_work_links(session_id)?;
+                s.fill_link_orgs(&mut links)?;
+                Some(
+                    links
+                        .iter()
+                        .filter(|l| scope.sees_link(l))
+                        .map(|l| l.id)
+                        .collect::<Vec<i64>>(),
+                )
+            };
+            s.archive_session_links(session_id, only.as_deref())?;
             return lifecycle_row(&s, session_id);
         }
         // A click, or an attach: a person's touch un-archives.
@@ -583,9 +626,7 @@ pub fn work_link<'a>(
             return lifecycle_row(&s, session_id);
         }
         "snooze" => {
-            if let Some(l) = args.link_id {
-                visible_link(l)?;
-            }
+            let link_id = tidy_target()?;
             let days = args.days.unwrap_or(tidy::SNOOZE_DEFAULT_DAYS);
             if !(1..=tidy::SNOOZE_MAX_DAYS).contains(&days) {
                 return Err(IpcError::new(
@@ -594,14 +635,12 @@ pub fn work_link<'a>(
                 ));
             }
             let until = crate::service::catalog::now_secs() + i64::from(days) * 86_400;
-            s.snooze_tidy(session_id, args.link_id, until)?;
+            s.snooze_tidy(session_id, Some(link_id), until)?;
             return lifecycle_row(&s, session_id);
         }
         "never" => {
-            if let Some(l) = args.link_id {
-                visible_link(l)?;
-            }
-            s.never_tidy(session_id, args.link_id)?;
+            let link_id = tidy_target()?;
+            s.never_tidy(session_id, Some(link_id))?;
             return lifecycle_row(&s, session_id);
         }
         _ => {}

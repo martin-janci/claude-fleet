@@ -127,7 +127,7 @@ describe('TransferChip', () => {
       keepSource: null, origin: 'local',
       steps: MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null })),
       status: 'waiting', report: null, error: null, resolveError: null,
-      startedAt: Date.now(), settledAt: null, cleanTarget: false, attempt: 1,
+      startedAt: Date.now(), settledAt: null, cleanTarget: false, forceCrossOrg: false, attempt: 1,
       resolving: false, awaitingStart: false,
       deadlineUnix: Math.floor(Date.now() / 1000) + 600, waitEnded: null, waitRefusal: null,
     };

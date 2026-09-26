@@ -160,7 +160,7 @@ describe('App layout', () => {
       sessionId: 77, sessionName: 's', fromHost: 'alpha', toHost: 'beta', keepSource: null,
       origin: 'local', steps: MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null })),
       status: 'waiting', report: null, error: null, resolveError: null, startedAt: 1, settledAt: null,
-      cleanTarget: false, attempt: 1, resolving: false, awaitingStart: false,
+      cleanTarget: false, forceCrossOrg: false, attempt: 1, resolving: false, awaitingStart: false,
       deadlineUnix: 2_000_000_000, waitEnded: null, waitRefusal: null,
     });
     try {

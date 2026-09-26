@@ -825,6 +825,18 @@ fn a_remote_messages_inbox_preview_strips_the_untrusted_marker() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "short reply");
+    // D8: every rendering of peer text says it is untrusted — the slim row
+    // lost the marker to the preview cap, so it carries the flag instead.
+    assert!(summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert_eq!(v["untrusted"], true, "{v}");
+    assert!(
+        !v["body_preview"]
+            .as_str()
+            .unwrap()
+            .contains("[claude-fleet"),
+        "{v}"
+    );
 }
 
 /// A local message's `body` carries no marker, so the preview is untouched.
@@ -844,6 +856,12 @@ fn a_local_messages_inbox_preview_is_the_raw_body() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "hi there");
+    assert!(!summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert!(
+        v.get("untrusted").is_none(),
+        "a local row carries no flag: {v}"
+    );
 }
 
 #[test]
@@ -900,10 +918,6 @@ fn list_sessions_docs_quote_status_vocabulary() {
         list_sessions_param_doc("claude_status").contains(&ClaudeStatus::vocabulary_doc()),
         "ListSessionsParams.claude_status doc must quote the vocabulary verbatim"
     );
-    assert!(
-        list_sessions_param_doc("summary").contains(&StuckKind::vocabulary_doc()),
-        "ListSessionsParams.summary doc must quote the stuck_kind vocabulary verbatim"
-    );
     let tools = FleetTools::tool_router_for_doc().list_all();
     let desc = tools
         .iter()
@@ -912,6 +926,34 @@ fn list_sessions_docs_quote_status_vocabulary() {
         .expect("list_sessions description");
     assert!(desc.contains(&ClaudeStatus::vocabulary_doc()));
     assert!(desc.contains(&StuckKind::vocabulary_doc()));
+}
+
+/// Wherever a served description or parameter doc lists a status vocabulary,
+/// it lists all of it, as the enum renders it (M11.5 moved the lists to the
+/// places a caller reads them; this keeps any that remain from drifting).
+#[test]
+fn every_served_status_list_quotes_the_enum() {
+    let claude = ClaudeStatus::vocabulary_doc();
+    let stuck = StuckKind::vocabulary_doc();
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let t = present::present(t);
+        let mut texts = vec![t.description.as_deref().unwrap_or_default().to_string()];
+        if let Some(props) = t.input_schema.get("properties").and_then(|p| p.as_object()) {
+            texts.extend(
+                props
+                    .values()
+                    .filter_map(|p| p["description"].as_str().map(str::to_string)),
+            );
+        }
+        for text in texts {
+            if text.contains("working | blocked") {
+                assert!(text.contains(&claude), "{}: {text}", t.name);
+            }
+            if text.contains("auth_menu |") {
+                assert!(text.contains(&stuck), "{}: {text}", t.name);
+            }
+        }
+    }
 }
 
 #[test]
@@ -1771,7 +1813,7 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1792,7 +1834,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 87);
+    assert_eq!(served, 89);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1927,14 +1969,16 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
     // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
     // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
     // may reach must also be something a full client may reach. `list_peer_links`
-    // is the same shape for the same reason (it names other fleets).
+    // is the same shape for the same reason (it names other fleets), and so
+    // is `get_settings` (it names hosts and their paths).
     for name in guard::READONLY_TOOLS {
         assert!(
             guard::CLIENT_TOOLS.contains(name)
                 || *name == "list_clients"
-                || *name == "list_peer_links",
+                || *name == "list_peer_links"
+                || *name == "get_settings",
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients/list_peer_links special case"
+             documented list_clients/list_peer_links/get_settings special case"
         );
     }
 }
@@ -3270,13 +3314,35 @@ fn the_served_definition_budget_stays_bounded() {
     // restore_host_sessions, recreate_session and restart_session (no new
     // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
     // plus 100.
-    // `quick_replies`, the composer's shared chip row: one tool that both
+    // M11.5: paid back 16,944 B (M0.6). Descriptions and parameter docs
+    // reworded, no tool, action or parameter renamed and no schema shape
+    // changed: prose that restated a schema default, a parameter's own doc,
+    // or a vocabulary listed twice was cut; every confirm gate, untrusted
+    // marker, host fence and "never" clause kept. Measured at 71,590 before
+    // and 54,646 after on 2026-09-25; plus 100. Re-measure when the M11.1 /
+    // M11.3 / M11.4 branches land: whichever lands second merges and
+    // re-measures.
+    // Merged over main (#285: `inbox` gains the hub-link from_addr
+    // untrusted clause): measured at 54,700 (+54), inside the headroom.
+    // Review follow-up: `move_session { force_cross_org }` (work graph M5 —
+    // a move whose live links would cross the org boundary is refused
+    // unless forced), one flag with a one-line doc plus a clause on the
+    // errors list. Measured at 54,927 on 2026-09-25 (+227); plus 100.
+    // M11.4 (`work_admin` `status`), 2026-09-25: measured at 54,934; plus 100.
+    // M11.1: +96 B for work_link name / work local_items (`work_link` gains
+    // `name` and a `title` parameter, `work` gains `local_items`; no
+    // description change). Merged over M11.2 / M11.4: measured at 55,030 on
+    // 2026-09-25; plus 100.
+    // get_settings/set_setting: +580 B (two master-only tools, M11.5's
+    // terse style). Measured at 55,610 on 2026-09-25; plus 100.
+    // `quick_replies` (the composer's shared chip row): one tool that both
     // reads and replaces the fleet's list, so the desktop and the phone stop
     // keeping private copies of the same buttons. A second, read-only tool
-    // would have cost a further definition for a list of at most 24 short
-    // strings, so the read is the same tool with `set` omitted. Measured at
-    // 72,716 on 2026-09-25 (+1,058 over 71,658); plus 100.
-    const BUDGET_BYTES: usize = 72_816;
+    // would have cost another definition for a list of at most 24 short
+    // strings, so the read is this tool with `set` omitted. Written in
+    // M11.5's terse style from the start: 825 B over that baseline, measured
+    // at 56,535 on 2026-09-26 (55,710 before); plus 100.
+    const BUDGET_BYTES: usize = 56_635;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3560,6 +3626,7 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
         confirm_nonce: None,
         dry_run,
         when: crate::service::move_session::When::Now,
+        force_cross_org: false,
     };
 
     let err = t
@@ -5669,6 +5736,106 @@ async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cu
     assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
 }
 
+/// `fresh_for` names the reader whose cursor the call advances, so it is
+/// fenced like a target: a per-host token naming a session on ANOTHER host
+/// is refused with `E_FORBIDDEN` before any read, and no cursor row is
+/// written — otherwise host A could advance host B's watermark and blind
+/// that session to its deltas. The same fence, through one helper, on all
+/// five tools: here session_history, inbox and list_sessions (the two
+/// SSH-backed ones, session_transcript and repo_diff, share it).
+#[tokio::test]
+async fn fresh_for_naming_another_hosts_session_is_forbidden_and_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let target = s
+        .upsert_session("target", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let foreign_reader = s
+        .upsert_session("reader-b", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    let own_reader = s
+        .upsert_session("reader-a", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.insert_session_event(target, "prompt_sent", None).unwrap();
+    s.insert_message(own_reader, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+    let host_a = host_caller("hosta", TokenMode::Full);
+    let cursor_rows = || -> i64 {
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    let err = t
+        .session_history(
+            Extension(host_a.clone()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(foreign_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let err = t
+        .inbox(
+            Extension(host_a.clone()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(foreign_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+    p.fresh_for = Some(foreign_reader);
+    let err = t
+        .list_sessions(Extension(host_a.clone()), Parameters(p))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert_eq!(cursor_rows(), 0, "a foreign reader never gets a cursor row");
+
+    // The same token naming its own host's session reads and writes as
+    // before; the master is unbound.
+    let out = t
+        .session_history(
+            Extension(host_a),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(own_reader),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&out)["data"].as_array().unwrap().len(), 1);
+    t.session_history(
+        Extension(Caller::master()),
+        Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(50),
+            fresh_for: Some(foreign_reader),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cursor_rows(), 2);
+}
+
 /// Ruling 17: an unknown reader (e.g. an agent still using its
 /// pre-`move_session` id) writes no cursor, so a stream paged from id 0
 /// would hand it the SAME oldest page with `more: true` on every call —
@@ -7030,16 +7197,16 @@ async fn an_approved_work_start_is_bound_to_force_cross_org_and_the_rest() {
             .unwrap_err();
         assert_ne!(confirm_nonce_of(&e), nonce);
     }
-    // The approved arguments go through once (each repo then fails on the
-    // unknown item), then never again.
-    let out = t
+    // The approved arguments go through once (the ticket, resolved once for
+    // every repo, is then unknown), then never again.
+    let ran = t
         .work_link(
             Extension(op.clone()),
             Parameters(start(Some(nonce.clone()), &|_| {})),
         )
         .await
-        .expect("approved: the start runs");
-    assert_eq!(result_json(&out)["failed"][0]["code"], "E_NOTFOUND");
+        .unwrap_err();
+    assert!(ran.message.starts_with("E_NOTFOUND"), "{}", ran.message);
     let e = t
         .work_link(
             Extension(op),
@@ -7048,6 +7215,47 @@ async fn an_approved_work_start_is_bound_to_force_cross_org_and_the_rest() {
         .await
         .unwrap_err();
     assert_ne!(confirm_nonce_of(&e), nonce);
+}
+
+/// M10.1: a multi-repo start's projects are checked before the operator's
+/// confirmation — a request that can only be refused is never put to a
+/// person — and `project_ids: []` is refused, never a silent single start.
+#[tokio::test]
+async fn a_bad_multi_start_is_refused_before_the_confirmation() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    for (project_id, ids) in [
+        (None, vec![]),
+        (Some(pid), vec![pid]),
+        (None, (1..=9).collect::<Vec<i64>>()),
+    ] {
+        for who in [operator(), Caller::master()] {
+            let e = t
+                .work_link(
+                    Extension(who),
+                    Parameters(WorkLinkArgs {
+                        action: "start".into(),
+                        key: Some("ABC-1".into()),
+                        project_id,
+                        project_ids: Some(ids.clone()),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                e.message.starts_with("E_INVALID"),
+                "{project_id:?} {ids:?}: {}",
+                e.message
+            );
+        }
+    }
+    // The multi-start's own clock stops short of the call's.
+    assert!(
+        crate::service::trackers::tickets::MULTI_START_BUDGET + std::time::Duration::from_secs(15)
+            <= super::support::LIFECYCLE_CAP
+    );
 }
 
 /// M9.7 review fix: every other path that starts or restarts a session is
@@ -7229,4 +7437,106 @@ async fn the_new_operator_gates_change_nothing_for_anyone_else() {
         .await
         .unwrap_err();
     assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+}
+
+// ---- operator settings ----
+
+/// The settings name hosts and their projects roots, and a write retunes the
+/// GC sweeper and auto-tidy for the whole fleet: only the master token may
+/// read or change them, whatever a client's or per-host token's mode.
+#[test]
+fn the_settings_tools_are_master_only() {
+    for t in ["get_settings", "set_setting"] {
+        assert!(enforce_admin(&Caller::master(), t).is_ok(), "{t}");
+        for (label, c) in every_caller_kind() {
+            if c.is_master() {
+                continue;
+            }
+            assert!(
+                enforce_mode(&c, t)
+                    .and_then(|()| enforce_admin(&c, t))
+                    .is_err(),
+                "{t}: {label}"
+            );
+        }
+    }
+    assert!(guard::is_readonly_tool("get_settings"));
+    assert!(!guard::is_readonly_tool("set_setting"));
+}
+
+#[tokio::test]
+async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
+    let (tools, _guards, store) = client_tools();
+    let set = |key: &str, value: serde_json::Value| {
+        tools.set_setting(Parameters(SetSettingParams {
+            key: key.into(),
+            value,
+        }))
+    };
+    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    assert_eq!(v["work.journal_days"], "90", "the default when unset: {v}");
+
+    // A string, a number and a boolean are each stored as their text.
+    set("work.journal_days", serde_json::json!("30"))
+        .await
+        .expect("string");
+    let v = result_json(
+        &set("work.recent_days", serde_json::json!(7))
+            .await
+            .expect("number"),
+    );
+    assert_eq!(
+        (
+            v["work.journal_days"].as_str(),
+            v["work.recent_days"].as_str()
+        ),
+        (Some("30"), Some("7"))
+    );
+    set("gc.enabled", serde_json::json!(true))
+        .await
+        .expect("bool");
+    // An array is stored as its JSON (an id set, normalised).
+    set("work.trusted_branch_projects", serde_json::json!([7, 3, 7]))
+        .await
+        .expect("array");
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_setting("gc.enabled").unwrap().as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            s.get_setting("work.trusted_branch_projects")
+                .unwrap()
+                .as_deref(),
+            Some("[3,7]")
+        );
+    }
+    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    assert_eq!(v["work.journal_days"], "30");
+
+    // Refused: a bad value, an unknown key, a derived key, keys other
+    // subsystems own, and no value at all. None of them is written.
+    for (key, value) in [
+        ("work.journal_days", serde_json::json!("soon")),
+        ("no.such_key", serde_json::json!("1")),
+        ("projects.resolved_base", serde_json::json!("{}")),
+        ("mcp.confirm_destructive", serde_json::json!(false)),
+        ("hub.allow_plaintext", serde_json::json!(true)),
+        ("work.journal_days", serde_json::Value::Null),
+    ] {
+        let err = set(key, value.clone()).await.expect_err(key);
+        assert!(
+            err.message.starts_with("E_INVALID"),
+            "{key}={value}: {}",
+            err.message
+        );
+    }
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_setting("work.journal_days").unwrap().as_deref(),
+        Some("30")
+    );
+    assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
+    assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
 }

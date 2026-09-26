@@ -59,6 +59,11 @@ export interface MoveRun {
   /** Whether the last (re)try asked to replace a stale attempt's leftovers
    *  on the target instead of refusing with `E_MOVE_TARGET_DIRTY`. */
   cleanTarget: boolean;
+  /** Whether a (re)try of this run carries its live work links across the
+   *  org boundary on the target instead of being refused (work graph M5:
+   *  `E_FORBIDDEN`, `cross_org: true`). Sticky once granted on a run, so a
+   *  later cleanup retry does not run into the same refusal again. */
+  forceCrossOrg: boolean;
   /** 1 for the original attempt; `retryMove` bumps it, on the same run. */
   attempt: number;
   /** A refusal from the last Finish/Undo attempt (`resolveMoveRun`), shown in
@@ -269,6 +274,7 @@ export function startMove(session: SessionRow, toHost: string, opts: { keepSourc
     startedAt: Date.now(),
     settledAt: null,
     cleanTarget: false,
+    forceCrossOrg: false,
     attempt: 1,
     resolving: false,
     // Same mechanism as `retryMove`. See `MoveRun.awaitingStart`.
@@ -624,10 +630,14 @@ function settleMoveResult(
  * a running one is already going, and a partial needs `resolveMoveRun` — a
  * second `move_session` there would build a second target.
  */
-export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {}): void {
+export function retryMove(
+  sessionId: number,
+  opts: { cleanTarget?: boolean; forceCrossOrg?: boolean } = {},
+): void {
   const run = get(store).get(sessionId);
   if (!run || run.status !== 'failed' || run.origin !== 'local') return;
   const cleanTarget = opts.cleanTarget ?? false;
+  const forceCrossOrg = opts.forceCrossOrg ?? run.forceCrossOrg;
   unwatchWait(sessionId);
   put({
     ...run,
@@ -637,6 +647,7 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     error: null,
     resolveError: null,
     cleanTarget,
+    forceCrossOrg,
     attempt: run.attempt + 1,
     resolving: false,
     startedAt: Date.now(),
@@ -655,6 +666,7 @@ export function retryMove(sessionId: number, opts: { cleanTarget?: boolean } = {
     // that does know carries the answer (`adoptPartial`).
     keepSource: run.keepSource ?? false,
     cleanTarget,
+    forceCrossOrg,
     // Same as `startMove`: a source busy again on retry waits instead of
     // refusing outright, and a `waiting` answer parks this same run there.
     when: 'idle',
@@ -783,6 +795,7 @@ export function adoptPartial(p: UnresolvedPartial, sessionName: string): void {
     },
     resolveError: null,
     cleanTarget: false,
+    forceCrossOrg: false,
     attempt: 1,
     resolving: false,
     awaitingStart: false,
@@ -820,6 +833,7 @@ export function adoptWait(w: UnresolvedWait, sessionName: string): void {
     error: null,
     resolveError: null,
     cleanTarget: false,
+    forceCrossOrg: false,
     attempt: 1,
     resolving: false,
     awaitingStart: false,
@@ -849,6 +863,7 @@ function observed(p: MoveProgress): MoveRun {
     startedAt: Date.now(),
     settledAt: null,
     cleanTarget: false,
+    forceCrossOrg: false,
     attempt: 1,
     resolving: false,
     awaitingStart: false,

@@ -24,17 +24,24 @@
 //! not `auth_failed` or `captcha` (a person has to act; `test` resets
 //! them), nor `unconfigured`. A 429 waits out `Retry-After` plus jitter.
 //! Events only on a real change: the store compares before it writes.
+//!
+//! **Metrics** (work graph M11.4): each pass that runs records, per tracker,
+//! its duration, the items the provider listed or fetched, the items that
+//! changed, the event frames the store emitted under the pass's own locks,
+//! and the error it ended with ([`SyncMetrics`]). In memory only — reset on
+//! restart — and read by the master's `work_admin { action: status }`.
 
 use super::{
     list_all, needs_credential, provider_for, Fetched, Incremental, ItemRef, TrackerError,
     TrackerNet, TrackerProvider, ViewDef, WorkItemSnapshot,
 };
-use crate::ipc_error::lock;
+use crate::ipc_error::{lock, IpcError};
 use crate::store::{Store, TrackerItemWrite, TrackerRow};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// `work.sync_interval_secs` default.
@@ -52,6 +59,9 @@ pub const UNBOUND_MAX: usize = 100;
 pub const NEGATIVE_TTL_SECS: i64 = 3600;
 /// Wait after a 429 with no `Retry-After`.
 pub const DEFAULT_RETRY_SECS: u64 = 60;
+/// Longest a 429's `Retry-After` parks a tracker: a tracker (or anyone
+/// answering for one) must not be able to park the sync until a restart.
+pub const MAX_RETRY_SECS: u64 = 3600;
 
 /// States a pass runs for.
 pub fn runnable(state: &str) -> bool {
@@ -62,6 +72,9 @@ pub fn runnable(state: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrackerPass {
     pub tracker_id: i64,
+    /// Items the provider answered (views, by-id and by-key fetches), before
+    /// the pass's dedupe.
+    pub listed: usize,
     pub seen: usize,
     pub changed: usize,
     pub unavailable: usize,
@@ -71,15 +84,112 @@ pub struct TrackerPass {
     pub skipped: bool,
 }
 
+/// One tracker's last sync pass (work graph M11.4), as `work_admin {
+/// action: status }` reports it to the master. In memory only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncMetrics {
+    pub tracker_id: i64,
+    /// When the last pass that ran started (unix seconds); `None`: no pass
+    /// has run for this tracker since the process started.
+    #[serde(default)]
+    pub last_pass_at: Option<i64>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Items the provider listed or fetched, before the pass's dedupe.
+    #[serde(default)]
+    pub items_listed: u64,
+    /// Items whose stored row changed (or became unavailable).
+    #[serde(default)]
+    pub items_changed: u64,
+    /// Event frames the store emitted under the pass's locks (`work:item`,
+    /// `work:tracker`, and the `session:updated` a bind causes).
+    #[serde(default)]
+    pub frames_emitted: u64,
+    /// Why the pass failed: redacted, defused, one line, at most
+    /// [`METRIC_ERROR_MAX_CHARS`] characters. `None` for a pass that ended ok.
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Longest `SyncMetrics.last_error`.
+pub const METRIC_ERROR_MAX_CHARS: usize = 300;
+
+/// Per-tracker metrics, shared between a sync and whoever reads them.
+pub type MetricsTable = Arc<Mutex<HashMap<i64, SyncMetrics>>>;
+
+static PROCESS_METRICS: OnceLock<MetricsTable> = OnceLock::new();
+
+/// The process's table: the one [`spawn_tracker_sync`]'s tick writes and
+/// [`metrics_for`] reads.
+pub fn process_metrics() -> MetricsTable {
+    Arc::clone(PROCESS_METRICS.get_or_init(Default::default))
+}
+
+/// The process's metrics for `tracker_ids`, in that order; a tracker no pass
+/// has run for yet gets a row with `last_pass_at: None`.
+pub fn metrics_for(tracker_ids: &[i64]) -> Vec<SyncMetrics> {
+    read_metrics(&process_metrics(), tracker_ids)
+}
+
+fn read_metrics(table: &MetricsTable, tracker_ids: &[i64]) -> Vec<SyncMetrics> {
+    let m = table.lock().unwrap_or_else(|p| p.into_inner());
+    tracker_ids
+        .iter()
+        .map(|id| {
+            m.get(id).cloned().unwrap_or(SyncMetrics {
+                tracker_id: *id,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// A pass's error as a metric: redacted, `[claude-fleet` defused, control
+/// characters flattened, capped.
+fn metric_error(e: &str) -> String {
+    let red = crate::logging::redact(e);
+    crate::mcp::guard::defuse(&red)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(METRIC_ERROR_MAX_CHARS)
+        .collect()
+}
+
+/// The store guard, counting the frames emitted while it is held into the
+/// pass's counter when it drops.
+struct Counted<'a> {
+    guard: MutexGuard<'a, Store>,
+    start: u64,
+    sink: &'a AtomicU64,
+}
+
+impl std::ops::Deref for Counted<'_> {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        &self.guard
+    }
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        let n = self.guard.frames_emitted().saturating_sub(self.start);
+        self.sink.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
 /// The sync's in-memory state: single-flight, back-off, the last whole
-/// listing per view, and keys a tracker said it does not know.
+/// listing per view, keys a tracker said it does not know, and the last
+/// pass's metrics per tracker.
 pub struct TrackerSync {
     net: TrackerNet,
     running: AtomicBool,
     not_before: Mutex<HashMap<i64, i64>>,
     last_full: Mutex<HashMap<(i64, String), i64>>,
     unknown_keys: Mutex<HashMap<(i64, String), i64>>,
-    clock: fn() -> i64,
+    metrics: MetricsTable,
+    /// Frames the running tracker pass has emitted so far.
+    frames: AtomicU64,
+    clock: Box<dyn Fn() -> i64 + Send + Sync>,
 }
 
 fn now() -> i64 {
@@ -102,13 +212,38 @@ impl TrackerSync {
             not_before: Mutex::new(HashMap::new()),
             last_full: Mutex::new(HashMap::new()),
             unknown_keys: Mutex::new(HashMap::new()),
-            clock: now,
+            metrics: MetricsTable::default(),
+            frames: AtomicU64::new(0),
+            clock: Box::new(now),
         }
     }
 
+    /// Record metrics into `table` (the process's, for the tick) instead of
+    /// a table of this sync's own.
+    pub fn with_metrics(mut self, table: MetricsTable) -> Self {
+        self.metrics = table;
+        self
+    }
+
+    /// The last pass's metrics for `tracker_ids` (see [`metrics_for`]).
+    pub fn metrics(&self, tracker_ids: &[i64]) -> Vec<SyncMetrics> {
+        read_metrics(&self.metrics, tracker_ids)
+    }
+
+    /// The store, with the frames emitted under this guard counted into the
+    /// running pass.
+    fn lock<'a>(&'a self, store: &'a Mutex<Store>) -> Result<Counted<'a>, IpcError> {
+        let guard = lock(store)?;
+        Ok(Counted {
+            start: guard.frames_emitted(),
+            guard,
+            sink: &self.frames,
+        })
+    }
+
     #[cfg(test)]
-    fn with_clock(mut self, clock: fn() -> i64) -> Self {
-        self.clock = clock;
+    fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
         self
     }
 
@@ -147,22 +282,34 @@ impl TrackerSync {
             ..Default::default()
         };
         let now = (self.clock)();
-        let waiting = self
-            .not_before
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&t.id).copied())
-            .is_some_and(|nb| nb > now);
+        // The deadline lives on the row (`set_tracker_not_before`): that copy
+        // is what a `lookup` honours, what survives a restart, and what a
+        // successful `test_tracker` clears — so the row alone decides. The
+        // copy kept here is the fallback for a row that cannot be read.
+        let waiting = match lock(store).and_then(|s| s.tracker_not_before(t.id)) {
+            Ok(on_row) => on_row.is_some_and(|nb| nb > now),
+            Err(_) => self
+                .not_before
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&t.id).copied())
+                .is_some_and(|nb| nb > now),
+        };
         if !runnable(&t.state) || waiting {
             pass.skipped = true;
             return pass;
         }
-        match self.run_tracker(t, store, now, &mut pass).await {
+        let started = Instant::now();
+        self.frames.store(0, Ordering::Relaxed);
+        let result = self.run_tracker(t, store, now, &mut pass).await;
+        let mut outcome: Option<String> = None;
+        match result {
             Ok(()) => {
                 if let Ok(mut m) = self.not_before.lock() {
                     m.remove(&t.id);
                 }
-                if let Ok(s) = lock(store) {
+                if let Ok(s) = self.lock(store) {
+                    let _ = s.set_tracker_not_before(t.id, None);
                     let changed = s.set_tracker_state(t.id, "ok", None).unwrap_or(false);
                     let first = s.set_tracker_synced(t.id, now).unwrap_or(false);
                     if changed || first {
@@ -172,17 +319,48 @@ impl TrackerSync {
             }
             Err(e) => {
                 pass.error = Some(e.explain());
-                if let TrackerError::RateLimited { retry_after_secs } = &e {
-                    let wait = retry_after_secs.unwrap_or(DEFAULT_RETRY_SECS);
+                let deadline = match &e {
+                    TrackerError::RateLimited { retry_after_secs } => {
+                        let wait = retry_after_secs
+                            .unwrap_or(DEFAULT_RETRY_SECS)
+                            .min(MAX_RETRY_SECS);
+                        Some(now.saturating_add(wait.saturating_add(jitter(wait)) as i64))
+                    }
+                    _ => None,
+                };
+                if let Some(d) = deadline {
                     if let Ok(mut m) = self.not_before.lock() {
-                        m.insert(t.id, now + (wait + jitter(wait)) as i64);
+                        m.insert(t.id, d);
                     }
                 }
                 tracing::warn!(tracker_id = t.id, result = ?e.state(), "tracker sync failed");
-                if let Ok(s) = lock(store) {
+                if let Ok(s) = self.lock(store) {
+                    if let Some(d) = deadline {
+                        let _ = s.set_tracker_not_before(t.id, Some(d));
+                    }
                     let _ = super::admin::record_failure(&s, t.id, &e);
+                    // The error as stored: already masked of the tracker's
+                    // own credential literals, not only by pattern.
+                    outcome = s
+                        .get_tracker(t.id)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r.last_error);
                 }
+                outcome.get_or_insert_with(|| e.explain());
             }
+        }
+        let m = SyncMetrics {
+            tracker_id: t.id,
+            last_pass_at: Some(now),
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            items_listed: pass.listed as u64,
+            items_changed: (pass.changed + pass.unavailable) as u64,
+            frames_emitted: self.frames.load(Ordering::Relaxed),
+            last_error: outcome.as_deref().map(metric_error),
+        };
+        if let Ok(mut table) = self.metrics.lock() {
+            table.insert(t.id, m);
         }
         pass
     }
@@ -195,7 +373,9 @@ impl TrackerSync {
         pass: &mut TrackerPass,
     ) -> Result<(), TrackerError> {
         let (cred, views) = {
-            let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
+            let s = self
+                .lock(store)
+                .map_err(|e| TrackerError::Invalid(e.message))?;
             (
                 s.resolve_tracker_credential(t.id)
                     .map_err(|e| TrackerError::Invalid(e.message))?,
@@ -207,6 +387,21 @@ impl TrackerSync {
             return Err(TrackerError::Unconfigured);
         }
         let provider = provider_for(t, cred, &self.net)?;
+        self.run_provider(t, provider.as_ref(), views, store, now, pass)
+            .await
+    }
+
+    /// The pass proper, over the provider `run_tracker` built (tests hand
+    /// in their own).
+    async fn run_provider(
+        &self,
+        t: &TrackerRow,
+        provider: &dyn TrackerProvider,
+        views: Vec<crate::store::TrackerViewRow>,
+        store: &Mutex<Store>,
+        now: i64,
+        pass: &mut TrackerPass,
+    ) -> Result<(), TrackerError> {
         let incremental = provider.caps().incremental;
         // (id, updated) seen this pass: the overlap's repeats are dropped.
         let mut seen: HashSet<(String, Option<i64>)> = HashSet::new();
@@ -226,7 +421,7 @@ impl TrackerSync {
                 query: v.query.clone(),
             };
             let listed = read_view(
-                provider.as_ref(),
+                provider,
                 &def,
                 incremental,
                 full,
@@ -238,7 +433,7 @@ impl TrackerSync {
                 Ok(r) => r,
                 Err(TrackerError::Forbidden(_)) => {
                     // C28 / plan: a 403 on one view disables that view only.
-                    if let Ok(s) = lock(store) {
+                    if let Ok(s) = self.lock(store) {
                         if s.set_tracker_view_enabled(t.id, &v.view_id, false)
                             .unwrap_or(false)
                         {
@@ -254,15 +449,17 @@ impl TrackerSync {
                     continue;
                 }
             };
-            if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
-                if let Ok(s) = lock(store) {
-                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
-                }
-            }
+            pass.listed += items.len();
             let newest = items.iter().filter_map(|i| i.updated).max();
             let ids: Vec<String> = items.iter().map(|i| i.external_id.clone()).collect();
             self.store_items(t.id, items, store, &mut seen, pass)?;
-            if let Ok(s) = lock(store) {
+            // The token and the watermark move only once the items they
+            // stand for are stored: a write that fails leaves them to be
+            // read again, not skipped.
+            if let Ok(s) = self.lock(store) {
+                if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
+                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
+                }
                 if let Some(w) = newest {
                     let _ = s.set_tracker_view_watermark(t.id, &v.view_id, w);
                 }
@@ -281,19 +478,27 @@ impl TrackerSync {
 
         // 2. linked items, by id.
         let linked = {
-            let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
+            let s = self
+                .lock(store)
+                .map_err(|e| TrackerError::Invalid(e.message))?;
             s.linked_tracker_item_ids(t.id, LINKED_MAX)
                 .map_err(|e| TrackerError::Invalid(e.message))?
         };
         if !linked.is_empty() {
             let refs: Vec<ItemRef> = linked.into_iter().map(ItemRef::Id).collect();
             let fetched = provider.fetch(&refs).await?;
+            pass.listed += fetched
+                .iter()
+                .filter(|f| matches!(f, Fetched::Found(_)))
+                .count();
             self.store_fetched(t.id, fetched, store, &mut seen, pass)?;
         }
 
         // 3. bare keys typed before the tracker was connected, by key.
         let unbound: Vec<String> = {
-            let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
+            let s = self
+                .lock(store)
+                .map_err(|e| TrackerError::Invalid(e.message))?;
             let keys = s
                 .unbound_ref_keys(t.id, UNBOUND_MAX * 2)
                 .map_err(|e| TrackerError::Invalid(e.message))?;
@@ -311,6 +516,10 @@ impl TrackerSync {
         if !unbound.is_empty() {
             let refs: Vec<ItemRef> = unbound.iter().map(|k| ItemRef::parse(k)).collect();
             let fetched = provider.fetch(&refs).await?;
+            pass.listed += fetched
+                .iter()
+                .filter(|f| matches!(f, Fetched::Found(_)))
+                .count();
             let mut found = Vec::new();
             for f in fetched {
                 match f {
@@ -328,7 +537,9 @@ impl TrackerSync {
         }
 
         // 5. bind.
-        let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
+        let s = self
+            .lock(store)
+            .map_err(|e| TrackerError::Invalid(e.message))?;
         let bound = s
             .bind_tracker_refs(t.id)
             .map_err(|e| TrackerError::Invalid(e.message))?;
@@ -356,7 +567,9 @@ impl TrackerSync {
             match f {
                 Fetched::Found(s) => found.push(*s),
                 Fetched::Unavailable { reference, reason } => {
-                    let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
+                    let s = self
+                        .lock(store)
+                        .map_err(|e| TrackerError::Invalid(e.message))?;
                     if s.mark_tracker_item_unavailable(tracker_id, &reference, &reason)
                         .map_err(|e| TrackerError::Invalid(e.message))?
                     {
@@ -376,7 +589,9 @@ impl TrackerSync {
         seen: &mut HashSet<(String, Option<i64>)>,
         pass: &mut TrackerPass,
     ) -> Result<(), TrackerError> {
-        let s = lock(store).map_err(|e| TrackerError::Invalid(e.message))?;
+        let s = self
+            .lock(store)
+            .map_err(|e| TrackerError::Invalid(e.message))?;
         for item in items {
             if !seen.insert((item.external_id.clone(), item.updated)) {
                 continue;
@@ -444,24 +659,67 @@ async fn read_view(
     }
 }
 
-/// A provider snapshot → the store's write shape.
+/// Longest title a tracker item keeps (a person's own titles are held to
+/// `WORK_TITLE_MAX_CHARS`; a tracker's get a little more).
+pub const TITLE_MAX_CHARS: usize = 300;
+/// Longest status name, kind, resolution, iteration, assignee, container
+/// or alias.
+pub const FIELD_MAX_CHARS: usize = 100;
+/// Longest key.
+pub const KEY_MAX_CHARS: usize = 64;
+/// Longest external id (and parent id) and URL.
+pub const ID_MAX_CHARS: usize = 200;
+pub const URL_MAX_CHARS: usize = 2048;
+/// Most aliases, containers or assignees kept.
+pub const LIST_MAX: usize = 16;
+
+fn cap(s: String, max: usize) -> String {
+    if s.chars().count() <= max {
+        s
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
+fn cap_list(v: Vec<String>, max: usize) -> Vec<String> {
+    v.into_iter().take(LIST_MAX).map(|s| cap(s, max)).collect()
+}
+
+/// A key is dropped, never cut: a truncated key is a well-formed, reachable
+/// key that can be another item's (a GitHub `owner/repo#123` cut to
+/// `…#12`), while one over `KEY_MAX_CHARS` was unreachable by key anyway
+/// (`WORK_REF_MAX_CHARS`).
+fn key_or_drop(k: String) -> Option<String> {
+    (k.chars().count() <= KEY_MAX_CHARS).then_some(k)
+}
+
+/// A provider snapshot → the store's write shape. The one place every
+/// snapshot passes (the sync's and `fetch_one`'s) before it is stored, so
+/// every field is bounded here: the tracker — or a host forging its
+/// answer — controls these strings, and each one rides in every linked
+/// session's row, row event and `GET /events` frame.
 pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
     TrackerItemWrite {
-        external_id: s.external_id,
-        key: s.key,
-        aliases: s.aliases,
-        title: s.title,
-        url: s.url,
-        kind: s.kind,
+        external_id: cap(s.external_id, ID_MAX_CHARS),
+        key: s.key.and_then(key_or_drop),
+        aliases: s
+            .aliases
+            .into_iter()
+            .filter_map(key_or_drop)
+            .take(LIST_MAX)
+            .collect(),
+        title: cap(s.title, TITLE_MAX_CHARS),
+        url: s.url.map(|u| cap(u, URL_MAX_CHARS)),
+        kind: s.kind.map(|k| cap(k, FIELD_MAX_CHARS)),
         hierarchy_level: s.hierarchy_level,
-        status_name: s.status.name,
+        status_name: cap(s.status.name, FIELD_MAX_CHARS),
         status_category: s.status.category,
-        resolution: s.status.resolution,
-        parent_external_id: s.parent_external_id,
-        containers: s.containers,
-        assignees: s.assignees,
-        assignee_id: s.assignee_id,
-        iteration: s.iteration,
+        resolution: s.status.resolution.map(|r| cap(r, FIELD_MAX_CHARS)),
+        parent_external_id: s.parent_external_id.map(|p| cap(p, ID_MAX_CHARS)),
+        containers: cap_list(s.containers, FIELD_MAX_CHARS),
+        assignees: cap_list(s.assignees, FIELD_MAX_CHARS),
+        assignee_id: s.assignee_id.map(|a| cap(a, ID_MAX_CHARS)),
+        iteration: s.iteration.map(|i| cap(i, FIELD_MAX_CHARS)),
         iteration_active: s.iteration_active,
         updated_ext: s.updated,
         description: s.description,
@@ -527,7 +785,7 @@ pub fn spawn_tracker_sync(
         return None;
     };
     tracing::info!("tracker sync every {}s", period.as_secs());
-    let sync = Arc::new(TrackerSync::new(net));
+    let sync = Arc::new(TrackerSync::new(net).with_metrics(process_metrics()));
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -545,3 +803,6 @@ pub fn spawn_tracker_sync(
 #[cfg(test)]
 #[path = "tests_sync.rs"]
 mod tests;
+
+#[cfg(test)]
+mod tests_ring_pressure;

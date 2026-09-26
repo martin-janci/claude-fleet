@@ -117,4 +117,90 @@ describe('TicketCard', () => {
       other.unmount();
     }
   });
+  it('reloads when the selected session’s key changes, and a late answer for the old key is dropped', async () => {
+    const pending = new Map<string, (c: Card) => void>();
+    vi.mocked(invoke).mockImplementation((cmd: string, a?: unknown) => {
+      if (cmd !== 'work_ticket_card') return Promise.resolve(null);
+      const key = (a as { args: { key: string } }).args.key;
+      return new Promise<Card>((res) => pending.set(key, res));
+    });
+    const { rerender } = render(TicketCard, { session: row() });
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('work_ticket_card', { args: { key: 'PAY-7' } });
+    // Another session, linked to another ticket: the card is asked again.
+    const other = row({
+      id: 32,
+      work: { link_id: 2, item_id: 4, key: 'PAY-8', title: 'CB', source: 'manual' },
+    });
+    await rerender({ session: other });
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('work_ticket_card', { args: { key: 'PAY-8' } });
+    expect(screen.getByText('PAY-8')).toBeTruthy();
+    // The old key's answer comes in late: it is not shown under the new key.
+    pending.get('PAY-7')!(card());
+    await flush();
+    expect(screen.queryByText('Refund <script>alert(1)</script>')).toBeNull();
+    expect(screen.queryByTestId('ticket-card-criteria')).toBeNull();
+    pending.get('PAY-8')!(card({ key: 'PAY-8', title: 'Chargeback dispute', acceptance: ['Money back'] }));
+    await flush();
+    expect(screen.getByText('Chargeback dispute')).toBeTruthy();
+    expect(screen.getByText('Money back')).toBeTruthy();
+    // A row update that keeps the key (a status change) does not ask again.
+    await rerender({ session: { ...other, claude_status: 'idle' } });
+    await flush();
+    const asks = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_ticket_card');
+    expect(asks).toHaveLength(2);
+    // Unlinked: the card goes, and nothing is asked for no key.
+    await rerender({ session: { ...other, work: null } });
+    await flush();
+    expect(screen.queryByTestId('ticket-card')).toBeNull();
+    expect(vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_ticket_card')).toHaveLength(2);
+  });
+
+  it('shows the latest handover outcome from the newest handover_* event on the timeline', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    let events: { id: number; kind: string; at: number }[] = [
+      { id: 5, kind: 'turn_done', at: now - 10 },
+      { id: 4, kind: 'handover_missing', at: now - 20 },
+      { id: 3, kind: 'handover_requested', at: now - 60 },
+    ];
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'work_ticket_card' ? card() : cmd === 'session_history' ? events : null,
+    );
+    const view = render(TicketCard, { session: row({ turn_seq: 1 }) });
+    await flush();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('session_history', { args: { session_id: 31, limit: 200 } });
+    const line = () => screen.getByTestId('ticket-card-handover-outcome');
+    expect(line().dataset.state).toBe('missing');
+
+    // A new request: pending; the turn that answers it ends: written.
+    events = [{ id: 6, kind: 'handover_requested', at: now - 5 }, ...events];
+    await view.rerender({ session: row({ turn_seq: 2 }) });
+    await flush();
+    expect(line().dataset.state).toBe('pending');
+    events = [{ id: 7, kind: 'handover_written', at: now }, ...events];
+    await view.rerender({ session: row({ turn_seq: 3 }) });
+    await flush();
+    expect(line().dataset.state).toBe('written');
+
+    // A failed send.
+    events = [{ id: 8, kind: 'handover_send_failed', at: now }, ...events];
+    await view.rerender({ session: row({ turn_seq: 4 }) });
+    await flush();
+    expect(line().dataset.state).toBe('failed');
+  });
+
+  it('shows no outcome without a handover event, or for an abandoned request', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'work_ticket_card'
+        ? card()
+        : cmd === 'session_history'
+          ? [{ id: 1, kind: 'handover_requested', at: now - 31 * 60 }]
+          : null,
+    );
+    render(TicketCard, { session: row() });
+    await flush();
+    expect(screen.queryByTestId('ticket-card-handover-outcome')).toBeNull();
+  });
 });

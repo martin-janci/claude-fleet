@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +169,9 @@ pub enum AdminAction {
     SetCredential,
     Test,
     Remove,
+    /// Work graph M11.4: the sync's per-tracker counters for its last pass
+    /// (in memory, reset on restart).
+    Status,
     /// Work graph M5: org administration (`service::orgs::admin`).
     Org(crate::service::orgs::OrgAction),
 }
@@ -183,6 +186,7 @@ impl AdminAction {
         "set_credential",
         "test",
         "remove",
+        "status",
         "list_orgs",
         "add_org",
         "update_org",
@@ -215,6 +219,7 @@ impl AdminAction {
             "set_credential" => AdminAction::SetCredential,
             "test" => AdminAction::Test,
             "remove" | "remove_tracker" => AdminAction::Remove,
+            "status" | "sync_status" => AdminAction::Status,
             other => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -275,10 +280,12 @@ fn default_name(provider: &str, site: &str) -> String {
     let host_path = site.trim_start_matches("https://");
     match provider {
         "jira" => host_path.trim_end_matches(".atlassian.net").to_string(),
-        "github" => host_path
-            .strip_prefix("github.com/")
-            .map(|o| format!("{o} (GitHub)"))
-            .unwrap_or_else(|| "GitHub".into()),
+        "github" => match crate::store::github_site(site) {
+            Some((None, Some(o))) => format!("{o} (GitHub)"),
+            Some((Some(h), Some(o))) => format!("{o} ({h})"),
+            Some((Some(h), None)) => format!("GitHub {h}"),
+            _ => "GitHub".into(),
+        },
         "asana" => "Asana".into(),
         "linear" => host_path
             .strip_prefix("linear.app/")
@@ -307,6 +314,99 @@ fn check_transport(provider: &str, transport: &str) -> Result<(), IpcError> {
     }
 }
 
+/// A host-side transport (`via_host:` curl, `via_cli:` gh) runs its
+/// command with the request on stdin, which a host reached through
+/// fleet-agent cannot do: every request would fail `E_UNSUPPORTED` and the
+/// tick would retry forever, so it is refused when the tracker is set up.
+fn check_host_transport(s: &Store, transport: &str) -> Result<(), IpcError> {
+    let Some(alias) = transport
+        .strip_prefix("via_host:")
+        .or_else(|| transport.strip_prefix("via_cli:"))
+    else {
+        return Ok(());
+    };
+    if s.agent_host_alias(alias)?.is_some() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{alias} is reached through fleet-agent, which cannot run curl or gh for a \
+                 tracker; pick a host fleet reaches over SSH"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The reverse of [`check_host_transport`], for the host side: a host some
+/// tracker runs curl or gh on (`via_host:` / `via_cli:`) cannot be switched
+/// to fleet-agent, which can run neither — the tracker would fail every
+/// request and the tick would retry forever. `hosts::add_host` asks before
+/// it writes `transport = agent`; the refusal names the tracker to move
+/// first (`work_admin { action: update, transport }`).
+pub fn refuse_agent_transport_on_tracker_host(s: &Store, alias: &str) -> Result<(), IpcError> {
+    for t in s.list_trackers()? {
+        let (tool, host) = if let Some(h) = t.transport.strip_prefix("via_host:") {
+            ("curl", h)
+        } else if let Some(h) = t.transport.strip_prefix("via_cli:") {
+            ("gh", h)
+        } else {
+            continue;
+        };
+        if host == alias {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "tracker {} ({}) runs {tool} on {alias}, which fleet-agent cannot; point \
+                     the tracker at a host fleet reaches over SSH (work_admin update, \
+                     transport) before switching {alias} to agent",
+                    t.id, t.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A GitHub tracker's `settings.hostname` held to its site (M11.4): an
+/// enterprise site (`https://<host>[/<owner>]`) always has one, whose host
+/// part is the site's — the one given, else the one it had (an update that
+/// resends `repos` alone keeps it), else the site's host; a github.com site
+/// never has one.
+fn github_hostname(
+    site: &str,
+    settings: &mut crate::store::TrackerSettings,
+    had: Option<&str>,
+) -> Result<(), IpcError> {
+    let site_host = crate::store::github_site(site).and_then(|(h, _)| h);
+    let hostname = settings
+        .hostname
+        .clone()
+        .or_else(|| had.map(str::to_string));
+    settings.hostname =
+        match (site_host, hostname) {
+            (None, None) => None,
+            (None, Some(_)) => return Err(IpcError::new(
+                codes::E_INVALID,
+                "hostname is for a GitHub Enterprise Server site; a github.com tracker has none",
+            )),
+            (Some(h), None) => Some(crate::store::validate_ghes_hostname(&h)?),
+            (Some(h), Some(given)) => {
+                let given = crate::store::validate_ghes_hostname(&given)?;
+                if crate::store::ghes_host_part(&given) != h {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        format!(
+                            "hostname {given} is not the site's host {h}; an enterprise tracker's \
+                         site is https://<hostname without port>[/<owner>]"
+                        ),
+                    ));
+                }
+                Some(given)
+            }
+        };
+    Ok(())
+}
+
 /// `settings` as a person sent it → validated for `provider`.
 fn parse_settings(
     provider: &str,
@@ -331,8 +431,14 @@ pub fn admin_sync(
                 .site_url
                 .as_deref()
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "add needs site_url"))?;
+            // An enterprise hostname says GitHub: its URL's host cannot.
+            let ghes = args
+                .settings
+                .as_ref()
+                .is_some_and(|v| v.get("hostname").is_some());
             let provider = match args.provider.as_deref() {
                 Some(p) => p,
+                None if ghes => "github",
                 None => infer_provider(raw).unwrap_or("jira"),
             };
             let site = site_from_input(provider, raw)?;
@@ -342,11 +448,17 @@ pub fn admin_sync(
                 .map(crate::store::validate_tracker_transport)
                 .transpose()?;
             check_transport(provider, transport.as_deref().unwrap_or("direct"))?;
-            let settings = args
+            check_host_transport(&s, transport.as_deref().unwrap_or("direct"))?;
+            let mut settings = args
                 .settings
                 .as_ref()
                 .map(|v| parse_settings(provider, v))
                 .transpose()?;
+            if provider == "github" {
+                let mut st = settings.take().unwrap_or_default();
+                github_hostname(&site, &mut st, None)?;
+                settings = (!st.is_default()).then_some(st);
+            }
             let name = args
                 .name
                 .clone()
@@ -371,17 +483,22 @@ pub fn admin_sync(
                     "update needs name, transport or settings",
                 ));
             }
-            let settings = args
+            let mut settings = args
                 .settings
                 .as_ref()
                 .map(|v| parse_settings(&row.provider, v))
                 .transpose()?;
+            if let (Some(st), "github") = (settings.as_mut(), row.provider.as_str()) {
+                github_hostname(&row.site_url, st, row.settings.hostname.as_deref())?;
+            }
             if let Some(n) = args.name.as_deref() {
                 s.rename_tracker(id, n)?;
             }
             if let Some(t) = args.transport.as_deref() {
-                check_transport(&row.provider, &crate::store::validate_tracker_transport(t)?)?;
-                s.set_tracker_transport(id, t)?;
+                let t = crate::store::validate_tracker_transport(t)?;
+                check_transport(&row.provider, &t)?;
+                check_host_transport(&s, &t)?;
+                s.set_tracker_transport(id, &t)?;
             }
             if let Some(st) = settings {
                 s.set_tracker_settings(id, &st)?;
@@ -412,6 +529,11 @@ pub fn admin_sync(
             }
             s.emit_tracker_removed(id);
             json(&serde_json::json!({ "removed": id }))
+        }
+        AdminAction::Status => {
+            let ids: Vec<i64> = s.list_trackers()?.iter().map(|t| t.id).collect();
+            drop(s);
+            json(&super::sync::metrics_for(&ids))
         }
         AdminAction::Test => Err(IpcError::new(
             codes::E_INTERNAL,
@@ -454,6 +576,11 @@ pub async fn test_tracker(
                     .map(|v| (v.id.clone(), v.label.clone(), v.query.clone()))
                     .collect::<Vec<_>>(),
             )?;
+            // A view the sync disabled on a 403 runs again after a person
+            // tests the tracker: nothing else ever re-enables it.
+            changed |= s.enable_tracker_views(id)?;
+            // The tracker answered: a 429 back-off still on the row is over.
+            s.set_tracker_not_before(id, None)?;
             changed |= s.set_tracker_state(id, "ok", None)?;
             if changed {
                 s.emit_tracker(id)?;
@@ -599,6 +726,114 @@ mod tests {
         );
     }
 
+    /// A host reached through fleet-agent cannot run curl or gh with the
+    /// request on stdin: `via_host` / `via_cli` on it is refused at add and
+    /// update time, naming fleet-agent, while an SSH host is fine.
+    #[test]
+    fn a_host_side_transport_on_a_fleet_agent_host_is_refused() {
+        let (st, id) = added();
+        {
+            let s = st.lock().unwrap();
+            s.upsert_host("agentbox").unwrap();
+            s.set_host_transport("agentbox", "agent").unwrap();
+            s.upsert_host("sshbox").unwrap();
+        }
+        let e = admin_sync(
+            &WorkAdminArgs {
+                site_url: Some("https://beta.atlassian.net".into()),
+                transport: Some("via_host:agentbox".into()),
+                ..args("add")
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("fleet-agent"), "{}", e.message);
+        assert_eq!(
+            admin_sync(&args("list"), &st)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let e = admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                transport: Some("via_host:agentbox".into()),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("fleet-agent"), "{}", e.message);
+        assert_eq!(
+            st.lock().unwrap().require_tracker(id).unwrap().transport,
+            "direct"
+        );
+        let v = admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                transport: Some("via_host:sshbox".into()),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap();
+        assert_eq!(v["transport"], "via_host:sshbox");
+    }
+
+    /// The reverse of the rule above: a host a tracker already runs curl or
+    /// gh on cannot be switched to fleet-agent. `add_host` re-adding it
+    /// with `transport: agent` is refused before the probe and any write,
+    /// naming the tracker; the row keeps its transport, and a host no
+    /// tracker runs on is free to become an agent host.
+    #[tokio::test]
+    async fn switching_a_tracker_host_to_fleet_agent_is_refused() {
+        use crate::service::hosts::{add_host, AddHostArgs};
+        let (st, id) = added();
+        st.lock().unwrap().upsert_host("sshbox").unwrap();
+        admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                transport: Some("via_host:sshbox".into()),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap();
+        let fake = crate::ssh_fake::FakeSsh::new();
+        let agent = |alias: &str| AddHostArgs {
+            alias: alias.into(),
+            ssh_alias: alias.into(),
+            transport: Some("agent".into()),
+        };
+        let e = add_host(agent("sshbox"), &st, &fake).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(
+            e.message.contains(&format!("tracker {id}"))
+                && e.message.contains("curl on sshbox")
+                && e.message.contains("fleet-agent"),
+            "{}",
+            e.message
+        );
+        assert!(fake.calls().is_empty(), "refused before the probe");
+        {
+            let s = st.lock().unwrap();
+            let host = s
+                .list_hosts()
+                .unwrap()
+                .into_iter()
+                .find(|h| h.alias == "sshbox")
+                .unwrap();
+            assert_eq!(host.transport, "ssh");
+            assert_eq!(s.require_tracker(id).unwrap().transport, "via_host:sshbox");
+        }
+        add_host(agent("other"), &st, &fake)
+            .await
+            .expect("no tracker runs on it");
+    }
+
     #[test]
     fn the_site_fence_holds_on_add() {
         let st = Mutex::new(Store::open_in_memory().unwrap());
@@ -623,10 +858,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_stores_the_probe_and_views_and_marks_the_tracker_ok() {
-        let (st, id) = added();
-        let f = FakeTransport::new();
+    /// One successful Jira Cloud probe: identity, tenant, projects, fields,
+    /// sprint check, favourite filters.
+    fn probe_ok(f: &FakeTransport) {
         f.once(
             Method::Get,
             "/myself",
@@ -657,6 +891,13 @@ mod tests {
             "/filter/favourite",
             Ok(Response::json(200, &fixture("filter_favourite.json"))),
         );
+    }
+
+    #[tokio::test]
+    async fn test_stores_the_probe_and_views_and_marks_the_tracker_ok() {
+        let (st, id) = added();
+        let f = FakeTransport::new();
+        probe_ok(&f);
         let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f.clone())))
             .await
             .unwrap();
@@ -669,6 +910,54 @@ mod tests {
             "no project has an open sprint: no sprint view"
         );
         assert_eq!(st.lock().unwrap().list_tracker_views(id).unwrap().len(), 4);
+    }
+
+    /// A view the sync disabled on a 403 is not disabled for good: a
+    /// successful test enables it again (a failed one leaves it alone).
+    #[tokio::test]
+    async fn a_successful_test_enables_the_views_a_403_disabled() {
+        let (st, id) = added();
+        {
+            let s = st.lock().unwrap();
+            s.sync_tracker_views(
+                id,
+                &[
+                    ("mine".into(), "My work".into(), "assignee = me".into()),
+                    ("filter:9".into(), "Secret".into(), "filter = 9".into()),
+                ],
+            )
+            .unwrap();
+            assert!(s.set_tracker_view_enabled(id, "mine", false).unwrap());
+        }
+        let disabled = |st: &Mutex<Store>| -> Vec<String> {
+            st.lock()
+                .unwrap()
+                .list_tracker_views(id)
+                .unwrap()
+                .into_iter()
+                .filter(|v| !v.enabled)
+                .map(|v| v.view_id)
+                .collect()
+        };
+        let f = FakeTransport::new();
+        f.once(Method::Get, "/myself", Ok(Response::new(401, "")));
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f)))
+            .await
+            .unwrap();
+        assert!(!r.ok);
+        assert_eq!(disabled(&st), vec!["mine"], "a failed test changes nothing");
+        let f = FakeTransport::new();
+        probe_ok(&f);
+        let r = test_tracker(id, &st, &TrackerNet::fake(Arc::new(f)))
+            .await
+            .unwrap();
+        assert!(r.ok, "{:?}", r.error);
+        let views = st.lock().unwrap().list_tracker_views(id).unwrap();
+        assert!(
+            views.iter().any(|v| v.view_id == "mine" && v.enabled),
+            "{views:?}"
+        );
+        assert!(disabled(&st).is_empty(), "every view runs again");
     }
 
     #[tokio::test]

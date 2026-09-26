@@ -214,3 +214,41 @@ M10.6 (independent; reuses M10.2's fake tracker)
   - **M4.6.** Landed on `main` separately (#273, OFF behind
     `work.classify_nudge`); D14 therefore reads *built, off by default*.
     D14–D16 are in the roadmap's decisions table.
+- 2026-09-25: **M10.2 done** on `claude/cloud-fleet-work-graph-m10-e2e`
+  (no new tool, action, contract bump or migration).
+  - **The fake tracker.** `scripts/e2e-fake-jira.py` (stdlib, 127.0.0.1)
+    serves Jira Cloud's myself / project / field / filter / search/jql /
+    bulkfetch / issue / changelog, and moves a ticket's status on request.
+    The hub reaches it only through `FLEET_E2E_TRACKER_PORT`, a transport
+    that exists only with the new `e2e` cargo feature and is honoured only
+    in a debug build; any other build refuses it (and `fleet-hub serve`
+    will not start with it set). It keeps the `*.atlassian.net` fence and
+    applies to direct Jira Cloud trackers only; Data Center's loopback
+    refusal is tested unchanged. The CI hub build has no feature.
+  - **The scenarios** (`hub-e2e.sh`, hub W, 54 checks; `ci-local.sh
+    --hub-e2e` builds the e2e hub into `target/e2e`; CI skips them, D16):
+    1–7 of the list above and the operator's refusal. Real: the hub, tmux,
+    git worktrees and origins, the provider and its sync. Simulated: the
+    tracker; Claude (`scripts/e2e-fake-claude.sh` posts the hooks and
+    answers a hand-off between its markers); time (tidy's 1-day / 1-hour
+    minimums, by moving two timestamps in `state.db`); the sync tick (a hub
+    restart); the operator (a client paired as `ux-agent`).
+  - **Deviations.** Detection runs on a session with no work yet: since
+    M4.6 a weak mention of a session with confirmed work is kept as a link
+    but not surfaced as `work_suggested` (tested too). "Tidy with a nonce"
+    is the documented hub behaviour: with `mcp.confirm_destructive` on the
+    nonce is never approved (no approver); off, `tidy_apply` kills the
+    clean session and only *requests* a safe kill of the dirty one.
+  - **Found and fixed.** A session started in a worktree never had
+    `sessions.worktree_id` (only an explicit repair set it), so tidy-up
+    could only archive a `work_link start`ed session. `new_session` now
+    links it. And the safe-kill marker scan read the prompt's own echo as
+    the reply: the prompt carries both markers on two lines, so the "two
+    hits" rule was met before Claude answered, and the last hit (the
+    prompt's `<one-line reason>` placeholder) was recorded as the failure.
+    The scan now anchors below the echo's FAILED line; with no echo in the
+    capture (a paste Claude Code folds away) any marker is the reply, which
+    the old rule, needing two, never saw. The fake Claude refuses a safe
+    kill with a reason, and the e2e checks that reason is what is recorded.
+  - Pass counts: 121 checks before (118 + 3 needing `ssh-keygen`); 122
+    without `WBIN`, 177 with it, all passing.

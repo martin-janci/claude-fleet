@@ -28,7 +28,7 @@
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
-  import { startWorkMulti, siblingCandidates, multiStartNote, shownSiblings } from './multi_start';
+  import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
 
   let {
     project,
@@ -702,13 +702,18 @@
     if (multiBlocked) return;
     busy = true;
     error = null;
-    const r = await startWorkMulti({
+    const args = {
       ...(t.id != null && t.tracker_id != null ? { item_id: t.id } : { reference: t.key ?? '' }),
       project_ids: [projectId, ...extra],
       host_alias: host,
+      name: friendlyName.trim() || undefined,
       worktree: inNewMode ? newWorktreeName.trim() : (chosenWorktree?.name ?? undefined),
       with_brief: briefOn,
-    });
+      // The brief and name as edited, the same as a single start: the
+      // backend applies them to every sibling.
+      brief: briefOn && briefEdited ? briefDraft : undefined,
+    };
+    const r = await startWorkMulti(args);
     busy = false;
     if (!r.ok) {
       if (destroyed) pushError(r.error, 'Start work failed');
@@ -720,12 +725,16 @@
       return p ? `${p.owner}/${p.repo}` : `project ${id}`;
     };
     const note = multiStartNote(r.value, labelOf);
+    const toast = multiStartToast(args, r.value, labelOf);
     const first = r.value.started[0];
     if (!first) {
       error = note ?? 'Nothing was started';
+      // "Start anyway" still reaches the repositories only the cross-org
+      // rule refused.
+      if (toast?.action) push(toast);
       return;
     }
-    if (note) push({ kind: 'info', message: note });
+    if (toast) push(toast);
     onCreate(first);
   }
 

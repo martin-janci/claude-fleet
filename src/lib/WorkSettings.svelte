@@ -12,6 +12,11 @@
   // carries only a `…abcd` hint. On a desktop paired with a hub, trackers
   // belong to the hub (its `work_admin` is master-only): the list is shown,
   // read-only, with the CLI lines that configure one.
+  //
+  // GitHub Enterprise Server (work graph M11.4): a GitHub-shaped issue URL on
+  // another host is offered as GitHub with its hostname prefilled (editable,
+  // for a port); the row then shows the instance, and the owner of the fleet
+  // sees each tracker's last sync pass (in the syncing process's memory).
   import { onMount } from 'svelte';
   import {
     trackers,
@@ -27,7 +32,11 @@
     PROVIDERS,
     trackerStateBadge,
     syncedAgo,
+    ghesHostname,
+    trackerSyncMetrics,
+    describeSyncMetrics,
     type ProviderId,
+    type SyncMetrics,
     type TrackerRow,
   } from './trackers';
   import { hosts } from './hosts';
@@ -59,6 +68,9 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let testing = $state<number | null>(null);
+  /** The enterprise hostname as edited; null: the one the URL suggests. */
+  let hostnameEdit = $state<string | null>(null);
+  let metrics = $state<Record<number, SyncMetrics>>({});
 
   const inferred = $derived(inferProvider(url));
   const provider = $derived<ProviderId | null>(picked || inferred?.provider || null);
@@ -67,8 +79,18 @@
   const site = $derived(
     inferred && (!picked || picked === inferred.provider) ? inferred.site : url.trim(),
   );
+  /** The site is a GitHub Enterprise instance, not github.com. */
+  const ghes = $derived.by(() => {
+    if (provider !== 'github' || !site) return false;
+    const host = site.match(/^https:\/\/([^/]+)/i)?.[1]?.toLowerCase() ?? '';
+    return !!host && host !== 'github.com' && host !== 'www.github.com';
+  });
+  const hostname = $derived(
+    (hostnameEdit ?? (inferred?.provider === 'github' ? inferred.hostname : '') ?? '').trim(),
+  );
   const canConnect = $derived.by(() => {
     if (!provider || !info || !site) return false;
+    if (ghes && !hostname) return false;
     if (info.needs === 'host_with_gh') return !!ghHost;
     if (info.needs === 'email_token') return email.trim().length > 3 && token.trim().length > 0;
     return token.trim().length > 0;
@@ -76,30 +98,64 @@
 
   onMount(() => {
     void loadTrackers();
+    if (owns) void loadMetrics();
     if (initialUrl) connecting = true;
   });
+
+  /** The last pass per tracker; quiet when this process cannot say (a
+   *  paired desktop is refused, an older build has no such command). */
+  async function loadMetrics() {
+    const r = await trackerSyncMetrics();
+    if (!r.ok || !Array.isArray(r.value)) return;
+    metrics = Object.fromEntries(r.value.map((m) => [m.tracker_id, m]));
+  }
+
+  /** The credential leaves this component's state: on Cancel and on every
+   *  way out of connect() that is not success, so nothing is pre-filled the
+   *  next time the form opens (the token went to the backend once, or never). */
+  function forgetCredential() {
+    token = '';
+    email = '';
+  }
 
   async function connect() {
     if (!canConnect || !provider || !info || busy) return;
     busy = true;
     error = null;
     const existing = $trackers.find((t) => t.provider === provider && t.site_url === site);
+    const transport = info.needs === 'host_with_gh' ? `via_cli:${ghHost}` : undefined;
+    const settings =
+      provider === 'jira_dc' && (extraCa.trim() || allowPrivate)
+        ? { extra_ca: extraCa.trim() || null, allow_private_network: allowPrivate }
+        : ghes
+          ? { hostname }
+          : undefined;
     let row: TrackerRow | null = existing ?? null;
     if (!row) {
-      const a = await addTracker(url.trim(), {
-        provider,
-        transport: info.needs === 'host_with_gh' ? `via_cli:${ghHost}` : undefined,
-        settings:
-          provider === 'jira_dc' && (extraCa.trim() || allowPrivate)
-            ? { extra_ca: extraCa.trim() || null, allow_private_network: allowPrivate }
-            : undefined,
-      });
+      const a = await addTracker(url.trim(), { provider, transport, settings });
       if (!a.ok) {
         busy = false;
         error = a.error.message;
+        forgetCredential();
         return;
       }
       row = a.value;
+    } else if ((transport && transport !== row.transport) || settings) {
+      // Re-connecting a site that is already a row (say, after a failed test):
+      // what the form carries beyond the credential — the `gh` host, the
+      // Data Center CA and private-network flag — lives on that row, so it is
+      // updated there rather than dropped.
+      const u = await updateTracker(row.id, {
+        transport: transport !== row.transport ? transport : undefined,
+        settings: settings ? { ...(row.settings ?? {}), ...settings } : undefined,
+      });
+      if (!u.ok) {
+        busy = false;
+        error = u.error.message;
+        forgetCredential();
+        return;
+      }
+      row = u.value;
     }
     if (info.needs !== 'host_with_gh') {
       const c = await setTrackerCredential(
@@ -112,24 +168,29 @@
       if (!c.ok) {
         busy = false;
         error = c.error.message;
+        forgetCredential();
         return;
       }
     }
     const t = await testTracker(row.id);
     busy = false;
     await loadTrackers();
+    void loadMetrics();
     if (!t.ok) {
       error = t.error.message;
+      forgetCredential();
       return;
     }
     if (!t.value.ok) {
       error = t.value.error ?? 'the test failed';
+      forgetCredential();
       return;
     }
     connecting = false;
     url = '';
-    email = '';
+    forgetCredential();
     picked = '';
+    hostnameEdit = null;
     extraCa = '';
     allowPrivate = false;
     push({
@@ -143,6 +204,7 @@
     const r = await testTracker(t.id);
     testing = null;
     await loadTrackers();
+    void loadMetrics();
     if (!r.ok) pushError(r.error, 'Test failed');
     else if (!r.value.ok) push({ kind: 'error', message: r.value.error ?? 'the test failed' });
   }
@@ -190,12 +252,17 @@
       {#each $trackers as t (t.id)}
         {@const badge = trackerStateBadge(t.state)}
         {@const prov = providerInfo(t.provider)}
+        {@const ghe = ghesHostname(t)}
+        {@const pass = describeSyncMetrics(metrics[t.id])}
         <li class="tracker" data-testid="tracker-row">
           {#if prov}<span class="prov" title={prov.label} data-testid="tracker-provider"
               >{prov.icon}</span
             >{/if}
           <span class="name">{t.name}</span>
           <span class="site">{t.site_url}</span>
+          {#if ghe}<span class="badge host" data-testid="tracker-ghes-host" title="GitHub Enterprise Server"
+              >GHES {ghe}</span
+            >{/if}
           <span class="badge {badge.tone}" data-testid="tracker-state" title={t.last_error ?? ''}
             >{badge.label}</span
           >
@@ -218,6 +285,13 @@
             >
           {/if}
         </li>
+        {#if owns && pass}
+          <li class="hint" data-testid="tracker-metrics">
+            {pass}{#if metrics[t.id]?.last_error}<span class="err" data-testid="tracker-metrics-error">
+                · {metrics[t.id].last_error}</span
+              >{/if}
+          </li>
+        {/if}
         {#if t.state === 'auth_failed'}
           <li class="hint" data-testid="tracker-expired">
             {#if t.provider === 'jira'}Atlassian API tokens expire within a year — create a new one
@@ -260,7 +334,8 @@
     <p class="hint" data-testid="work-remote">
       {hubBlock('add_tracker', $hubStatus)} On the hub:
       <code>fleet-hub tracker add &lt;ticket-url&gt;</code> (GitHub:
-      <code>--via-cli &lt;host with gh&gt;</code>), then
+      <code>--via-cli &lt;host with gh&gt;</code>; Enterprise: also
+      <code>--hostname &lt;host[:port]&gt;</code>), then
       <code>fleet-hub tracker set-credential &lt;id&gt; [--email &lt;you&gt;] &lt; token.txt</code>.
     </p>
   {:else if !connecting}
@@ -294,11 +369,28 @@
       </select>
       {#if url.trim() && !provider}
         <span class="err" data-testid="connect-url-error"
-          >Not a URL fleet recognises (Jira Cloud, GitHub, Asana, Linear) — or pick Jira Data Center</span
+          >Not a URL fleet recognises (Jira Cloud, GitHub, GitHub Enterprise, Asana, Linear) — or pick
+          Jira Data Center</span
         >
       {:else if provider && site}
         <span class="ok" data-testid="connect-site"
           >{site}{inferred?.key && (!picked || picked === inferred.provider) ? ` · ${inferred.key}` : ''}</span
+        >
+      {/if}
+      {#if ghes}
+        <label for="ghes-hostname">GitHub Enterprise hostname</label>
+        <input
+          id="ghes-hostname"
+          data-testid="connect-ghes-hostname"
+          value={hostname}
+          oninput={(e) => (hostnameEdit = (e.currentTarget as HTMLInputElement).value)}
+          placeholder="ghe.example.com"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <span class="hint"
+          >Passed to <code>gh --hostname</code>; add <code>:port</code> if the instance has one. Log
+          <code>gh</code> in to it on the host below.</span
         >
       {/if}
       {#if info?.needs === 'host_with_gh'}
@@ -341,7 +433,15 @@
         <button class="btn primary" type="submit" data-testid="connect-submit" disabled={!canConnect || busy}
           >{busy ? 'Connecting…' : 'Connect'}</button
         >
-        <button class="btn" type="button" onclick={() => (connecting = false)}>Cancel</button>
+        <button
+          class="btn"
+          type="button"
+          data-testid="connect-cancel"
+          onclick={() => {
+            connecting = false;
+            forgetCredential();
+          }}>Cancel</button
+        >
       </div>
     </form>
   {/if}
@@ -390,6 +490,9 @@
   }
   .badge.error {
     color: var(--err, #ef4444);
+  }
+  .badge.host {
+    color: var(--fg-muted);
   }
   .connect {
     display: grid;

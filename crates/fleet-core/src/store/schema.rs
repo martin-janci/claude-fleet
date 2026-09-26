@@ -561,6 +561,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/056_classify_nudge.sql"),
         already_applied: Some(conversations_have_nudge_stamp),
     },
+    // Re-issues 044's `trg_read_cursors_on_session_delete` for a database
+    // migrated by an intermediate build of 044 that lacked it:
+    // `CREATE TRIGGER IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        57,
+        include_str!("../../migrations/057_read_cursors_trigger.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -594,8 +601,49 @@ impl Migration {
 #[cfg(test)]
 pub(crate) const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
+/// The newest schema this build knows: the downgrade guard's bound.
+const KNOWN_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
+
+/// `(version, sql)` of every migration up to and including `version`, in
+/// order: the historical files, for a test that builds an older database
+/// (`store::testgen`).
+#[cfg(test)]
+pub(super) fn migrations_through(version: i64) -> impl Iterator<Item = (i64, &'static str)> {
+    MIGRATIONS
+        .iter()
+        .filter(move |m| m.version <= version)
+        .map(|m| (m.version, m.sql))
+}
+
+/// The downgrade guard's refusal: `recorded` came from a newer build.
+fn newer_schema_error(recorded: i64) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+        Some(format!(
+            "this database is at schema version {recorded}, but this build of claude-fleet \
+             only knows up to {KNOWN_SCHEMA_VERSION}: it was last opened by a newer release. \
+             It is not corrupt; do not delete it. Run that release (or a newer one) again, \
+             or restore the copy of state.db you backed up before upgrading."
+        )),
+    )
+}
+
 impl Store {
     pub(super) fn migrate(&self) -> Result<()> {
+        // Downgrade guard, before anything is written: a database a newer
+        // build migrated has a schema this build does not know, so this
+        // build refuses it rather than running against it. A fresh file has
+        // no `schema_version` yet, which reads as nothing recorded.
+        let recorded: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .ok()
+            .flatten();
+        if let Some(recorded) = recorded.filter(|&v| v > KNOWN_SCHEMA_VERSION) {
+            return Err(newer_schema_error(recorded));
+        }
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         // The bootstrap migration is idempotent (`CREATE TABLE IF NOT EXISTS`
         // + `INSERT OR IGNORE`) and always runs: on a fresh DB it also creates
@@ -838,6 +886,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         };
         assert!(store.has_table("handoffs").unwrap());
         assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
@@ -906,6 +955,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         };
         store.migrate().unwrap();
         let (n, src, started): (i64, String, i64) = store
@@ -1134,6 +1184,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         }
     }
 
@@ -2044,6 +2095,7 @@ mod tests {
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
+            instance: super::next_instance(),
         };
         assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());
@@ -2624,6 +2676,67 @@ mod tests {
         assert!(sql.contains(" WHERE "), "partial: {sql}");
     }
 
+    /// Migration 044 was rewritten after it landed; a database whose 044
+    /// ran without `trg_read_cursors_on_session_delete` recorded 44 all the
+    /// same and never got the trigger. Migration 057 re-issues it: such a
+    /// database gains it on the next open, and a session's cursors then die
+    /// with its row as designed.
+    #[test]
+    fn migration_057_restores_the_read_cursor_trigger_a_rewritten_044_left_out() {
+        let trigger_exists = |s: &Store| -> bool {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                      WHERE type = 'trigger' AND name = 'trg_read_cursors_on_session_delete'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        };
+        let s = store_at_version(56);
+        // The intermediate 044: table and indexes, no trigger.
+        s.conn
+            .execute_batch("DROP TRIGGER trg_read_cursors_on_session_delete;")
+            .unwrap();
+        assert!(!trigger_exists(&s));
+        assert_eq!(s.schema_version().unwrap(), 56);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(trigger_exists(&s), "057 re-issued the trigger");
+        // And it does its job: a deleted session takes its cursors with it,
+        // as the reader and as the target.
+        s.conn
+            .execute_batch(
+                "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+                 INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+                   VALUES (1, 'a1', 'local', 1, 1, 'running'),
+                          (2, 'a2', 'local', 1, 1, 'running');
+                 INSERT INTO read_cursors (reader_session_id, tool, resource_key, target_session_id, watermark, updated_at)
+                   VALUES (1, 'inbox', '2:false', 2, 5, 1),
+                          (2, 'inbox', '1:false', 1, 5, 1),
+                          (2, 'list_sessions', '', NULL, NULL, 1);
+                 DELETE FROM sessions WHERE id = 1;",
+            )
+            .unwrap();
+        let left: Vec<(i64, String)> = s
+            .conn
+            .prepare("SELECT reader_session_id, tool FROM read_cursors ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec![(2, "list_sessions".to_string())]);
+        // A database that has the trigger already is untouched by a re-run.
+        s.conn
+            .execute_batch(include_str!(
+                "../../migrations/057_read_cursors_trigger.sql"
+            ))
+            .unwrap();
+        assert!(trigger_exists(&s));
+    }
+
     /// Migration 055 on a database that already has migration 054 and rows
     /// in `participants`: it must not disturb them, and running it twice
     /// (`CREATE INDEX IF NOT EXISTS`) is a no-op.
@@ -2656,3 +2769,6 @@ mod tests {
         assert_eq!(rows, 2, "the re-run touched no rows");
     }
 }
+
+#[cfg(test)]
+mod tests_upgrade;

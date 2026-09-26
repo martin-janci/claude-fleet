@@ -391,7 +391,12 @@ impl SshClient {
     /// `run_bounded_capped` with `stdin` written to the remote command and
     /// then closed (see [`SshExec::run_with_stdin`]). Not retried on a mux
     /// failure: the bytes may already have been consumed. A fleet-agent host
-    /// is refused (`E_UNSUPPORTED`): its exec frames carry no stdin.
+    /// is refused (`E_UNSUPPORTED`): its exec frames carry no stdin. The
+    /// `local` host is a local spawn under [`ensure_local_allowed`], as in
+    /// [`run_shell`] — never `ssh local`, which resolves nothing (or, with an
+    /// `~/.ssh/config` entry of that name, the wrong machine).
+    ///
+    /// [`ensure_local_allowed`]: crate::service::hub::ensure_local_allowed
     pub async fn run_with_stdin(
         &self,
         host: &str,
@@ -401,6 +406,10 @@ impl SshClient {
         wall_clock: Duration,
         max_output: usize,
     ) -> Result<Output, IpcError> {
+        if host == crate::service::projects::LOCAL_HOST {
+            crate::service::hub::ensure_local_allowed(host)?;
+            return run_local_with_stdin(args, stdin, wall_clock, max_output).await;
+        }
         if self.agent_route(host).is_some() {
             return Err(IpcError::new(
                 codes::E_UNSUPPORTED,
@@ -1099,6 +1108,56 @@ async fn run_local_shell(script: &str, wall_clock: Duration) -> Result<Output, I
             codes::E_TIMEOUT,
             format!("local script exceeded {}s", wall_clock.as_secs()),
         )),
+    }
+}
+
+/// The `local` arm of [`SshClient::run_with_stdin`]: `args` space-joined
+/// and handed to `bash -c`, which re-tokenises them exactly as sshd's login
+/// shell would (so a caller's `bash -lc '<quoted script>'` runs the same
+/// script here), `stdin` written and closed from a writer task, both output
+/// pipes drained under `max_output`, and the child killed and reaped when
+/// `wall_clock` elapses (`E_SSH_TIMEOUT`, the bound every `SshExec` reports).
+async fn run_local_with_stdin(
+    args: &[&str],
+    stdin: Vec<u8>,
+    wall_clock: Duration,
+    max_output: usize,
+) -> Result<Output, IpcError> {
+    let host = crate::service::projects::LOCAL_HOST;
+    let mut child = tokio::process::Command::new("bash")
+        .arg("-c")
+        .arg(args.join(" "))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?;
+    let stdout_task = tokio::spawn(read_capped(child.stdout.take(), Some(max_output)));
+    let stderr_task = tokio::spawn(read_capped(child.stderr.take(), Some(max_output)));
+    if let Some(mut pipe) = child.stdin.take() {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = pipe.write_all(&stdin).await;
+            let _ = pipe.shutdown().await;
+        });
+    }
+    tokio::select! {
+        biased;
+        _ = tokio::time::sleep(wall_clock) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            Err(wall_clock_error(host, wall_clock, false))
+        }
+        status = child.wait() => {
+            let status = status
+                .map_err(|e| IpcError::new(codes::E_SHELL, format!("wait bash: {e}")))?;
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            Ok(Output { status, stdout, stderr })
+        }
     }
 }
 
@@ -2281,5 +2340,67 @@ mod tests {
             calls_after,
             "positive cache: no new call"
         );
+    }
+
+    /// `via_cli:local` / `via_host:local` on a desktop: the stdin-fed
+    /// script runs here, the way `run_shell` treats `local`, and `ssh` is
+    /// never spawned for a host that resolves to nothing.
+    #[tokio::test]
+    async fn run_with_stdin_on_local_spawns_locally_and_never_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("ssh-was-called");
+        let bin = fake_ssh(
+            dir.path(),
+            &format!(
+                "touch '{m}'; echo 'ssh: Could not resolve hostname local' >&2; exit 255",
+                m = mark.display()
+            ),
+        );
+        let c = SshClient::with_ssh_binary(bin);
+        let script = crate::shell::quote("cat; printf '%s' done; printf '%s' err >&2");
+        let args = ["bash", "-lc", script.as_str()];
+        let out = c
+            .run_with_stdin(
+                "local",
+                &args,
+                b"hello ".to_vec(),
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+                1024,
+            )
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello done");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "err");
+        assert!(!mark.exists(), "ssh must not be spawned for local");
+
+        // The output cap and the wall clock hold on the local arm too.
+        let out = c
+            .run_with_stdin(
+                "local",
+                &args,
+                b"0123456789".to_vec(),
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+                4,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"0123");
+        let hang = crate::shell::quote("cat >/dev/null; sleep 30");
+        let e = c
+            .run_with_stdin(
+                "local",
+                &["bash", "-lc", hang.as_str()],
+                Vec::new(),
+                Duration::from_secs(1),
+                Duration::from_millis(300),
+                1024,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_SSH_TIMEOUT, "{e:?}");
+        assert!(!mark.exists());
     }
 }

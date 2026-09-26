@@ -290,9 +290,28 @@ async fn a_rate_limited_graphql_answer_backs_off() {
             retry_after_secs: None
         }
     );
-    // A spent quota on a 403 waits until the reset.
+    // The primary limit is a 200 with RATE_LIMITED and the reset in the
+    // headers: waited out, like the 403.
     let f = FakeTransport::new();
     let reset = crate::service::catalog::now_secs() + 120;
+    f.once(
+        Method::Post,
+        "/graphql",
+        Ok(Response::json(
+            200,
+            &json!({"data": null, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}),
+        )
+        .with_header("X-RateLimit-Remaining", "0")
+        .with_header("X-RateLimit-Reset", reset.to_string())),
+    );
+    match github(&f).list(&mine(), None, None).await.unwrap_err() {
+        TrackerError::RateLimited {
+            retry_after_secs: Some(s),
+        } => assert!((110..=121).contains(&s), "{s}"),
+        e => panic!("{e:?}"),
+    }
+    // A spent quota on a 403 waits until the reset.
+    let f = FakeTransport::new();
     f.once(
         Method::Post,
         "/graphql",
@@ -306,6 +325,24 @@ async fn a_rate_limited_graphql_answer_backs_off() {
         } => assert!((110..=121).contains(&s), "{s}"),
         e => panic!("{e:?}"),
     }
+}
+
+/// The item's URL is built from the validated repository and number, never
+/// taken from the answer: `gh` runs on a fleet host, which controls it.
+#[test]
+fn the_issue_url_is_built_not_taken_from_the_answer() {
+    let f = FakeTransport::new();
+    let mut n = fixture("github", "nodes_two.json")["data"]["nodes"][0].clone();
+    n["url"] = json!("https://github.com.login-verify.example/acme/api/issues/42");
+    let s = github(&f).snapshot(&n).unwrap();
+    assert_eq!(
+        s.url.as_deref(),
+        Some("https://github.com/Acme/api/issues/42")
+    );
+    assert_eq!(s.key.as_deref(), Some("acme/api#42"));
+    // A repository name that is not one yields no item at all.
+    n["repository"]["nameWithOwner"] = json!("acme/api?x=1");
+    assert!(github(&f).snapshot(&n).is_none());
 }
 
 /// End to end through `via_cli`: the provider, `TrackerNet`'s transport
@@ -477,6 +514,139 @@ mod flow {
         }
     }
 
+    /// Work graph M11.4: an enterprise tracker by pasting an issue URL on
+    /// it; its hostname held to its site, master-set and fenced.
+    #[test]
+    fn an_enterprise_tracker_is_added_with_its_hostname_held_to_the_site() {
+        let st = Mutex::new(Store::open_in_memory().unwrap());
+        let add = |url: &str, settings: Option<serde_json::Value>| {
+            admin_sync(
+                &WorkAdminArgs {
+                    provider: Some("github".into()),
+                    site_url: Some(url.into()),
+                    transport: Some("via_cli:devbox".into()),
+                    settings,
+                    ..args("add")
+                },
+                &st,
+            )
+        };
+        let v = add("https://GHE.corp.example/Acme/api/issues/4", None).unwrap();
+        assert_eq!(v["site_url"], "https://ghe.corp.example/acme");
+        assert_eq!(
+            v["settings"]["hostname"], "ghe.corp.example",
+            "from the site"
+        );
+        assert_eq!(v["name"], "acme (ghe.corp.example)");
+        let id = v["id"].as_i64().unwrap();
+        let v = add(
+            "https://ghe.corp.example/other",
+            Some(json!({"hostname": "GHE.corp.example:8443"})),
+        )
+        .unwrap();
+        assert_eq!(v["settings"]["hostname"], "ghe.corp.example:8443");
+        for (url, settings) in [
+            // Not the site's host.
+            (
+                "https://ghe.corp.example/third",
+                json!({"hostname": "ghe.other.example"}),
+            ),
+            // github.com has no hostname.
+            (
+                "https://github.com/acme",
+                json!({"hostname": "ghe.corp.example"}),
+            ),
+            // Injection, a scheme, loopback.
+            (
+                "https://ghe.corp.example/x1",
+                json!({"hostname": "ghe.corp.example;id"}),
+            ),
+            (
+                "https://ghe.corp.example/x2",
+                json!({"hostname": "$(id).corp.example"}),
+            ),
+            (
+                "https://ghe.corp.example/x3",
+                json!({"hostname": "https://ghe.corp.example"}),
+            ),
+            (
+                "https://ghe.corp.example/x4",
+                json!({"hostname": "ghe.corp.example\nid"}),
+            ),
+            (
+                "https://ghe.corp.example/x5",
+                json!({"hostname": "ghe corp.example"}),
+            ),
+            ("https://localhost/x", json!({})),
+            ("https://127.0.0.1/x", json!({})),
+            ("https://169.254.169.254/latest", json!({})),
+        ] {
+            let e = add(url, Some(settings.clone())).unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{url} {settings}");
+        }
+        // An update that resends repos alone keeps the hostname; one that
+        // names another host is refused.
+        let v = admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                settings: Some(json!({"repos": ["acme/api"]})),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap();
+        assert_eq!(v["settings"]["hostname"], "ghe.corp.example");
+        assert_eq!(v["settings"]["repos"], json!(["acme/api"]));
+        let e = admin_sync(
+            &WorkAdminArgs {
+                tracker_id: Some(id),
+                settings: Some(json!({"hostname": "evil.example"})),
+                ..args("update")
+            },
+            &st,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        // The same repository name on github.com and on the instance are
+        // different work: each tracker claims only its own.
+        let gh = admin_sync(
+            &WorkAdminArgs {
+                site_url: Some("https://github.com/acme".into()),
+                transport: Some("via_cli:devbox".into()),
+                ..args("add")
+            },
+            &st,
+        )
+        .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let rows = st.lock().unwrap().list_trackers().unwrap();
+        assert_eq!(
+            crate::store::tracker_claims(&rows, "ghe.corp.example/acme/api#4"),
+            vec![id]
+        );
+        assert_eq!(crate::store::tracker_claims(&rows, "acme/api#4"), vec![gh]);
+        assert!(crate::store::tracker_claims(&rows, "ghe.other.example/acme/api#4").is_empty());
+    }
+
+    /// `status`: the sync's per-tracker counters, one row per tracker.
+    #[test]
+    fn status_answers_a_row_per_tracker() {
+        let (st, id) = added();
+        let v = admin_sync(&args("status"), &st).unwrap();
+        let rows = v.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["tracker_id"], id);
+        for k in [
+            "duration_ms",
+            "items_listed",
+            "items_changed",
+            "frames_emitted",
+        ] {
+            assert!(rows[0][k].is_u64(), "{k}: {v}");
+        }
+    }
+
     #[tokio::test]
     async fn test_sync_bind_lookup_and_start_through_gh() {
         let (st, id) = added();
@@ -579,5 +749,369 @@ mod flow {
             .requests()
             .iter()
             .all(|r| r.header_value("Authorization").is_none()));
+    }
+}
+
+// --- GitHub Enterprise Server (M11.4) -----------------------------------------
+
+/// The conformance suite again, for an enterprise tracker, with every call
+/// going through the real [`GhCliTransport`]: a bridge stands in for SSH,
+/// asserts the script `gh` would run (`--hostname` the instance, the
+/// `graphql` endpoint, the body on stdin), and answers from the harness's
+/// [`FakeTransport`] as `gh api --include` prints it.
+mod ghes {
+    use super::*;
+    use crate::ipc_error::IpcError;
+    use crate::net::https::Request;
+    use crate::net::via_host::GhCliTransport;
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::Path;
+    use std::process::{ExitStatus, Output};
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    pub(super) const GHES_SITE: &str = "https://ghe.corp.example/acme";
+    pub(super) const GHES_HOSTNAME: &str = "ghe.corp.example:8443";
+    const GHES_API: &str = "https://ghe.corp.example:8443/api/graphql";
+
+    /// SSH as far as `gh api` on the host goes: the script is checked, the
+    /// request replayed against `fake`, the answer printed back.
+    pub(super) struct GhBridge {
+        pub fake: FakeTransport,
+        pub scripts: std::sync::Mutex<Vec<String>>,
+    }
+
+    fn output(code: i32, stdout: Vec<u8>, stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(code << 8),
+            stdout,
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    fn unsupported() -> IpcError {
+        IpcError::new(crate::ipc_error::codes::E_UNSUPPORTED, "not a gh call")
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ssh::SshExec for GhBridge {
+        async fn run(&self, _: &str, _: &[&str], _: Duration) -> Result<Output, IpcError> {
+            Err(unsupported())
+        }
+        async fn run_bounded(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: Duration,
+            _: Duration,
+        ) -> Result<Output, IpcError> {
+            Err(unsupported())
+        }
+        async fn run_cancellable(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: Duration,
+            _: CancellationToken,
+        ) -> Result<Output, IpcError> {
+            Err(unsupported())
+        }
+        async fn run_bounded_cancellable(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: Duration,
+            _: Duration,
+            _: CancellationToken,
+        ) -> Result<Output, IpcError> {
+            Err(unsupported())
+        }
+        async fn upload_file(
+            &self,
+            _: &str,
+            _: &Path,
+            _: &str,
+            _: Duration,
+        ) -> Result<(), IpcError> {
+            Err(unsupported())
+        }
+        async fn remote_home(&self, _: &str) -> Result<String, IpcError> {
+            Err(unsupported())
+        }
+        async fn run_with_stdin(
+            &self,
+            host: &str,
+            args: &[&str],
+            stdin: Vec<u8>,
+            _: Duration,
+            _: Duration,
+            _: usize,
+        ) -> Result<Output, IpcError> {
+            assert_eq!(host, "devbox");
+            let [bash, lc, quoted] = args else {
+                panic!("not a bash -lc call: {args:?}")
+            };
+            assert_eq!((*bash, *lc), ("bash", "-lc"));
+            let script = crate::ssh_fake::unquote(quoted).expect("one quoted script");
+            assert!(
+                script.ends_with(
+                    "exec gh api --include --hostname 'ghe.corp.example:8443' \
+                     --method POST 'graphql' --input -"
+                ),
+                "gh is pointed at the enterprise instance: {script}"
+            );
+            assert!(!script.contains("github.com"), "{script}");
+            self.scripts.lock().unwrap().push(script);
+            let mut req = Request::get(GHES_API);
+            req.method = Method::Post;
+            req.body = Some(stdin);
+            match self.fake.send(req).await {
+                Ok(resp) => {
+                    let mut out = format!("HTTP/2.0 {} X\n", resp.status).into_bytes();
+                    for (k, v) in &resp.headers {
+                        out.extend(format!("{k}: {v}\n").into_bytes());
+                    }
+                    out.push(b'\n');
+                    let code = if resp.is_success() { 0 } else { 1 };
+                    out.extend(resp.body);
+                    Ok(output(code, out, ""))
+                }
+                Err(e) => Ok(output(255, Vec::new(), &format!("ssh: {e}"))),
+            }
+        }
+    }
+
+    pub(super) fn settings() -> TrackerSettings {
+        TrackerSettings {
+            hostname: Some(GHES_HOSTNAME.into()),
+            ..Default::default()
+        }
+    }
+
+    pub(super) fn ghes(fake: &FakeTransport) -> GitHub {
+        let bridge = GhBridge {
+            fake: fake.clone(),
+            scripts: Default::default(),
+        };
+        let t = GhCliTransport::new(Arc::new(bridge), "devbox")
+            .with_enterprise(Some(GHES_HOSTNAME.into()));
+        GitHub::new(GHES_SITE, config(), settings(), Arc::new(t))
+    }
+
+    struct GhesHarness;
+
+    #[async_trait::async_trait]
+    impl Harness for GhesHarness {
+        fn name(&self) -> &'static str {
+            "github_ghes"
+        }
+
+        fn expect(&self) -> Expect {
+            let rn = |repo: &str, n| ItemRef::RepoNumber {
+                repo: repo.into(),
+                n,
+            };
+            Expect {
+                instance_id: Some(GHES_HOSTNAME),
+                moved: Some((
+                    rn("ghe.corp.example/acme/legacy", 5),
+                    "I_kwDOAcme0007",
+                    "ghe.corp.example/acme/legacy#5",
+                )),
+                recognize: vec![
+                    (
+                        "see https://ghe.corp.example/acme/api/issues/42, \
+                         https://github.com/acme/api/issues/1 and \
+                         https://ghe.other.example/acme/api/issues/2",
+                        None,
+                        vec![rn("ghe.corp.example/acme/api", 42)],
+                    ),
+                    (
+                        "fixes ghe.corp.example/acme/web#7, not acme/web#8",
+                        None,
+                        vec![rn("ghe.corp.example/acme/web", 7)],
+                    ),
+                    (
+                        "fixes #7",
+                        Some("ghe.corp.example/Acme/Web"),
+                        vec![rn("ghe.corp.example/acme/web", 7)],
+                    ),
+                    ("fixes #7", Some("acme/web"), vec![]),
+                    ("fixes #7", Some("ghe.corp.example/other/x"), vec![]),
+                ],
+                bare_repo: "ghe.corp.example/acme/api",
+                ..GitHubHarness.expect()
+            }
+        }
+
+        fn provider(&self, fake: &FakeTransport) -> Box<dyn TrackerProvider> {
+            Box::new(ghes(fake))
+        }
+
+        fn script_probe(&self, f: &FakeTransport) {
+            GitHubHarness.script_probe(f)
+        }
+
+        fn script_list(&self, f: &FakeTransport) {
+            GitHubHarness.script_list(f)
+        }
+
+        async fn incremental(
+            &self,
+            p: &dyn TrackerProvider,
+            f: &FakeTransport,
+        ) -> Result<Vec<WorkItemSnapshot>, TrackerError> {
+            GitHubHarness.incremental(p, f).await
+        }
+
+        fn script_fetch(&self, f: &FakeTransport) {
+            GitHubHarness.script_fetch(f)
+        }
+
+        fn script_moved(&self, f: &FakeTransport) {
+            GitHubHarness.script_moved(f)
+        }
+
+        fn script_error(&self, f: &FakeTransport, case: ErrorCase) {
+            GitHubHarness.script_error(f, case)
+        }
+    }
+
+    crate::conformance_suite!(GhesHarness);
+
+    #[tokio::test]
+    async fn enterprise_keys_carry_the_host_and_every_call_names_the_instance() {
+        let f = FakeTransport::new();
+        GitHubHarness.script_list(&f);
+        let items = list_all(&ghes(&f), &mine(), None).await.unwrap();
+        assert_eq!(
+            items[0].key.as_deref(),
+            Some("ghe.corp.example/acme/api#42")
+        );
+        assert_eq!(items[0].containers, vec!["ghe.corp.example/acme/api"]);
+        assert_eq!(
+            items[2].parent_key.as_deref(),
+            Some("ghe.corp.example/acme/api#42")
+        );
+        for r in f.requests() {
+            assert_eq!(r.url, GHES_API);
+        }
+        // Scope: this instance only, never github.com's same-named repo.
+        let p = ghes(&f);
+        assert!(p.in_scope("ghe.corp.example/acme/api"));
+        assert!(!p.in_scope("acme/api"));
+        assert!(!p.in_scope("ghe.other.example/acme/api"));
+        assert!(!p.in_scope("ghe.corp.example/other/api"));
+        // A github.com reference is not this tracker's to fetch.
+        let got = p
+            .fetch(&[ItemRef::RepoNumber {
+                repo: "acme/api".into(),
+                n: 42,
+            }])
+            .await
+            .unwrap();
+        assert!(matches!(&got[0], Fetched::Unavailable { .. }));
+    }
+
+    /// A pasted enterprise URL or `host/owner/repo#n` finds the cached item
+    /// of that instance; the same path on a host no tracker has is not a
+    /// ticket URL at all.
+    #[tokio::test]
+    async fn lookup_by_an_enterprise_url_answers_from_its_own_instance() {
+        use crate::ipc_error::codes;
+        use crate::service::orgs::OrgScope;
+        use crate::service::trackers::tickets::lookup;
+        use crate::store::Store;
+        use std::sync::Mutex;
+        let s = Store::open_in_memory().unwrap();
+        let t = s.add_tracker("github", "GHE", GHES_SITE).unwrap();
+        s.set_tracker_settings(t.id, &settings()).unwrap();
+        let f = FakeTransport::new();
+        GitHubHarness.script_list(&f);
+        let items = list_all(&ghes(&f), &mine(), None).await.unwrap();
+        let id = s
+            .upsert_tracker_item(
+                t.id,
+                &crate::service::trackers::sync::to_write(items[0].clone()),
+            )
+            .unwrap()
+            .id;
+        let st = Mutex::new(s);
+        let net = TrackerNet::fake(Arc::new(FakeTransport::new()));
+        for r in [
+            "https://ghe.corp.example/acme/api/issues/42",
+            "https://ghe.corp.example:8443/Acme/API/issues/42",
+            "ghe.corp.example/acme/api#42",
+        ] {
+            let got = lookup(&st, r, &OrgScope::All, &net).await.unwrap();
+            assert_eq!(got.item.id, id, "{r}");
+        }
+        let e = lookup(
+            &st,
+            "https://ghe.other.example/acme/api/issues/42",
+            &OrgScope::All,
+            &net,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{}", e.message);
+        // github.com's acme/api#42 is not the enterprise one.
+        let e = lookup(
+            &st,
+            "https://github.com/acme/api/issues/42",
+            &OrgScope::All,
+            &net,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_NOTFOUND, "{}", e.message);
+    }
+
+    /// Through `TrackerNet`'s own transport selection: a `via_cli` row with a
+    /// hostname runs `gh --hostname <it>` on its host, over a scripted SSH.
+    #[tokio::test]
+    async fn a_via_cli_enterprise_row_runs_gh_with_its_hostname() {
+        let ssh = FakeSsh::new();
+        ssh.on_host(
+            "devbox",
+            Match::contains("gh api"),
+            Reply::ok(&format!(
+                "HTTP/2.0 200 OK\nContent-Type: application/json\n\n{}",
+                fixture("github", "viewer.json")
+            )),
+        );
+        let row = crate::store::TrackerRow {
+            id: 1,
+            provider: "github".into(),
+            name: "GitHub ghe.corp.example".into(),
+            instance_id: None,
+            site_url: "https://ghe.corp.example".into(),
+            transport: "via_cli:devbox".into(),
+            config: TrackerConfig::default(),
+            state: "unconfigured".into(),
+            last_sync_at: None,
+            last_error: None,
+            created_at: 1,
+            has_credential: false,
+            credential_hint: None,
+            auth_kind: None,
+            username: None,
+            org_id: None,
+            settings: settings(),
+        };
+        let net = TrackerNet::with_ssh(Arc::new(ssh.clone()));
+        let p = crate::service::trackers::provider_for(&row, None, &net).unwrap();
+        let info = p.probe().await.unwrap();
+        assert_eq!(info.instance_id.as_deref(), Some(GHES_HOSTNAME));
+        let calls = ssh.calls_for("devbox");
+        let script = calls[0].script().unwrap();
+        assert!(
+            script.contains("gh api --include --hostname 'ghe.corp.example:8443' --method POST 'graphql' --input -"),
+            "{script}"
+        );
+        assert!(calls[0].stdin_str().unwrap().contains("viewer"));
+        // The host fence follows the instance.
+        let policy = crate::service::trackers::host_policy(&row);
+        assert!(policy("ghe.corp.example") && !policy("api.github.com"));
     }
 }

@@ -668,10 +668,19 @@ hub), keep the old link — its waiting messages are what a re-pair keeps:
 1. On the listening hub: `fleet-hub client revoke <old peer client>`, then
    `fleet-hub pair --mode peer --name <label>` for a new code. (Without the
    revoke, the new code's first exchange is refused: `fleet <id> is already
-   linked to another peer token; revoke that client first`.)
+   linked to another peer token; revoke that client first (…), then mint a
+   new pairing code`.)
 2. On the dialing hub: `fleet-hub peer add https://<other-hub> <new code>`.
    Do **not** `peer remove` the old link: that fails its waiting messages
    back to their senders.
+
+The order matters. That refusal is final for the token it was given: the
+dialing hub's new link stops as `refused` and is never retried, so revoking
+the old client afterwards revives nothing. After a re-pair in the wrong
+order, revoke the old client, then mint a **new** pairing code and `peer add`
+it again; the refused row on the dialing hub can be `peer remove`d by its ID
+(it holds no messages), and the client the refused code minted on the
+listening hub is revoked like any other (`fleet-hub client revoke <label>`).
 
 The new link's first exchange reaches the other hub, but the old link may not
 have noticed its revoked token yet (it can be parked in a long-poll for up to
@@ -776,6 +785,7 @@ fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123   # Jira Cloud
 fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
 fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
 fleet-hub tracker list
+fleet-hub tracker status          # each tracker's last sync pass (in memory)
 fleet-hub tracker remove 1        # its items stay, marked unavailable
 ```
 
@@ -826,16 +836,55 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
   trackers claim is never bound automatically.
 
+### GitHub Enterprise Server
+
+An enterprise instance is a GitHub tracker with a `hostname`: paste an issue
+URL on it and say it is GitHub (its host cannot be told from the URL), or
+give the host with `--hostname`, which implies `--provider github`:
+
+```sh
+fleet-hub tracker add https://ghe.corp.example/acme --via-cli devbox \
+  --hostname ghe.corp.example:8443
+fleet-hub tracker test 4
+```
+
+`gh` on that host must be logged in to the instance (`gh auth login
+--hostname ghe.corp.example:8443`); fleet runs `gh api --hostname <it>
+graphql` there, the hostname `shell::quote`d, and nothing but the instance's
+`https://<host>/api/graphql` is ever asked for. The hostname is admin-set
+(`work_admin` is master-only) and fenced by name: a DNS name of two or more
+labels with an optional port — no scheme, path, userinfo, IP literal,
+`localhost`, or github.com lookalike. Fleet itself never connects to it
+(`gh` on the host does, through that host's resolver), so there is no
+resolve-then-refuse step as for Data Center: the fence is the name. The
+site's host is the hostname's; its keys are `host/owner/repo#n`, so the same
+repository name on github.com and on the instance is never the same work, and
+only a configured instance's URLs and `host/owner/repo#n` references are
+recognised.
+
+### Sync metrics
+
+`fleet-hub tracker status` (`work_admin { action: status }`, master-only, and
+Settings → Work on the machine that syncs) shows each tracker's last pass:
+its duration, the items the tracker listed or fetched, the items that
+changed, the event frames the pass emitted, and the error it ended with
+(redacted, one line). They are kept in memory only and start empty after a
+restart.
+
 ### Reaching a tracker from a host: `via_host`
 
 A tracker only one machine can reach (a VPN, an internal network), or one
 whose requests should leave from a particular host, is read with `curl` on
 that host: `fleet-hub tracker add <url> --via-host <host>`. The token goes to
-the host **on stdin** into a private temp file (`umask 077`, removed on
-exit) that `curl -q` reads with `-H @file`: it is in no argv on the host
-(`ps` shows only file names), no environment variable and no log. Requests
-are https only, never follow a redirect, and still go only to that
-tracker's own host. `curl` 7.55 or newer is needed on the host.
+the host **on stdin** into a private temp directory (`umask 077`, on
+`$XDG_RUNTIME_DIR` when there is one); the header file is unlinked as soon
+as the script holds it open, before `curl -q` reads it through
+`-H @/dev/fd/3`, so it is a file only for a moment, in no argv on the host
+(`ps` shows `/dev/fd/3` and file names), no environment variable and no
+log. The directory goes on exit, and one a killed shell left behind is
+swept by the next request after ten minutes. Requests are https only,
+never follow a redirect, and still go only to that tracker's own host.
+`curl` 7.55 or newer is needed on the host.
 
 ### Jira Data Center
 
@@ -857,7 +906,7 @@ fleet-hub tracker test 3
 ### What to know
 
 - **Sites are fenced** per provider — `*.atlassian.net`, `api.github.com`
-  (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
+  or the enterprise instance's `/api/graphql` (through `gh`), `app.asana.com`, `api.linear.app`, the one Data Center host
   — and redirects are never followed: a tracker's URL is where the hub sends
   a credential from its own network position.
 - **States.** An expired or refused credential sets `auth_failed` and polling
@@ -933,7 +982,11 @@ What else to know:
 - **Linking across orgs is refused for everyone**, the master included,
   unless `force_cross_org: true`: it is a data-integrity rule that stops
   Company B's ticket from being attached to a Company A session by mistake
-  (the desktop explains it and offers "Link anyway"). Detection never
+  (the desktop explains it and offers "Link anyway"). A `move_session` to a
+  host whose org the session's live links are not in is refused the same
+  way, before anything is copied; `force_cross_org: true` carries the links
+  as they are and the report's `warnings` names each crossing (the Transfer
+  sheet offers "Move anyway"). Detection never
   guesses across orgs, and the sync never binds (nor fetches) a bare key
   for another org's session.
 - **Sessions are not fenced by default.** `isolate_sessions` (per org, off
@@ -949,7 +1002,10 @@ What else to know:
   orgs' hosts (so a branch named after a ticket shows its key); turn
   `isolate_sessions` on for an org whose session names must not be seen.
 - **A host in no org sees only unassigned work.** Assign every host of a
-  company before connecting a second company's tracker.
+  company before connecting a second company's tracker: a bare key linked
+  on an unassigned host's session belongs to no org, so ANY org's tracker
+  may bind it (fetching the key with that org's credentials), which is why
+  hosts are assigned first.
 
 ## Tidy-up and auto-tidy
 
@@ -1383,7 +1439,9 @@ subcommand — `fleet-hub token show --data-dir D` and
 | — | — | `work.recent_days` | `14` |
 
 The `reports.*` and `work.*` settings have no flag: set them over the API
-with `set_setting`. `work.journal_days` is how long work memory (the
+with `set_setting` (master token; `get_settings` reads them all). It
+reaches only the settings registry, never the `hub.*` and `mcp.*` values
+in this table. `work.journal_days` is how long work memory (the
 journal behind resume and the handover brief) is kept for conversations no
 confirmed work link references; `0` keeps it forever.
 
@@ -1648,7 +1706,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 175 commands, 72 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 179 commands, 75 route to a hub tool, 1 routes except for one argument shape, 82 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1696,7 +1754,7 @@ Of the 175 commands, 72 route to a hub tool, 1 routes except for one argument sh
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
-| `get_fleet_settings` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; read and change them on the hub |
+| `get_fleet_settings` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; read them on the hub with get_settings (master token) |
 | `hide_host` | hiding a host is fleet administration, which the hub reserves for its own operator — hide it there with `fleet-hub` |
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
@@ -1727,10 +1785,11 @@ Of the 175 commands, 72 route to a hub tool, 1 routes except for one argument sh
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
 | `session_tool_detail` | the hub exposes no tool for one tool call's input and result; the Conversation tab's tool lines still come from session_conversation |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
-| `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub |
+| `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub with set_setting (master token) |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
 | `update_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
@@ -1892,8 +1951,10 @@ deliberately.
 - **A peer's own words cannot forge the marker that quotes them.** If a
   message body from another fleet happens to contain a line matching
   fleet's own untrusted-content marker, that line is neutralised (prefixed
-  `> `) before it is ever stored — a peer cannot close the marked block
-  early and have the rest of its text read back as fleet's own.
+  `> `, and every `[claude-fleet` in the body defused to `(claude-fleet`,
+  whatever invisible character sits in front of it) before it is ever
+  stored — a peer cannot close the marked block early and have the rest of
+  its text read back as fleet's own.
 - **Trust in a link is decided once, at pairing, by identity — not by a
   fleet-id allowlist.** The pairing code itself is the credential: only
   someone who can already run commands on the other hub can mint one, and
@@ -1931,7 +1992,10 @@ deliberately.
   action for master, clients and hosts in two orgs and in none. See
   *Organisations and isolation*.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
-  the desktop.
+  the desktop — the file is created owner-only before SQLite opens it, so
+  the WAL sidecars `state.db-wal` and `state.db-shm` (which hold every
+  recent commit, tokens included, while the daemon runs) inherit `0600`
+  too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
   UI confirmation dialog. A hub has no UI to show that dialog to — leave the

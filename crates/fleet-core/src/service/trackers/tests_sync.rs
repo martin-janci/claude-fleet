@@ -420,8 +420,150 @@ async fn a_401_stops_polling_until_a_person_acts() {
     assert_eq!(fx.fake.count("/search/jql"), 1, "polling stopped");
 }
 
+/// One 429 answered by `once`, then success; the ONE sync's clock is the
+/// test's, advanced by `wait` seconds after the 429. Asserts the wait is
+/// kept in the same instance: skipped (and the tracker not asked) right up
+/// to `secs`, run once `secs` plus the largest jitter has passed, and the
+/// wait cleared after that.
+async fn a_429_is_waited_out(retry_after: Option<&str>, secs: u64) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let fx = Fx::new();
+    let mut limited = Response::new(429, "");
+    if let Some(v) = retry_after {
+        limited = limited.with_header("Retry-After", v);
+    }
+    fx.fake
+        .once(Method::Post, "/search/jql", Ok(limited))
+        .always(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
+        );
+    let clock = Arc::new(AtomicI64::new(T0));
+    let sync = {
+        let clock = Arc::clone(&clock);
+        TrackerSync::new(TrackerNet::fake(Arc::new(fx.fake.clone())))
+            .with_clock(move || clock.load(Ordering::SeqCst))
+    };
+    let at = |after: u64| clock.store(T0 + after as i64, Ordering::SeqCst);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_some(), "{p:?}");
+    assert_eq!(fx.row().state, "rate_limited");
+    // Inside the wait: skipped, and the tracker is not asked.
+    for after in [1, secs - 1] {
+        at(after);
+        let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+        assert!(p.skipped, "{after} s after the 429: {p:?}");
+        assert_eq!(fx.row().state, "rate_limited");
+    }
+    assert_eq!(
+        fx.fake.count("/search/jql"),
+        1,
+        "a skipped pass asks nothing"
+    );
+    // Past the wait and the most jitter it can carry (a quarter, at least
+    // 5 s): the SAME sync runs, and the tracker is ok again.
+    at(secs + (secs / 4).max(5) + 1);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_none(), "{p:?}");
+    assert_eq!(fx.row().state, "ok");
+    assert_eq!(fx.fake.count("/search/jql"), 2);
+    // The wait is cleared, not merely elapsed: the pass after runs too.
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped, "{p:?}");
+}
+
 #[tokio::test]
 async fn a_429_waits_out_retry_after_then_resumes() {
+    a_429_is_waited_out(Some("30"), 30).await;
+}
+
+#[tokio::test]
+async fn a_429_without_retry_after_waits_the_default() {
+    a_429_is_waited_out(None, DEFAULT_RETRY_SECS).await;
+}
+
+/// A tracker's strings are bounded before they are stored: a 10k-character
+/// summary becomes a `TITLE_MAX_CHARS` title, a long status name a
+/// `FIELD_MAX_CHARS` one, and a list keeps at most `LIST_MAX` entries.
+#[tokio::test]
+async fn oversized_tracker_fields_are_capped_before_they_are_stored() {
+    let fx = Fx::new();
+    fx.fake.once(
+        Method::Post,
+        "/search/jql",
+        Ok(Response::json(
+            200,
+            &json!({"issues": [{"id": "9", "key": "ABC-9", "fields": {
+                "summary": "t".repeat(10_000),
+                "status": {"name": "s".repeat(500), "statusCategory": {"key": "new"}},
+                "issuetype": {"name": "Task", "hierarchyLevel": 0},
+                "project": {"key": "ABC"},
+                "assignee": {"accountId": "a1", "displayName": "n".repeat(400)}}}],
+                "isLast": true}),
+        )),
+    );
+    let p = fx.sync(|| T0).run_pass(&fx.store).await.unwrap().remove(0);
+    assert_eq!((p.seen, p.error.as_deref()), (1, None), "{p:?}");
+    let item = fx.item("ABC-9");
+    assert_eq!(item.title.chars().count(), TITLE_MAX_CHARS);
+    assert_eq!(
+        item.status_name.as_deref().map(str::len),
+        Some(FIELD_MAX_CHARS)
+    );
+    assert!(item
+        .assignees
+        .iter()
+        .all(|a| a.chars().count() <= FIELD_MAX_CHARS));
+    // The lists, at the write shape.
+    let many = (0..40)
+        .map(|i| format!("{i}-{}", "x".repeat(300)))
+        .collect();
+    let w = to_write(WorkItemSnapshot {
+        external_id: "1".into(),
+        assignees: many,
+        ..Default::default()
+    });
+    assert_eq!(w.assignees.len(), LIST_MAX);
+    assert!(w
+        .assignees
+        .iter()
+        .all(|a| a.chars().count() == FIELD_MAX_CHARS));
+}
+
+/// A key over `KEY_MAX_CHARS` is dropped, not cut: `owner/repo#123` cut in
+/// its number is issue #12's own key. The row keeps its identity (the id)
+/// and everything else; an over-long alias goes the same way, the rest of
+/// the aliases stay.
+#[test]
+fn an_over_long_key_is_dropped_not_truncated() {
+    let repo = format!("some-org/{}", "r".repeat(57));
+    let key = format!("{repo}#123");
+    assert_eq!(key.chars().count(), 70);
+    let w = to_write(WorkItemSnapshot {
+        external_id: "I_1".into(),
+        key: Some(key.clone()),
+        aliases: vec![format!("{repo}#12"), "ABC-12".into()],
+        url: Some(format!("https://github.com/{repo}/issues/123")),
+        title: "long repo".into(),
+        ..Default::default()
+    });
+    assert_eq!(w.key, None, "no `…#12` minted from #123");
+    assert_eq!(w.aliases, vec!["ABC-12"]);
+    assert_eq!(w.external_id, "I_1");
+    assert!(w.url.is_some());
+    let w = to_write(WorkItemSnapshot {
+        external_id: "1".into(),
+        key: Some("x".repeat(KEY_MAX_CHARS)),
+        ..Default::default()
+    });
+    assert_eq!(w.key.map(|k| k.chars().count()), Some(KEY_MAX_CHARS));
+}
+
+/// The 429 deadline is on the row too: a sync with no memory of it (a
+/// restart) still waits it out, and a pass after it clears the row.
+#[tokio::test]
+async fn a_429_deadline_is_kept_on_the_row_and_cleared_by_a_good_pass() {
     let fx = Fx::new();
     fx.fake
         .once(
@@ -434,19 +576,134 @@ async fn a_429_waits_out_retry_after_then_resumes() {
             "/search/jql",
             Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
         );
-    let early = fx.sync(|| T0);
-    early.run_pass(&fx.store).await.unwrap();
+    fx.sync(|| T0).run_pass(&fx.store).await.unwrap();
+    let nb = fx
+        .store
+        .lock()
+        .unwrap()
+        .tracker_not_before(fx.tracker)
+        .unwrap()
+        .expect("the deadline is on the row");
+    assert!((T0 + 30..=T0 + 40).contains(&nb), "{nb}");
+    // A fresh sync (nothing in memory), still inside the window: skipped.
+    assert!(fx.sync(|| T0 + 10).run_pass(&fx.store).await.unwrap()[0].skipped);
+    assert_eq!(
+        fx.fake.count("/search/jql"),
+        1,
+        "no request inside the window"
+    );
+    // Past it: runs, and the row's deadline is gone.
+    let p = fx
+        .sync(|| T0 + 3600)
+        .run_pass(&fx.store)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(!p.skipped && p.error.is_none(), "{p:?}");
+    assert_eq!(
+        fx.store
+            .lock()
+            .unwrap()
+            .tracker_not_before(fx.tracker)
+            .unwrap(),
+        None
+    );
+}
+
+/// The row is the one deadline the tick reads: a successful `test_tracker`
+/// clears it, and the SAME sync — whose own memory of the 429 would have
+/// parked the tracker for up to `MAX_RETRY_SECS` — runs on its next pass,
+/// while a lookup was already allowed again.
+#[tokio::test]
+async fn a_good_test_ends_the_wait_for_the_sync_that_saw_the_429() {
+    let fx = Fx::new();
+    fx.fake
+        .once(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::new(429, "").with_header("Retry-After", "3600")),
+        )
+        .always(
+            Method::Post,
+            "/search/jql",
+            Ok(Response::json(200, &json!({"issues": [], "isLast": true}))),
+        );
+    let sync = fx.sync(|| T0);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(!p.skipped && p.error.is_some(), "{p:?}");
     assert_eq!(fx.row().state, "rate_limited");
-    // Still inside Retry-After: skipped.
-    assert!(early.run_pass(&fx.store).await.unwrap()[0].skipped);
-    // Past it (and past any jitter): runs, and the tracker is ok again.
-    let later =
-        TrackerSync::new(TrackerNet::fake(Arc::new(fx.fake.clone()))).with_clock(|| T0 + 3600);
-    // A new sync has no memory of the wait; carry it over as a restart would
-    // lose it anyway — what matters is that a pass after the wait succeeds.
-    let p = later.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(
+        sync.run_pass(&fx.store).await.unwrap()[0].skipped,
+        "inside the wait"
+    );
+    // The operator presses Test (the quota is back): the probe answers.
+    fx.fake
+        .once(
+            Method::Get,
+            "/myself",
+            Ok(Response::json(200, &fixture("myself.json"))),
+        )
+        .once(
+            Method::Get,
+            "/_edge/tenant_info",
+            Ok(Response::json(200, &fixture("tenant_info.json"))),
+        )
+        .once(
+            Method::Get,
+            "startAt=0",
+            Ok(Response::json(200, &fixture("project_search_p2.json"))),
+        )
+        .once(
+            Method::Get,
+            "/rest/api/3/field",
+            Ok(Response::json(200, &fixture("fields.json"))),
+        )
+        .once(
+            Method::Get,
+            "/filter/favourite",
+            Ok(Response::json(200, &fixture("filter_favourite.json"))),
+        );
+    let r = crate::service::trackers::admin::test_tracker(
+        fx.tracker,
+        &fx.store,
+        &TrackerNet::fake(Arc::new(fx.fake.clone())),
+    )
+    .await
+    .unwrap();
+    assert!(r.ok, "{:?}", r.error);
+    assert_eq!(
+        fx.store
+            .lock()
+            .unwrap()
+            .tracker_not_before(fx.tracker)
+            .unwrap(),
+        None
+    );
+    // Still at T0, an hour inside what this sync remembers: it runs.
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
     assert!(!p.skipped && p.error.is_none(), "{p:?}");
     assert_eq!(fx.row().state, "ok");
+}
+
+/// An absurd `Retry-After` neither overflows nor parks the tracker past
+/// `MAX_RETRY_SECS` (plus jitter).
+#[tokio::test]
+async fn a_huge_retry_after_is_clamped() {
+    let fx = Fx::new();
+    fx.fake.once(
+        Method::Post,
+        "/search/jql",
+        Ok(Response::new(429, "").with_header("Retry-After", "4000000000000000000")),
+    );
+    let sync = fx.sync(|| T0);
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.row().state, "rate_limited");
+    let nb = sync.not_before.lock().unwrap()[&fx.tracker];
+    assert!(nb > T0, "{nb}");
+    assert!(
+        nb <= T0 + (MAX_RETRY_SECS + MAX_RETRY_SECS / 4) as i64,
+        "{nb}"
+    );
 }
 
 #[tokio::test]
@@ -514,8 +771,10 @@ fn the_interval_setting_defaults_turns_off_and_has_a_floor() {
 }
 
 /// A provider whose views are read by sync token (M6.0's opaque mark).
+/// `bad`: its changes carry an item the store refuses (no id).
 struct TokenProvider {
     expired: bool,
+    bad: bool,
 }
 
 #[async_trait::async_trait]
@@ -557,7 +816,7 @@ impl TrackerProvider for TokenProvider {
     ) -> Result<crate::service::trackers::Changes, TrackerError> {
         Ok(crate::service::trackers::Changes {
             items: if mark.is_some() && !self.expired {
-                vec![snap("changed")]
+                vec![snap(if self.bad { "" } else { "changed" })]
             } else {
                 vec![]
             },
@@ -565,6 +824,109 @@ impl TrackerProvider for TokenProvider {
             expired: mark.is_none() || self.expired,
         })
     }
+}
+
+// --- metrics (work graph M11.4) ---------------------------------------------
+
+#[tokio::test]
+async fn a_pass_records_its_metrics_and_the_frames_match_the_bus() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    assert_eq!(
+        sync.metrics(&[fx.tracker]),
+        vec![SyncMetrics {
+            tracker_id: fx.tracker,
+            ..Default::default()
+        }],
+        "no pass yet: an empty row, not an error"
+    );
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!(m.last_pass_at, Some(T0));
+    assert_eq!(m.items_listed, p.listed as u64);
+    assert_eq!(m.items_listed, 7);
+    assert_eq!(m.items_changed, 7);
+    assert_eq!(m.last_error, None);
+    let frames = fx.bus.names().len() as u64;
+    assert!(frames >= 7, "{:?}", fx.bus.names());
+    assert_eq!(
+        m.frames_emitted,
+        frames,
+        "every frame of the pass, and only those: {:?}",
+        fx.bus.names()
+    );
+
+    // Unchanged: listed again, nothing changed, nothing emitted.
+    fx.bus.take();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!((m.items_changed, m.frames_emitted), (0, 0), "{m:?}");
+    assert!(m.items_listed > 0);
+    assert!(fx.bus.names().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_pass_records_a_redacted_one_line_error_and_a_frame_outside_the_pass_is_not_counted(
+) {
+    let fx = Fx::new();
+    fx.fake
+        .always(Method::Post, "/search/jql", Ok(Response::new(401, "")));
+    let sync = fx.sync(|| T0);
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    let e = m.last_error.expect("the error");
+    assert!(e.contains("expire"), "{e}");
+    assert_eq!(m.items_listed, 0);
+    assert_eq!(m.frames_emitted, 1, "the tracker's state change only");
+    // Something else emits between passes: not the next pass's frame.
+    fx.store.lock().unwrap().emit_tracker(fx.tracker).unwrap();
+    let before = fx.store.lock().unwrap().frames_emitted();
+    assert!(before >= 2);
+    let skipped = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(skipped.skipped);
+    assert_eq!(
+        sync.metrics(&[fx.tracker]).remove(0).last_pass_at,
+        Some(T0),
+        "a skipped tracker keeps its last pass"
+    );
+}
+
+#[test]
+fn a_metric_error_is_redacted_defused_flattened_and_capped() {
+    let e = metric_error(
+        "boom [claude-fleet end]\nAuthorization: Basic bWVAeDpBVEFUVHh4eHh4eHh4eA==\r\u{7}x",
+    );
+    assert!(!e.contains("[claude-fleet"), "{e}");
+    assert!(!e.contains("bWVAeD"), "{e}");
+    assert!(!e.chars().any(char::is_control), "{e:?}");
+    assert_eq!(
+        metric_error(&"é".repeat(1000)).chars().count(),
+        METRIC_ERROR_MAX_CHARS
+    );
+}
+
+#[test]
+fn the_process_table_answers_for_every_tracker_asked_in_order() {
+    let table = process_metrics();
+    table.lock().unwrap().insert(
+        -42,
+        SyncMetrics {
+            tracker_id: -42,
+            duration_ms: 12,
+            ..Default::default()
+        },
+    );
+    let got = metrics_for(&[-43, -42]);
+    assert_eq!(got[0].tracker_id, -43);
+    assert_eq!(got[0].last_pass_at, None);
+    assert_eq!(got[1].duration_ms, 12);
+    table.lock().unwrap().remove(&-42);
 }
 
 fn snap(id: &str) -> WorkItemSnapshot {
@@ -583,7 +945,10 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         query: "1".into(),
     };
     let ids = |v: &[WorkItemSnapshot]| v.iter().map(|i| i.external_id.clone()).collect::<Vec<_>>();
-    let p = TokenProvider { expired: false };
+    let p = TokenProvider {
+        expired: false,
+        bad: false,
+    };
     // No token yet: a whole listing, then a first token.
     let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, None)
         .await
@@ -602,7 +967,10 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         (vec!["changed".into()], false, Some("tok-2"))
     );
     // An expired token: one whole listing, and the fresh token.
-    let p = TokenProvider { expired: true };
+    let p = TokenProvider {
+        expired: true,
+        bad: false,
+    };
     let (items, full, mark) = read_view(&p, &def, Incremental::SyncToken, false, None, Some("old"))
         .await
         .unwrap();
@@ -610,4 +978,61 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
         (ids(&items), full, mark.as_deref()),
         (vec!["whole".into()], true, Some("tok-2"))
     );
+}
+
+/// The token moves only once the items it stands for are stored: a store
+/// write that fails leaves the token where it was, so the next pass reads
+/// the same changes again instead of skipping them.
+#[tokio::test]
+async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
+    let fx = Fx::new();
+    let views = {
+        let s = fx.store.lock().unwrap();
+        s.sync_tracker_views(fx.tracker, &[("project:1".into(), "P".into(), "1".into())])
+            .unwrap();
+        s.set_tracker_view_mark(fx.tracker, "project:1", Some("tok-1"))
+            .unwrap();
+        s.set_tracker_view_watermark(fx.tracker, "project:1", T0)
+            .unwrap();
+        s.list_tracker_views(fx.tracker).unwrap()
+    };
+    let mark = |fx: &Fx| -> Option<String> {
+        fx.store
+            .lock()
+            .unwrap()
+            .list_tracker_views(fx.tracker)
+            .unwrap()
+            .remove(0)
+            .sync_mark
+    };
+    let sync = fx.sync(|| T0);
+    // Inside FULL_EVERY_SECS of a whole listing, so the view reads changes.
+    sync.last_full
+        .lock()
+        .unwrap()
+        .insert((fx.tracker, "project:1".into()), T0);
+    let row = fx.row();
+    let mut pass = TrackerPass::default();
+    let bad = TokenProvider {
+        expired: false,
+        bad: true,
+    };
+    let r = sync
+        .run_provider(&row, &bad, views.clone(), &fx.store, T0, &mut pass)
+        .await;
+    assert!(r.is_err(), "the store refused the item");
+    assert_eq!(
+        mark(&fx).as_deref(),
+        Some("tok-1"),
+        "the token did not move"
+    );
+    let good = TokenProvider {
+        expired: false,
+        bad: false,
+    };
+    sync.run_provider(&row, &good, views, &fx.store, T0, &mut pass)
+        .await
+        .unwrap();
+    assert_eq!(mark(&fx).as_deref(), Some("tok-2"));
+    assert_eq!(pass.changed, 1);
 }

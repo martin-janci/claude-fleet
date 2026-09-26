@@ -671,6 +671,52 @@ fn routed_read_cases() -> Vec<Case> {
             Box::new(|b, s, _| block_on(commands::work::routed::work_reopened(b, s)).map(|_| ())),
         ),
         (
+            "list_local_work_items",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "local_items" }),
+            r#"[{"id":3,"key":"OPS","title":"Ops cleanup","created_at":1,"live_sessions":2}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::list_local_work_items(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "name_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "name", "key": "OPS", "item_id": null,
+                    "link_id": null, "source": null, "title": "Ops cleanup" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::name_session_work(
+                    b,
+                    commands::work::NameSessionWorkArgs {
+                        session_id: 7,
+                        title: "Ops cleanup".into(),
+                        key: Some("OPS".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "rename_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "name", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "title": "Ops, renamed" }),
+            r#"{"id":3,"source":"local","key":"OPS","title":"Ops, renamed","status_category":"todo","created_at":1,"updated_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::rename_work_item(
+                    b,
+                    commands::work::RenameWorkItemArgs {
+                        item_id: 3,
+                        title: "Ops, renamed".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "session_history",
             "session_history",
             // The clamp runs on this side, so the hub is asked for the same
@@ -1570,6 +1616,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         clean_target: false,
                         dry_run: true,
                         when: fleet_core::service::move_session::When::Now,
+                        force_cross_org: false,
                     },
                     s,
                     h,
@@ -1597,6 +1644,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         clean_target: true,
                         dry_run: false,
                         when: fleet_core::service::move_session::When::Now,
+                        force_cross_org: false,
                     },
                     s,
                     h,
@@ -1625,6 +1673,35 @@ fn routed_mutation_cases() -> Vec<Case> {
                         clean_target: false,
                         dry_run: false,
                         when: fleet_core::service::move_session::When::Idle,
+                        force_cross_org: false,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `force_cross_org` (work graph M5): off the wire when false, so
+        // the three cases above reach an older hub exactly as before, and
+        // pinned here when true, so the one flag that turns a refused
+        // cross-org move into a carried one cannot stop short of the wire.
+        (
+            "move_session",
+            "move_session",
+            json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false, "strict": false, "clean_target": false, "dry_run": false, "when": "now", "force_cross_org": true }),
+            MOVE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::move_session::routed::move_session(
+                    b,
+                    MoveSessionArgs {
+                        session_id: 7,
+                        target_host_alias: "hetzner".into(),
+                        keep_source: false,
+                        strict: false,
+                        clean_target: false,
+                        dry_run: false,
+                        when: fleet_core::service::move_session::When::Now,
+                        force_cross_org: true,
                     },
                     s,
                     h,
@@ -1776,6 +1853,7 @@ fn a_hub_answering_a_preview_deserialises_into_move_outcome_preview() {
             clean_target: false,
             dry_run: true,
             when: fleet_core::service::move_session::When::Now,
+            force_cross_org: false,
         },
         &st,
         &ssh(),
@@ -2285,6 +2363,7 @@ fn dry_run_args(dry_run: bool) -> fleet_core::service::move_session::MoveSession
         clean_target: false,
         dry_run,
         when: fleet_core::service::move_session::When::Now,
+        force_cross_org: false,
     }
 }
 
@@ -2447,6 +2526,7 @@ fn when_args(
         clean_target: false,
         dry_run: false,
         when,
+        force_cross_org: false,
     }
 }
 
