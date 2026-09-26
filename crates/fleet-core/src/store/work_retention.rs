@@ -31,8 +31,9 @@
 //!   goes only with all its descendants). Local items are never swept.
 //! * **`session_events`** (`work.retention.timeline_work_events_days`, by
 //!   `at`): only [`WORK_EVENT_KINDS`]; the newest event of each kind per
-//!   session (`at DESC, id DESC`, the order `newest_session_event_of`
-//!   reads a pending handover in) is kept.
+//!   session is kept by BOTH orders its readers use — `at DESC, id DESC`
+//!   (`newest_session_event_of`, a pending handover) and `MAX(id)` (the
+//!   M11.3 keep in `tidy_sessions`) — so a clock step cannot drop either.
 //!
 //! There is no pinned-note concept in the schema; a note is kept by the
 //! journal rules above. `0` days keeps a table forever.
@@ -52,6 +53,8 @@ pub const WORK_EVENT_KINDS: &[&str] = &[
     "handover_started",
     "work_classify_nudge",
     "gc_tidied",
+    // A per-session keep (M11.3): its detail is the second it holds until.
+    "tidy_kept",
 ];
 
 /// One retention-swept table.
@@ -164,7 +167,9 @@ fn events_cte() -> String {
         "WITH newest(id) AS ( \
            SELECT id FROM (SELECT id, ROW_NUMBER() OVER ( \
                PARTITION BY session_id, kind ORDER BY at DESC, id DESC) AS rn \
-             FROM session_events WHERE kind IN ({kinds})) WHERE rn = 1), \
+             FROM session_events WHERE kind IN ({kinds})) WHERE rn = 1 \
+           UNION SELECT MAX(id) FROM session_events WHERE kind IN ({kinds}) \
+             GROUP BY session_id, kind), \
          eligible(id) AS ( \
            SELECT e.id FROM session_events e \
            WHERE e.kind IN ({kinds}) AND e.at < ?1 \

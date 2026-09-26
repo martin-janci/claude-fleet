@@ -402,6 +402,21 @@ fn timeline_sweeps_superseded_work_events_only() {
 }
 
 #[test]
+fn the_newest_by_id_survives_a_clock_step_too() {
+    // tidy_sessions reads a keep by MAX(id); a clock stepped back wrote the
+    // live keep with an older `at` than the one it replaced.
+    let s = Store::open_in_memory().unwrap();
+    let (a, _) = session(&s, "a");
+    let older = event(&s, a, "tidy_kept", OLD - 100);
+    let first = event(&s, a, "tidy_kept", OLD + 100);
+    let stepped = event(&s, a, "tidy_kept", OLD);
+    sweep_exactly(&s, RetentionTable::WorkEvents, 180, &[older]);
+    let left = ids(&s, "session_events");
+    assert!(left.contains(&first), "newest by time");
+    assert!(left.contains(&stepped), "newest by id: the keep in force");
+}
+
+#[test]
 fn zero_days_keeps_every_table_forever() {
     let s = Store::open_in_memory().unwrap();
     let (sid, _) = session(&s, "a");

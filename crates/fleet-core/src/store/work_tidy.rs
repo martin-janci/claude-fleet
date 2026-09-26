@@ -4,6 +4,8 @@
 //!
 //! Nothing here deletes a row. Archive, snooze and never are flags on the
 //! live link; a reopen is a stamp on the item plus a `reopened` journal row.
+//! A per-session keep (work graph M11.3) is a `tidy_kept` timeline event
+//! whose detail is the unix second it holds until: no column, no migration.
 
 use super::{now_unix, Store};
 use crate::ipc_error::{codes, IpcError};
@@ -42,6 +44,9 @@ pub struct ReopenedWork {
 /// `sessions` columns only the tidy planner reads: the last touch, the PR
 /// signals, the live branch.
 type SessionExtra = (Option<i64>, Option<String>, Option<String>);
+
+/// The timeline event a per-session keep writes (work graph M11.3).
+pub const EVENT_TIDY_KEPT: &str = "tidy_kept";
 
 impl Store {
     /// Everything [`crate::service::gc::tidy::plan_tidy`] reads, one entry
@@ -135,6 +140,40 @@ impl Store {
                 extra.insert(id, e);
             }
         }
+        // Any live link but a rejection — a non-primary confirmed link or a
+        // suggestion no one decided — ties a session to work
+        // (`TidySession::any_link`, the `idle_unlinked` gate).
+        let any_link: HashSet<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT p.session_id FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE l.ended_at IS NULL AND l.state <> 'rejected' AND p.session_id IS NOT NULL",
+            )?;
+            let it = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            it.collect::<rusqlite::Result<_>>()?
+        };
+        // The latest keep of each session (a later, shorter keep replaces a
+        // longer one), written after the row was created: `sessions.id` can
+        // be reused, and a keep never outlives the session it was given to.
+        let kept: HashMap<i64, i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT e.session_id, CAST(e.detail AS INTEGER) FROM session_events e \
+                 JOIN sessions s ON s.id = e.session_id \
+                 WHERE e.kind = ?1 AND e.at >= s.created_at \
+                   AND e.id = (SELECT MAX(x.id) FROM session_events x \
+                               WHERE x.session_id = e.session_id AND x.kind = ?1)",
+            )?;
+            let it = stmt.query_map([EVENT_TIDY_KEPT], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+            })?;
+            let mut out = HashMap::new();
+            for row in it {
+                if let (id, Some(until)) = row? {
+                    out.insert(id, until);
+                }
+            }
+            out
+        };
         let tasks: HashSet<i64> = self
             .open_tasks()?
             .into_iter()
@@ -161,10 +200,18 @@ impl Store {
                     last_touch_at: touch,
                     open_tasks: tasks.contains(&row.id),
                     branch: branch.or_else(|| row.worktree_key.clone()),
+                    any_link: any_link.contains(&row.id),
+                    kept_until: kept.get(&row.id).copied(),
                     row,
                 }
             })
             .collect())
+    }
+
+    /// Keep a session out of tidy-up until `until` (work graph M11.3): a
+    /// `tidy_kept` timeline event the planner reads. The latest keep wins.
+    pub fn keep_tidy(&self, session_id: i64, until: i64) -> Result<(), IpcError> {
+        self.insert_session_event(session_id, EVENT_TIDY_KEPT, Some(&until.to_string()))
     }
 
     /// The live participant of a session row, or `E_NOTFOUND`.

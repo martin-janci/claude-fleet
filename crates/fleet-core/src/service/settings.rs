@@ -207,6 +207,10 @@ pub const WORK_TIDY_DONE_DAYS: &str = "work.tidy_done_days";
 /// Tidy-up: how long a session must have been idle before any reason
 /// suggests it.
 pub const WORK_TIDY_IDLE_HOURS: &str = "work.tidy_idle_hours";
+/// Tidy-up (work graph M11.3): a session with no work linked is suggested
+/// (`idle_unlinked`) once it has been idle, and unprompted, this many days.
+/// Never acted on by auto-tidy (D19).
+pub const WORK_TIDY_IDLE_UNLINKED_DAYS: &str = "work.tidy_idle_unlinked_days";
 /// Auto-tidy: the GC sweep acts on the tidy candidates of the allowed
 /// reasons (below) by itself — safe kill or archive only, never a plain
 /// kill. Off by default: tidy-up only suggests.
@@ -430,6 +434,11 @@ pub const SPECS: &[Spec] = &[
         key: WORK_TIDY_IDLE_HOURS,
         default: "4",
         kind: Kind::Int { min: 1, max: 720 },
+    },
+    Spec {
+        key: WORK_TIDY_IDLE_UNLINKED_DAYS,
+        default: "7",
+        kind: Kind::Int { min: 1, max: 90 },
     },
     Spec {
         key: WORK_AUTO_TIDY,
@@ -793,13 +802,27 @@ mod tests {
         assert_eq!(resolve(WORK_AUTO_TIDY, None), "false");
         assert_eq!(resolve(WORK_TIDY_DONE_DAYS, None), "2");
         assert_eq!(resolve(WORK_TIDY_IDLE_HOURS, None), "4");
+        assert_eq!(resolve(WORK_TIDY_IDLE_UNLINKED_DAYS, None), "7");
+        assert!(validate(WORK_TIDY_IDLE_UNLINKED_DAYS, "1").is_ok());
+        assert!(validate(WORK_TIDY_IDLE_UNLINKED_DAYS, "90").is_ok());
+        for bad in ["0", "91", "-3", "a week"] {
+            assert!(
+                validate(WORK_TIDY_IDLE_UNLINKED_DAYS, bad).is_err(),
+                "{bad}"
+            );
+        }
         assert_eq!(
             resolve(WORK_AUTO_TIDY_REASONS, None),
             "done_idle,pr_merged_idle"
         );
         assert!(validate(WORK_AUTO_TIDY_REASONS, "").is_ok(), "none");
         assert!(validate(WORK_AUTO_TIDY_REASONS, " not_planned , done_idle").is_ok());
-        for bad in ["duplicate_worktree", "ghost_expiring", "done_idle,kill"] {
+        for bad in [
+            "duplicate_worktree",
+            "ghost_expiring",
+            "idle_unlinked",
+            "done_idle,kill",
+        ] {
             assert_eq!(
                 validate(WORK_AUTO_TIDY_REASONS, bad).unwrap_err().code,
                 codes::E_INVALID,

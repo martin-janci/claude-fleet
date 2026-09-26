@@ -12,7 +12,12 @@
 //!   dirty or unpushed tree only ever goes through the safe-kill path;
 //! - a worktree another live session shares is only plain-killed (its files
 //!   stay; a safe-remove would delete a tree in use);
-//! - nothing here deletes a transcript, a branch or a journal row.
+//! - nothing here deletes a transcript, a branch or a journal row;
+//! - a session with no work linked (work graph M11.3, `idle_unlinked`) is
+//!   killed only while the fresh plan still names it, never by auto-tidy
+//!   (D19), and only when its worktree inspects clean and pushed: dirty,
+//!   unpushed or uninspectable work is refused, not safe-killed — no one
+//!   decided what that work is for.
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::gc::tidy::{
@@ -31,6 +36,9 @@ pub const SNOOZE_DEFAULT_DAYS: u32 = 7;
 pub const SNOOZE_MAX_DAYS: u32 = 365;
 /// Most items one `tidy_apply` takes.
 pub const APPLY_MAX_ITEMS: usize = 200;
+/// Default and bounds of a per-session keep (work graph M11.3), in days.
+pub const KEEP_DEFAULT_DAYS: u32 = 7;
+pub const KEEP_MAX_DAYS: u32 = 90;
 
 /// `work { action: tidy }`: the candidates and the policy they were planned
 /// under (for the sheet's footer and the dry-run preview).
@@ -46,6 +54,10 @@ pub struct TidyReport {
     pub done_days: i64,
     #[serde(default)]
     pub idle_hours: i64,
+    /// `work.tidy_idle_unlinked_days` (work graph M11.3); absent from an
+    /// older peer.
+    #[serde(default)]
+    pub idle_unlinked_days: i64,
 }
 
 // One choice in the sheet (no doc comment: it would ride the tool schema).
@@ -55,7 +67,7 @@ pub struct TidyReport {
 #[schemars(crate = "rmcp::schemars")]
 pub struct TidyApplyItem {
     pub session_id: i64,
-    /// safe_kill|kill|archive|snooze|never
+    /// safe_kill|kill|archive|snooze|never|keep
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_id: Option<i64>,
@@ -69,7 +81,7 @@ pub struct TidyApplyResult {
     pub session_id: i64,
     pub action: String,
     pub ok: bool,
-    /// archived | killed | safe_kill_requested | snoozed | never
+    /// archived | killed | safe_kill_requested | snoozed | never | kept
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +105,7 @@ pub fn tidy_config(s: &Store) -> TidyConfig {
     TidyConfig {
         done_secs: int(settings::WORK_TIDY_DONE_DAYS, 2) * 86_400,
         idle_secs: int(settings::WORK_TIDY_IDLE_HOURS, 4) * 3600,
+        unlinked_idle_secs: int(settings::WORK_TIDY_IDLE_UNLINKED_DAYS, 7) * 86_400,
         lost_ttl_secs: int(settings::SESSIONS_LOST_TTL_SECS, 14 * 86_400),
         auto: settings::get_bool(s, settings::WORK_AUTO_TIDY),
         auto_reasons: reasons.split(',').filter_map(TidyReason::parse).collect(),
@@ -192,6 +205,7 @@ pub fn work_tidy(store: &Mutex<Store>, scope: &OrgScope, now: i64) -> Result<Tid
         auto_reasons: snap.cfg.auto_reasons.clone(),
         done_days: snap.cfg.done_secs / 86_400,
         idle_hours: snap.cfg.idle_secs / 3600,
+        idle_unlinked_days: snap.cfg.unlinked_idle_secs / 86_400,
     })
 }
 
@@ -236,6 +250,7 @@ async fn tidy_kill(
     snap: &Snapshot,
     s: &TidySession,
     label: &str,
+    require_clean: bool,
 ) -> Result<&'static str, IpcError> {
     let r = &s.row;
     if r.status != "running" {
@@ -245,7 +260,36 @@ async fn tidy_kill(
         ));
     }
     let plain = matches!(r.kind.as_str(), "bg" | "shell" | "review") || snap.shares_worktree(s);
-    let via_claude = if plain {
+    let via_claude = if require_clean {
+        // Unlinked work: kill only a tree with nothing in it to lose. The
+        // planner never names a shared or untracked tree for this reason;
+        // the checks stand here too, the sheet may be minutes old.
+        if plain || r.kind != "work" || r.worktree_id.is_none() {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "no work linked and no worktree of its own fleet can inspect: not killed",
+            ));
+        }
+        match exec.inspect(&r.host_alias, &r.tmux_name).await {
+            Ok(insp) if !needs_safe_remove(&insp) => false,
+            Ok(_) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "no work linked, and its worktree has uncommitted or unpushed work: \
+                     not killed (open it, or link it to its work)",
+                ))
+            }
+            Err(e) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "no work linked, and its worktree could not be inspected: not killed ({})",
+                        e.message
+                    ),
+                ))
+            }
+        }
+    } else if plain {
         false
     } else if r.kind == "work" && r.worktree_id.is_some() {
         match exec.inspect(&r.host_alias, &r.tmux_name).await {
@@ -292,12 +336,13 @@ fn resolve<'a>(
 }
 
 /// Who applies an item (its scope), what the timeline calls it (`manual`,
-/// `auto:<reason>`), and when.
+/// `auto:<reason>`), when, and the fresh plan (M11.3's unlinked kills).
 #[derive(Clone, Copy)]
 struct ApplyCtx<'a> {
     scope: &'a OrgScope,
     source: &'a str,
     now: i64,
+    plan: &'a [TidyCandidate],
 }
 
 /// Apply one item to a session [`resolve`] found in the caller's scope,
@@ -310,7 +355,12 @@ async fn apply_one(
     item: &TidyApplyItem,
     ctx: ApplyCtx<'_>,
 ) -> Result<&'static str, IpcError> {
-    let ApplyCtx { scope, source, now } = ctx;
+    let ApplyCtx {
+        scope,
+        source,
+        now,
+        plan,
+    } = ctx;
     let action = item.action.as_str();
     let destructive = matches!(action, "safe_kill" | "kill" | "archive");
     if destructive {
@@ -323,7 +373,39 @@ async fn apply_one(
     }
     match action {
         "safe_kill" | "kill" => {
-            tidy_kill(store, exec, snap, s, &format!("{source}:{action}")).await
+            // A session with no work linked, and no other reason: the
+            // `idle_unlinked` kill (work graph M11.3). Only while the fresh
+            // plan still names it, never automatically (D19), clean only.
+            let planned = plan
+                .iter()
+                .find(|c| c.session_id == s.row.id)
+                .map(|c| c.reason);
+            let unlinked_kill =
+                s.unlinked() && matches!(planned, None | Some(TidyReason::IdleUnlinked));
+            if unlinked_kill {
+                if source.starts_with("auto") {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        "auto-tidy never acts on a session with no work linked",
+                    ));
+                }
+                if planned.is_none() {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        "no work linked and no longer a tidy-up candidate \
+                         (used, linked or kept since): not killed",
+                    ));
+                }
+            }
+            tidy_kill(
+                store,
+                exec,
+                snap,
+                s,
+                &format!("{source}:{action}"),
+                unlinked_kill,
+            )
+            .await
         }
         "archive" => {
             // A per-host token stamps only the links it sees (work graph M5).
@@ -366,10 +448,29 @@ async fn apply_one(
             lock(store)?.never_tidy(s.row.id, item.link_id)?;
             Ok("never")
         }
+        "keep" => {
+            // Per session, link or not (work graph M11.3): the scope check
+            // above is the fence — own host, own org.
+            let days = item.days.unwrap_or(KEEP_DEFAULT_DAYS);
+            if !(1..=KEEP_MAX_DAYS).contains(&days) {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("keep days must be 1..={KEEP_MAX_DAYS}"),
+                ));
+            }
+            if s.row.status != "running" {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "only a live session can be kept",
+                ));
+            }
+            lock(store)?.keep_tidy(s.row.id, now + i64::from(days) * 86_400)?;
+            Ok("kept")
+        }
         other => Err(IpcError::new(
             codes::E_INVALID,
             format!(
-                "unknown tidy action {other:?}; one of safe_kill, kill, archive, snooze, never"
+                "unknown tidy action {other:?}; one of safe_kill, kill, archive, snooze, never, keep"
             ),
         )),
     }
@@ -391,6 +492,7 @@ pub async fn tidy_apply(
         ));
     }
     let snap = Snapshot::take(store)?;
+    let plan = snap.plan(now);
     let mut report = TidyApplyReport::default();
     for item in items {
         let result = match resolve(&snap, scope, item.session_id) {
@@ -403,6 +505,7 @@ pub async fn tidy_apply(
                     scope,
                     source: "manual",
                     now,
+                    plan: &plan,
                 };
                 let result = apply_one(store, exec, &snap, s, item, ctx).await;
                 if let Err(e) = &result {
@@ -476,6 +579,7 @@ pub async fn auto_tidy(
             scope: &OrgScope::All,
             source: &source,
             now,
+            plan: &plan,
         };
         match apply_one(store, exec, &snap, s, &item, ctx).await {
             Ok(_) => acted += 1,

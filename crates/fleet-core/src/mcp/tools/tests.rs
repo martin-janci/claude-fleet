@@ -3333,13 +3333,17 @@ fn the_served_definition_budget_stays_bounded() {
     // `name` and a `title` parameter, `work` gains `local_items`; no
     // description change). Merged over M11.2 / M11.4: measured at 55,030 on
     // 2026-09-25; plus 100.
+    // M11.3 merged over M11.1: `keep` on `tidy_apply`'s item action, nothing
+    // else. Measured at 55,035 on 2026-09-25 (+5); plus 100.
     // get_settings/set_setting: +580 B (two master-only tools, M11.5's
     // terse style). Measured at 55,610 on 2026-09-25; plus 100.
+    // M11.3 merged over get_settings/set_setting: `keep` on `tidy_apply`'s
+    // item action. Measured at 55,615 on 2026-09-26 (+5); plus 100.
     // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
     // description; `set_setting`'s example key now `work.recent_days`),
-    // merged over the above: measured at 55,630 on 2026-09-26 (+20), inside
-    // the headroom, not raised.
-    const BUDGET_BYTES: usize = 55_710;
+    // merged over M11.3: measured at 55,635 on 2026-09-26 (+20), inside the
+    // headroom, not raised.
+    const BUDGET_BYTES: usize = 55_715;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -244,4 +244,32 @@ describe('TodayView', () => {
     expect(get(selectedSession)).toBeNull();
     expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).not.toContain('send_prompt');
   });
+
+
+  it("Stale's no-work group carries idle, unlinked sessions into Tidy up (M11.3)", async () => {
+    const noWork: Today = {
+      since: 0,
+      now: 200,
+      groups: [{ bucket: 'stale', sessions: [{ id: 43, name: 'lonely', host_alias: 'mefistos', stale: 'idle', last_activity_at: 1 }] }],
+      shipped: [],
+    };
+    sessions.set([session('mefistos', 'lonely', { id: 43 })]);
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_today') return noWork;
+      if (cmd === 'work_tidy')
+        return {
+          ...EMPTY_REPORT,
+          candidates: [{ session_id: 43, host_alias: 'mefistos', tmux_name: 'lonely', reason: 'idle_unlinked', action: 'safe_kill', since: 0 }],
+        };
+      return null;
+    });
+    tidyRequest.set(null);
+    render(TodayView, { onclose: vi.fn() });
+    await flush();
+    const btn = await screen.findByTestId('today-tidy');
+    expect(btn.textContent).toBe('Tidy up · 1');
+    await fireEvent.click(btn);
+    expect(get(tidyRequest)?.sessionIds).toEqual([43]);
+    expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).not.toContain('tidy_apply');
+  });
 });

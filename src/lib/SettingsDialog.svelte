@@ -25,7 +25,10 @@
     settingSecs,
     settingInt,
     parseHoursInput,
+    parseBoundedIntInput,
     parseIntInput,
+    TIDY_IDLE_UNLINKED_DAYS_MAX,
+    TIDY_IDLE_UNLINKED_DAYS_MIN,
     parsePricesJsonInput,
     secsToHours,
     hoursToSecs,
@@ -329,6 +332,18 @@
       return;
     }
     void applyLimit(key, r.value);
+  }
+  function onIdleUnlinkedDaysChange(e: Event) {
+    const r = parseBoundedIntInput(
+      (e.currentTarget as HTMLInputElement).value,
+      TIDY_IDLE_UNLINKED_DAYS_MIN,
+      TIDY_IDLE_UNLINKED_DAYS_MAX,
+    );
+    if ('error' in r) {
+      limitsError = `Tidy: unlinked for: ${r.error}`;
+      return;
+    }
+    void applyLimit(SETTING_KEYS.workTidyIdleUnlinkedDays, r.value);
   }
   function onUsagePricesChange(e: Event) {
     const r = parsePricesJsonInput((e.currentTarget as HTMLTextAreaElement).value);
@@ -1149,6 +1164,17 @@
           data-testid="work-tidy-idle-hours"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workTidyIdleHours, 'Tidy: idle for', e)} />
         <span class="hook-desc" id="work-tidy-idle-hours-desc">hours a session must be idle before any reason suggests it</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-tidy-idle-unlinked-days">tidy: unlinked for</label>
+        <input class="port" id="work-tidy-idle-unlinked-days" type="number"
+          min={TIDY_IDLE_UNLINKED_DAYS_MIN} max={TIDY_IDLE_UNLINKED_DAYS_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workTidyIdleUnlinkedDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-tidy-idle-unlinked-days-desc"
+          data-testid="work-tidy-idle-unlinked-days"
+          onchange={onIdleUnlinkedDaysChange} />
+        <span class="hook-desc" id="work-tidy-idle-unlinked-days-desc">days a session with no work linked must sit idle and unprompted before Tidy up suggests it (1–90; only ever suggested, never auto-tidied)</span>
       </div>
       <label class="toggle">
         <input
