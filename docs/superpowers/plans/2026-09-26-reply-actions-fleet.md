@@ -532,6 +532,9 @@ Runs the script on the session's host, then either rebinds-and-restarts this ses
 - Consumes: `rewind_script` (Task 2); `Store::get_session_by_id`, `Store::rebind_conversation(session_id, claude_session_id, StartSource::Fork, transcript_path, model)`, `sessions::restart_session(RestartSessionArgs { host_alias, name, force })`, `sessions::new_session(NewSessionArgs { .., resume_claude_session_id })`.
 - Produces:
   ```rust
+  // Both derive Serialize + Deserialize; RewindMode is
+  // `#[serde(rename_all = "snake_case")]`, so it serialises to exactly the
+  // wire's "rewind" / "fork" and is usable as a #[tauri::command] parameter.
   pub enum RewindMode { Rewind, Fork }
   pub struct RewindArgs {
       pub session_id: i64,
@@ -670,7 +673,13 @@ use crate::store::{SessionRow, Store};
 use std::sync::{Arc, Mutex};
 
 /// What happens after the truncated transcript exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `snake_case` so the serialised form IS the wire vocabulary — `"rewind"` /
+/// `"fork"` — in the MCP params, in the Tauri command's arguments and in the
+/// hub route alike. One vocabulary beats a `String` in one layer and an enum
+/// in another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RewindMode {
     /// Rebind THIS session to the new conversation and restart its pane.
     Rewind,
@@ -678,6 +687,10 @@ pub enum RewindMode {
     Fork,
 }
 
+/// Serde-derived because this is also the `#[tauri::command]` parameter type
+/// (Task 5): the desktop deserialises it from the frontend and the hub route
+/// serialises it back out.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RewindArgs {
     pub session_id: i64,
     /// Keep strictly before this entry. `None` keeps the whole transcript,
@@ -841,8 +854,34 @@ Claude-Session: https://claude.ai/code/session_012PBjHSukJW9dyjDaEPpvDy"
 - Modify: `crates/fleet-core/src/mcp/tools/params.rs` (add `RewindConversationParams`)
 - Modify: `crates/fleet-core/src/mcp/tools/lifecycle.rs` (add the `#[tool]` method beside `restart_session` at `:169`)
 - Modify: the `generate_handler!`-equivalent tool list the router uses (follow `restart_session`'s registration)
+- Modify: `crates/fleet-core/src/mcp/guard.rs` — a `TOOL_POLICIES` row (beside `restart_session`'s at `:376`) **and** an `OPERATOR_CONFIRMS` entry (`:858`)
 - Modify: `crates/fleet-core/src/mcp/tools/tests.rs:3291` (`BUDGET_BYTES` + its doc comment)
 - Test: `crates/fleet-core/src/mcp/tools/tests.rs`
+
+**Registration is mandatory, and it comes first.** A tool with no
+`TOOL_POLICIES` row fails the router exhaustiveness test (`guard.rs:878` spells
+this out), and `confirm_gate`'s `debug_assert` (`support.rs:1165`) panics unless
+the tool is in `CONFIRM_TOOLS` or `OPERATOR_CONFIRMS`. Take exact parity with
+`restart_session`:
+
+```rust
+    ToolPolicy {
+        name: "rewind_conversation",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+```
+
+and add `"rewind_conversation"` to `OPERATOR_CONFIRMS`.
+
+`Access::Client` is what lets a paired phone with a `full` token call it — the
+mobile plan depends on it. `confirm: false` **plus** `OPERATOR_CONFIRMS` is
+exactly `restart_session`'s treatment and it is not a contradiction: a person
+driving the desktop is ungated (the desktop shows its own confirm dialog),
+while the operator agent is always forced to get a human's approval
+(`operator_must_confirm`, decision D12).
 
 **Interfaces:**
 - Consumes: `service::rewind::{rewind_conversation, RewindArgs, RewindMode}` (Task 3).
@@ -878,13 +917,16 @@ async fn rewind_conversation_rejects_an_unknown_mode() {
 }
 
 #[tokio::test]
-async fn rewind_conversation_needs_a_confirmation() {
-    // Rewind is destructive to the live conversation, so it joins the
-    // confirm-gated set (M9.7) exactly as restart_session did.
+async fn a_master_caller_is_not_confirm_gated_for_a_rewind() {
+    // `confirm: false` + OPERATOR_CONFIRMS means a person at the desktop is
+    // ungated — the desktop shows its own dialog. So this must NOT fail for
+    // the confirmation; it fails later, for an unreachable host.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h1").unwrap();
     let id = s
         .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.set_claude_session_id(id, "11111111-1111-1111-1111-111111111111")
         .unwrap();
     let t = test_tools(s);
     let err = t
@@ -899,10 +941,24 @@ async fn rewind_conversation_needs_a_confirmation() {
             }),
         )
         .await
-        .expect_err("no nonce, no rewind");
-    assert!(format!("{err:?}").to_lowercase().contains("confirm"));
+        .expect_err("no reachable host in a unit test");
+    let text = format!("{err:?}").to_lowercase();
+    assert!(
+        !text.contains("confirm"),
+        "a master caller must not be confirm-gated: {text}"
+    );
 }
 ```
+
+> **The operator gate is guard.rs's, not this tool's.** `confirm_gate` is a
+> no-op unless the caller is the operator (`support.rs:1172-1175`), so a test
+> driving `Caller::master()` can never observe it — asserting otherwise would
+> pass for the wrong reason or fail a correct implementation. Membership in
+> `OPERATOR_CONFIRMS` is what this task adds, and `guard.rs`'s own tests (which
+> walk `CONFIRM_TOOLS` / `OPERATOR_CONFIRMS`, e.g. `guard.rs:1523`) are what
+> cover it. If an existing test covers `restart_session`'s operator gate
+> specifically, copy it for `rewind_conversation`; otherwise do not invent a
+> new harness for it.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1407,6 +1463,8 @@ Create `src/lib/ReplyActions.svelte`:
     truncated,
     text,
     sessionId,
+    hostAlias,
+    tmuxName,
     supported = true,
     onFork,
   }: {
@@ -1415,6 +1473,9 @@ Create `src/lib/ReplyActions.svelte`:
     truncated: boolean;
     text: string;
     sessionId: number;
+    /** `sendPrompt` addresses a session by host + tmux name, not by id. */
+    hostAlias: string;
+    tmuxName: string;
     supported?: boolean;
     /** Opens the worktree sheet (Task 7); it calls the backend itself. */
     onFork: (anchor: string | null) => void;
@@ -1438,7 +1499,9 @@ Create `src/lib/ReplyActions.svelte`:
     confirming = null;
     if (!r.ok) return;
     if (retry && prompt) {
-      await sendPrompt(sessionId, prompt);
+      // sendPrompt(hostAlias, tmuxName, prompt) — see `src/lib/sessions.ts:598`.
+      // `send_prompt` has no session-id form.
+      await sendPrompt(hostAlias, tmuxName, prompt);
     } else if (prompt) {
       insertIntoComposer(sessionId, prompt);
     }
@@ -1527,17 +1590,19 @@ In `src/lib/ConversationPanel.svelte`, replace the `.text` block at `:1827-1834`
                       <span class="copy-slot text-copy">
                         <ReplyActions
                           turns={conv.turns}
-                          {index}
+                          index={i}
                           truncated={conv.truncated}
                           text={g.text}
                           sessionId={session.id}
+                          hostAlias={session.host_alias}
+                          tmuxName={session.tmux_name}
                           onFork={(anchor) => openForkSheet(anchor)}
                         />
                       </span>
                     </div>
 ```
 
-`index` here is the `{@const i = row.index}` already in scope at `:1777`; pass `index={i}`. Import `ReplyActions from './ReplyActions.svelte'` beside the `CopyButton` import at `:32`, and add `openForkSheet` as a stub `(anchor: string | null) => {}` for now — Task 7 implements it.
+`i` is the `{@const i = row.index}` already in scope at `:1777`. Import `ReplyActions from './ReplyActions.svelte'` beside the `CopyButton` import at `:32`, and add `openForkSheet` as a stub `(anchor: string | null) => {}` for now — Task 7 implements it.
 
 - [ ] **Step 7: Add the component tests**
 
@@ -1560,6 +1625,18 @@ const turns = [
   { prompt: 'two', at: null, ended_at: null, items: [], prompt_uuid: 'a2' },
 ];
 
+// `sendPrompt` addresses a session by host + tmux name, not by id
+// (src/lib/sessions.ts:598), so the component needs both.
+const base = {
+  turns,
+  truncated: false,
+  text: 'reply',
+  sessionId: 7,
+  hostAlias: 'h1',
+  tmuxName: 'sess',
+  onFork: () => {},
+};
+
 beforeEach(() => {
   rewindConversation.mockReset();
   sendPrompt.mockReset();
@@ -1569,12 +1646,12 @@ describe('ReplyActions', () => {
   it('retry rewinds and then sends the same prompt', async () => {
     rewindConversation.mockResolvedValue({ ok: true, value: { id: 7 } });
     render(ReplyActions, {
-      props: { turns, index: 1, truncated: false, text: 'reply', sessionId: 7, onFork: () => {} },
+      props: { ...base, index: 1 },
     });
     await screen.getByTestId('reply-retry').click();
     await screen.getByTestId('confirm-ok').click();
     expect(rewindConversation).toHaveBeenCalledWith(7, 'rewind', 'a2');
-    expect(sendPrompt).toHaveBeenCalledWith(7, 'two');
+    expect(sendPrompt).toHaveBeenCalledWith('h1', 'sess', 'two');
   });
 
   it('a refused rewind does NOT then send the prompt', async () => {
@@ -1583,7 +1660,7 @@ describe('ReplyActions', () => {
       error: { code: 'E_INVALID', message: 'this session is mid-turn' },
     });
     render(ReplyActions, {
-      props: { turns, index: 1, truncated: false, text: 'reply', sessionId: 7, onFork: () => {} },
+      props: { ...base, index: 1 },
     });
     await screen.getByTestId('reply-retry').click();
     await screen.getByTestId('confirm-ok').click();
@@ -1592,7 +1669,7 @@ describe('ReplyActions', () => {
 
   it('offers no rewind or retry on the first turn of an untruncated conversation', () => {
     render(ReplyActions, {
-      props: { turns, index: 0, truncated: false, text: 'reply', sessionId: 7, onFork: () => {} },
+      props: { ...base, index: 0 },
     });
     expect(screen.queryByTestId('reply-rewind')).toBeNull();
     expect(screen.queryByTestId('reply-retry')).toBeNull();
