@@ -128,7 +128,7 @@ pub fn tool_lines_script(
 /// The shared prefix of [`read_script`] / [`tool_lines_script`]: locate the
 /// transcript (resolution order documented on [`read_script`]) and leave it
 /// in `$f`, or print the `NO_TRANSCRIPT` sentinel on stderr and `exit 4`.
-fn locate_script(
+pub(crate) fn locate_script(
     tmux_name: Option<&str>,
     stored_path: Option<&str>,
     fallback_dir: Option<&str>,
