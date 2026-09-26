@@ -601,8 +601,49 @@ impl Migration {
 #[cfg(test)]
 pub(crate) const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
+/// The newest schema this build knows: the downgrade guard's bound.
+const KNOWN_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
+
+/// `(version, sql)` of every migration up to and including `version`, in
+/// order: the historical files, for a test that builds an older database
+/// (`store::testgen`).
+#[cfg(test)]
+pub(super) fn migrations_through(version: i64) -> impl Iterator<Item = (i64, &'static str)> {
+    MIGRATIONS
+        .iter()
+        .filter(move |m| m.version <= version)
+        .map(|m| (m.version, m.sql))
+}
+
+/// The downgrade guard's refusal: `recorded` came from a newer build.
+fn newer_schema_error(recorded: i64) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+        Some(format!(
+            "this database is at schema version {recorded}, but this build of claude-fleet \
+             only knows up to {KNOWN_SCHEMA_VERSION}: it was last opened by a newer release. \
+             It is not corrupt; do not delete it. Run that release (or a newer one) again, \
+             or restore the copy of state.db you backed up before upgrading."
+        )),
+    )
+}
+
 impl Store {
     pub(super) fn migrate(&self) -> Result<()> {
+        // Downgrade guard, before anything is written: a database a newer
+        // build migrated has a schema this build does not know, so this
+        // build refuses it rather than running against it. A fresh file has
+        // no `schema_version` yet, which reads as nothing recorded.
+        let recorded: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .ok()
+            .flatten();
+        if let Some(recorded) = recorded.filter(|&v| v > KNOWN_SCHEMA_VERSION) {
+            return Err(newer_schema_error(recorded));
+        }
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         // The bootstrap migration is idempotent (`CREATE TABLE IF NOT EXISTS`
         // + `INSERT OR IGNORE`) and always runs: on a fresh DB it also creates
@@ -2728,3 +2769,6 @@ mod tests {
         assert_eq!(rows, 2, "the re-run touched no rows");
     }
 }
+
+#[cfg(test)]
+mod tests_upgrade;
