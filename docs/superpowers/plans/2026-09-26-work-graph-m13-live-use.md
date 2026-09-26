@@ -212,22 +212,3 @@ M13.5   last
   covers M10–M13. Found on the way: M4.6's #273 was closed unmerged, the
   commit reached `main` with #270; `main` had moved to a599ffa (v0.3.1),
   which changes none of the facts above.
-- 2026-09-26: **M13.1 done** (on `claude/cloud-fleet-work-graph-m13-truth`,
-  after M13.0). `SyncMetrics` gains `items_failed` and `consecutive_partial`
-  (`#[serde(default)]`), filled from `TrackerPass.failed`; a pass that ends
-  ok but skipped items sets `last_error` to "n item(s) skipped: <the last
-  skipped item's reason>", sanitised by `metric_error`. `tracker_health_level`
-  takes the partial count: one partial pass reads `degraded`,
-  `TRACKER_FAILING_AFTER` (3) in a row read `failing` (D25).
-  `TrackerHealth` gains `items_failed`, `consecutive_partial` and `reason`
-  (`skipping_items` only while the state is `ok` and no pass failed); the
-  desktop's Attention item reads "Sync skipping items: Jira (acme)" from it,
-  never "Reconnect". Settings → Work's last-pass line and `fleet-hub tracker
-  status` say "skipped n (m passes in a row)". The hub-contract golden gains
-  the three `Health.trackers.trackers` keys (additions, no revision bump).
-  Deviation: the log names the skipped ticket (tracker id and external id,
-  `upsert_tracker_item_or_skip`), not its view, so the guide says that.
-  No migration, no new tool or action, no tool-description change (the
-  budget is untouched), no contract bump. The `claude-fleet` crate's
-  contract test was not run here (no Tauri system libraries); the golden
-  was edited by hand to match `wire_keys`.

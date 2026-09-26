@@ -429,17 +429,4 @@ describe('describeSyncMetrics', () => {
       'last pass 61.0 s · 0 listed · 0 changed · 0 frames',
     );
   });
-
-  it('says how many items the pass skipped, and for how long (M13.1)', () => {
-    const base = { tracker_id: 1, last_pass_at: 5, duration_ms: 10, items_listed: 7 };
-    expect(describeSyncMetrics({ ...base, items_failed: 1, consecutive_partial: 1 })).toBe(
-      'last pass 10 ms · 7 listed · 0 changed · 0 frames · 1 skipped',
-    );
-    expect(describeSyncMetrics({ ...base, items_failed: 2, consecutive_partial: 4 })).toBe(
-      'last pass 10 ms · 7 listed · 0 changed · 0 frames · 2 skipped (4 passes in a row)',
-    );
-    expect(describeSyncMetrics({ ...base, items_failed: 0, consecutive_partial: 0 })).toBe(
-      'last pass 10 ms · 7 listed · 0 changed · 0 frames',
-    );
-  });
 });

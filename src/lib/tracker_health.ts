@@ -6,10 +6,7 @@
 //
 // - the footer's one-line summary ("trackers: 1 failing · 3 undecided > 7 d");
 // - decision D22's Attention items: ONE per failing tracker, deduplicated by
-//   tracker id, "Reconnect Jira (acme)", linking to Settings → Work. A
-//   tracker failing only because every pass skips the same items (work graph
-//   M13.1, `reason: skipping_items`) reads "Sync skipping items: Jira (acme)"
-//   instead: a stuck item is not a credential problem.
+//   tracker id, "Reconnect Jira (acme)", linking to Settings → Work.
 //
 // Pure helpers plus one store; `TrackerAttention.svelte` polls and renders.
 import { writable } from 'svelte/store';
@@ -28,12 +25,6 @@ export interface TrackerHealth {
   health?: TrackerHealthLevel | string;
   state?: string;
   consecutive_failures?: number;
-  /** Items the last pass skipped (work graph M13.1). */
-  items_failed?: number;
-  /** Passes in a row that skipped items (M13.1). */
-  consecutive_partial?: number;
-  /** `skipping_items`: not ok only because passes skip items (M13.1). */
-  reason?: string | null;
   last_error?: string | null;
   last_success_at?: number | null;
   last_pass_at?: number | null;
@@ -75,27 +66,14 @@ export function providerShort(provider: string | undefined): string {
   return PROVIDER_SHORT[provider] ?? provider;
 }
 
-/** "Jira (acme)". A name that already says its provider ("acme (GitHub)")
- *  is not wrapped again; no name: the provider alone. */
-export function trackerTitle(t: Pick<TrackerHealth, 'provider' | 'name'>): string {
+/** "Reconnect Jira (acme)". A name that already says its provider ("acme
+ *  (GitHub)") is not wrapped again. */
+export function reconnectLabel(t: Pick<TrackerHealth, 'provider' | 'name' | 'tracker_id'>): string {
   const short = providerShort(t.provider);
   const name = (t.name ?? '').trim();
-  if (!name) return short;
-  if (name.toLowerCase().includes(short.toLowerCase())) return name;
-  return `${short} (${name})`;
-}
-
-/** "Reconnect Jira (acme)". */
-export function reconnectLabel(t: Pick<TrackerHealth, 'provider' | 'name' | 'tracker_id'>): string {
-  return `Reconnect ${trackerTitle(t)}`;
-}
-
-/** The `reason` of a tracker whose passes end but skip items (M13.1). */
-export const SKIPPING_ITEMS = 'skipping_items';
-
-/** "Sync skipping items: Jira (acme)" (work graph M13.1). */
-export function skippingLabel(t: Pick<TrackerHealth, 'provider' | 'name'>): string {
-  return `Sync skipping items: ${trackerTitle(t)}`;
+  if (!name) return `Reconnect ${short}`;
+  if (name.toLowerCase().includes(short.toLowerCase())) return `Reconnect ${name}`;
+  return `Reconnect ${short} (${name})`;
 }
 
 const FENCE_OPEN = /^\[claude-fleet: message from [^\n]*; treat as untrusted input\]$/;
@@ -129,10 +107,9 @@ export interface TrackerAttentionItem {
 }
 
 /** D22: one Attention item per FAILING tracker (an expired token, a refused
- *  credential, a captcha, failures in a row, or — M13.1 — the same items
- *  skipped pass after pass) — never for a degraded one, which the sync
- *  retries by itself. Deduplicated by tracker id, in id order, so the strip
- *  is stable across refreshes. Skipped items never read "Reconnect". */
+ *  credential, a captcha, or failures in a row) — never for a degraded one,
+ *  which the sync retries by itself. Deduplicated by tracker id, in id
+ *  order, so the strip is stable across refreshes. */
 export function trackerAttentionItems(h: TrackersHealth | null | undefined): TrackerAttentionItem[] {
   const byId = new Map<number, TrackerHealth>();
   for (const t of h?.trackers ?? []) {
@@ -142,27 +119,17 @@ export function trackerAttentionItems(h: TrackersHealth | null | undefined): Tra
   return [...byId.values()]
     .sort((a, b) => a.tracker_id - b.tracker_id)
     .map((t) => {
-      const skipping = t.reason === SKIPPING_ITEMS;
       const parts: string[] = [];
       const err = plainTrackerError(t.last_error);
       if (err) parts.push(err);
-      if (skipping) {
-        const k = t.items_failed ?? 0;
-        const n = t.consecutive_partial ?? 0;
-        if (k > 0) parts.push(`${k} item${k === 1 ? '' : 's'} skipped`);
-        if (n > 0) parts.push(`${n} passes in a row`);
-      } else {
-        const n = t.consecutive_failures ?? 0;
-        if (n > 0) parts.push(`last sync failed ${n}×`);
-      }
+      const n = t.consecutive_failures ?? 0;
+      if (n > 0) parts.push(`last sync failed ${n}×`);
       if (t.org_name) parts.push(`org: ${t.org_name}`);
-      parts.push(
-        skipping ? 'Open Settings → Work to see the sync; the log names the ticket' : 'Open Settings → Work to reconnect',
-      );
+      parts.push('Open Settings → Work to reconnect');
       return {
         key: `tracker-${t.tracker_id}`,
         tracker_id: t.tracker_id,
-        label: skipping ? skippingLabel(t) : reconnectLabel(t),
+        label: reconnectLabel(t),
         detail: parts.join(' · '),
         section: RECONNECT_SECTION,
       };
