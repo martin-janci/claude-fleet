@@ -3,6 +3,7 @@
 use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
+use crate::service::rewind;
 
 #[tool_router(router = lifecycle_router, vis = "pub(super)")]
 impl FleetTools {
@@ -195,6 +196,58 @@ impl FleetTools {
         let row = sessions::restart_session(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Truncate a session's transcript into a new \
+        conversation: \"fork\" starts a new session there, \"rewind\" \
+        restarts this one. The original is unchanged. Returns the updated \
+        row.")]
+    pub(super) async fn rewind_conversation(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<RewindConversationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "rewind_conversation",
+            &format!(
+                "session_id={} mode={} anchor={:?}",
+                p.session_id, p.mode, p.anchor_uuid
+            ),
+        );
+        let mode = match p.mode.as_str() {
+            "rewind" => rewind::RewindMode::Rewind,
+            "fork" => rewind::RewindMode::Fork,
+            other => {
+                return Err(to_mcp_err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("mode must be \"rewind\" or \"fork\", not {other:?}"),
+                )))
+            }
+        };
+        // Rewind rebuilds a live pane, so it needs a person (D12), the same
+        // rule restart_session follows. Fork starts something new and does not.
+        if mode == rewind::RewindMode::Rewind {
+            self.confirm_gate(
+                "rewind_conversation",
+                p.confirm_nonce.as_deref(),
+                &format!("session_id={} anchor={:?}", p.session_id, p.anchor_uuid),
+                &caller,
+            )?;
+        }
+        let row = rewind::rewind_conversation(
+            rewind::RewindArgs {
+                session_id: p.session_id,
+                anchor_uuid: p.anchor_uuid,
+                mode,
+                new_worktree: p.new_worktree,
+            },
+            &self.store,
+            &self.ssh,
+            &self.reg,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&row)
     }
 

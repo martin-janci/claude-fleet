@@ -1056,6 +1056,63 @@ fn test_tools(store: Store) -> FleetTools {
     )
 }
 
+#[tokio::test]
+async fn rewind_conversation_rejects_an_unknown_mode() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let err = t
+        .rewind_conversation(
+            Extension(Caller::master()),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "sideways".into(),
+                new_worktree: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("mode is a closed set");
+    assert!(format!("{err:?}").contains("mode"));
+}
+
+#[tokio::test]
+async fn a_master_caller_is_not_confirm_gated_for_a_rewind() {
+    // `confirm: false` + OPERATOR_CONFIRMS means a person at the desktop is
+    // ungated — the desktop shows its own dialog. So this must NOT fail for
+    // the confirmation; it fails later, for an unreachable host.
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.set_claude_session_id(id, "11111111-1111-1111-1111-111111111111")
+        .unwrap();
+    let t = test_tools(s);
+    let err = t
+        .rewind_conversation(
+            Extension(Caller::master()),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "rewind".into(),
+                new_worktree: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("no reachable host in a unit test");
+    let text = format!("{err:?}").to_lowercase();
+    assert!(
+        !text.contains("confirm"),
+        "a master caller must not be confirm-gated: {text}"
+    );
+}
+
 fn two_host_store() -> (Store, i64, i64) {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("hosta").unwrap();
@@ -1813,7 +1870,8 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
+/// 89; `rewind_conversation`: 90.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1834,7 +1892,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 89);
+    assert_eq!(served, 90);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3349,7 +3407,16 @@ fn the_served_definition_budget_stays_bounded() {
     // strings, so the read is this tool with `set` omitted. Written in
     // M11.5's terse style from the start: 825 B over that baseline, measured
     // at 56,560 on 2026-09-26 (55,735 before, after M12.3); plus 100.
-    const BUDGET_BYTES: usize = 56_660;
+    // `rewind_conversation` (reply actions Task 4): one tool with a `mode`
+    // rather than separate fork/rewind tools, so this stays a single
+    // addition; five fields whose per-field docs
+    // `every_tool_parameter_is_documented` makes mandatory account for most
+    // of the cost. Measured at 57,558 on 2026-09-26 (56,560 before, over
+    // the then-100-byte headroom already); trimming the description to one
+    // sentence was tried first and freed 79 bytes, to 57,479 — not enough
+    // to fit inside the existing headroom. Raised to 57,579 (the trimmed
+    // measurement plus 100).
+    const BUDGET_BYTES: usize = 57_579;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -6819,6 +6886,7 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "restore_host_sessions",
         "recreate_session",
         "restart_session",
+        "rewind_conversation",
         "safe_kill_session",
         "work_link",
         "kill_session",
