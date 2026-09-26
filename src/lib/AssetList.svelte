@@ -7,13 +7,20 @@
     filter,
     onselect,
     onimport,
+    readonly = false,
   }: {
     listing: AssetListing;
     selected: { kind: string; name: string } | null;
     filter: string;
     onselect: (kind: string, name: string) => void;
     onimport: (row: AssetInventoryRow) => void;
+    /** An overview (a hub-client desktop): no detail to open, nothing to
+     *  import — each row says where the asset is and in what state. */
+    readonly?: boolean;
   } = $props();
+
+  const hostsTitle = (hosts: { host_alias: string; state: string }[]) =>
+    hosts.length ? hosts.map((h) => `${h.host_alias}: ${h.state.replace('_', ' ')}`).join('\n') : 'not installed on any host';
 
   const groups = $derived(
     groupByKind(listing).map((g) => ({
@@ -30,15 +37,26 @@
     <div class="group-header">{g.label} <span class="count">{g.assets.length}</span></div>
     {#each g.assets as a (a.name)}
       {@const c = stateCounts(a.hosts)}
-      <button class="row" class:selected={isSel(a.kind, a.name)} onclick={() => onselect(a.kind, a.name)} data-testid={`asset-row-${a.kind}-${a.name}`}>
-        <span class="name">{a.name}</span>
+      {#snippet chips()}
         <span class="chips">
           {#if c.in_sync}<span class="chip ok">{c.in_sync} in sync</span>{/if}
           {#if c.drifted}<span class="chip warn">{c.drifted} drifted</span>{/if}
           {#if c.missing}<span class="chip muted">{c.missing} missing</span>{/if}
           {#if c.unsupported}<span class="chip muted">{c.unsupported} unsupported</span>{/if}
         </span>
-      </button>
+      {/snippet}
+      {#if readonly}
+        <div class="row static" title={hostsTitle(a.hosts)} data-testid={`asset-row-${a.kind}-${a.name}`}>
+          <span class="name">{a.name}</span>
+          {#if a.version}<span class="meta">{a.version}</span>{/if}
+          {@render chips()}
+        </div>
+      {:else}
+        <button class="row" class:selected={isSel(a.kind, a.name)} onclick={() => onselect(a.kind, a.name)} data-testid={`asset-row-${a.kind}-${a.name}`}>
+          <span class="name">{a.name}</span>
+          {@render chips()}
+        </button>
+      {/if}
     {/each}
   {/each}
   {#if unmanaged.length > 0}
@@ -51,7 +69,7 @@
           <!-- Fleet installed this and will remove it on the next sync — it
                is not "yours to import", so no Import button here. -->
           <span class="badge orphan" data-testid={`orphan-badge-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>orphan</span>
-        {:else}
+        {:else if !readonly}
           <button class="link" onclick={() => onimport(r)} title="Import from this host">Import</button>
         {/if}
       </div>
@@ -66,7 +84,8 @@
   .row { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 5px 10px; background: none; border: 0; color: var(--fg); cursor: pointer; }
   .row:hover { background: var(--bg-pane); }
   .row.selected { background: var(--bg-pane); box-shadow: inset 2px 0 0 var(--accent); }
-  .row.unmanaged { cursor: default; }
+  .row.unmanaged, .row.static { cursor: default; }
+  .row.static:hover { background: none; }
   .name { flex: 1; font-family: ui-monospace, monospace; }
   .meta { color: var(--fg-muted); font-size: 11px; }
   .chips { display: flex; gap: 4px; }

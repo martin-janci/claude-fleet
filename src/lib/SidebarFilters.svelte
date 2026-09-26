@@ -28,6 +28,8 @@
     HAS_SESSION_LABELS,
     STATUS_FILTERS,
     STATUS_FILTER_LABELS,
+    statusNameFilter,
+    statusNamesOf,
     type WorkFilters,
   } from './work_filters';
 
@@ -35,7 +37,11 @@
   // work mode, once there is work to filter (a tracker, a linked session),
   // or while a filter is on.
   const workMode = $derived($sidebarGroupBy === 'work');
-  const workView = $derived(effectiveWorkFilters($workFilters, $trackers, workMode));
+  // The tracker's own status names ("QA Review") next to the three
+  // categories: whatever columns the team's workflow has, read off the
+  // sessions' work, nothing to configure.
+  const statusNames = $derived(statusNamesOf($sessions));
+  const workView = $derived(effectiveWorkFilters($workFilters, $trackers, workMode, statusNames));
   const workActive = $derived(activeWorkFilterCount(workView));
   const workChromeShown = $derived(
     workMode || $trackers.length > 0 || workActive > 0 || $sessions.some((s) => s.work != null),
@@ -257,6 +263,22 @@
           >
         {/each}
       </nav>
+      {#if statusNames.length > 0}
+        <nav class="chips" aria-label="tracker status filter" data-testid="wf-status-names">
+          {#each statusNames as name (name)}
+            {@const f = statusNameFilter(name)}
+            <button
+              class="pill"
+              class:active={workView.status.toLowerCase() === f.toLowerCase()}
+              data-testid="wf-status-name"
+              aria-pressed={workView.status.toLowerCase() === f.toLowerCase()}
+              title="Only work whose tracker status is “{name}”"
+              onclick={() =>
+                setWork({ status: workView.status.toLowerCase() === f.toLowerCase() ? 'all' : f })}>{name}</button
+            >
+          {/each}
+        </nav>
+      {/if}
       <nav class="chips" aria-label="assignee and archived filters">
         <button
           class="pill"

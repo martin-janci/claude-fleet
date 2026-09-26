@@ -29,6 +29,9 @@ export interface FilterRow {
   trackerId?: number | null;
   /** todo | in_progress | done. */
   statusCategory?: string | null;
+  /** The tracker's own status name ("QA Review"), which a category lumps
+   *  together with its siblings. */
+  statusName?: string | null;
   assignees?: readonly string[];
   /** A live session works on it. */
   live: boolean;
@@ -45,7 +48,7 @@ export interface RowFilters {
   scope?: string; // 'all' | scope id
   showBgAgents?: boolean;
   tracker?: number | 'all';
-  status?: string; // 'all' | category
+  status?: string; // 'all' | category | `name:<tracker status name>`
   assignee?: string; // 'all' | name
   hasSession?: 'any' | 'yes' | 'no';
   /** Include archived (past) rows. Default true. */
@@ -63,7 +66,7 @@ export function rowMatches(r: FilterRow, f: RowFilters): boolean {
   if (f.scope && f.scope !== 'all' && r.scope !== '*' && r.scope !== f.scope) return false;
   if (f.showBgAgents === false && r.kind === 'bg') return false;
   if (f.tracker !== undefined && f.tracker !== 'all' && r.trackerId !== f.tracker) return false;
-  if (f.status && f.status !== 'all' && r.statusCategory !== f.status) return false;
+  if (f.status && f.status !== 'all' && !statusMatches(r, f.status)) return false;
   if (f.assignee && f.assignee !== 'all' && !(r.assignees ?? []).includes(f.assignee)) return false;
   if (f.hasSession === 'yes' && !r.live) return false;
   if (f.hasSession === 'no' && r.live) return false;
@@ -74,6 +77,19 @@ export function rowMatches(r: FilterRow, f: RowFilters): boolean {
   return true;
 }
 
+/** A status filter naming one tracker status rather than a category:
+ *  `name:QA Review`. Matched case-insensitively — trackers are not
+ *  consistent about "In review" vs "In Review". */
+export const STATUS_NAME_PREFIX = 'name:';
+
+function statusMatches(r: FilterRow, status: string): boolean {
+  if (status.startsWith(STATUS_NAME_PREFIX)) {
+    const want = status.slice(STATUS_NAME_PREFIX.length).trim().toLowerCase();
+    return (r.statusName ?? '').trim().toLowerCase() === want;
+  }
+  return r.statusCategory === status;
+}
+
 /** A live session as a [`FilterRow`]. */
 export function sessionFilterRow(s: SessionRow, scopeOf?: (s: SessionRow) => string): FilterRow {
   return {
@@ -81,6 +97,7 @@ export function sessionFilterRow(s: SessionRow, scopeOf?: (s: SessionRow) => str
     scope: scopeOf ? scopeOf(s) : 'all',
     kind: s.kind,
     statusCategory: s.work?.status_category ?? null,
+    statusName: s.work?.status_name ?? null,
     live: true,
     archived: false,
     session: s,
