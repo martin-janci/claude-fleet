@@ -23,7 +23,33 @@
 # `FLEET_HUB_TLS=auto` (ACME in the hub itself) is refused — see docs/hub.md.
 services:
   fleet-hub:
-    image: ghcr.io/martin-janci/fleet-hub:latest
+    # Pinned to one release on purpose. `docker compose pull` then fetches
+    # exactly this version and nothing else, so an upgrade is a line you edit
+    # and can revert — see "Upgrade and rollback" in docs/hub.md.
+    #
+    # The tag has NO `v` prefix: for the git tag `v1.2.3` the image tag the
+    # workflow publishes is `1.2.3` (docker/metadata-action's
+    # `{{version}}` strips the `v`). `fleet-hub:latest` exists too and is a
+    # convenience for "whatever the newest stable release is" — never a
+    # deployment you can roll back, since the tag moves under you on every
+    # release. A release candidate (`0.3.0-rc.1`) never moves `latest`, and
+    # this line is never bumped to one.
+    #
+    # scripts/release.sh rewrites this line on every stable release, and
+    # scripts/check-version-consistency.sh fails CI if it drifts from the rest
+    # of the tree — so the pin here is always a version that exists.
+    #
+    # To pin harder, replace the tag with the immutable digest that release
+    # recorded on its GitHub Release page (also printable with
+    # `docker buildx imagetools inspect <the image: line below> --format
+    # '{{.Manifest.Digest}}'`) — nothing rewrites the version in this comment,
+    # so it names no version:
+    #
+    #   image: ghcr.io/martin-janci/fleet-hub@sha256:<digest>
+    #
+    # A digest pins one exact multi-arch manifest; a version tag could in
+    # principle be re-pushed. Nothing here rewrites a digest for you.
+    image: ghcr.io/martin-janci/fleet-hub:0.2.41
     restart: unless-stopped
     # Worst case a SIGTERM shutdown drains for DRAIN_TIMEOUT (10s) then waits
     # out TICK_SHUTDOWN_TIMEOUT (10s) for an in-flight reconcile/usage pass —

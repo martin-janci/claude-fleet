@@ -14,6 +14,11 @@
 # other carrier, and every Cargo.lock entry for a crate this repo versions,
 # must hold the byte-identical string.
 #
+# One more file is checked by a different rule: the hub image pin in
+# `deploy/hub/docker-compose.yml` (path from `release.sh --list-image-pin`).
+# Its version lives in a Docker tag, which carries no `v` and must not follow a
+# pre-release — see section 5.
+#
 # Usage:
 #   scripts/check-version-consistency.sh                       # carriers only
 #   scripts/check-version-consistency.sh --expect-tag v1.2.3    # also assert the tag
@@ -204,7 +209,45 @@ for entry in "${EXEMPT[@]}"; do
   [[ "$got_lock" == "$pinned" ]] || problem "Cargo.lock entry for '$name' is '${got_lock:-<none>}', but the allowlist pins it at '$pinned'"
 done
 
-# --- 5. on a release tag: the tag name too -----------------------------------
+# --- 5. the shipped hub deployment pins a real, published image --------------
+# deploy/hub/docker-compose.yml is the file operators curl and run, and its
+# `image:` tag is a version carrier in everything but syntax (F-C9). Its rule
+# differs from the carriers above in two ways, both deliberate:
+#   * the image tag has no `v` prefix (`v1.2.3` -> `1.2.3`), and
+#   * on a PRE-RELEASE the pin must NOT follow. `main` is where docs/hub.md
+#     tells operators to fetch this file from, so a `0.3.0-rc.1` pin there
+#     would hand a release candidate to the next hub that is set up. The pin
+#     stays on the last stable release until the finalising tag moves it —
+#     the same rule hub-image.yml applies to `latest`.
+# The path comes from `scripts/release.sh --list-image-pin`, not a copy here.
+PIN_FILE="$(scripts/release.sh --list-image-pin)"
+if [[ ! -f "$PIN_FILE" ]]; then
+  echo "check-version-consistency: scripts/release.sh --list-image-pin names a missing file: $PIN_FILE" >&2
+  exit 1
+fi
+# The `image:` line for fleet-hub, in `name:tag` form, ignoring comments.
+PIN="$(sed -n 's|^[[:space:]]*image:[[:space:]]*ghcr\.io/[^:@[:space:]]*/fleet-hub:\([^[:space:]#]*\).*|\1|p' "$PIN_FILE" | head -n1)"
+if [[ -z "$PIN" ]]; then
+  echo "check-version-consistency: no 'image: ghcr.io/<owner>/fleet-hub:<tag>' line in $PIN_FILE" >&2
+  echo "  (a digest pin is not checkable here — if that is intended, teach this script about it)" >&2
+  exit 1
+fi
+if [[ "$VERSION" == *-* ]]; then
+  # Pre-release: the pin must be a plain X.Y.Z, i.e. still on a stable release.
+  if [[ "$PIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf '  ok    %-32s %s (pre-release %s does not move the pin)\n' "$PIN_FILE" "$PIN" "$VERSION"
+  else
+    printf '  WRONG %-32s %s\n' "$PIN_FILE" "$PIN"
+    problem "$PIN_FILE pins the hub image at '$PIN'; during the pre-release $VERSION it must stay on a stable X.Y.Z"
+  fi
+elif [[ "$PIN" == "$VERSION" ]]; then
+  printf '  ok    %-32s %s\n' "$PIN_FILE" "$PIN"
+else
+  printf '  WRONG %-32s %s\n' "$PIN_FILE" "$PIN"
+  problem "$PIN_FILE pins the hub image at '$PIN', expected '$VERSION' (no 'v' prefix) — scripts/release.sh rewrites this line"
+fi
+
+# --- 6. on a release tag: the tag name too -----------------------------------
 if [[ -n "$EXPECT_TAG" ]]; then
   if [[ "$EXPECT_TAG" == "v$VERSION" ]]; then
     printf '  ok    %-32s %s\n' "git tag" "$EXPECT_TAG"

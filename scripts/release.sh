@@ -4,6 +4,7 @@
 #        scripts/release.sh auto           (version derived from the commits)
 #        scripts/release.sh --next         (print that derived version; changes nothing)
 #        scripts/release.sh --list         (print the version carriers; changes nothing)
+#        scripts/release.sh --list-image-pin (print the hub compose path; changes nothing)
 # Env:   RELEASE_DRY_RUN=1        edit files only — no cargo/commit/tag (for testing)
 #        RELEASE_SKIP_CI_CHECK=1  tag without proving CI is green on HEAD
 # Needs: bash, git, cargo, node, awk, date, gh. See docs/RELEASING.md.
@@ -23,6 +24,13 @@ REPO_URL="https://github.com/martin-janci/claude-fleet"
 # it verifies.
 VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml crates/fleet-proto/Cargo.toml crates/fleet-agent/Cargo.toml)
 
+# The shipped hub deployment pins one image version, so an operator's
+# `docker compose pull` fetches a known release instead of a moving `latest`
+# (F-C9). It is deliberately NOT in VERSION_FILES: the other carriers must hold
+# the version byte-for-byte, and this one must not on a pre-release — see the
+# rewrite below.
+COMPOSE_FILE=deploy/hub/docker-compose.yml
+
 die() { echo "release.sh: $*" >&2; exit 1; }
 
 # `--list` prints exactly the paths this script rewrites, one per line, relative
@@ -36,7 +44,17 @@ if [[ ${1:-} == "--list" ]]; then
   exit 0
 fi
 
-[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z[-rc.N]> | auto | --next | --list"
+# Same idea for the one file whose version lives in a Docker tag rather than a
+# version field: print the path, touch nothing. check-version-consistency.sh
+# reads it from here so the two scripts cannot disagree about which file holds
+# the hub image pin.
+if [[ ${1:-} == "--list-image-pin" ]]; then
+  [[ $# -eq 1 ]] || die "usage: scripts/release.sh --list-image-pin"
+  echo "$COMPOSE_FILE"
+  exit 0
+fi
+
+[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z[-rc.N]> | auto | --next | --list | --list-image-pin"
 
 # X.Y.Z, or X.Y.Z-<pre> for a release candidate. The pre-release suffix is the
 # review channel that replaced the draft habit: `v0.3.0-rc.1` builds the same
@@ -166,6 +184,36 @@ for (const f of files) {
 }
 JS
 
+# --- 1b. The hub image pin in the shipped compose -----------------------------
+# deploy/hub/docker-compose.yml names the exact image an operator runs, and the
+# image tag for `vX.Y.Z` is `X.Y.Z` — no `v` (docker/metadata-action's
+# `{{version}}` strips it; see hub-image.yml's `type=semver` line).
+#
+# A PRE-RELEASE is deliberately skipped. The release commit lands on `main`, and
+# `main` is where docs/hub.md tells operators to curl this file from, so bumping
+# the pin to `0.3.0-rc.1` would hand a release candidate to the next person who
+# sets a hub up. That is the same reason hub-image.yml refuses to move `latest`
+# for an rc. The finalising `0.3.0` release moves the pin.
+if [[ "$NEW" == *-* ]]; then
+  echo "  $COMPOSE_FILE (unchanged: $NEW is a pre-release — the pin stays on the last stable)"
+else
+  node - "$NEW" "$COMPOSE_FILE" <<'JS'
+const fs = require("fs");
+const [next, f] = process.argv.slice(2);
+const src = fs.readFileSync(f, "utf8");
+// The `image:` line for fleet-hub specifically, in `name:tag` form. A digest
+// pin (`@sha256:…`) or a locally built image does not match, and this fails
+// loudly rather than quietly leaving a stale version behind.
+const re = /^(\s*image:\s*ghcr\.io\/[^:@\s]*\/fleet-hub):[^\s#]+/m;
+if (!re.test(src)) {
+  console.error(`release.sh: no 'image: ghcr.io/<owner>/fleet-hub:<tag>' line in ${f}`);
+  process.exit(1);
+}
+fs.writeFileSync(f, src.replace(re, `$1:${next}`));
+JS
+  echo "  $COMPOSE_FILE (image pin -> $NEW)"
+fi
+
 # --- 2. Cargo.lock follows Cargo.toml ----------------------------------------
 if [[ -z "${RELEASE_DRY_RUN:-}" ]]; then
   # Every crate this script just bumped needs Cargo.lock synced, or a
@@ -262,7 +310,7 @@ if [[ -t 0 ]]; then
   echo; echo "Edit CHANGELOG.md now if the generated section needs polishing, then press Enter."
   read -r _
 fi
-git add "${VERSION_FILES[@]}" Cargo.lock CHANGELOG.md
+git add "${VERSION_FILES[@]}" "$COMPOSE_FILE" Cargo.lock CHANGELOG.md
 git commit -q -m "chore(release): v$NEW"
 git tag -a "v$NEW" -m "claude-fleet v$NEW"
 echo
