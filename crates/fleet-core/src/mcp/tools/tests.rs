@@ -1834,7 +1834,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 88);
+    assert_eq!(served, 89);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3342,7 +3342,14 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
     // description; `set_setting`'s example key now `work.recent_days`),
     // merged over M11.3: measured at 55,635 on 2026-09-26 (+20); plus 100.
-    const BUDGET_BYTES: usize = 55_735;
+    // `quick_replies` (the composer's shared chip row): one tool that both
+    // reads and replaces the fleet's list, so the desktop and the phone stop
+    // keeping private copies of the same buttons. A second, read-only tool
+    // would have cost another definition for a list of at most 24 short
+    // strings, so the read is this tool with `set` omitted. Written in
+    // M11.5's terse style from the start: 825 B over that baseline, measured
+    // at 56,560 on 2026-09-26 (55,735 before, after M12.3); plus 100.
+    const BUDGET_BYTES: usize = 56_660;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

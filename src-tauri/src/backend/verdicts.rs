@@ -517,6 +517,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       connections and the hub exposes no tool for it; purge from the hub",
         },
     ),
+    // The chip row is fleet state (see `service::quick_replies`), so a
+    // paired desktop edits the hub's list — the same one the phone draws —
+    // rather than a private copy that would disagree with it.
+    (
+        "quick_replies",
+        Verdict::Routed {
+            tool: "quick_replies",
+        },
+    ),
+    (
+        "set_quick_replies",
+        Verdict::Routed {
+            tool: "quick_replies",
+        },
+    ),
     (
         "get_fleet_settings",
         Verdict::LocalOnly {

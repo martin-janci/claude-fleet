@@ -87,6 +87,30 @@ impl FleetTools {
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Read or replace the fleet's quick replies: the \
+        chip row the desktop and phone composers draw above the prompt box, \
+        as [{label, text}]. No arguments reads; `set` replaces the whole \
+        list (max 24, [] restores the defaults). Errors: E_INVALID.")]
+    pub(super) async fn quick_replies(
+        &self,
+        Parameters(p): Parameters<QuickRepliesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Chip TEXT is a prompt the operator wrote; the count is the whole
+        // audit line, same rule as set_clipboard's body.
+        audit(
+            "quick_replies",
+            &match &p.set {
+                Some(entries) => format!("set={}", entries.len()),
+                None => "read".to_string(),
+            },
+        );
+        let entries = match p.set {
+            Some(entries) => quick_replies::replace(&self.store, entries).map_err(to_mcp_err)?,
+            None => quick_replies::list(&self.store).map_err(to_mcp_err)?,
+        };
+        ok_json_compact(&entries)
+    }
+
     #[tool(description = "Register a host. transport \"ssh\" (default) is \
         probed first and persisted only if reachable; \"agent\" (a host the \
         hub cannot reach; it runs fleet-agent and dials in) is persisted \
