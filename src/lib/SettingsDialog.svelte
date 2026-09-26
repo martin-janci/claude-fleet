@@ -1143,6 +1143,22 @@
           onchange={() => toggleSetting(SETTING_KEYS.workClassifyNudge)} />
         After three prompts with no ticket, ask Claude once which of your few open tickets it is on (only ever a suggestion)
       </label>
+      <div class="mcp-field">
+        <label class="lbl" for="work-summary-model">summary model</label>
+        <select
+          class="layout-select"
+          id="work-summary-model"
+          value={$fleetSettings[SETTING_KEYS.workSummaryModel] ?? 'haiku'}
+          disabled={automationBusy}
+          aria-describedby="work-summary-model-desc"
+          data-testid="work-summary-model"
+          onchange={(e) => void applySetting(SETTING_KEYS.workSummaryModel, (e.currentTarget as HTMLSelectElement).value)}>
+          <option value="haiku">haiku</option>
+          <option value="sonnet">sonnet</option>
+          <option value="opus">opus</option>
+        </select>
+        <span class="hook-desc" id="work-summary-model-desc">the model <em>Summarise</em> runs on for a past session, on that session's own host and account</span>
+      </div>
       <h5 class="sub" data-testid="work-retention">Retention</h5>
       <div class="mcp-field">
         <label class="lbl" for="work-retention-journal-days">journal</label>

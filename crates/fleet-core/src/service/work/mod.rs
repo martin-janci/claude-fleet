@@ -16,6 +16,7 @@ pub mod resume;
 pub mod retention;
 #[cfg(test)]
 mod scale_tests;
+pub mod summary;
 pub mod tidy;
 pub mod today;
 
@@ -269,6 +270,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "dismiss",
     "tidy_apply",
     "name",
+    "summarize",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -306,6 +308,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("list_local_work_items", "work", "local_items"),
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
+    ("summarize_past_work", "work_link", "summarize"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph

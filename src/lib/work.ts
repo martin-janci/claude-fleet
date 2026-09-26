@@ -532,6 +532,30 @@ export async function requestWorkHandover(sessionId: number): Promise<Result<Ses
 }
 
 
+/** A past session's summary (work graph M13.1): `work_link { summarize }`. */
+export interface SummaryOutcome {
+  key: string;
+  link_id: number;
+  host_alias: string;
+  claude_session_id: string;
+  model: string;
+  journal_id: number;
+  at: number;
+  /** Fenced as untrusted: Claude's reading of a transcript. */
+  summary: string;
+  truncated?: boolean;
+}
+
+/**
+ * Ask for a Claude-written summary of past work `linkId` of `key` (work
+ * graph M13.1, on demand only). One print-mode fork runs on the session's own
+ * host, with no tools; the reply replaces that conversation's earlier
+ * summary, and the next resume brief shows it.
+ */
+export async function summarizePastWork(key: string, linkId: number): Promise<Result<SummaryOutcome>> {
+  return invokeCmd<SummaryOutcome>('summarize_past_work', { args: { key, link_id: linkId } });
+}
+
 /** Where the latest handover request stands (work graph M9.3). */
 export type HandoverState = 'pending' | 'written' | 'missing' | 'failed';
 

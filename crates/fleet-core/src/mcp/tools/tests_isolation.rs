@@ -1374,6 +1374,39 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Work graph M13.1: a summary of B's past work (s-b-old on h-b). Its
+    // conversation id here is not a UUID, so a caller that passes every
+    // fence stops at that check, before anything runs on a host.
+    let past_b: i64 = {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .query_row(
+                "SELECT id FROM work_links WHERE snap_tmux = 's-b-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    m.row(
+        "work_link",
+        "summarize",
+        move |_, _| json!({ "action": "summarize", "key": "BB-3", "link_id": past_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone => {
+                    is_code(who, a, "E_FORBIDDEN", "summarise B's past work")
+                }
+                _ => {
+                    is_code(who, a, "E_INVALID", "past every fence");
+                    assert!(text(a).contains("claude session id"), "{who:?}: {a:?}");
+                }
+            }
+        },
+    )
+    .await;
     for args in [
         json!({ "action": "start", "key": "BB-2", "project_id": 1, "host_alias": "h-a" }),
         json!({ "action": "start", "url": "https://bravo.atlassian.net/browse/BB-2",

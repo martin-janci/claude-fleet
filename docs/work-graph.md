@@ -320,6 +320,20 @@ There are two kinds:
   `handover_requested`, then `handover_written`, `handover_missing` or
   `handover_send_failed`. Fleet never spends a turn on this by itself, not
   even at safe kill (decision D9).
+- **A summary of a past session, on demand.** A session that has ended
+  cannot write its own hand-off, so each past-work row in the sidebar has
+  **Summarise**. It runs one print-mode fork of that session's last
+  conversation on the session's own host, under its own Claude account,
+  with the model `work.summary_model` names (`haiku` by default). The fork
+  has no tools and no MCP servers, fleet's hooks are off for it, and it
+  leaves no transcript behind; the original conversation is not touched.
+  Claude's answer is shown below the row and kept in the journal (redacted,
+  at most 4,000 characters, one per conversation: asking again replaces
+  it), and the next resume brief shows it inside the untrusted fence, after
+  a live session's own hand-off. It needs the transcript and the directory
+  the conversation ran in to still be on the host; otherwise it says so and
+  runs nothing. Only one summary runs per host at a time. It is never
+  automatic (decisions D10, D27).
 
 ## Today and standup
 
@@ -542,6 +556,7 @@ table.
 | `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
 | `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |
 | `work.classify_nudge` | `false` | on / off | one note per conversation asking Claude to name its work after three unlinked turns |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | the model a dead session's on-demand *Summarise* runs on, on the session's own host and account |
 | `work.tidy_done_days` | `2` | 1–365 days | how long a linked ticket must be done before tidy-up suggests its session |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | how long a session must be idle before any tidy reason suggests it |
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | idle and unprompted days before a session with no work is suggested (`idle_unlinked`) |

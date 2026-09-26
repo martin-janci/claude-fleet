@@ -84,6 +84,13 @@ const FENCE_END = '[claude-fleet: end of untrusted input]';
  *  agent, not for a person, so the two marker lines are dropped here. Svelte
  *  renders it as text either way. */
 export function plainTrackerError(e: string | null | undefined): string {
+  return plainUntrusted(e);
+}
+
+/** Text fenced as untrusted (`mcp::guard::fence_untrusted`), for a person:
+ *  the two marker lines dropped, anything else unchanged. Svelte renders the
+ *  rest as text. Shared by tracker errors and past-work summaries. */
+export function plainUntrusted(e: string | null | undefined): string {
   if (!e) return '';
   const lines = e.split('\n');
   if (lines.length >= 2 && FENCE_OPEN.test(lines[0]) && lines[lines.length - 1] === FENCE_END) {

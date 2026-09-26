@@ -674,7 +674,7 @@ the M12.6 review describes.
   trusted, polling unchanged (D13).
 - **M13.4** naming work on the phone, in fleet-mobile (D20).
 
-Status: planned.
+Status: M13.1 built on `claude/cloud-fleet-work-graph-m13`; M13.2–M13.4 planned.
 
 ## Critical path and parallelism
 

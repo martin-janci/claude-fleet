@@ -530,6 +530,23 @@ Index by area (names only; see the reference for details):
   stuck, without work, when a request is already pending (30 min), and for
   the operator's own session. Timeline: `handover_requested`,
   `handover_written`, `handover_missing`, `handover_send_failed`.
+  `work_link { action: "summarize", key, link_id }` (M13.1, on demand only)
+  is the dead-session counterpart: a Claude-written summary of past work
+  `link_id` (an ended link of `key`, from `work { links }` or the resume
+  plan). One `claude -p --resume <id> --fork-session
+  --no-session-persistence --tools '' --strict-mcp-config` run on the
+  session's own host, in the directory its transcript recorded, with the
+  model `work.summary_model` names and fleet's hooks off. The answer is
+  redacted, capped at 4,000 characters, stored as that conversation's one
+  journal `summary` (asking again replaces it) and returned fenced as
+  untrusted in `summary`; the resume brief shows it after the agent
+  handover. `E_NO_TRANSCRIPT` when the transcript is gone or was purged,
+  `E_NOTFOUND` when its directory is gone, `E_CLAUDE_CLI` when `claude` is
+  missing or fails, `E_TIMEOUT` past 170 s, `E_EXISTS` while another
+  summary runs on that host, and `E_INVALID` when a live session still
+  holds the conversation (ask it for a `handover`). A per-host token may
+  summarise only its own host's past work in its org; the operator's
+  request waits for confirmation, and is refused on a hub.
   `work_link { action: "start", …, project_ids: [..] }` (M9.6) starts one
   ticket in several repositories at once — up to 8 — one sibling session
   per project, all on the same branch name (`slug(key + title)`, or the

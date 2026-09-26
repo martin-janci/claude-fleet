@@ -318,6 +318,7 @@ export const ROUTED_ACTIONS = [
   'start_work',
   'start_work_multi',
   'request_work_handover',
+  'summarize_past_work',
   'tidy_apply',
   'archive_session_work',
   'unarchive_session_work',

@@ -237,9 +237,13 @@ Insert into composer with the hub-fenced `composer_text` — never sent).
 M9.7 (the operator's starts and kills always confirmed; refused on a hub),
 M9.3 (agent-written handover on demand, `work_link { action: handover }`)
 and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
-too. Write-back (D3 none), dead-session summaries (D10 off) and webhooks
-(D13 no) are decided against and not built; see
-`docs/superpowers/plans/2026-09-24-work-graph-m9-beyond.md`.
+too. Write-back (D3), dead-session summaries (D10) and webhooks (D13) were
+decided against, then said yes to on 2026-09-26 as M13
+(`docs/superpowers/plans/2026-09-26-work-graph-m13-decided-yes.md`).
+M13.1 is landed: `work_link { action: summarize }`, on demand only, one
+tool-less print-mode fork on the session's own host
+(`service/work/summary.rs`, `work.summary_model`), stored as a journal
+`summary` and fenced in the brief.
 Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
 M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
 and the M5.5 filters (tracker / status / mine / has-session / archived)

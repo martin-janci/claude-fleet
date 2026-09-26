@@ -648,7 +648,8 @@ impl FleetTools {
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
         ticket (project_ids: one per repo). handover {session_id}: ask it to \
-        write its hand-off. archive|unarchive (UI only), snooze {days}|never \
+        write its hand-off. summarize {key, link_id}: \
+        a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty).")]
     pub(super) async fn work_link(
@@ -703,6 +704,41 @@ impl FleetTools {
                 &work_link_start_summary(&args, &repos),
                 &caller,
             )?;
+        }
+        if args.action == "summarize" {
+            // Work graph M13.1: a Claude-written summary of a dead session
+            // (on demand only, D10 / D27). It spends a model call, so the
+            // operator's request is confirmed like a start, and refused on a
+            // hub, where no one can approve it. The host and org fences are
+            // inside.
+            let key = args
+                .key
+                .as_deref()
+                .ok_or_else(|| mcp_err("E_INVALID", "summarize needs key", None))?;
+            let link_id = args
+                .link_id
+                .ok_or_else(|| mcp_err("E_INVALID", "summarize needs link_id", None))?;
+            if caller.is_operator() {
+                self.confirm_gate(
+                    "work_link",
+                    args.confirm_nonce.as_deref(),
+                    &format!(
+                        "Summarise past work {} (link {link_id}) with a model call on its host",
+                        bound_text(Some(key))
+                    ),
+                    &caller,
+                )?;
+            }
+            let out = crate::service::work::summary::summarize(
+                &self.store,
+                self.ssh.as_ref(),
+                key,
+                link_id,
+                &scope,
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&out);
         }
         if args.action == "handover" {
             // Work graph M9.3: ask a live session to write its hand-off (on

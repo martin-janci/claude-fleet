@@ -306,6 +306,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "request_work_handover",
         Verdict::Routed { tool: "work_link" },
     ),
+    // Work graph M13.1: a Claude-written summary of past work (on demand,
+    // D10). Routed: the run happens on the session's own host, which the
+    // hub reaches.
+    ("summarize_past_work", Verdict::Routed { tool: "work_link" }),
     // Work graph M9.6: one ticket, one sibling session per repository.
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
     // Work graph M11.1: "Name this work…" — local work items, listed from

@@ -310,6 +310,7 @@ pub fn run() {
             commands::work::work_today,
             commands::work::work_ticket_card,
             commands::work::request_work_handover,
+            commands::work::summarize_past_work,
             commands::work::list_local_work_items,
             commands::work::name_session_work,
             commands::work::rename_work_item,

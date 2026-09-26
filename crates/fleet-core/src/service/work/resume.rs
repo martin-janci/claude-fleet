@@ -431,6 +431,22 @@ pub fn transcript_probe_script(
     stored_path: Option<&str>,
     claude_session_id: &str,
 ) -> Result<String, String> {
+    let paths = transcript_candidates(stored_path, claude_session_id)?;
+    Ok(format!(
+        "for f in {}; do if [ -f \"$f\" ]; then echo {TRANSCRIPT_PROBE_TAG}present; exit 0; fi; done; echo {TRANSCRIPT_PROBE_TAG}absent",
+        paths.join(" ")
+    ))
+}
+
+/// PURE: the shell words, quoted and validated, where `claude_session_id`'s
+/// transcript may be: the path a conversation row recorded (when it still
+/// validates), then the glob under every project of the host's
+/// `$HOME/.claude/projects`. Shared by the transcript probe and the
+/// summary run (work graph M13.1).
+pub fn transcript_candidates(
+    stored_path: Option<&str>,
+    claude_session_id: &str,
+) -> Result<Vec<String>, String> {
     let mut paths = Vec::new();
     if let Some(p) =
         stored_path.filter(|p| crate::service::hooks::valid_transcript_path(p, claude_session_id))
@@ -448,10 +464,7 @@ pub fn transcript_probe_script(
         None,
         claude_session_id,
     )?);
-    Ok(format!(
-        "for f in {}; do if [ -f \"$f\" ]; then echo {TRANSCRIPT_PROBE_TAG}present; exit 0; fi; done; echo {TRANSCRIPT_PROBE_TAG}absent",
-        paths.join(" ")
-    ))
+    Ok(paths)
 }
 
 /// What the transcript probe found.

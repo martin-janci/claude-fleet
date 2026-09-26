@@ -248,3 +248,20 @@ M13.4 ── independent (fleet-mobile repository)
 
 ## Revisions
 - 2026-09-26: first version, after the user said yes to D3, D10, D13 and D20.
+- 2026-09-26: **M13.1 built** on `claude/cloud-fleet-work-graph-m13`.
+  - `work_link { action: summarize, key, link_id }` addresses the ended link,
+    like `resume`: a dead session has no row left.
+  - `--resume` finds a transcript by the directory it ran in, so the host
+    script finds the transcript (M11.2's `transcript_candidates`), reads its
+    recorded `cwd`, and runs there. The M11.2 probe is folded into that one
+    command: an absent transcript is `E_NO_TRANSCRIPT`, a missing directory
+    `E_NOTFOUND`, and nothing is recreated.
+  - One per host at a time is an in-process slot (`E_EXISTS`), not a
+    `FleetTasks` queue: there is no such per-host queue in the tree, and a
+    click that waits minutes behind another is worse than a clear refusal.
+  - `work.summary_model` is a `Choice` of `haiku` / `sonnet` / `opus`, never
+    free text: it ends up in a command.
+  - The desktop's *Summarise* sits beside *Resume* on every past-work row
+    (`SummarizeButton.svelte`), shows the answer as text below the row, and is
+    Routed (`summarize_past_work`).
+  - The tool surface is +125 B (56,854); `BUDGET_BYTES` is 56,954.
