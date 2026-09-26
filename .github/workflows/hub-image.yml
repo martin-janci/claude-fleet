@@ -6,8 +6,57 @@ on:
 permissions:
   contents: read
   packages: write
+
+# EVERY job here is gated on `github.ref_type == 'tag'`, the same gate
+# release.yml carries. `workflow_dispatch` stays in the trigger list as the
+# re-run path for a tag whose image build failed — but it must be dispatched
+# AT a tag (`gh workflow run hub-image.yml --ref v1.2.3`), not at a branch.
+# Dispatched from a branch, every job below skips and the run publishes
+# nothing.
+#
+# Without the gate, a branch dispatch pushed a real image built from
+# unreleased code into the namespace operators pull from: the `build` legs
+# push BY DIGEST unconditionally, before any tag logic runs, so blobs landed
+# in ghcr regardless of ref and `merge` then hung a `sha-<commit>` tag on
+# them. `latest` and the semver tag were already safe (both are disabled off
+# a tag ref by `docker/metadata-action`), but a `sha-` tag in the registry is
+# still an image someone can pull and run, with no release, no CHANGELOG
+# entry and no version anyone can name (F-C9). Gating only `merge` would not
+# have been enough — it has to gate `build`, where the push happens.
+#
+# docs/hub.md used to offer that branch dispatch to operators as a reassurance
+# ("only ever publishes a sha-<commit> tag, never latest"); it now describes
+# this gate instead.
 jobs:
+  # Gate. The image reports `crates/fleet-hub/Cargo.toml`'s version at runtime
+  # (`main.rs`'s `app_version::set(env!("CARGO_PKG_VERSION"))`), while the
+  # image's own semver TAG comes from the git ref — and nothing compared the
+  # two (F-C10). On a plain tag push they agree by construction, because the
+  # Dockerfile builds `--locked` from the checked-out tree; the reachable drift
+  # is a re-tag, a dispatch at a tag that does not match the tree, or a
+  # hand-bumped carrier (F-C5, as happened for 0.2.27).
+  #
+  # This is the same script and the same invocation ci.yml and release.yml use
+  # — called, not reimplemented: `--expect-tag` asserts the tag equals
+  # `v<package.json version>`, and every carrier (including
+  # `crates/fleet-hub/Cargo.toml` and the `fleet-hub` Cargo.lock entry, and
+  # now the hub image pin in deploy/hub/docker-compose.yml) agrees with it.
+  # It needs nothing but a checkout and `node`.
+  #
+  # The tag name arrives through `env:`, never interpolated into a `run:` body.
+  version-consistency:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert the carriers and the tag agree
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: scripts/check-version-consistency.sh --expect-tag "$REF_NAME"
+
   meta:
+    if: github.ref_type == 'tag'
+    needs: version-consistency
     runs-on: ubuntu-24.04
     # This job only renders tag/label strings — it does not check out the
     # repository and it does not touch the registry, so it needs none of the
@@ -63,7 +112,8 @@ jobs:
   # `merge` publishes nothing at all and fails visibly rather than leaving
   # a stale `latest`.
   build:
-    needs: meta
+    if: github.ref_type == 'tag'
+    needs: [version-consistency, meta]
     strategy:
       fail-fast: false
       matrix:
@@ -137,9 +187,16 @@ jobs:
   # annotation on the run, and a line in the job summary, both emitted only
   # on the amd64-only path (`steps.digests.outputs.status`, set from
   # merge-hub-digests.sh's own `STATUS=` line).
+  # `!cancelled()` deliberately lets this job run past a FAILED build leg (see
+  # above) — but not past a failed gate. `version-consistency` is therefore
+  # spelled out here rather than left to `needs:`: an unchecked version or a
+  # branch ref must publish nothing, and `!cancelled()` on its own would
+  # happily run this job after either. (`needs['version-consistency']` and not
+  # `needs.version-consistency`: a hyphen cannot appear in dotted property
+  # access — the same form release.yml uses.)
   merge:
-    if: ${{ !cancelled() }} # bare `!cancelled()` is invalid YAML here (leading `!`), so this one keeps the wrapper
-    needs: [meta, build]
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success' }}
+    needs: [version-consistency, meta, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
