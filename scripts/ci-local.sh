@@ -28,9 +28,9 @@
 #                  pnpm audit --audit-level=high
 #   hub-e2e:       scripts/hub-e2e.sh, opt-in via --hub-e2e (mirrors the
 #                  hub-headless CI job's e2e step; see that script's own
-#                  header), plus its work-graph leg, which CI skips: that
-#                  needs a hub built with the test-only `e2e` feature, built
-#                  here into $CARGO_TARGET_DIR/e2e. Skipped with a message if
+#                  header), work-graph leg included: like CI, it builds a
+#                  hub with the test-only `e2e` feature into
+#                  $CARGO_TARGET_DIR/e2e and passes it as WBIN. Skipped with a message if
 #                  tmux is missing.
 #                  NOT part of the default run: it drives real fleet-hub /
 #                  fleet-agent processes and, for one of its three hubs,
