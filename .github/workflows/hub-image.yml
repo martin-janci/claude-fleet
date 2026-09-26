@@ -22,14 +22,19 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/fleet-hub
+          # `latest` is gated on the tag having NO pre-release suffix.
+          # deploy/hub/docker-compose.yml pins `fleet-hub:latest`, so a
+          # `v0.3.0-rc.1` tag moving it would push a release candidate onto
+          # every hub operator's next `docker compose pull` — silently, since
+          # nothing about the tag they pinned changed. The rc still gets its
+          # own `…:0.3.0-rc.1` tag from the semver line above. A pre-release
+          # is a tag with a `-` in its version, the same test release.yml
+          # uses to set `prerelease:`.
+          #
+          # (The comment lives out here rather than inside the block scalar
+          # below: every line in there is an input value to the action.)
           tags: |
             type=semver,pattern={{version}}
-            # `latest` only for a real release. deploy/hub/docker-compose.yml
-            # pins `fleet-hub:latest`, so an `v0.3.0-rc.1` tag moving it would
-            # push a release candidate onto every hub operator who runs
-            # `docker compose pull` — silently, since nothing about the tag
-            # they pinned changed. A pre-release is a tag with a `-` in its
-            # version, the same rule release.yml and scripts/release.sh use.
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=sha
 
