@@ -17,17 +17,22 @@ use std::time::Duration;
 /// How long any one upload step may take.
 pub const UPLOAD_TIMEOUT_SECS: u64 = 60;
 
-/// Basenames of `paths`, in order — not yet collision-free (see
-/// `dedupe_names`). Shared by `upload_to_session` and `upload_attachments`.
+/// The last path component of each input, as a name that cannot escape a
+/// directory. `Path::file_name` alone is not enough: it answers `None` for
+/// `..`, and on Unix a `\` is an ordinary character, so a Windows-style path
+/// arrives as one long "name". Anything with no usable component left
+/// becomes an empty string, which every caller must treat as a refusal.
 pub fn basenames_of(paths: &[String]) -> Vec<String> {
     paths
         .iter()
         .map(|p| {
-            Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-                .to_string()
+            let last = p.rsplit(['/', '\\']).next().unwrap_or("");
+            if last == "." || last == ".." {
+                ""
+            } else {
+                last
+            }
+            .to_string()
         })
         .collect()
 }
@@ -92,7 +97,9 @@ pub fn last_nonempty_line(stdout: &str, host: &str) -> Result<String, IpcError> 
 /// return their absolute destination paths, in order. The one local-vs-remote
 /// branch `upload_to_session` and `upload_attachments` share: a local session
 /// copies with `std::fs`, a remote one streams over the ControlMaster
-/// (`SshClient::upload_file`).
+/// (`SshClient::upload_file`). Every name must be non-empty: names from
+/// `basenames_of` are empty when the input has no usable path component, and
+/// those are refused with an error rather than silently creating a directory path.
 pub async fn transfer_all(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -101,6 +108,17 @@ pub async fn transfer_all(
     dir: &str,
     timeout: Duration,
 ) -> Result<Vec<String>, IpcError> {
+    // Enforce the invariant: every name must be non-empty. An empty name from
+    // `basenames_of` indicates the input had no usable path component (e.g. "." or "..").
+    if let Some(empty_idx) = names.iter().position(|n| n.is_empty()) {
+        return Err(IpcError::new(
+            codes::E_UPLOAD,
+            format!(
+                "file {} has no usable name (possibly a path component like . or ..)",
+                empty_idx
+            ),
+        ));
+    }
     let mut remote_paths = Vec::with_capacity(names.len());
 
     if host == "local" {
@@ -212,5 +230,44 @@ mod tests {
     fn leading_dot_name_has_no_extension() {
         let got = dedupe_names(&[".env".into(), ".env".into()]);
         assert_eq!(got, vec![".env", ".env-1"]);
+    }
+
+    #[test]
+    fn a_filename_can_never_be_a_path() {
+        // Every hostile input must reduce to the exact right basename, or empty.
+        // Weaker assertions (not-slash, not-.., not-.) would pass even if the
+        // hardening were reverted, so the test would fail to catch regressions.
+        let cases = vec![
+            ("../../.ssh/authorized_keys", "authorized_keys"),
+            ("/etc/passwd", "passwd"),
+            ("a/b/c.txt", "c.txt"),
+            (r"..\..\windows\system32", "system32"),
+        ];
+        for (hostile, expected) in cases {
+            let got = basenames_of(&[hostile.to_string()])[0].clone();
+            assert_eq!(
+                got, expected,
+                "{hostile} should reduce to {expected}, got {got}"
+            );
+        }
+        // . and .. must become empty, not a default like "file"
+        assert!(
+            basenames_of(&["..".to_string()])[0].is_empty(),
+            ".. should reduce to empty"
+        );
+        assert!(
+            basenames_of(&[".".to_string()])[0].is_empty(),
+            ". should reduce to empty"
+        );
+        assert!(
+            basenames_of(&["///".to_string()])[0].is_empty(),
+            "/// should reduce to empty"
+        );
+    }
+
+    #[test]
+    fn a_name_with_nothing_usable_in_it_reduces_to_empty() {
+        // The route turns this into 400 rather than inventing a name.
+        assert!(basenames_of(&["".to_string()]).pop().unwrap().is_empty());
     }
 }

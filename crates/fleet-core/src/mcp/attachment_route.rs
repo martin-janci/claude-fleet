@@ -60,11 +60,15 @@ pub async fn handle_attachment(
 
     // The name is reduced to a basename BEFORE anything else looks at it: a
     // `name` of `../../.ssh/authorized_keys` must land as
-    // `authorized_keys` inside ATTACH_DIR, never outside it.
+    // `authorized_keys` inside ATTACH_DIR, never outside it. Refuse empty,
+    // control-character, or whitespace-only names (e.g. from "." or "..").
     let name = match basenames_of(std::slice::from_ref(&q.name))
         .pop()
-        .filter(|n| !n.is_empty())
-    {
+        .filter(|n| {
+            !n.is_empty()
+                && !n.chars().any(|c| c.is_control())
+                && !n.chars().all(|c| c.is_whitespace())
+        }) {
         Some(n) => n,
         None => return (StatusCode::BAD_REQUEST, "no usable filename").into_response(),
     };
@@ -287,5 +291,51 @@ mod tests {
             "full token should pass the mode gate and reach the store lookup; \
              404 means no such session row (as expected)"
         );
+    }
+
+    #[tokio::test]
+    async fn a_filename_with_no_usable_component_is_refused_with_400() {
+        let (addr, _store) = app().await;
+        // `name=..` (URL-encoded as %2E%2E) reduces to empty. This test pins the
+        // hardening: without it, basenames_of would return "file", reaching the
+        // session lookup and failing with 404. With hardening, it returns empty,
+        // the filter rejects it with 400 "no usable filename" — the only
+        // route-level assertion that discriminates the weak from hardened
+        // basenames_of.
+        let (st, body) = http(
+            addr,
+            "POST",
+            "/attachment?session_id=1&name=%2E%2E",
+            "full-tok",
+            "content",
+        )
+        .await;
+        assert_eq!(st, 400, ".. should be refused with 400, got {st}: {body}");
+        assert!(
+            body.contains("no usable filename"),
+            "error should explain the problem: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_per_file_ceiling_is_refused() {
+        let (addr, _store) = app().await;
+        let big = "x".repeat(fleet_core_max_bytes() + 1);
+        let (st, _) = http(
+            addr,
+            "POST",
+            "/attachment?session_id=1&name=big.bin",
+            "full-tok",
+            &big,
+        )
+        .await;
+        assert_eq!(
+            st, 413,
+            "the body limit layer should refuse before the handler runs"
+        );
+    }
+
+    fn fleet_core_max_bytes() -> usize {
+        crate::service::attachments::MAX_BYTES as usize
     }
 }
