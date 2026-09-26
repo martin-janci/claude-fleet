@@ -115,12 +115,12 @@ last told about), and on its first call after a fleet restart if it has not
 listed since, because the new process cannot know what the client cached.
 In practice that is a client left connected across a fleet upgrade: it
 re-lists and sees the new tools without a manual reconnect. Each change is sent once per token, so two clients sharing
-one token share one notice. Only the master token and per-host tokens are
-told: a paired client (a phone, or a paired desktop) calls a fixed set of
-tools, and a peer hub calls one. `/mcp/json` neither advertises nor sends it,
-because its answer is the handler's first message. A reader that takes the
-last `data:` frame of an SSE body (as `wire::last_event_payload` does) is
-unaffected.
+one token share one notice. Every token is told except a peer hub's, which
+calls one tool; that includes a paired client whose mode flips between `full`
+and `readonly`. `/mcp/json` neither advertises nor sends it, because its
+answer is the handler's first message. A reader that takes the last `data:`
+frame of an SSE body (as `wire::last_event_payload` does), or the first frame
+carrying `result` or `error` (as fleet-mobile does), is unaffected.
 
 ### Endpoints
 

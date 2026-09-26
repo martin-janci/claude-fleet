@@ -40,15 +40,16 @@ const MAX_CALLERS: usize = 4096;
 
 /// Who may be sent the notification.
 ///
-/// A peer hub sees one fixed tool and never lists. A paired client is a phone
-/// or a desktop in hub-client mode: both call a compiled-in set of tools, so
-/// a list change means nothing to either, and the phone's SSE reader lives in
-/// another repository — a frame ahead of the answer is not a risk worth
-/// taking for a message it has no use for. The master token and per-host
-/// tokens are how AI assistants (the operator's, and each host's sessions)
-/// reach the fleet: those are the clients that cache `tools/list`.
+/// Every caller but a peer hub, which sees one fixed tool and never lists.
+///
+/// A paired client is told too. An AI assistant may hold one, and its
+/// visible set is the one that moves at runtime (`full` ↔ `readonly`). The
+/// readers that do not care skip the frame: the desktop's hub client takes
+/// the last one (`wire::last_event_payload`), and fleet-mobile's
+/// `HubClient.jsonRpcReply` takes the first frame carrying `result` or
+/// `error`, pinned by its `JsonRpcFramingTest`.
 pub(super) fn wants_notification(caller: &Caller) -> bool {
-    caller.mode != TokenMode::Peer && caller.client.is_none()
+    caller.mode != TokenMode::Peer
 }
 
 /// A fingerprint of a visible tool list: order-independent over the names.
@@ -141,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn peers_and_paired_clients_are_not_notified() {
+    fn every_caller_but_a_peer_is_notified() {
         assert!(wants_notification(&Caller::master()));
         let host = Caller {
             host_alias: Some("a".into()),
@@ -158,7 +159,8 @@ mod tests {
             }),
             mode,
         };
-        assert!(!wants_notification(&client(TokenMode::Full)));
+        assert!(wants_notification(&client(TokenMode::Full)));
+        assert!(wants_notification(&client(TokenMode::Readonly)));
         assert!(!wants_notification(&client(TokenMode::Peer)));
     }
 }

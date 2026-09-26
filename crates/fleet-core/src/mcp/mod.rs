@@ -1328,8 +1328,17 @@ mod tests {
 
     /// [`serve_real_tools`] with a fleet Host/Origin allowlist.
     async fn serve_real_tools_with(allowed_hosts: Vec<String>) -> std::net::SocketAddr {
+        serve_real_tools_on(allowed_hosts).await.0
+    }
+
+    /// [`serve_real_tools_with`], handing back the store so a test can mint
+    /// client tokens into it.
+    async fn serve_real_tools_on(
+        allowed_hosts: Vec<String>,
+    ) -> (std::net::SocketAddr, Arc<Mutex<Store>>) {
         use std::net::Ipv4Addr;
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let served = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::new(SshClient::new()),
@@ -1396,7 +1405,7 @@ mod tests {
             .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        addr
+        (addr, served)
     }
 
     /// One raw HTTP/1.1 exchange; reads until the server closes or 800 ms.
@@ -1576,6 +1585,35 @@ mod tests {
         let second = raw_round_trip(addr, &post_mcp(A_CALL)).await;
         assert!(second.contains(r#""id":3"#), "answered:\n{second}");
         assert!(!second.contains(LIST_CHANGED), "told once:\n{second}");
+    }
+
+    /// A paired client is told like any other caller: an assistant may hold
+    /// one, and every reader that does not care skips the frame (fleet-mobile
+    /// takes the first frame with a `result` or `error`). A peer hub, which
+    /// may call one tool, is not.
+    #[tokio::test]
+    async fn a_paired_client_is_told_and_a_peer_is_not() {
+        let (addr, store) = serve_real_tools_on(vec![]).await;
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("phone", &auth::sha256_hex("client-tok"), "full")
+                .unwrap();
+            s.insert_client_token("hub-b", &auth::sha256_hex("peer-tok"), "peer")
+                .unwrap();
+        }
+        let as_token =
+            |tok: &str| post_mcp(A_CALL).replace("Bearer s3cret", &format!("Bearer {tok}"));
+
+        let client = raw_round_trip(addr, &as_token("client-tok")).await;
+        assert!(client.contains(r#""id":3"#), "answered:\n{client}");
+        assert!(
+            client.contains(LIST_CHANGED),
+            "a paired client is told:\n{client}"
+        );
+
+        let peer = raw_round_trip(addr, &as_token("peer-tok")).await;
+        assert!(peer.contains(r#""id":3"#), "answered:\n{peer}");
+        assert!(!peer.contains(LIST_CHANGED), "a peer is not:\n{peer}");
     }
 
     /// A client that listed on this process holds the current list: nothing
