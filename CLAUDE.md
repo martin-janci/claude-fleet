@@ -244,7 +244,25 @@ Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
 M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
 and the M5.5 filters (tracker / status / mine / has-session / archived)
 have chips under the sidebar's "⚑ work" pill (`work_filters.ts`, through
-`rowMatches`).
+`rowMatches`). The rest of M10 is landed too: the M9 review leftovers, the
+work graph end to end in `scripts/hub-e2e.sh` against a loopback fake
+tracker (the `e2e` feature; CI builds it as `WBIN` and fails without it),
+the replay-ring numbers, and the phone's Today / ticket card; the written
+acceptance run, `docs/work-graph-acceptance.md`, waits on the owner.
+Work graph M11 (the long tail) is landed: "Name this work…" (`work_link
+{ action: name }`, `work { local_items }`), resume probes the transcript,
+tidy reason `idle_unlinked` (`work.tidy_idle_unlinked_days`, never
+auto-tidied), GitHub Enterprise and per-tracker `SyncMetrics`
+(`work_admin { status }`), and the tool budget paid back.
+Work graph M12 (ship and operate) is landed: the upgrade test and
+downgrade guard (`store::testgen`), the scale fixture and budget tests
+(`service/work/scale_tests.rs`, migration 058), the `work.retention.*`
+windows (`store/work_retention.rs`), trackers in `fleet_health` with a
+Reconnect Attention item, and the review of the decided-against list
+(`reviews/2026-09-26-work-graph-decisions-revisited.md`).
+M13 (live use) is next: `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`;
+open decisions are the roadmap's table, and a decision-gated feature starts
+only on the user's "yes".
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

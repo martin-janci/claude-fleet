@@ -541,3 +541,9 @@ record, besides pass / fail:
   phone?" (handover recorded as built), as recommended above.
 - 2026-09-26: `net/https.rs`'s module comment no longer promises `acli`.
   It now points to `net/via_host.rs` (`gh`, `curl`) and D17.
+- 2026-09-26 (M13.0): the D15 question above is answered. M8.6.3 *Ask for a
+  handover* is on fleet-mobile `main`: martin-janci/fleet-mobile#35 (merge
+  `6ed86ed`), first released in fleet-mobile v0.2.41 (`WorkSheet.kt`,
+  `SessionWorkViewModel.kt`'s `canHandover`, `WorkActions.handover`). The
+  roadmap's D15 row records it; D15 itself (multi-start) still waits on
+  M10.3.
