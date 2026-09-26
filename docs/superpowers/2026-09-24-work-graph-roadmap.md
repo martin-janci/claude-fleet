@@ -627,6 +627,40 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - M10.0 (the plan) is committed; M10.1–M10.3, M10.5 and M10.6 are not
   started.
 
+### M12: ship and operate
+
+Plan: `plans/2026-09-25-work-graph-m12-ship-and-operate.md`. (M11, the long
+tail, has its own plan: `plans/2026-09-25-work-graph-m11-long-tail.md`.)
+
+- **M12.1** upgrade path proven on a generated pre-work-graph database.
+- **M12.2** scale budgets and the indexes they needed (migration 058).
+- **M12.3** retention: the `work.retention.*` windows and `work_admin
+  { status | sweep_now }`.
+- **M12.4** trackers in `fleet_health` and the "Reconnect …" Attention item.
+- **M12.5** the user guide, `docs/work-graph.md`.
+- **M12.6** the decided-against list revisited (docs only).
+
+**Value:** the work graph can be shipped, upgraded into, run for months and
+explained.
+
+**Status (2026-09-26):**
+- M12.1, M12.2 and M12.3 are landed (see the plan's *Revisions*).
+- M12.4 is landed (#303).
+- **M12.5 done** on `claude/cloud-fleet-work-graph-m12-guide`:
+  `docs/work-graph.md` covers the whole feature and lists every `work.*`
+  setting with its default. `service::settings`'s
+  `work_settings_are_in_the_user_guide` fails when a registered `work.*`
+  setting is missing from that table, carries another default, or the
+  table names one that is not registered. Getting started, troubleshooting,
+  concepts and both READMEs link to it. Its fleet-health section was
+  rewritten from M12.4's code once #303 merged.
+- **M12.6 written; decisions wait on the user.**
+  `reviews/2026-09-26-work-graph-decisions-revisited.md` revisits D3, D10,
+  D13, D15 / D20 and D17 with the repository's evidence (M10.3 has not run,
+  so no usage is claimed) and recommends. D16 is corrected below. The
+  decisions table is otherwise unchanged: the user updates it, and each
+  "yes" becomes its own milestone (M13+).
+
 ## Critical path and parallelism
 
 ```
@@ -658,7 +692,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
 | D15 | Handover and multi-start on the phone (M10.5)? | read-only M9 only · also the actions | Read-only only (Today + card) |
-| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | Local opt-in, as today |
+| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done: hub-e2e already runs in CI** (`hub-headless` job, `.github/workflows/ci.yml`, every PR and `main` push). The M10.2 work-graph leg needs an `e2e`-feature hub and is skipped there; `ci-local.sh --hub-e2e` runs it |
 
 ## Risks to watch
 
@@ -762,3 +796,18 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: `main` merged into M10.4. M4.6 had landed on `main` (#273,
   OFF behind `work.classify_nudge`), so M10.4's "decided against" is
   withdrawn: D14 reads *built, off by default*.
+- 2026-09-26: M12 added to the milestones (it was planned without a
+  section here). **M12.5 done**: the user guide `docs/work-graph.md`, with a
+  docs check (`work_settings_are_in_the_user_guide`) that fails CI when a
+  `work.*` setting is missing from its table. Revise the guide with any
+  milestone that changes what a user sees.
+- 2026-09-26: M12.4 merged (#303); the guide's *Trackers in fleet health*
+  section now describes the code as landed, and its verify marker is gone.
+- 2026-09-26: M12.6 written, docs only
+  (`reviews/2026-09-26-work-graph-decisions-revisited.md`): per
+  decided-against item, the source, the evidence in the repository, the
+  smallest safe version, the risks and a recommendation (D3, D13, D17 stay
+  decided against; D10, D15 / D20 decide after M10.3). D16 is corrected to
+  done: hub-e2e already runs in CI's `hub-headless` job. The note also
+  records that D15's row understates the phone (M8.6.3 built *Ask for a
+  handover*); the row is left for the user to restate.

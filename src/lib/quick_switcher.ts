@@ -406,6 +406,7 @@ export function ticketFilterRow(
     scope: org != null ? `org:${org}` : '*',
     trackerId: t.tracker_id ?? null,
     statusCategory: t.status_category ?? null,
+    statusName: t.status_name ?? null,
     assignees: t.assignees ?? [],
     live: (t.live_session_ids ?? []).length > 0,
     archived: false,

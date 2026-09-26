@@ -36,7 +36,7 @@ import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, sessions, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
-import { composerPresets, resetComposerPresets } from './composer_presets';
+import { composerPresets } from './composer_presets';
 import { composerDrafts, insertIntoComposer } from './conversation';
 import { scrollMemory } from './conversation_nav';
 import { openPathRequest } from './app_views';
@@ -141,7 +141,10 @@ beforeEach(() => {
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
   scrollMemory.clear();
-  resetComposerPresets();
+  composerPresets.set([
+    { label: 'Clear', text: '/clear' },
+    { label: 'Compact', text: '/compact' },
+  ]);
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
   sessions.set([]);
@@ -1071,6 +1074,34 @@ describe('ConversationPanel quick actions', () => {
     await fireEvent.click(more);
     expect(more.getAttribute('aria-expanded')).toBe('true');
     expect(row.getAttribute('data-expanded')).toBe('true');
+  });
+
+  it('stays expanded on a re-measure while the wrapped chips span two lines', async () => {
+    await mount();
+    const row = screen.getByTestId('conv-chips');
+    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
+    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('conv-chips-more'));
+
+    // Wrapped, nothing clips: scrollWidth equals clientWidth. The old
+    // measurement read that as "fits" and collapsed the row it had just
+    // opened, so More showed nothing.
+    Object.defineProperty(row, 'scrollWidth', { value: 300, configurable: true });
+    const chips = Array.from(row.children) as HTMLElement[];
+    chips.forEach((c, i) => Object.defineProperty(c, 'offsetTop', { value: i === chips.length - 1 ? 30 : 0, configurable: true }));
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+    expect(row.getAttribute('data-expanded')).toBe('true');
+    expect(screen.getByTestId('conv-chips-more').getAttribute('aria-expanded')).toBe('true');
+
+    // Widened until every chip is back on one line: nothing more to show.
+    chips.forEach((c) => Object.defineProperty(c, 'offsetTop', { value: 0, configurable: true }));
+    window.dispatchEvent(new Event('resize'));
+    await tick();
+    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
+    expect(row.getAttribute('data-expanded')).toBe('false');
   });
 
   it('preserveThread keeps the viewport on the same content when the composer grows', async () => {

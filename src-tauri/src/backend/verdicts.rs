@@ -86,7 +86,7 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
         .map(|(_, v)| v)
 }
 
-/// The twenty Assets commands that all refuse for the same reason.
+/// The Assets commands that all refuse for the same reason.
 /// Organisations (work graph M5.2): the hub's `work_admin` is master-only.
 const ORGS_ARE_ADMIN: &str = "organisations, their rules and which org a host or tracker belongs \
      to are the hosts' security boundary and fleet administration: the hub's work_admin is \
@@ -517,6 +517,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       connections and the hub exposes no tool for it; purge from the hub",
         },
     ),
+    // The chip row is fleet state (see `service::quick_replies`), so a
+    // paired desktop edits the hub's list — the same one the phone draws —
+    // rather than a private copy that would disagree with it.
+    (
+        "quick_replies",
+        Verdict::Routed {
+            tool: "quick_replies",
+        },
+    ),
+    (
+        "set_quick_replies",
+        Verdict::Routed {
+            tool: "quick_replies",
+        },
+    ),
     (
         "get_fleet_settings",
         Verdict::LocalOnly {
@@ -884,14 +899,15 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: CATALOG_IS_A_CHECKOUT,
         },
     ),
+    // The one catalog READ with parity: the hub's `list_assets` answers
+    // `catalog::list_assets` over its own catalog and inventory — the same
+    // `AssetListing` — so a hub-client desktop gets the Assets overview (what
+    // is installed where, what drifted) of the fleet it is a window onto.
+    // Authoring, sync and secrets stay on the machine that owns the checkout.
     (
         "catalog_list_assets",
-        Verdict::LocalOnly {
-            instead: "the hub does serve this list (its read-only list_assets tool, open to \
-                      any paired client), but the Assets panel is built on the catalog's \
-                      configuration and git checkout, which only the machine that owns the \
-                      fleet has; call list_assets on the hub, or browse the catalog on that \
-                      machine",
+        Verdict::Routed {
+            tool: "list_assets",
         },
     ),
     (
@@ -970,13 +986,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       has; call import_assets on the hub, or import on that machine",
         },
     ),
+    // Read-only on the hosts, open to a paired client: it refreshes the
+    // inventory the overview above reads, and returns the same per-host
+    // `HostScanResult`s.
     (
         "assets_scan_hosts",
-        Verdict::LocalOnly {
-            instead: "the hub has this as its scan_assets tool, but its result feeds an \
-                      inventory panel built on the catalog checkout, which only the machine \
-                      that owns the fleet has; call scan_assets on the hub, or scan from \
-                      that machine",
+        Verdict::Routed {
+            tool: "scan_assets",
         },
     ),
     (

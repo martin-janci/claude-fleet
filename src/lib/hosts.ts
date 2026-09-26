@@ -41,6 +41,23 @@ export const resetTombstonesForTests = rows.resetTombstonesForTests;
  *  that previously did a linear `$hosts.find` should read this instead. */
 export const hostByAlias = derived(hosts, ($h) => new Map($h.map((h) => [h.alias, h])));
 
+/** Whether a new session / project may target `alias`: visible, and
+ *  reachable unless it is `local`. The rule behind HostChips' `disabled`
+ *  and every new-thing dialog's host choice. */
+export function isPickableHost(list: readonly HostRow[], alias: string | null | undefined): alias is string {
+  return !!alias && list.some((h) => h.alias === alias && !h.hidden && (h.reachable || h.alias === 'local'));
+}
+
+/** The host a dialog starts on when nothing remembered is pickable: `local`
+ *  when it is, else the first pickable host. A hub started with
+ *  `hub.local_host=false` hides its `local` row, and defaulting to it there
+ *  only earns "host local is disabled on this hub" on submit. `'local'` when
+ *  nothing at all is pickable (the submit then says why). */
+export function defaultHost(list: readonly HostRow[]): string {
+  if (isPickableHost(list, 'local')) return 'local';
+  return list.find((h) => isPickableHost(list, h.alias))?.alias ?? 'local';
+}
+
 // Sidebar host filter — `'all'` shows sessions from every host, otherwise
 // the value is a specific `alias`. Persisted across restarts.
 const isString = (v: unknown): v is string => typeof v === 'string';

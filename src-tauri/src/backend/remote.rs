@@ -758,6 +758,33 @@ impl HubBackend {
         Ok(page.worktrees)
     }
 
+    /// `commands::quick_replies::quick_replies`.
+    ///
+    /// Sends no `set` key at all rather than `set: null` — a present-but-null
+    /// `set` is "replace with nothing" to a stricter reader than today's
+    /// `Option`, and the difference between those two readings is a fleet's
+    /// whole chip row.
+    pub async fn quick_replies(
+        &self,
+    ) -> Result<Vec<fleet_core::service::quick_replies::QuickReply>, IpcError> {
+        self.route("quick_replies", &json!({})).await
+    }
+
+    /// `commands::quick_replies::set_quick_replies`.
+    ///
+    /// Its own call rather than an argument to the one above, because the two
+    /// commands are two rows in the table even though they reach one tool:
+    /// `route` takes the COMMAND name and looks the tool up, so each command
+    /// has to name itself here. The answer is the stored list either way, so
+    /// the write needs no follow-up read to see what the hub made of it.
+    pub async fn set_quick_replies(
+        &self,
+        entries: Vec<fleet_core::service::quick_replies::QuickReply>,
+    ) -> Result<Vec<fleet_core::service::quick_replies::QuickReply>, IpcError> {
+        self.route("set_quick_replies", &json!({ "set": entries }))
+            .await
+    }
+
     /// `commands::tasks::list_tasks`.
     pub async fn list_tasks(
         &self,
@@ -878,6 +905,25 @@ impl HubBackend {
     /// not in hub-client mode.
     pub async fn ensure_operator(&self) -> Result<SessionRow, IpcError> {
         self.route("ensure_operator", &json!({})).await
+    }
+
+    /// `commands::assets::catalog_list_assets`: the hub's catalog with each
+    /// asset's per-host state, the same `AssetListing` the local command
+    /// builds.
+    pub async fn catalog_list_assets(
+        &self,
+    ) -> Result<fleet_core::service::catalog::AssetListing, IpcError> {
+        self.route("catalog_list_assets", &json!({})).await
+    }
+
+    /// `commands::assets::assets_scan_hosts`: `None` scans every reachable
+    /// host.
+    pub async fn assets_scan_hosts(
+        &self,
+        host_alias: Option<String>,
+    ) -> Result<Vec<fleet_core::service::catalog::inventory::HostScanResult>, IpcError> {
+        self.route("assets_scan_hosts", &json!({ "host_alias": host_alias }))
+            .await
     }
 }
 

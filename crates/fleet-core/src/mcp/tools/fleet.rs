@@ -9,8 +9,10 @@ impl FleetTools {
         readiness, the cached fleet roll-up, per-host reverse-tunnel health \
         (tunnels_flapping: supervised but crash-looping, so the Control API \
         is unreachable from that host), and ESTIMATED token usage and cost \
-        (micro-USD) per host and UTC day for 7 days. A per-host token's \
-        usage covers its own host only.")]
+        (micro-USD) per host and UTC day for 7 days, and trackers (each \
+        ok/degraded/failing, failures in a row, last error and success; \
+        detection_backlog: suggestions undecided for detection_backlog_days). \
+        A per-host token sees its own host's usage and its org's trackers.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -19,10 +21,21 @@ impl FleetTools {
         let mut h = health::health_check(&self.store);
         h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
-            if let Ok(s) = self.store.lock() {
-                health::scope_usage_to_host(&mut h, &s, host);
+            match self.store.lock() {
+                Ok(s) => {
+                    health::scope_usage_to_host(&mut h, &s, host);
+                    // Work graph M12.4: its org's trackers, its host's backlog.
+                    // A scope that cannot be read shows no tracker at all.
+                    match caller.org_scope(&s) {
+                        Ok(scope) => health::scope_trackers(&mut h, &s, &scope),
+                        Err(_) => h.trackers = Default::default(),
+                    }
+                }
+                Err(_) => h.trackers = Default::default(),
             }
         }
+        // An agent reads it: a tracker's error is the tracker's text.
+        h.trackers.fence_errors();
         ok_json_compact(&h)
     }
 
@@ -85,6 +98,30 @@ impl FleetTools {
     pub(super) async fn list_accounts(&self) -> Result<CallToolResult, McpError> {
         audit("list_accounts", "");
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Read or replace the fleet's quick replies: the \
+        chip row the desktop and phone composers draw above the prompt box, \
+        as [{label, text}]. No arguments reads; `set` replaces the whole \
+        list (max 24, [] restores the defaults). Errors: E_INVALID.")]
+    pub(super) async fn quick_replies(
+        &self,
+        Parameters(p): Parameters<QuickRepliesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Chip TEXT is a prompt the operator wrote; the count is the whole
+        // audit line, same rule as set_clipboard's body.
+        audit(
+            "quick_replies",
+            &match &p.set {
+                Some(entries) => format!("set={}", entries.len()),
+                None => "read".to_string(),
+            },
+        );
+        let entries = match p.set {
+            Some(entries) => quick_replies::replace(&self.store, entries).map_err(to_mcp_err)?,
+            None => quick_replies::list(&self.store).map_err(to_mcp_err)?,
+        };
+        ok_json_compact(&entries)
     }
 
     #[tool(description = "Register a host. transport \"ssh\" (default) is \

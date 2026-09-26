@@ -75,7 +75,7 @@ Ensure the UX agent's operator session exists; returns its row.
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days. A per-host token's usage covers its own host only.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers.
 
 ### `get_clipboard`
 
@@ -235,6 +235,12 @@ Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and
 
 Parameters: `rotate`
 
+### `quick_replies`
+
+Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text}]. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
+
+Parameters: `set`
+
 ### `recreate_session`
 
 Recreate a session: kill its tmux session and rebuild it in the same worktree, resuming the same Claude conversation. For a frozen, OOM-killed or out-of-context session, or to revive a ghost: the conversation survives, the process does not. Returns the row.
@@ -243,7 +249,7 @@ Parameters: `confirm_nonce`, `force`, `session_id`
 
 ### `refresh_projects`
 
-Rescan the local projects directory for new or removed repositories and worktrees; returns the project list. E_NOTFOUND on a hub with hub.local_host off (no local projects directory).
+Rescan the local projects directory for new or removed repositories and worktrees; returns the project list. On a hub with hub.local_host off there is no local projects directory: nothing is scanned and the stored list is returned.
 
 ### `register_self`
 
@@ -596,6 +602,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`
+- `commands::quick_replies::quick_replies`
+- `commands::quick_replies::set_quick_replies`
 - `commands::sessions::get_fleet_settings`
 - `commands::sessions::set_fleet_setting`
 - `commands::tasks::list_tasks`

@@ -252,7 +252,9 @@ and CI fails when it is stale. The workflows that tie the tools together
 
 Index by area (names only; see the reference for details):
 
-- **Fleet & hosts** — `fleet_health`, `usage_report` (estimated token
+- **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
+  health and the detection backlog, from cached sync state; a per-host token
+  sees its own org's trackers), `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
@@ -265,6 +267,9 @@ Index by area (names only; see the reference for details):
   `set_friendly_name`, `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
+- **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
+  presets the desktop and the phone both draw above their text box — call it
+  with no arguments to read, with `set` to replace the list).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
