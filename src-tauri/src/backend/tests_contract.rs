@@ -79,6 +79,7 @@ pub(crate) fn sample_session() -> SessionRow {
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
+        prompt_submit_seq: 4,
         usage: sample_usage(),
         context: SessionContext {
             model: Some("claude-opus-5".into()),
@@ -792,7 +793,7 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_eight() {
+fn a_session_rows_wire_names_are_these_exact_fifty_nine() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -826,6 +827,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_eight() {
         "pending_input",
         "pr_url",
         "project_id",
+        "prompt_submit_seq",
         "reviews_session_id",
         "row_version",
         "safe_kill_detail",
@@ -854,7 +856,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_eight() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 58, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 59, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

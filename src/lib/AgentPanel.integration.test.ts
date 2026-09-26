@@ -32,6 +32,7 @@ import { get } from 'svelte/store';
 import { agentPanelOpen, operatorState, operatorSession } from './operator';
 import { sessionConversation, sessionActivity, listConversations, toolDetail } from './conversation';
 import { sendPrompt, sessions, applySessionEvents, type SessionRow } from './sessions';
+import { outbox } from './outbox';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
@@ -95,6 +96,7 @@ beforeEach(() => {
   mockedDetail.mockReset();
   mockedSend.mockReset();
   agentPanelOpen.set(true);
+  outbox.resetForTests();
   operatorState.set('ready');
   operatorSession.set(row());
   sessions.set([row()]);
@@ -118,7 +120,7 @@ describe('AgentPanel with the real ConversationPanel underneath', () => {
 
 // The defect these cover: AgentPanel used to own its own composer and call
 // `sendPrompt` itself, bypassing ConversationPanel's send path entirely. All
-// of ConversationPanel's liveness state — the pending turn, the `optimistic`
+// of ConversationPanel's liveness state — the outgoing message, the `optimistic`
 // flag that keeps the 5 s transcript cadence off the 15 s quiet one, and the
 // immediate refetch — is set in that path and nowhere else, so a prompt sent
 // from the agent sheet showed nothing, said nothing, and appeared whenever
@@ -132,7 +134,7 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     }
   }
 
-  it('shows what was just sent as a pending turn, before any transcript read carries it', async () => {
+  it('shows what was just sent as an outgoing message, before any transcript read carries it', async () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     render(AgentPanel);
     await settle();
@@ -140,8 +142,8 @@ describe('the agent sheet sends through ConversationPanel, not around it', () =>
     const box = screen.getByPlaceholderText(/send a prompt/i) as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'co sa deje' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
-    await waitFor(() => expect(screen.getByTestId('conv-pending')).toBeTruthy());
-    expect(screen.getByTestId('conv-pending').textContent).toContain('co sa deje');
+    await waitFor(() => expect(screen.getByTestId('conv-outgoing')).toBeTruthy());
+    expect(screen.getByTestId('conv-outgoing').textContent).toContain('co sa deje');
   });
 
   it('carries the context chip prefix into the one composer that sends', async () => {

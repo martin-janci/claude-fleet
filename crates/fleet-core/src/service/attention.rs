@@ -131,6 +131,7 @@ mod tests {
         SessionRow {
             id: 1,
             row_version: 0,
+            prompt_submit_seq: 0,
             tmux_name: "t".to_string(),
             host_alias: "alpha".to_string(),
             project_id: None,

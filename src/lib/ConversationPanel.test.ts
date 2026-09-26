@@ -46,6 +46,7 @@ import { copyText } from './clipboard';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { invoke } from '@tauri-apps/api/core';
 import type { PickedFile } from './attachments';
+import { outbox } from './outbox';
 
 const REMOTE: HubStatus = {
   remote: true,
@@ -141,6 +142,7 @@ beforeEach(() => {
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
   scrollMemory.clear();
+  outbox.resetForTests();
   composerPresets.set([
     { label: 'Clear', text: '/clear' },
     { label: 'Compact', text: '/compact' },
@@ -630,9 +632,10 @@ async function settle() {
 }
 
 describe('ConversationPanel composer', () => {
-  it('sends the typed prompt to the session on Enter, clears the box, shows it as a pending turn and refetches at once', async () => {
+  it('shows the message the moment Enter is pressed, before the send returns, and frees the box', async () => {
     mockedConv.mockReturnValue(ok(conv()));
-    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    let release!: (r: unknown) => void;
+    mockedSend.mockReturnValue(new Promise((r) => (release = r)));
     render(ConversationPanel, { session: session({ host_alias: 'trn', tmux_name: 'dev-x' }), visible: true });
     await settle();
     expect(mockedConv).toHaveBeenCalledTimes(1);
@@ -642,10 +645,63 @@ describe('ConversationPanel composer', () => {
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
 
+    // On the wire, and already on screen: the box is empty and usable.
     expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'run the tests');
+    const bubble = screen.getByTestId('conv-outgoing');
+    expect(bubble.textContent).toContain('run the tests');
+    expect(bubble.dataset.state).toBe('sending');
+    expect(screen.getByTestId('conv-receipt').textContent).toContain('Sending…');
     expect(box.value).toBe('');
-    expect(screen.getByTestId('conv-pending').textContent).toContain('run the tests');
+    expect(box.disabled).toBe(false);
+
+    release({ ok: true, value: undefined });
+    await settle();
+    await settle();
+    expect(screen.getByTestId('conv-outgoing').dataset.state).toBe('sent');
+    expect(screen.getByTestId('conv-receipt').textContent).toContain('Sent');
+    // Delivered: read the transcript now, not a poll interval later.
     expect(mockedConv).toHaveBeenCalledTimes(2);
+  });
+
+  it('a second message waits its turn behind the first, then goes', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    let release!: (r: unknown) => void;
+    mockedSend.mockReturnValueOnce(new Promise((r) => (release = r)));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'one' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await fireEvent.input(box, { target: { value: 'two' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(screen.getAllByTestId('conv-outgoing').map((b) => b.dataset.state)).toEqual(['sending', 'waiting']);
+    expect(screen.getAllByTestId('conv-receipt')[1].textContent).toContain('Up next');
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    release({ ok: true, value: undefined });
+    await settle();
+    await settle();
+    expect(mockedSend.mock.calls.map((c) => c[2])).toEqual(['one', 'two']);
+  });
+
+  it('shows Claude taking the message when the submit counter moves', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const row = session({ claude_status: 'idle', prompt_submit_seq: 3 });
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'go' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await settle();
+    expect(screen.getByTestId('conv-outgoing').dataset.state).toBe('sent');
+    sessions.set([{ ...row, claude_status: 'working', prompt_submit_seq: 4 }]);
+    await settle();
+    expect(screen.getByTestId('conv-outgoing').dataset.state).toBe('received');
+    expect(screen.getByTestId('conv-receipt').textContent).toContain('Claude is on it');
   });
 
   it('the Send button sends too, and a blank prompt never sends', async () => {
@@ -677,21 +733,72 @@ describe('ConversationPanel composer', () => {
     expect(box.value).toBe('line one');
   });
 
-  it('a failed send shows the error and keeps the text', async () => {
+  it('a gated composer holds a second prompt until Claude has taken the first', async () => {
     mockedConv.mockReturnValue(ok(conv()));
-    mockedSend.mockResolvedValue({ ok: false, error: { code: 'E_TMUX', message: "can't find session" } });
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const row = session({ claude_status: 'idle', prompt_submit_seq: 0 });
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true, blockWhileBusy: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    const button = screen.getByTestId('conv-composer-send') as HTMLButtonElement;
+    await fireEvent.input(box, { target: { value: 'one' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await settle();
+    await fireEvent.input(box, { target: { value: 'two' } });
+    expect(button.disabled).toBe(true);
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(box.value).toBe('two');
+  });
+
+  it('a failed send stays in the thread with the reason, and Retry sends it again', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValueOnce({ ok: false, error: { code: 'E_TMUX', message: "can't find session" } });
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
     render(ConversationPanel, { session: session(), visible: true });
     await settle();
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'hello' } });
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(screen.getByTestId('conv-composer-error').textContent).toContain("can't find session");
-    expect(box.value).toBe('hello');
-    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    await settle();
+    expect(screen.getByTestId('conv-outgoing').dataset.state).toBe('failed');
+    expect(screen.getByTestId('conv-receipt').textContent).toContain("Not sent: can't find session");
+    await fireEvent.click(screen.getByTestId('conv-outgoing-retry'));
+    await settle();
+    await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('conv-outgoing').dataset.state).toBe('sent');
   });
 
-  it('the pending turn disappears once the transcript carries the prompt', async () => {
+  it('Edit takes a failed message back into the box; Discard drops it', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: false, error: { code: 'E_TMUX', message: 'gone' } });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'first' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-outgoing-edit'));
+    await settle();
+    expect(box.value).toBe('first');
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
+
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-outgoing-discard'));
+    await settle();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
+    expect(box.value).toBe('');
+  });
+
+  it('the message gives way to the transcript turn once the transcript carries it', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     mockedConv.mockReturnValue(ok(conv()));
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
@@ -701,19 +808,20 @@ describe('ConversationPanel composer', () => {
     await fireEvent.input(box, { target: { value: 'hello' } });
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(screen.getByTestId('conv-pending')).toBeTruthy();
+    await settle();
+    expect(screen.getByTestId('conv-outgoing')).toBeTruthy();
 
-    // the transcript has not caught up yet: pending stays
+    // the transcript has not caught up yet: the message stays
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
     await settle();
-    expect(screen.getByTestId('conv-pending')).toBeTruthy();
+    expect(screen.getByTestId('conv-outgoing')).toBeTruthy();
 
     const caughtUp = conv();
     caughtUp.turns.push({ prompt: 'hello', at: '2026-09-13T10:01:00.000Z', ended_at: null, items: [{ kind: 'text', text: 'hi' }] });
     mockedConv.mockReturnValue(ok(caughtUp));
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
     await settle();
-    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
     expect(screen.getAllByTestId('conv-prompt')).toHaveLength(2);
   });
 
@@ -978,7 +1086,7 @@ describe('ConversationPanel quick actions', () => {
     await fireEvent.click(screen.getByTestId('conv-chip-enter'));
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '');
-    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
   });
 
   // Round 20 F2. The chip's tooltip says "Sends a bare Enter." With a context
@@ -1002,7 +1110,7 @@ describe('ConversationPanel quick actions', () => {
     await settle();
     expect(mockedSend).toHaveBeenCalledTimes(1);
     expect(mockedSend.mock.calls[0][2]).toBe('');
-    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
   });
 
   // The neighbouring path, decided deliberately rather than left to fall out
@@ -1319,21 +1427,27 @@ describe('ConversationPanel live indicator', () => {
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     // the pane has not classified yet: the send shows as "sent"
     mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: null }) });
-    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    // The outbox reads the row it stamps the send with from the store, as
+    // the app's own panel row comes from it.
+    const row = session({ claude_status: 'idle' });
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true });
     await settle();
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'hello' } });
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
+    await settle();
     expect(screen.getByTestId('conv-indicator').getAttribute('data-kind')).toBe('sent');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Waiting for Claude…');
 
-    // transcript carries the prompt: pending clears, the session is still working
+    // transcript carries the prompt: the message gives way, the session is still working
     const caughtUp = conv();
     caughtUp.turns.push({ prompt: 'hello', at: '2026-09-13T10:01:00.000Z', ended_at: null, items: [] });
     mockedConv.mockReturnValue(ok(caughtUp));
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
     await settle();
-    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
     expect(screen.getByTestId('conv-indicator').getAttribute('data-kind')).toBe('working');
 
     mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'idle' }) });
@@ -1709,7 +1823,7 @@ describe('ConversationPanel context meter', () => {
 });
 
 describe('ConversationPanel review-round fixes', () => {
-  it('a slash command sends but leaves no pending turn and no optimistic working state', async () => {
+  it('a slash command sends but leaves no message behind and no optimistic working state', async () => {
     mockedConv.mockReturnValue(ok(conv()));
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
     render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
@@ -1720,7 +1834,7 @@ describe('ConversationPanel review-round fixes', () => {
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/status');
     expect(box.value).toBe('');
-    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
   });
 
@@ -1740,8 +1854,14 @@ describe('ConversationPanel review-round fixes', () => {
     await settle();
     expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('typing in two');
     expect(composerDrafts.get(2)).toBe('typing in two');
-    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
+    // ...and the send itself was not lost with the switch: back in one, the
+    // message is there, delivered.
+    await rerender({ session: session({ id: 1 }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-outgoing').textContent).toContain('for one');
+    expect(screen.getByTestId('conv-outgoing').dataset.state).toBe('sent');
   });
 
   it('Load older never inflates the new-item count', async () => {
@@ -4113,7 +4233,7 @@ describe('ConversationPanel attachments', () => {
     expect(screen.queryAllByTestId('conv-attachment')).toHaveLength(0);
   });
 
-  it('a failed upload cancels the send, keeps the draft, and marks the tile as needing reattachment', async () => {
+  it('a failed upload fails the message without sending; Edit gives back the text and a tile flagged for reattaching', async () => {
     await renderPanel();
     mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'pick_attachments')
@@ -4128,17 +4248,20 @@ describe('ConversationPanel attachments', () => {
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'look' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
-    await settle();
+    for (let i = 0; i < 3; i++) await settle();
 
-    expect(box.value).toBe('look');
-    expect(screen.getByTestId('conv-composer-error').textContent).toContain('host unreachable');
+    expect(screen.getByTestId('conv-outgoing').dataset.state).toBe('failed');
+    expect(screen.getByTestId('conv-receipt').textContent).toContain('host unreachable');
     expect(mockedSend).not.toHaveBeenCalled();
-    // The tile stays so the user can retry — but `upload_attachments`
-    // consumes a path's authorisation before a failure like this one can be
-    // told apart from a genuine mid-transfer failure (`UploadAllowList::
-    // consume` in `upload.rs` runs unconditionally, ahead of the transfer),
-    // so a plain retry is not actually safe. The tile must say so rather
-    // than looking untouched.
+    // `upload_attachments` consumes a path's authorisation before a failure
+    // like this one can be told apart from a genuine mid-transfer failure
+    // (`UploadAllowList::consume` in `upload.rs` runs unconditionally, ahead
+    // of the transfer), so a plain retry is not actually safe: no Retry, and
+    // the tile Edit hands back says so rather than looking untouched.
+    expect(screen.queryByTestId('conv-outgoing-retry')).toBeNull();
+    await fireEvent.click(screen.getByTestId('conv-outgoing-edit'));
+    await settle();
+    expect(box.value).toBe('look');
     const tile = screen.getByTestId('conv-attachment');
     expect(tile.getAttribute('data-state')).toBe('error');
     expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
@@ -4234,17 +4357,20 @@ describe('ConversationPanel attachments', () => {
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'look' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
-    await settle();
+    for (let i = 0; i < 3; i++) await settle();
 
     expect(mockedSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('conv-receipt').textContent).toContain('too long');
+    expect(screen.queryByTestId('conv-outgoing-retry')).toBeNull();
+    await fireEvent.click(screen.getByTestId('conv-outgoing-edit'));
+    await settle();
     expect(box.value).toBe('look');
-    expect(screen.getByTestId('conv-composer-error').textContent).toContain('too long');
     const tile = screen.getByTestId('conv-attachment');
     expect(tile.getAttribute('data-state')).toBe('error');
     expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
   });
 
-  it('a failed send after a successful upload marks the tile as needing reattachment', async () => {
+  it('a failed send after a successful upload can be retried with the uploaded paths; Edit flags the tile', async () => {
     await renderPanel();
     mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'pick_attachments')
@@ -4259,11 +4385,22 @@ describe('ConversationPanel attachments', () => {
 
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
     await fireEvent.input(box, { target: { value: 'look' } });
+    const uploads = () => mockedInvoke.mock.calls.filter((c) => c[0] === 'upload_attachments').length;
+    const uploadsBefore = uploads();
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
-    await settle();
+    for (let i = 0; i < 3; i++) await settle();
 
+    expect(screen.getByTestId('conv-receipt').textContent).toContain("can't find session");
+    // The upload went through: a retry re-sends with its paths, no re-upload.
+    await fireEvent.click(screen.getByTestId('conv-outgoing-retry'));
+    for (let i = 0; i < 3; i++) await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(2);
+    expect(mockedSend.mock.calls[1][2]).toBe('look\n\nAttached files:\n/w/p/.claude-fleet-attachments/a.png');
+    expect(uploads()).toBe(uploadsBefore + 1);
+    // Still failing: take it back. The paths it spent are gone.
+    await fireEvent.click(screen.getByTestId('conv-outgoing-edit'));
+    await settle();
     expect(box.value).toBe('look');
-    expect(screen.getByTestId('conv-composer-error').textContent).toContain("can't find session");
     const tile = screen.getByTestId('conv-attachment');
     expect(tile.getAttribute('data-state')).toBe('error');
     expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
