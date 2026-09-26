@@ -762,8 +762,32 @@ pub async fn rewind_conversation(
         None,
         None,
     );
-    let out = ssh.run_script(&sess.host_alias, &script).await?;
-    let new_path = out.trim().to_string();
+    // `run_shell` is the helper every transcript script already goes through
+    // (`transcript::read_tail`, `transcript.rs:1947`), so the SSH quoting
+    // round-trip is handled there and needs nothing extra here.
+    let out = run_shell(ssh, &sess.host_alias, &script).await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Map the script's sentinels to codes rather than letting prose leak
+        // out, exactly as `read_tail` maps NO_TRANSCRIPT.
+        if stderr.contains(crate::service::rewind::NO_ANCHOR) {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                "that reply is no longer in the transcript",
+            ));
+        }
+        if stderr.contains(crate::service::transcript::NO_TRANSCRIPT_SENTINEL) {
+            return Err(IpcError::new(
+                codes::E_NO_TRANSCRIPT,
+                format!("no transcript for this session on {}", sess.host_alias),
+            ));
+        }
+        return Err(IpcError::new(
+            codes::E_SHELL,
+            format!("rewind failed: {}", stderr.trim()),
+        ));
+    }
+    let new_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     match args.mode {
         RewindMode::Rewind => {
@@ -808,13 +832,22 @@ pub async fn rewind_conversation(
 }
 ```
 
-> **Note for the implementer:** `ssh.run_script`, `NewSessionArgs::default()`
-> and the exact field set of `NewSessionArgs` / `SessionRow` are what to check
-> against the current source first — `crates/fleet-core/src/service/sessions/lifecycle.rs:30`
-> for the args and `crates/fleet-core/src/ssh.rs` for the run helper other
-> transcript readers use (`fetch_conversation_for_row` at
-> `transcript.rs:1625` is the closest caller to copy). Keep the behaviour and
-> the refusals exactly as written; adapt the plumbing to what exists.
+> **Note for the implementer — verified plumbing.** `run_shell(ssh, host_alias,
+> script)` is the helper every transcript script goes through; read
+> `transcript::read_tail` (`transcript.rs:1942-1967`) and copy its shape,
+> including how it turns a sentinel in stderr into an `IpcError` code. Import
+> `run_shell` from wherever `transcript.rs` imports it.
+>
+> `NO_TRANSCRIPT` in `transcript.rs` is currently a private `const`; widen it
+> (and name it as the snippet above does, or adjust the snippet to the real
+> name) so `rewind.rs` can match on it — that is the same one-line visibility
+> widening Task 2 did for `locate_script`.
+>
+> Still to check against the source before writing: `NewSessionArgs`' exact
+> field set and whether it derives `Default` (`lifecycle.rs:30`), and
+> `SessionRow`'s field names (`model`, `transcript_path`, `project_id`,
+> `worktree_id`, `claude_status`). Keep the behaviour and the refusals exactly
+> as written; adapt the plumbing to what exists.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
