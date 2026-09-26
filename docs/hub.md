@@ -612,8 +612,8 @@ same resolution the desktop's Files tab and its own attach button have always
 used; what is new is that `/attachment` is the first way to drive it from off
 the machine, with no OS file dialog in the path to show anyone where "there"
 is. Nothing about the route is rate limited, either: the `RateLimiter` guards
-`/pair` and nothing else, so a `full` client may keep writing 10 MB a request
-for as long as it holds a token, and cleaning up
+`/pair` and `broadcast_prompt`, and no other authorized route, so a `full`
+client may keep writing 10 MB a request for as long as it holds a token, and cleaning up
 `.claude-fleet-attachments/` is out of scope — nothing prunes it. Neither is
 an escalation, since a `full` token can already send arbitrary prompts to any
 session; both are worth stating, because together they turn request volume
