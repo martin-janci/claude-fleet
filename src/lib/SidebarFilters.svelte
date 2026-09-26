@@ -13,6 +13,7 @@
   const scopeTitle = `Organisation scope (${scopeChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator))})`;
   import LinkReview from './LinkReview.svelte';
   import TidyReview from './TidyReview.svelte';
+  import TrackerAttention from './TrackerAttention.svelte';
   import { sessionFocus, clearSessionFocus } from './session_focus';
   import { RECENCY_VALUES, type Recency } from './session_status';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -319,6 +320,7 @@
   {/if}
   <Attention />
   <ScopeAttention />
+  <TrackerAttention />
   <LinkReview />
   <TidyReview />
   {#if $sessionFocus}
