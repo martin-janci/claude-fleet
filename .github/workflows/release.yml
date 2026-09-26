@@ -1,14 +1,27 @@
 name: release
 
-# Builds the desktop bundles and attaches them to a *draft* GitHub Release.
+# Builds the desktop bundles, attaches them to a GitHub Release, and PUBLISHES
+# it once the release is proven complete.
 #
 # Trigger: pushing the `vX.Y.Z` tag that `scripts/release.sh` creates
 # (`git push origin main --follow-tags`). `workflow_dispatch` is a manual
 # re-run: pick the tag under "Use workflow from". Both jobs are gated on
 # `github.ref_type == 'tag'`, so dispatching from a branch is a no-op rather
-# than creating a draft named after the branch. The draft is published by
-# hand by the repo owner after checking the assets; publishing it fires
-# docs.yml (release: published).
+# than creating a release named after the branch.
+#
+# WHY THE RELEASE PUBLISHES ITSELF. The release used to be created as a draft
+# and published by hand. That gate cost nothing when it was pressed and
+# everything when it was not: six complete, checksummed, green-run releases
+# (v0.2.28 through v0.2.37) sat unpublished — versions users could not
+# download, for no reason anyone recorded. The keypress was never a decision;
+# `verify-release` already makes the judgement it was standing in for, and
+# makes it better, by enumerating the release's real assets. So the release is
+# created as a draft, built into, verified, and then published by the `publish`
+# job — which runs on the DEFAULT "every need succeeded" condition, so a failed
+# leg leaves the draft unpublished and intact for inspection. "Draft only when
+# something went wrong" falls out of that, with no second rule to keep in sync.
+#
+# Publishing fires docs.yml (`release: published`).
 #
 # `version-consistency` is the gate in front of all of it: every other job
 # `needs:` it, it is NOT `continue-on-error`, and it asserts both that the six
@@ -126,28 +139,52 @@ jobs:
     needs: version-consistency
     runs-on: ubuntu-24.04
     outputs:
-      release_id: ${{ steps.draft.outputs.result }}
+      release_id: ${{ steps.release.outputs.result }}
     steps:
-      - name: Create (or reuse) the draft release for this tag
-        id: draft
+      # Needed only for CHANGELOG.md: this job was pure github-script before
+      # the notes moved onto the release.
+      - uses: actions/checkout@v4
+      # The release notes are the CHANGELOG section for this version,
+      # verbatim — the text that was written and reviewed in the release
+      # commit, rather than a second copy composed here. No section means no
+      # notes, and this step fails the release rather than publishing an empty
+      # one; `scripts/release.sh` always writes one, so this fires only for a
+      # tag that was not cut by it.
+      - name: Take this version's notes out of CHANGELOG.md
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: scripts/changelog-section.sh "${REF_NAME#v}" >notes.md
+      - name: Create (or reuse) the release for this tag
+        id: release
         uses: actions/github-script@v7
         with:
           result-encoding: string
           script: |
+            const fs = require('fs');
             const tag = context.ref.replace(/^refs\/tags\//, '');
             const { owner, repo } = context.repo;
             // getReleaseByTag() does not return drafts, so scan the list.
+            // Matching on the tag ALONE, not on `r.draft`: since this workflow
+            // publishes what it builds, a re-run of a tag that already
+            // succeeded finds a PUBLISHED release, and a draft-only search
+            // would fall through to createRelease() and 422 with
+            // "already_exists" — breaking the re-run recovery path that
+            // docs/RELEASING.md tells you to use when a leg fails.
             const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
-            const existing = releases.find(r => r.tag_name === tag && r.draft);
+            const existing = releases.find(r => r.tag_name === tag);
             if (existing) {
               // The body is deliberately left alone on reuse: the tag pins
               // the commit, so the build sha recorded below is still the
               // right one, and a re-run must not clobber notes the owner has
-              // already edited into the draft.
-              core.info(`Reusing existing draft release ${existing.id} for ${tag}`);
+              // already edited into the release.
+              core.info(`Reusing existing release ${existing.id} for ${tag} (draft: ${existing.draft})`);
               return existing.id;
             }
             const body = [
+              fs.readFileSync('notes.md', 'utf8').trim(),
+              '',
+              '---',
+              '',
               'Unsigned builds (no Apple Developer ID yet). On macOS the first launch reports the app as *"damaged and can\'t be opened"* — it is not damaged. Drag it to `/Applications`, then clear the quarantine flag:',
               '',
               '```bash',
@@ -156,7 +193,7 @@ jobs:
               '',
               `Right-click → **Open** does not help here: that is the bypass for a signed-but-unnotarized app. Full instructions: [Installing a release build](https://github.com/${owner}/${repo}/blob/${tag}/README.md#installing-a-release-build).`,
               '',
-              `Release notes: see the matching section of [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
+              `Every version's notes: [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
               '',
               // Built and signed in its own repository, under this same tag,
               // by scripts/release-mobile.sh (docs/RELEASING.md step 6).
@@ -176,6 +213,10 @@ jobs:
               // README.txt (scripts/package-linux-release.sh).
               `Built from commit \`${context.sha}\` (https://github.com/${owner}/${repo}/commit/${context.sha}).`,
             ].join('\n');
+            // Created as a draft even though it will be published: the
+            // assets are uploaded one at a time over the next twenty minutes,
+            // and a release that is visible while half-built is worse than
+            // one that appears complete. The `publish` job flips it.
             const { data } = await github.rest.repos.createRelease({
               owner, repo,
               tag_name: tag,
@@ -439,3 +480,60 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG: ${{ github.ref_name }}
         run: scripts/verify-release.sh
+
+  # THE PUBLICATION. Everything above builds into a draft; this is what makes
+  # it a release people can download.
+  #
+  # `if:` names only the tag gate, so the DEFAULT "all needs succeeded"
+  # condition applies — the exact opposite of the `!cancelled()` on `checksums`
+  # and `verify-release`, and the reason those two are written the way they
+  # are. A failed leg, a failed gate, a cancelled run: any of them skips this
+  # job and the draft stays a draft, complete with whatever it did manage to
+  # build, for someone to look at. There is no "publish anyway" path and no
+  # second definition of "good enough" here: `verify-release` succeeding IS
+  # the definition.
+  #
+  # Idempotent, because the re-run path leads straight back through it: it
+  # PATCHes draft/prerelease/make_latest to what they should be, whatever they
+  # are now — including on a release that a human published by hand, or one
+  # created before this job existed.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [create-release, verify-release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish the release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const release_id = Number(process.env.RELEASE_ID);
+            if (!Number.isInteger(release_id)) {
+              core.setFailed(`create-release produced no usable release id (got '${process.env.RELEASE_ID}')`);
+              return;
+            }
+            const tag = context.ref.replace(/^refs\/tags\//, '');
+            const { owner, repo } = context.repo;
+            // A pre-release is decided by the tag and nothing else: `v0.3.0`
+            // is a release, `v0.3.0-rc.1` is a release candidate. Same rule
+            // scripts/release.sh, scripts/release-assets.sh and
+            // hub-image.yml's `latest` guard use.
+            const prerelease = tag.slice(1).includes('-');
+            // make_latest, stated rather than inherited. 'legacy' is
+            // GitHub's own by-creation-date rule, which is right here: it
+            // keeps the newest release the "Latest" one, and stops the
+            // publication of an old, backfilled draft from dragging the
+            // Latest badge backwards. A release candidate never takes it.
+            const make_latest = prerelease ? 'false' : 'legacy';
+            const { data } = await github.rest.repos.updateRelease({
+              owner, repo, release_id,
+              draft: false,
+              prerelease,
+              make_latest,
+            });
+            core.info(`Published ${tag}: ${data.html_url} (prerelease: ${prerelease}, make_latest: ${make_latest})`);
+            await core.summary
+              .addHeading(`Published ${tag}`, 3)
+              .addLink(data.html_url, data.html_url)
+              .write();
