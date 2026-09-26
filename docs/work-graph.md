@@ -461,9 +461,17 @@ state and the store. It never calls a tracker or a host. For each tracker:
   them. Three failed passes in a row are `failing` too. A transient state
   (`rate_limited`, `unreachable`) with fewer failures is `degraded`: the sync
   retries it by itself.
-- `state`, `consecutive_failures`, `last_error` (redacted, one line, at most
-  300 characters, fenced as untrusted), `last_success_at`, `last_pass_at`,
-  and its org.
+- **Skipped items.** A pass can end but skip items it could not store: the
+  item is retried next pass, and its view's watermark does not move. A last
+  pass that skipped anything reads `degraded`; three passes in a row that
+  skipped items read `failing` (decision D25), because the same item is
+  stuck and never reaches the cache. `reason` is then `skipping_items`. A
+  clean pass brings the tracker back to `ok`.
+- `state`, `consecutive_failures`, `items_failed` (skipped by the last pass),
+  `consecutive_partial` (passes in a row that skipped items), `reason`,
+  `last_error` (redacted, one line, at most 300 characters, fenced as
+  untrusted; for skipped items, the last one's reason), `last_success_at`,
+  `last_pass_at`, and its org.
 
 Fleet-wide it also counts `failing`, `degraded`, and the **detection
 backlog**: link suggestions on live sessions that have waited more than 7
@@ -478,15 +486,18 @@ On the desktop:
   opens Settings → Work.
 - Each **failing** tracker raises one item in the attention strip,
   **⚠ Reconnect Jira (acme) →**, which opens Settings scrolled to Work.
-  Hover it for the error, the failure count and the org. A degraded tracker
-  raises none.
+  Hover it for the error, the failure count and the org. A tracker that is
+  failing only because it skips the same items reads **⚠ Sync skipping
+  items: Jira (acme) →** instead: a stuck item is not a credential problem,
+  and reconnecting would not fix it. A degraded tracker raises none.
 - The roll-up is read at startup and every 60 seconds. On a paired desktop
   it is the hub's `fleet_health`.
 
 After you set a new credential and **Test** it, the item goes away once the
 tracker is `ok` and a sync pass has succeeded, at the next read after that. The same numbers, with each pass's details, are in `fleet-hub tracker
 status` and Settings → Work. See
-[troubleshooting.md → Tracker sync fails](troubleshooting.md#tracker-sync-fails).
+[troubleshooting.md → Tracker sync fails](troubleshooting.md#tracker-sync-fails)
+and [→ Sync skips items](troubleshooting.md#sync-skips-items).
 
 > **[Screenshot placeholder]** The attention strip with a Reconnect item,
 > and the footer's trackers line.

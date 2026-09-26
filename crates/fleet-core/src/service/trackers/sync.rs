@@ -123,7 +123,10 @@ pub struct SyncMetrics {
     #[serde(default)]
     pub frames_emitted: u64,
     /// Why the pass failed: redacted, defused, one line, at most
-    /// [`METRIC_ERROR_MAX_CHARS`] characters. `None` for a pass that ended ok.
+    /// [`METRIC_ERROR_MAX_CHARS`] characters. For a pass that ended ok but
+    /// skipped items (`items_failed > 0`, work graph M13.1), the reason the
+    /// last skipped item gave, prefixed with the count. `None` for a pass
+    /// that ended ok and stored everything.
     #[serde(default)]
     pub last_error: Option<String>,
     /// Passes in a row that ended in an error; `0` after a pass that ended
@@ -131,6 +134,16 @@ pub struct SyncMetrics {
     /// memory like the rest, so a restart starts it again from `0`.
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Items the last pass could not store and skipped (retried next pass;
+    /// their view's watermark does not move). Work graph M13.1, from
+    /// [`TrackerPass::failed`].
+    #[serde(default)]
+    pub items_failed: u64,
+    /// Passes in a row that skipped at least one item; `0` after a pass that
+    /// stored everything it tried. Read by `fleet_health`: the same item
+    /// stuck on every pass makes the tracker `failing` (decision D25).
+    #[serde(default)]
+    pub consecutive_partial: u32,
 }
 
 /// Longest `SyncMetrics.last_error`.
@@ -372,19 +385,41 @@ impl TrackerSync {
                 outcome.get_or_insert_with(|| e.explain());
             }
         }
+        let previous = self
+            .metrics
+            .lock()
+            .ok()
+            .and_then(|m| {
+                m.get(&t.id)
+                    .map(|p| (p.consecutive_failures, p.consecutive_partial))
+            })
+            .unwrap_or((0, 0));
         let consecutive_failures = match outcome {
             None => 0,
-            Some(_) => self
-                .metrics
-                .lock()
-                .ok()
-                .and_then(|m| m.get(&t.id).map(|p| p.consecutive_failures))
-                .unwrap_or(0)
-                .saturating_add(1),
+            Some(_) => previous.0.saturating_add(1),
         };
+        let consecutive_partial = if pass.failed > 0 {
+            previous.1.saturating_add(1)
+        } else {
+            0
+        };
+        // A pass that ended ok but skipped items says why (M13.1): the last
+        // skipped item's reason, which is SQL / store text, sanitised like
+        // any other metric error.
+        if outcome.is_none() && pass.failed > 0 {
+            outcome = Some(format!(
+                "{} item(s) skipped: {}",
+                pass.failed,
+                pass.last_item_error
+                    .as_deref()
+                    .unwrap_or("the store refused them")
+            ));
+        }
         let m = SyncMetrics {
             tracker_id: t.id,
             consecutive_failures,
+            items_failed: pass.failed as u64,
+            consecutive_partial,
             last_pass_at: Some(now),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             items_listed: pass.listed as u64,

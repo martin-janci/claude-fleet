@@ -245,6 +245,10 @@ export interface SyncMetrics {
   frames_emitted?: number;
   /** Redacted, one line, capped. */
   last_error?: string | null;
+  /** Items the last pass skipped (work graph M13.1); retried next pass. */
+  items_failed?: number;
+  /** Passes in a row that skipped at least one item (M13.1). */
+  consecutive_partial?: number;
 }
 
 /** The sync's counters per tracker. Admin (`work_admin { status }`):
@@ -627,18 +631,25 @@ export function trackerStale(t: TrackerRow, nowSec: number, intervalSecs: number
 }
 
 /** One line for a tracker's last sync pass ("last pass 1.2 s · 40 listed ·
- *  3 changed · 12 frames"), or null when no pass has run since the syncing
- *  process started. */
+ *  3 changed · 12 frames", plus "1 skipped (2 passes in a row)" when the
+ *  pass skipped items, M13.1), or null when no pass has run since the
+ *  syncing process started. */
 export function describeSyncMetrics(m: SyncMetrics | null | undefined): string | null {
   if (!m || m.last_pass_at == null) return null;
   const ms = m.duration_ms ?? 0;
   const took = ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
-  return [
+  const parts = [
     `last pass ${took}`,
     `${m.items_listed ?? 0} listed`,
     `${m.items_changed ?? 0} changed`,
     `${m.frames_emitted ?? 0} frames`,
-  ].join(' · ');
+  ];
+  const failed = m.items_failed ?? 0;
+  if (failed > 0) {
+    const n = m.consecutive_partial ?? 0;
+    parts.push(`${failed} skipped` + (n > 1 ? ` (${n} passes in a row)` : ''));
+  }
+  return parts.join(' · ');
 }
 
 /** "synced 4 min ago" / "never synced". */

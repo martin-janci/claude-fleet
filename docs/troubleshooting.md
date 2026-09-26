@@ -26,6 +26,7 @@ it.
 | Need logs / reporting a bug | n/a | **Settings → Diagnostics → Copy diagnostics**; logs under `<app data>/logs/`. See [Logs](#logs-where-they-live-and-how-to-raise-verbosity). |
 | Session's **worktree directory vanished** (git errors in the pane, `cd: no such directory`, new panes fail) | The worktree was deleted, pruned, or moved on disk while the fleet row (and possibly the tmux session) survived | New session, Restart, Recreate and opening the terminal re-create only what is confirmed missing; anything more (a stale git entry, a moved checkout, a deleted branch, a pane in a removed directory) needs **Repair workspace** in the session details (or the `repair_session` tool). See [Repairing a session whose directory vanished](#repairing-a-session-whose-directory-vanished). (`E_REPAIR_REQUIRED`, `E_REPO_MISSING`, `E_BRANCH_CHECKED_OUT`, `E_WORKSPACE_LOCKED`, `E_REPAIR_FAILED`) |
 | A tracker shows **auth_failed** / **unreachable** / **rate_limited**, or chips show ◷ | The token expired or was revoked, the site or the `gh` host cannot be reached, or the tracker is throttling | Read the tracker's error in **Settings → Work** (or `fleet-hub tracker status`). See [Tracker sync fails](#tracker-sync-fails). |
+| **Sync skipping items: <tracker>** in the attention strip, or `skipped n` in Settings → Work | One ticket cannot be stored (the store refused it) and is retried every pass | Its view's watermark waits for it. Read the reason in Settings → Work or `fleet-hub tracker status`; the log names the ticket. See [Sync skips items](#sync-skips-items). |
 | A phone or `/events` client got **`lagged`** (or `resumed: false`) right after a tracker was added | The first sync of a new tracker sends one `work:item` frame per ticket and briefly fills the replay ring | Expected once per tracker (decision D18): the client re-lists and carries on. See [`lagged` after a first sync](#lagged-after-a-trackers-first-sync). |
 | **Why is this session linked to X?** | Detection linked or suggested it from a branch, a URL, a prompt or the PR | Click the work chip: the popover lists each link's evidence and rule. See [Why is this session linked to X?](#why-is-this-session-linked-to-x) |
 | *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
@@ -435,6 +436,30 @@ a chip shows ◷ once the tracker has not synced for two intervals.
   sync off, and it is read at start: restart after changing it).
 - A ticket that was deleted or hidden is marked **unavailable** (a
   struck-through chip). It is never deleted, and its links stay.
+
+#### Sync skips items
+
+A sync pass stores each ticket on its own. When the store refuses one (a
+constraint, a value it cannot write), that ticket is **skipped**: the rest of
+the pass goes on, the ticket is tried again next pass, and its view's
+watermark does not move until it is stored. Nothing is lost, but that ticket
+never reaches the cache while it keeps failing.
+
+- **Settings → Work** shows it on the tracker's last-pass line (`1 skipped
+  (3 passes in a row)`) with the last skipped ticket's reason; `fleet-hub
+  tracker status` prints the same (`skipped 1 (3 passes in a row)`).
+- **Health:** one pass that skipped items makes the tracker `degraded`;
+  three in a row make it `failing`, and the attention strip shows **⚠ Sync
+  skipping items: <tracker> →** (never "Reconnect": the credential is fine).
+  See the [work guide](work-graph.md#trackers-in-fleet-health).
+- **Finding the ticket:** the hub's (or desktop's) log has one warning per
+  skipped ticket with the tracker id, the ticket's external id and the
+  error, and one line per pass with the count
+  (`tracker sync: 1 item(s) failed and were skipped this pass`). See
+  [Logs](#logs-where-they-live-and-how-to-raise-verbosity).
+- **Fixing it:** usually a fleet bug with an unusual ticket: attach the log
+  lines to a bug report. Once a pass stores everything, the tracker is back
+  to `ok` by itself.
 
 #### `lagged` after a tracker's first sync
 

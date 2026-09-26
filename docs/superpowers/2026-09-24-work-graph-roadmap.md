@@ -770,7 +770,11 @@ and every open decision gets an answer backed by usage.
 
 **Status (2026-09-26):**
 - **M13.0 done** (this revision).
-- M13.1 and M13.2 are not started. M13.3 waits on the owner's run; M13.4
+- **M13.1 done** on `claude/cloud-fleet-work-graph-m13-truth`: skipped items
+  in `SyncMetrics` and `fleet_health` (`degraded`, then `failing` after
+  three partial passes, D25), "Sync skipping items" in Attention, the guide
+  and troubleshooting.
+- M13.2 is not started. M13.3 waits on the owner's run; M13.4
   waits on the decisions.
 
 ## Critical path and parallelism
@@ -828,7 +832,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D22 | Should a failing tracker raise an Attention item, not only a health row? (M12 plan) | yes · health only | **Yes, built** (M12.4, #303): one "Reconnect …" item per tracker, deduplicated |
 | D23 | Per-org retention override (needs a migration)? (M12 plan) | now · later | **Later:** settings only (M12.3, #299); no migration |
 | D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2 |
-| D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1 |
+| D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"). **Built** (M13.1) |
 | D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | Yes (default); M13.5 |
 
 ## Risks to watch
@@ -970,3 +974,6 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   every row; D16 corrected (the work-graph leg runs in CI since #314); D14
   corrected (#273 was closed; M4.6 reached `main` with #270). The critical
   path covers M9–M13.
+- 2026-09-26: M13.1 done (partial sync failures visible): `items_failed` /
+  `consecutive_partial` in `SyncMetrics`, `reason: skipping_items` in
+  `fleet_health`, D25 as defaulted. No migration, tool or contract change.

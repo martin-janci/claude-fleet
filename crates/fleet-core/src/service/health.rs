@@ -127,6 +127,19 @@ pub struct TrackerHealth {
     /// Sync passes in a row that failed, since this process started.
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Items the last pass skipped (work graph M13.1).
+    #[serde(default)]
+    pub items_failed: u64,
+    /// Passes in a row that skipped at least one item (M13.1).
+    #[serde(default)]
+    pub consecutive_partial: u32,
+    /// Why a tracker that is not `ok` is so, when it is not a failed pass or
+    /// a credential: `skipping_items` — every pass ends, but skips items
+    /// (M13.1). The desktop words its Attention item from it: a stuck item
+    /// is not a credential problem, so it never reads "Reconnect". `None`
+    /// otherwise.
+    #[serde(default)]
+    pub reason: Option<String>,
     /// Why it is not ok: redacted, defused, one line, capped at
     /// [`TRACKER_ERROR_MAX_CHARS`]; fenced as untrusted for an MCP caller.
     /// `None` while `health` is `ok`.
@@ -140,23 +153,42 @@ pub struct TrackerHealth {
     pub last_pass_at: Option<i64>,
 }
 
-/// A tracker's health level from its stored state and the sync's count of
-/// failed passes in a row. Pure.
+/// A tracker's health level from its stored state, the sync's count of
+/// failed passes in a row, and its count of passes in a row that skipped
+/// items. Pure.
 ///
 /// - `failing`: a person has to act — the credential was refused or is
 ///   missing, or a captcha stands in the way (the sync stops polling those,
 ///   so no count would ever grow) — or [`TRACKER_FAILING_AFTER`] passes in a
-///   row failed;
+///   row failed, or skipped items (the same item stuck, decision D25);
 /// - `degraded`: a transient state (rate limited, unreachable), an unknown
-///   one (a newer hub's), or fewer failed passes than that;
-/// - `ok`: state `ok` and the last pass did not fail.
-pub fn tracker_health_level(state: &str, consecutive_failures: u32) -> &'static str {
+///   one (a newer hub's), fewer failed passes than that, or a last pass that
+///   skipped items (M13.1);
+/// - `ok`: state `ok`, and the last pass neither failed nor skipped an item.
+pub fn tracker_health_level(
+    state: &str,
+    consecutive_failures: u32,
+    consecutive_partial: u32,
+) -> &'static str {
     match state {
         "auth_failed" | "captcha" | "unconfigured" => "failing",
         _ if consecutive_failures >= TRACKER_FAILING_AFTER => "failing",
-        "ok" if consecutive_failures == 0 => "ok",
+        _ if consecutive_partial >= TRACKER_FAILING_AFTER => "failing",
+        "ok" if consecutive_failures == 0 && consecutive_partial == 0 => "ok",
         _ => "degraded",
     }
+}
+
+/// [`TrackerHealth::reason`] for a tracker that is not ok only because its
+/// passes skip items: state `ok`, no failed pass, at least one partial one.
+/// Pure.
+pub fn tracker_health_reason(
+    state: &str,
+    consecutive_failures: u32,
+    consecutive_partial: u32,
+) -> Option<&'static str> {
+    (state == "ok" && consecutive_failures == 0 && consecutive_partial > 0)
+        .then_some("skipping_items")
 }
 
 /// One tracker's row, from its stored row and its sync metrics. Pure.
@@ -166,7 +198,9 @@ pub fn tracker_health(
     org_name: Option<String>,
 ) -> TrackerHealth {
     let consecutive_failures = m.map_or(0, |m| m.consecutive_failures);
-    let health = tracker_health_level(&t.state, consecutive_failures);
+    let consecutive_partial = m.map_or(0, |m| m.consecutive_partial);
+    let health = tracker_health_level(&t.state, consecutive_failures, consecutive_partial);
+    let reason = tracker_health_reason(&t.state, consecutive_failures, consecutive_partial);
     // The sync's copy is already sanitised; the stored one (a `test`, a
     // `lookup`, or a pass before this process started) is sanitised here.
     let last_error = (health != "ok")
@@ -185,6 +219,9 @@ pub fn tracker_health(
         health: health.to_string(),
         state: t.state.clone(),
         consecutive_failures,
+        items_failed: m.map_or(0, |m| m.items_failed),
+        consecutive_partial,
+        reason: reason.map(str::to_string),
         last_error,
         last_success_at: t.last_sync_at,
         last_pass_at: m.and_then(|m| m.last_pass_at),
@@ -883,30 +920,96 @@ mod tests {
     #[test]
     fn a_tracker_moves_ok_degraded_failing_and_back() {
         // The sync's count walks a tracker through the levels.
-        assert_eq!(tracker_health_level("ok", 0), "ok");
-        assert_eq!(tracker_health_level("unreachable", 1), "degraded");
-        assert_eq!(tracker_health_level("unreachable", 2), "degraded");
+        assert_eq!(tracker_health_level("ok", 0, 0), "ok");
+        assert_eq!(tracker_health_level("unreachable", 1, 0), "degraded");
+        assert_eq!(tracker_health_level("unreachable", 2, 0), "degraded");
         assert_eq!(
-            tracker_health_level("unreachable", TRACKER_FAILING_AFTER),
+            tracker_health_level("unreachable", TRACKER_FAILING_AFTER, 0),
             "failing"
         );
         assert_eq!(
-            tracker_health_level("ok", 0),
+            tracker_health_level("ok", 0, 0),
             "ok",
             "a pass that ends ok resets it"
         );
         // Transient states read degraded, even before a counted failure
         // (a restart forgets the count; the stored state does not).
-        assert_eq!(tracker_health_level("rate_limited", 0), "degraded");
-        assert_eq!(tracker_health_level("unreachable", 0), "degraded");
+        assert_eq!(tracker_health_level("rate_limited", 0, 0), "degraded");
+        assert_eq!(tracker_health_level("unreachable", 0, 0), "degraded");
         // A pass that failed with no state change ("ok" + error) too.
-        assert_eq!(tracker_health_level("ok", 1), "degraded");
+        assert_eq!(tracker_health_level("ok", 1, 0), "degraded");
         // A person has to act: failing at once, whatever the count.
         for st in ["auth_failed", "captcha", "unconfigured"] {
-            assert_eq!(tracker_health_level(st, 0), "failing", "{st}");
+            assert_eq!(tracker_health_level(st, 0, 0), "failing", "{st}");
         }
         // A newer hub's state is not ok.
-        assert_eq!(tracker_health_level("teleported", 0), "degraded");
+        assert_eq!(tracker_health_level("teleported", 0, 0), "degraded");
+    }
+
+    fn partial(tracker_id: i64, failed: u64, in_a_row: u32) -> SyncMetrics {
+        SyncMetrics {
+            items_failed: failed,
+            consecutive_partial: in_a_row,
+            last_error: (failed > 0).then(|| format!("{failed} item(s) skipped: poison")),
+            ..metrics(tracker_id, 0, None)
+        }
+    }
+
+    /// Work graph M13.1 (D25): skipped items read degraded, the same items
+    /// skipped [`TRACKER_FAILING_AFTER`] passes in a row read failing, and a
+    /// clean pass brings the tracker back to ok.
+    #[test]
+    fn a_tracker_that_skips_items_is_degraded_then_failing_then_ok_again() {
+        assert_eq!(tracker_health_level("ok", 0, 1), "degraded");
+        assert_eq!(
+            tracker_health_level("ok", 0, TRACKER_FAILING_AFTER - 1),
+            "degraded"
+        );
+        assert_eq!(
+            tracker_health_level("ok", 0, TRACKER_FAILING_AFTER),
+            "failing"
+        );
+        assert_eq!(tracker_health_level("ok", 0, 0), "ok");
+        // A credential problem stays failing, whatever the items did.
+        assert_eq!(tracker_health_level("auth_failed", 0, 1), "failing");
+
+        let store = Store::open_in_memory().unwrap();
+        let t = store
+            .add_tracker("jira", "acme", "https://acme.atlassian.net")
+            .unwrap();
+        store.set_tracker_state(t.id, "ok", None).unwrap();
+        let row = store.get_tracker(t.id).unwrap().unwrap();
+
+        let h = tracker_health(&row, Some(&partial(t.id, 1, 1)), None);
+        assert_eq!(h.health, "degraded");
+        assert_eq!(h.reason.as_deref(), Some("skipping_items"));
+        assert_eq!((h.items_failed, h.consecutive_partial), (1, 1));
+        assert_eq!(
+            h.last_error.as_deref(),
+            Some("1 item(s) skipped: poison"),
+            "the last skipped item's reason"
+        );
+
+        let n = TRACKER_FAILING_AFTER;
+        let h = tracker_health(&row, Some(&partial(t.id, 1, n)), None);
+        assert_eq!(h.health, "failing");
+        assert_eq!(h.reason.as_deref(), Some("skipping_items"), "not Reconnect");
+        assert_eq!(h.consecutive_failures, 0);
+
+        let h = tracker_health(&row, Some(&partial(t.id, 0, 0)), None);
+        assert_eq!(h.health, "ok");
+        assert_eq!((h.reason, h.last_error), (None, None));
+
+        // A failing pass is the sync's error, not skipped items: no reason.
+        let mut both = partial(t.id, 1, n);
+        both.consecutive_failures = n;
+        assert_eq!(tracker_health(&row, Some(&both), None).reason, None);
+        store
+            .set_tracker_state(t.id, "auth_failed", Some("401"))
+            .unwrap();
+        let row = store.get_tracker(t.id).unwrap().unwrap();
+        let h = tracker_health(&row, Some(&partial(t.id, 1, n)), None);
+        assert_eq!((h.health.as_str(), h.reason), ("failing", None));
     }
 
     #[test]
@@ -989,6 +1092,9 @@ mod tests {
                 .map(|&id| {
                     if id == tb.id {
                         metrics(id, 1, Some("offline"))
+                    } else if id == tn.id {
+                        // M13.1: gamma skips an item every pass.
+                        partial(id, 1, TRACKER_FAILING_AFTER)
                     } else {
                         metrics(id, 0, None)
                     }
@@ -999,7 +1105,8 @@ mod tests {
 
         let all = trackers_from_store(&s, &OrgScope::All, &m, 1_000);
         assert_eq!(ids(&all), vec![ta.id, tb.id, tn.id]);
-        assert_eq!((all.failing, all.degraded), (1, 1));
+        assert_eq!((all.failing, all.degraded), (2, 1));
+        assert_eq!(all.trackers[2].reason.as_deref(), Some("skipping_items"));
         assert_eq!(all.trackers[0].org_name.as_deref(), Some("Company A"));
         assert_eq!(all.detection_backlog_days, DETECTION_BACKLOG_DAYS);
 
@@ -1013,6 +1120,10 @@ mod tests {
         assert!(
             !serde_json::to_string(&hb).unwrap().contains("alpha"),
             "nothing of A's tracker reaches B"
+        );
+        assert!(
+            !serde_json::to_string(&hb).unwrap().contains("poison"),
+            "nor the unassigned tracker's skipped items (M13.1)"
         );
         // An unassigned host: unassigned trackers only.
         let host_none = OrgScope::for_host(&s, "h-none").unwrap();

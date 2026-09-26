@@ -151,8 +151,17 @@ fn status_line(m: &Value) -> String {
         .as_str()
         .map(|e| format!("  — {e}"))
         .unwrap_or_default();
+    // Work graph M13.1: items the pass skipped, and for how many passes in a
+    // row. Absent (an older hub) or zero: nothing to say.
+    let failed = m["items_failed"].as_u64().unwrap_or_default();
+    let in_a_row = m["consecutive_partial"].as_u64().unwrap_or_default();
+    let skipped = match (failed, in_a_row) {
+        (0, _) => String::new(),
+        (_, 0 | 1) => format!("  skipped {failed}"),
+        _ => format!("  skipped {failed} ({in_a_row} passes in a row)"),
+    };
     format!(
-        "{id:>4}  last pass {}  {} ms  listed {}  changed {}  frames {}{err}",
+        "{id:>4}  last pass {}  {} ms  listed {}  changed {}  frames {}{skipped}{err}",
         fmt_time(m["last_pass_at"].as_i64()),
         m["duration_ms"].as_u64().unwrap_or_default(),
         m["items_listed"].as_u64().unwrap_or_default(),
@@ -516,6 +525,19 @@ mod tests {
         assert!(
             line.ends_with("— the tracker could not be reached"),
             "{line}"
+        );
+        assert!(!line.contains("skipped"), "{line}");
+        // Work graph M13.1: a pass that skipped items says so.
+        let partial = status_line(&json!({
+            "tracker_id": 5, "last_pass_at": 1_790_000_000, "duration_ms": 10,
+            "items_listed": 7, "items_changed": 0, "frames_emitted": 0,
+            "items_failed": 1, "consecutive_partial": 2,
+            "last_error": "1 item(s) skipped: poison"
+        }));
+        assert!(
+            partial
+                .contains("frames 0  skipped 1 (2 passes in a row)  — 1 item(s) skipped: poison"),
+            "{partial}"
         );
         let none = status_line(&json!({"tracker_id": 4, "last_pass_at": null}));
         assert!(none.contains("no pass since the hub started"), "{none}");

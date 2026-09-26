@@ -94,6 +94,47 @@ describe('tracker attention items (pure)', () => {
     expect(reconnectLabel({ tracker_id: 1, provider: 'future', name: 'x' })).toBe('Reconnect future (x)');
   });
 
+  // Work graph M13.1 (D25): the same items skipped pass after pass make a
+  // tracker failing, but a stuck item is not a credential problem.
+  it('words a tracker that only skips items as "Sync skipping items", never "Reconnect"', () => {
+    const items = trackerAttentionItems({
+      trackers: [
+        {
+          tracker_id: 7,
+          provider: 'jira',
+          name: 'acme',
+          health: 'failing',
+          state: 'ok',
+          consecutive_failures: 0,
+          items_failed: 1,
+          consecutive_partial: 3,
+          reason: 'skipping_items',
+          last_error: '1 item(s) skipped: CHECK constraint failed',
+        },
+        // Skipping, but only degraded (one partial pass): no item yet.
+        {
+          tracker_id: 8,
+          provider: 'jira',
+          name: 'beta',
+          health: 'degraded',
+          state: 'ok',
+          items_failed: 1,
+          consecutive_partial: 1,
+          reason: 'skipping_items',
+        },
+      ],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].label).toBe('Sync skipping items: Jira (acme)');
+    expect(items[0].label).not.toContain('Reconnect');
+    expect(items[0].detail).toContain('CHECK constraint failed');
+    expect(items[0].detail).toContain('1 item skipped');
+    expect(items[0].detail).toContain('3 passes in a row');
+    expect(items[0].detail).not.toContain('reconnect');
+    expect(items[0].detail).not.toContain('last sync failed');
+    expect(items[0].section).toBe('work');
+  });
+
   it('strips only a whole fence', () => {
     expect(plainTrackerError(FENCED)).toBe('Jira answered 401: the API token has expired');
     expect(plainTrackerError('plain text')).toBe('plain text');
