@@ -186,6 +186,19 @@ impl EventBus for StoreBus {
     }
 }
 
+/// The error a lost transaction surfaces as: `E_SQLITE` once converted,
+/// the code the failed `COMMIT` used to produce.
+fn lost_transaction() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+        Some(
+            "the transaction was rolled back by SQLite before it could commit; \
+             none of its writes were kept"
+                .to_string(),
+        ),
+    )
+}
+
 /// How long a statement waits on another connection's lock (a `fleet-hub`
 /// CLI beside the daemon) before it fails with `SQLITE_BUSY`.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -395,6 +408,37 @@ impl Store {
         &self.conn
     }
 
+    /// Make every read of a `table` row matching the SQL condition `when`
+    /// fail with a real `SQLITE_IOERR`, which SQLite answers by rolling the
+    /// WHOLE transaction back even for a read-only statement (`IOERR` is a
+    /// "special error" to `sqlite3VdbeHalt`). A TEMP view named like the
+    /// table shadows it for every unqualified name, so writes to `table`
+    /// fail too: arm only a table the code under test merely reads.
+    #[cfg(test)]
+    pub(crate) fn arm_read_ioerr_for_test(&self, table: &str, when: &str) {
+        self.conn
+            .create_scalar_function(
+                "fleet_test_ioerr",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| -> rusqlite::Result<i64> {
+                    // No message: `sqlite3_result_error` would turn the code
+                    // into a plain SQLITE_ERROR.
+                    Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                        None,
+                    ))
+                },
+            )
+            .unwrap();
+        self.conn
+            .execute_batch(&format!(
+                "CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} \
+                 WHERE CASE WHEN {when} THEN fleet_test_ioerr() ELSE 1 END"
+            ))
+            .unwrap();
+    }
+
     #[cfg(test)]
     pub fn has_table(&self, name: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
@@ -490,6 +534,13 @@ impl Store {
     /// later autocommit write on the writer would join a transaction nobody
     /// commits. Nested, a failure only ever rolls back to the savepoint; the
     /// caller's transaction is the caller's.
+    ///
+    /// Inside [`Store::atomically`] it refuses to open (`Err`, no SAVEPOINT
+    /// issued) once SQLite has rolled that transaction back — even at a READ
+    /// whose error the caller swallowed (`IOERR` / `NOMEM` roll back a
+    /// read-only statement's transaction too). In autocommit the SAVEPOINT
+    /// would start a fresh transaction and its RELEASE commit the helper's
+    /// writes on their own, outside the transaction they belonged to.
     pub(super) fn in_savepoint<R, E>(
         &self,
         name: &'static str,
@@ -498,6 +549,9 @@ impl Store {
     where
         E: From<rusqlite::Error>,
     {
+        if self.transaction_lost() {
+            return Err(lost_transaction().into());
+        }
         let was_autocommit = self.conn.is_autocommit();
         self.conn.execute_batch(&format!("SAVEPOINT {name}"))?;
         let undo = |conn: &Connection| {
@@ -596,15 +650,35 @@ impl Store {
     /// instead of letting the writes after it commit one by one. Outside
     /// `atomically` there is no transaction to lose and it is always `Ok`,
     /// so a helper shared by both paths may call it unconditionally.
+    ///
+    /// A best-effort READ needs it as much as a write: SQLite rolls the
+    /// whole transaction back on an `IOERR` / `NOMEM` answer to a SELECT
+    /// too, so a swallowed read (`.ok()`, `unwrap_or_default()`) followed
+    /// by plain writes calls it right after the read.
     pub fn ensure_in_tx(&self) -> Result<(), crate::ipc_error::IpcError> {
-        if self.bus.is_holding() && self.conn.is_autocommit() {
-            return Err(crate::ipc_error::IpcError::new(
-                crate::ipc_error::codes::E_SQLITE,
-                "the transaction was rolled back by SQLite before it could commit; \
-                 none of its writes were kept",
-            ));
+        if self.transaction_lost() {
+            return Err(lost_transaction().into());
         }
         Ok(())
+    }
+
+    /// Inside an [`Store::in_savepoint`] body: `Err` once SQLite has rolled
+    /// the savepoint back (with whatever transaction encloses it). A body
+    /// never legitimately runs in autocommit, standalone or nested, so a
+    /// swallowed error followed by more of the body's writes checks this —
+    /// [`Store::ensure_in_tx`] only knows about `atomically`, and a
+    /// standalone savepoint's writes would otherwise commit one by one.
+    pub(super) fn ensure_in_savepoint(&self) -> Result<(), crate::ipc_error::IpcError> {
+        if self.conn.is_autocommit() {
+            return Err(lost_transaction().into());
+        }
+        Ok(())
+    }
+
+    /// An [`Store::atomically`] transaction is running (the bus is holding
+    /// its events) but SQLite has already rolled it back under it.
+    fn transaction_lost(&self) -> bool {
+        self.bus.is_holding() && self.conn.is_autocommit()
     }
 
     /// Frames this store has handed to its event bus since it was opened
@@ -957,6 +1031,63 @@ mod tests {
         });
         assert!(r.is_err());
         assert_eq!(setting(&s, "tail"), None, "the tail write never ran");
+    }
+
+    /// Residual I1: a READ that SQLite answered with a whole-transaction
+    /// rollback (a real `SQLITE_IOERR`) and whose error the closure swallowed
+    /// leaves the connection in autocommit. A savepoint helper after it must
+    /// not open: standalone its SAVEPOINT would start a new transaction and
+    /// its RELEASE commit the tail on its own.
+    #[test]
+    fn in_savepoint_refuses_to_open_on_a_lost_atomically() {
+        let (s, bus) = test_support::store_with_recorder();
+        s.conn.execute_batch("CREATE TABLE tail (x TEXT)").unwrap();
+        s.set_setting("boom", "1").unwrap();
+        s.arm_read_ioerr_for_test("settings", "key = 'boom'");
+        bus.take();
+        let mut body_ran = false;
+        let mut sp: Option<Result<(), crate::ipc_error::IpcError>> = None;
+        let r = s.atomically(|s| {
+            s.conn.execute("INSERT INTO tail VALUES ('before')", [])?;
+            // A best-effort read whose error is swallowed.
+            assert!(s.get_setting("boom").is_err(), "the read fails");
+            assert!(
+                s.conn.is_autocommit(),
+                "SQLite rolled the read's transaction back"
+            );
+            sp = Some(
+                s.in_savepoint("sp_tail", |c| -> Result<(), crate::ipc_error::IpcError> {
+                    body_ran = true;
+                    c.execute("INSERT INTO tail VALUES ('after')", [])?;
+                    Ok(())
+                }),
+            );
+            // Swallowed too: `atomically`'s own check still fails the call.
+            Ok(())
+        });
+        assert!(!body_ran, "no savepoint opens on a lost transaction");
+        let sp_err = sp.unwrap().unwrap_err();
+        assert!(
+            sp_err.message.contains("rolled back"),
+            "names the lost transaction: {sp_err:?}"
+        );
+        assert!(r.is_err(), "the lost transaction fails atomically");
+        let tail = |s: &Store| -> i64 {
+            s.conn
+                .query_row("SELECT COUNT(*) FROM tail", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(tail(&s), 0, "nothing kept");
+        assert!(s.conn.is_autocommit(), "no transaction left open");
+        assert!(bus.take().is_empty(), "nothing announced");
+        // Standalone (no `atomically`), a savepoint in autocommit is the
+        // transaction itself and still opens.
+        s.in_savepoint("sp_alone", |c| -> rusqlite::Result<()> {
+            c.execute("INSERT INTO tail VALUES ('alone')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(tail(&s), 1);
     }
 
     // ── M3: the write lock is taken at BEGIN ──

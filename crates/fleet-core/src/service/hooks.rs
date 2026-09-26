@@ -234,6 +234,9 @@ fn resolve_hook_row(
             _ => true,
         })
         .collect();
+    // `row_cwd` swallows its reads: one SQLite answered by rolling the
+    // hook's transaction back would read as "cwd unknown" and match.
+    s.ensure_in_tx()?;
     Ok(if matching.len() == 1 {
         matching
             .into_iter()
@@ -706,7 +709,8 @@ fn prompt_rebind_source(s: &Store, row: &SessionRow) -> Result<StartSource, IpcE
 /// worktree row belongs to the same host, else (local rows only) its
 /// project's base path. A remote row's project base path is the LOCAL
 /// checkout, which says nothing about the remote cwd, so it counts as
-/// unknown.
+/// unknown. Its reads are best-effort (a failure is "unknown" too), so a
+/// caller inside a transaction checks [`Store::ensure_in_tx`] after it.
 fn row_cwd(s: &Store, row: &SessionRow) -> Option<String> {
     let wt = row
         .worktree_id
@@ -2888,6 +2892,57 @@ mod tests {
         here.cwd = Some("/home/u/proj".into());
         apply_hook(&store, &make_ssh(), &here, &ctx(&host, None)).unwrap();
         assert_eq!(claude_id(&store, id).as_deref(), Some(NEW));
+    }
+
+    /// Residual I1: `row_cwd` swallows its project read. When SQLite answers
+    /// that read with a whole-transaction rollback (a real `SQLITE_IOERR`),
+    /// the awaiting row's cwd reads as unknown and would match: the rebind,
+    /// hook-seen stamp and prompt writes after it must not commit on their
+    /// own in autocommit, and nothing is announced.
+    #[test]
+    fn awaiting_rebind_lost_at_the_cwd_read_writes_nothing() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let store = Arc::new(Mutex::new(
+            Store::open_with_bus_in_memory(bus.clone()).unwrap(),
+        ));
+        let id = pane_session(&store, "s", "%3");
+        {
+            let s = store.lock().unwrap();
+            let pid = s.upsert_project("o", "r", "/home/u/proj").unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET project_id=?1 WHERE id=?2",
+                    rusqlite::params![pid, id],
+                )
+                .unwrap();
+            s.mark_awaiting_rebind(id).unwrap();
+            s.arm_read_ioerr_for_test("projects", "1");
+        }
+        bus.take();
+        let host = host_caller("local");
+        let mut prompt = make_payload("UserPromptSubmit", NEW);
+        prompt.cwd = Some("/home/u/other".into());
+        prompt.prompt = Some("fix it".into());
+
+        let result = apply_hook(&store, &make_ssh(), &prompt, &ctx(&host, None));
+
+        assert_eq!(
+            claude_id(&store, id).as_deref(),
+            Some(OLD),
+            "the rebind after the lost transaction must not autocommit"
+        );
+        let s = store.lock().unwrap();
+        assert!(
+            s.list_conversations(id, 5)
+                .unwrap()
+                .iter()
+                .all(|c| c.claude_session_id != NEW),
+            "no conversation opened"
+        );
+        assert_eq!(s.sessions_awaiting_rebind("local").unwrap().len(), 1);
+        assert!(result.is_err(), "the lost transaction fails the hook");
+        assert!(s.conn_ref().is_autocommit(), "no transaction is left open");
+        assert!(bus.take().is_empty(), "nothing rolled back is announced");
     }
 
     #[test]

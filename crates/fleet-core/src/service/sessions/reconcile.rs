@@ -621,6 +621,9 @@ fn write_reachable_host(
 ) -> Result<(), IpcError> {
     let host = &probe.host;
     let paths = HostPaths::for_host(s, &host.alias);
+    // `for_host` swallows its reads (settings, worktrees); one SQLite
+    // answered with a rollback must stop the plain writes below.
+    s.ensure_in_tx()?;
     // `None` (not asked this pass, or unanswerable) reads as "no agents"
     // for pairing/status purposes ONLY — the pruner below is gated
     // separately on `probe.agent_rows` itself, so a `None` never ghosts a
@@ -767,6 +770,7 @@ fn write_reachable_host(
     // the identity WRITE below too (see the comment there), not
     // just fall back for the comparison.
     let stored_identity_read = s.get_host_identity(&host.alias);
+    s.ensure_in_tx()?;
     let stored_identity_read_ok = stored_identity_read.is_ok();
     let stored_identity = stored_identity_read.unwrap_or_default();
     let verdict = mass_loss_verdict(&stored_identity, probe.identity.as_ref());
@@ -794,6 +798,8 @@ fn write_reachable_host(
         ));
         match s.mark_host_sessions_lost(&host.alias, reason, &verdict_keep, now, probe.started_at) {
             Ok(lost) => {
+                // Its re-read of each reclassified row is best-effort.
+                s.ensure_in_tx()?;
                 // Reclassified rows count too: they are this
                 // verdict's first loss record (a failed earlier pass
                 // only ghosted them as `missing`), so the routine
@@ -854,6 +860,7 @@ fn write_reachable_host(
         .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
         .ok()
         .flatten();
+    s.ensure_in_tx()?;
     s.apply_host_reconcile_in_tx(HostReconcile {
         alias: &host.alias,
         reachable: true,
@@ -1144,6 +1151,7 @@ pub(super) fn reconcile_agent_rows(
 ) -> Result<(), IpcError> {
     let mut keep: Vec<String> = Vec::new();
     let paths = HostPaths::for_host(s, host_alias);
+    s.ensure_in_tx()?;
     let dismissed = match s.dismissed_agents(host_alias) {
         Ok(d) => d,
         Err(e) => {
@@ -1232,6 +1240,7 @@ pub(super) fn reconcile_agent_rows(
         .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
         .ok()
         .flatten();
+    s.ensure_in_tx()?;
     let lost_ttl_cutoff = read_lost_ttl_cutoff(lost_ttl_raw, now);
     if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, lost_ttl_cutoff) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");

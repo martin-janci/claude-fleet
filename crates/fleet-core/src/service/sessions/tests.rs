@@ -6121,6 +6121,74 @@ fn a_host_write_whose_transaction_is_lost_writes_no_tail() {
     assert!(announced.is_empty(), "announced {announced:?}");
 }
 
+/// Residual I1: a best-effort READ that SQLite answers by rolling the
+/// host's whole transaction back (a real `SQLITE_IOERR` on the lost-TTL
+/// setting) must not let the session burst after it commit on its own: its
+/// SAVEPOINT would otherwise start a fresh transaction and its RELEASE
+/// commit the upsert in autocommit.
+#[test]
+fn a_host_write_lost_at_a_swallowed_read_writes_no_burst() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    s.set_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS, "86400")
+        .unwrap();
+    s.arm_read_ioerr_for_test("settings", "key = 'sessions.lost_ttl_secs'");
+    bus.take();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    assert!(
+        s.get_session("dev-a", "vps").unwrap().is_none(),
+        "the session burst after the lost transaction must not autocommit"
+    );
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
+/// Residual I1: `HostPaths::for_host` swallows its worktree read. When
+/// SQLite answers that read by rolling the host's transaction back, the
+/// PLAIN writes after it (the account relink, no savepoint) must not commit
+/// one by one.
+#[test]
+fn a_host_write_lost_at_the_host_paths_read_writes_no_account() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let pid = s.upsert_project("o", "r", "/home/u/r").unwrap();
+    s.upsert_worktree_on("vps", pid, "wt", "/home/u/r-wt", None)
+        .unwrap();
+    let projects = s.list_projects().unwrap();
+    s.arm_read_ioerr_for_test("worktrees", "host_alias = 'vps'");
+    bus.take();
+    let mut probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    probe.account = Some(oauth_account("acct-1", "a@example.com"));
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    assert!(
+        s.list_accounts().unwrap().is_empty(),
+        "the account relink after the lost transaction must not autocommit"
+    );
+    assert!(s.get_session("dev-a", "vps").unwrap().is_none());
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
 /// M1: `whoami`'s E_AMBIGUOUS candidates come in `list_all_sessions` order
 /// (most recent activity first), as they did before the direct lookup.
 #[test]

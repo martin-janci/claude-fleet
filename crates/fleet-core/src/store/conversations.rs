@@ -269,7 +269,7 @@ impl Store {
             if !same {
                 if let Err(e) = self.carry_resumed_work(session_id, claude_session_id) {
                     tracing::warn!(session_id, error = %e.message, "[work] resume carry failed");
-                    self.ensure_in_tx()?;
+                    self.ensure_in_savepoint()?;
                 }
             }
             Ok(())

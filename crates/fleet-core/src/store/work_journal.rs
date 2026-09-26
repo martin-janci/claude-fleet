@@ -180,6 +180,10 @@ impl Store {
                     )
                     .ok()
                     .flatten();
+                // Best-effort dedupe read, unless SQLite answered it by
+                // rolling the savepoint back: the INSERT below would then
+                // commit on its own.
+                self.ensure_in_savepoint()?;
                 if last.is_some() && last == body {
                     return Ok(None);
                 }
