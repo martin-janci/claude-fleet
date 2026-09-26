@@ -10,7 +10,9 @@ on a tracker.
 This page explains the feature. The exact tool parameters are in
 [control-api.md](control-api.md) (`work`, `work_link`, `work_admin`) and the
 generated [control-api-reference.md](control-api-reference.md). The hub's
-side (commands, providers, orgs, retention) is in [hub.md](hub.md).
+side (commands, providers, orgs, retention) is in [hub.md](hub.md). To
+check the whole feature on your own installation, walk through the manual
+acceptance run, [work-graph-acceptance.md](work-graph-acceptance.md).
 
 - [What "work" is](#what-work-is)
 - [Linking and detection](#linking-and-detection)

@@ -626,6 +626,11 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
   migration or contract bump.
 - M10.0 (the plan) is committed; M10.1–M10.3, M10.5 and M10.6 are not
   started.
+- **M10.3: script written; waits on the user's run.**
+  `docs/work-graph-acceptance.md` (2026-09-26) is the one manual
+  acceptance run, 59 steps, with the evidence M12.6 asked for and the D5
+  measurement. The filled-in copy is committed as the record and updates
+  the decisions table.
 
 ### M12: ship and operate
 
@@ -815,3 +820,8 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   a handover* is already on the phone (M8.6.3, full token), and Today and
   the ticket card stay read-only (M10.5). Only multi-start is still open;
   the default stays desktop only until M10.3.
+- 2026-09-26: M10.3 script written (`docs/work-graph-acceptance.md`, docs
+  only; linked from `docs/work-graph.md`): 59 steps from the upgrade to the
+  phone, the M11 / M12 manual items, the evidence for D3, D10, D13,
+  D15 / D20, D17 and tracker health, and the D5 measurement. It waits on the
+  user's run; no result is claimed.
