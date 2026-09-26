@@ -552,8 +552,15 @@ jobs:
             // the Latest badge backwards, because that draft is older on both
             // counts. A release candidate never takes the badge at all.
             const make_latest = prerelease ? 'false' : 'legacy';
+            // tag_name, stated rather than inherited, like make_latest: v0.3.0's
+            // draft came out of the build legs with its tag_name reset to an
+            // `untagged-…` placeholder, and publishing it without restating the
+            // tag left a published release that /releases/tag/<tag> could not
+            // find and that never took the Latest badge. The tag already exists
+            // (it started this run), so this binds to it and moves nothing.
             const { data } = await github.rest.repos.updateRelease({
               owner, repo, release_id,
+              tag_name: tag,
               draft: false,
               prerelease,
               make_latest,
