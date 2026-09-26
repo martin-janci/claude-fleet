@@ -243,7 +243,7 @@ Parameters: `confirm_nonce`, `force`, `session_id`
 
 ### `refresh_projects`
 
-Rescan the local projects directory for new or removed repositories and worktrees; returns the project list. E_NOTFOUND on a hub with hub.local_host off (no local projects directory).
+Rescan the local projects directory for new or removed repositories and worktrees; returns the project list. On a hub with hub.local_host off there is no local projects directory: nothing is scanned and the stored list is returned.
 
 ### `register_self`
 
