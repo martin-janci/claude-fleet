@@ -1570,7 +1570,14 @@ rotated one, and see *Trackers* above.
 The desktop's `state.db` carries a `local` host row for the machine it ran
 on. Since the hub defaults `hub.local_host` to `false`, that copied `local`
 row is hidden and marked unreachable automatically on first start — not
-deleted, just no longer listed, counted, probed or polled for usage.
+deleted, just no longer listed, counted, probed or polled for usage. The
+sessions that were live on it are ghosted with `lost_reason =
+local_disabled` on every start (nothing probes `local` on such a hub, so
+they would otherwise stay live and refuse every action); they stay
+dismissable and are pruned like any other ghost. `refresh_projects` has no
+local projects directory to scan there and returns the stored list, and the
+new-session, add-project and background-session dialogs start on the first
+pickable host instead of `local`.
 
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a
@@ -1717,11 +1724,14 @@ standalone exactly as before.
   such a host, which is the whole reason it dials the hub instead — so the tab
   says that rather than showing a command that cannot work. Dropping files on
   the pane (`upload_to_session`) follows the same rule, for the same reason.
-- **The asset catalog and the setup checklist** are about the machine that
-  owns the fleet, so they show the reason instead of their panels. (The hub
-  does serve the catalog's asset list, `list_assets`, to any paired client;
-  what it does not serve is the configuration and git checkout the Assets
-  panel is built on.)
+- **The asset catalog** is a read-only overview: the hub's catalog through
+  `list_assets` (each asset's per-host state, unmanaged assets, problems) and
+  a Scan hosts button through `scan_assets`, both open to any paired client.
+  Editing assets, Sync and Secrets need the catalog's git checkout and the
+  sync secrets, which live on the hub's machine, so the panel does not offer
+  them.
+- **The setup checklist** is about the machine that owns the fleet, so it
+  shows the reason instead of its panel.
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
   the error says to pair again in Settings → Hub.
 
@@ -1742,7 +1752,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 181 commands, 75 route to a hub tool, 1 routes except for one argument shape, 84 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 181 commands, 77 route to a hub tool, 1 routes except for one argument shape, 82 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1752,7 +1762,6 @@ Of the 181 commands, 75 route to a hub tool, 1 routes except for one argument sh
 | `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `assets_scan_hosts` | the hub has this as its scan_assets tool, but its result feeds an inventory panel built on the catalog checkout, which only the machine that owns the fleet has; call scan_assets on the hub, or scan from that machine |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
@@ -1770,7 +1779,6 @@ Of the 181 commands, 75 route to a hub tool, 1 routes except for one argument sh
 | `catalog_layer_template` | a template is the first step of authoring a layer into the catalog's git checkout, and catalog_write_layer refuses here for want of that checkout; the hub exposes no layer-authoring tool, so author on the machine that owns the fleet |
 | `catalog_lint_all` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_lint_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_list_assets` | the hub does serve this list (its read-only list_assets tool, open to any paired client), but the Assets panel is built on the catalog's configuration and git checkout, which only the machine that owns the fleet has; call list_assets on the hub, or browse the catalog on that machine |
 | `catalog_list_layers` | the hub does serve this (its read-only list_layers tool), but the layer definitions live in the catalog's git checkout, which only the machine that owns the fleet has; call list_layers on the hub, or work on the catalog there |
 | `catalog_list_secrets` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_load` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |

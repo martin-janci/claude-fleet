@@ -17,11 +17,12 @@ use tokio_util::sync::CancellationToken;
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostScanResult {
     pub host: String,
     /// "scanned" | "skipped" | "failed"
     pub status: String,
+    #[serde(default)]
     pub detail: Option<String>,
     pub rows: usize,
 }

@@ -20,6 +20,8 @@ import {
   mineItemIds,
   pastWorkFields,
   sessionWorkRow,
+  statusNameFilter,
+  statusNamesOf,
   toRowFilters,
   workFilterPredicate,
   workFilters,
@@ -182,5 +184,45 @@ describe('work filter state', () => {
     vi.mocked(invoke).mockRejectedValue({ code: 'E_HUB', message: 'down' });
     await loadMine();
     expect([...get(mineItemIds)]).toEqual([11, 14]);
+  });
+});
+
+describe('status by tracker name', () => {
+  const withStatus = (category: string, name: string | null) =>
+    ({ work: { status_category: category, status_name: name } }) as unknown as SessionRow;
+
+  it('lists each name once, case-insensitively, in workflow order', () => {
+    expect(
+      statusNamesOf([
+        withStatus('done', 'Done'),
+        withStatus('in_progress', 'QA Review'),
+        withStatus('in_progress', 'qa review'),
+        withStatus('todo', 'Backlog'),
+        withStatus('in_progress', 'In Progress'),
+        withStatus('todo', null),
+        { work: null } as unknown as SessionRow,
+      ]),
+    ).toEqual(['Backlog', 'In Progress', 'QA Review', 'Done']);
+  });
+
+  it('matches the name, not the category, and ignores case', () => {
+    const f = { status: statusNameFilter('QA Review') };
+    expect(rowMatches({ host: null, scope: '*', live: true, archived: false, statusCategory: 'in_progress', statusName: 'qa review' }, f)).toBe(true);
+    expect(rowMatches({ host: null, scope: '*', live: true, archived: false, statusCategory: 'in_progress', statusName: 'In Progress' }, f)).toBe(false);
+    expect(rowMatches({ host: null, scope: '*', live: true, archived: false, statusCategory: 'in_progress' }, f)).toBe(false);
+  });
+
+  it('persists a name filter and drops a blank one', () => {
+    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'name:QA Review' })).toBe(true);
+    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'name:  ' })).toBe(false);
+    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'qa' })).toBe(false);
+  });
+
+  it('treats a name no session is in any more as any status', () => {
+    const f: WorkFilters = { ...DEFAULT_WORK_FILTERS, status: 'name:Blocked' };
+    expect(effectiveWorkFilters(f, [], false, ['QA Review']).status).toBe('all');
+    expect(effectiveWorkFilters(f, [], false, ['blocked']).status).toBe('name:Blocked');
+    // Without the list (a caller that has none) the filter stands.
+    expect(effectiveWorkFilters(f, [], false).status).toBe('name:Blocked');
   });
 });

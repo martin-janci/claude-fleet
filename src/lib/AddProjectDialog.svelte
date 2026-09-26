@@ -2,7 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { addProject, confirmTokenOf, type AddProjectSource, type ProjectTreeRow } from './projects';
-  import { hosts } from './hosts';
+  import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
   import { isComponent, parseRepoUrl } from './repo_url';
   import Modal from './Modal.svelte';
@@ -50,12 +50,11 @@
   // `local`. Folder mode is local-only; it overrides the choice without
   // touching it, so leaving folder mode restores the remembered host.
   const isString = (v: unknown): v is string => typeof v === 'string';
-  const pickable = (alias: string) =>
-    $hosts.some((h) => h.alias === alias && !h.hidden && (h.reachable || h.alias === 'local'));
+  const pickable = (alias: string) => isPickableHost($hosts, alias);
   let chosenHost = $state<string>(
     untrack(() => {
       const last = readPref('last-host', '', isString);
-      return last && pickable(last) ? last : 'local';
+      return last && pickable(last) ? last : defaultHost($hosts);
     }),
   );
   $effect(() => {

@@ -1108,4 +1108,50 @@ mod tests {
         assert!(validate(REPAIR_TICK_INTERVAL_SECS, &MAX_SECS.to_string()).is_ok());
         assert_eq!(resolve(REPAIR_TICK_INTERVAL_SECS, Some("0")), "600");
     }
+
+    /// The user guide (`docs/work-graph.md`), compiled in like
+    /// `mcp::doc_gen`'s guide so the check runs wherever `cargo test` runs.
+    const WORK_GUIDE: &str = include_str!("../../../../docs/work-graph.md");
+
+    /// Work graph M12.5: the guide's settings table names every registered
+    /// `work.*` setting with its default, and nothing that is not one, so a
+    /// new or renamed setting cannot ship undocumented.
+    #[test]
+    fn work_settings_are_in_the_user_guide() {
+        let rows: BTreeMap<&str, &str> = WORK_GUIDE
+            .lines()
+            .filter_map(|l| {
+                let rest = l.strip_prefix("| `work.")?;
+                let key_len = rest.find('`')?;
+                Some((&l[3..3 + "work.".len() + key_len], l))
+            })
+            .collect();
+        let specs: Vec<&Spec> = SPECS
+            .iter()
+            .filter(|s| s.key.starts_with("work."))
+            .collect();
+        assert!(!specs.is_empty(), "no work.* settings registered");
+        for spec in &specs {
+            let row = rows.get(spec.key).unwrap_or_else(|| {
+                panic!(
+                    "docs/work-graph.md → Settings has no row for `{}` (default `{}`); add one",
+                    spec.key, spec.default
+                )
+            });
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(
+                cells.get(2).copied(),
+                Some(format!("`{}`", spec.default).as_str()),
+                "docs/work-graph.md: the default of `{}` is `{}` in code",
+                spec.key,
+                spec.default
+            );
+        }
+        for key in rows.keys() {
+            assert!(
+                specs.iter().any(|s| s.key == *key),
+                "docs/work-graph.md lists `{key}`, which is not a registered setting"
+            );
+        }
+    }
 }

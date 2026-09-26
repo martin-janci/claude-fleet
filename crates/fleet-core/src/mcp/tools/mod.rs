@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 mod assets;
 mod fleet;
 mod lifecycle;
+mod list_changed;
 mod messaging;
 mod orchestration;
 mod params;
@@ -100,6 +101,13 @@ pub struct FleetTools {
     /// retried call delivers once. Created once in `new`; every per-MCP-
     /// session clone shares it.
     recent_sends: Arc<std::sync::Mutex<RecentSends>>,
+    /// The tool list each caller is known to hold, for
+    /// `notifications/tools/list_changed`. Created once in `new`; both mounts
+    /// and every per-request clone share it.
+    list_changed: Arc<list_changed::ToolListTracker>,
+    /// True on the SSE mount only: `/mcp/json` answers with the FIRST message
+    /// the handler sends, so a notification there would replace the result.
+    push_list_changed: bool,
     tool_router: ToolRouter<FleetTools>,
 }
 
@@ -272,6 +280,8 @@ impl FleetTools {
             guards,
             long_polls: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
             recent_sends: Arc::new(std::sync::Mutex::new(RecentSends::default())),
+            list_changed: Arc::default(),
+            push_list_changed: false,
             tool_router: Self::tool_router(),
         }
     }
@@ -290,6 +300,40 @@ impl FleetTools {
     /// `self.store`, so it sees its own write under the same lock order.
     pub(super) fn reader(&self) -> &Mutex<Store> {
         crate::store::read_via(self.read_pool.as_deref(), &self.store)
+    }
+
+    /// This handler as mounted with `framing`: only an SSE response can carry
+    /// a notification ahead of the result, so only there is `listChanged`
+    /// advertised and sent.
+    pub(crate) fn for_framing(mut self, framing: super::Framing) -> Self {
+        self.push_list_changed = framing == super::Framing::Sse;
+        self
+    }
+
+    /// Fingerprint of the tool names `caller` may see — the same filter
+    /// `list_tools` applies, over names only so a `tools/call` does not clone
+    /// every schema.
+    fn visible_fingerprint(&self, caller: &Caller) -> u64 {
+        list_changed::fingerprint(
+            self.tool_router
+                .map
+                .keys()
+                .map(|k| k.as_ref())
+                .filter(|name| present::visible_to(caller, name)),
+        )
+    }
+
+    /// Tell `caller` its cached tool list is stale, on this call's own SSE
+    /// stream, ahead of the result — see `list_changed`. A send failure only
+    /// means the client went away; the call itself goes on.
+    async fn notice_list_changed(&self, caller: &Caller, context: &RequestContext<RoleServer>) {
+        if !self.push_list_changed || !list_changed::wants_notification(caller) {
+            return;
+        }
+        let current = self.visible_fingerprint(caller);
+        if self.list_changed.needs_notice(&caller.label(), current) {
+            let _ = context.peer.notify_tool_list_changed().await;
+        }
     }
 
     /// Every tool, summed from the per-domain `#[tool_router]` blocks. Both
@@ -333,6 +377,9 @@ impl ServerHandler for FleetTools {
         let label = caller.label();
         // Audit first so refused calls are on the timeline too.
         persist_audit(&self.store, &tool, request.arguments.as_ref(), &caller);
+        // Before the gates: a call refused for a tool the caller cannot see is
+        // the likeliest sign that its list is stale.
+        self.notice_list_changed(&caller, &context).await;
         if let Err(e) = enforce_mode(&caller, &tool).and_then(|()| enforce_admin(&caller, &tool)) {
             return tool_error_result(e);
         }
@@ -387,13 +434,17 @@ impl ServerHandler for FleetTools {
                 next_cursor: None,
             });
         };
-        let tools = self
+        let tools: Vec<Tool> = self
             .tool_router
             .list_all()
             .into_iter()
             .filter(|t| present::visible_to(&caller, &t.name))
             .map(present::present)
             .collect();
+        self.list_changed.listed(
+            &caller.label(),
+            list_changed::fingerprint(tools.iter().map(|t| t.name.as_ref())),
+        );
         Ok(ListToolsResult {
             tools,
             meta: None,
@@ -406,7 +457,13 @@ impl ServerHandler for FleetTools {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let tools = ServerCapabilities::builder().enable_tools();
+        let capabilities = if self.push_list_changed {
+            tools.enable_tool_list_changed().build()
+        } else {
+            tools.build()
+        };
+        ServerInfo::new(capabilities)
             .with_server_info(Implementation::from_build_env())
             // 2025-11-25; rmcp negotiates down for a client that asks for an
             // older known revision.

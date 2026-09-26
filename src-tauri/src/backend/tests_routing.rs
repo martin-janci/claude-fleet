@@ -981,6 +981,32 @@ fn routed_read_cases() -> Vec<Case> {
                 block_on(commands::operator::routed::operator_status(b, s)).map(|_| ())
             }),
         ),
+        // The Assets overview on a hub client: the hub's catalog listing, and
+        // the scan that refreshes it. Everything else in the catalog refuses.
+        (
+            "catalog_list_assets",
+            "list_assets",
+            json!({}),
+            r#"{"head":"abc","loaded_at":1,"assets":[{"kind":"skill","name":"worktree","version":"1","description":"d","tags":[],"hosts":[{"host_alias":"nas","harness":"claude","state":"in_sync"}]}],"unmanaged":[{"host_alias":"nas","harness":"claude","kind":"skill","name":"extra","state":"unmanaged","scanned_at":1,"managed":false}],"problems":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::assets::routed::catalog_list_assets(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "assets_scan_hosts",
+            "scan_assets",
+            json!({ "host_alias": "nas" }),
+            r#"[{"host":"nas","status":"scanned","rows":3}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::assets::routed::assets_scan_hosts(
+                    b,
+                    s,
+                    h,
+                    Some("nas".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
 
@@ -2796,8 +2822,6 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
     const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
 
     for (command, tool) in [
-        ("catalog_list_assets", "list_assets"),
-        ("assets_scan_hosts", "scan_assets"),
         ("catalog_import_host", "import_assets"),
         ("catalog_plan_sync", "plan_sync"),
         ("catalog_apply_sync", "apply_sync"),

@@ -476,7 +476,9 @@ pub(crate) fn test_app(
 }
 
 /// Which answer shape a mount produces. The two differ in one rmcp config
-/// flag and nothing else — same tools, same auth, same Host allowlist.
+/// flag and in what follows from it — same tools, same auth, same Host
+/// allowlist; only the SSE mount can carry `notifications/tools/list_changed`
+/// ahead of a result, so only it advertises `listChanged`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Framing {
     /// `text/event-stream`, the JSON-RPC body on a `data:` line.
@@ -489,9 +491,11 @@ pub(crate) enum Framing {
 ///
 /// Stateless means every POST is a self-contained JSON-RPC exchange served by
 /// a fresh `FleetTools` clone: no `Mcp-Session-Id` is issued or required, and
-/// `GET`/`DELETE` are refused (405). The server never sends server-initiated
-/// messages (tools only), so a session bought nothing and cost a reconnect
-/// after every app restart, port or token change, or tunnel bounce.
+/// `GET`/`DELETE` are refused (405). The one server-initiated message it has,
+/// `notifications/tools/list_changed`, rides the next `tools/call`'s own SSE
+/// response (see `tools::list_changed`), so a session would buy nothing and
+/// cost a reconnect after every app restart, port or token change, or tunnel
+/// bounce.
 ///
 /// rmcp keeps its own DNS-rebinding Host check, separate from fleet's
 /// `authorize` layer, and by default it admits only loopback Hosts. A Host
@@ -530,6 +534,7 @@ pub(crate) fn streamable_service(
         .map(str::to_string)
         .chain(allowed_hosts.iter().cloned())
         .collect();
+    let tools = tools.for_framing(framing);
     StreamableHttpService::new(
         move || Ok(tools.clone()),
         NeverSessionManager::default().into(),
@@ -1401,8 +1406,17 @@ mod tests {
 
     /// [`serve_real_tools`] with a fleet Host/Origin allowlist.
     async fn serve_real_tools_with(allowed_hosts: Vec<String>) -> std::net::SocketAddr {
+        serve_real_tools_on(allowed_hosts).await.0
+    }
+
+    /// [`serve_real_tools_with`], handing back the store so a test can mint
+    /// client tokens into it.
+    async fn serve_real_tools_on(
+        allowed_hosts: Vec<String>,
+    ) -> (std::net::SocketAddr, Arc<Mutex<Store>>) {
         use std::net::Ipv4Addr;
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let served = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::new(SshClient::new()),
@@ -1470,7 +1484,7 @@ mod tests {
             .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        addr
+        (addr, served)
     }
 
     /// One raw HTTP/1.1 exchange; reads until the server closes or 800 ms.
@@ -1603,6 +1617,99 @@ mod tests {
             r.contains("401"),
             "an unauthenticated tool endpoint is the way to get this wrong:\n{r}"
         );
+    }
+
+    /// `listChanged` is advertised where it can be delivered: the SSE mount,
+    /// whose response stream can carry a notification ahead of the result.
+    /// `/mcp/json` answers with the first message the handler sends, so it
+    /// neither advertises nor sends one.
+    #[tokio::test]
+    async fn list_changed_is_advertised_on_the_sse_mount_only() {
+        let addr = serve_real_tools().await;
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+        let sse = raw_round_trip(addr, &post_mcp(init)).await;
+        assert!(sse.contains(r#""listChanged":true"#), "/mcp:\n{sse}");
+        let json = raw_round_trip(addr, &post_mcp_path("/mcp/json", "127.0.0.1", init)).await;
+        assert!(json.contains("200 OK"), "/mcp/json:\n{json}");
+        assert!(!json.contains("listChanged"), "/mcp/json:\n{json}");
+    }
+
+    const LIST_CHANGED: &str = "notifications/tools/list_changed";
+    const A_CALL: &str = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_friendly_name","arguments":{"session_id":999999,"friendly_name":"x"}}}"#;
+
+    /// A client left connected across a restart holds a list the new process
+    /// never served it. Its first call carries the notification ahead of the
+    /// result — once — and the result is still the last frame, which is what
+    /// every in-repo reader (`wire::last_event_payload`) takes.
+    #[tokio::test]
+    async fn a_caller_that_never_listed_is_told_once_ahead_of_the_result() {
+        let addr = serve_real_tools().await;
+        let first = raw_round_trip(addr, &post_mcp(A_CALL)).await;
+        let notice = first
+            .find(LIST_CHANGED)
+            .unwrap_or_else(|| panic!("notified:\n{first}"));
+        let result = first
+            .find(r#""id":3"#)
+            .unwrap_or_else(|| panic!("answered:\n{first}"));
+        assert!(
+            notice < result,
+            "the notification precedes the result:\n{first}"
+        );
+        let body = &first[first.find("\r\n\r\n").unwrap()..];
+        assert!(
+            wire::last_event_payload(body).contains("E_NOTFOUND"),
+            "the result is the last frame:\n{first}"
+        );
+
+        let second = raw_round_trip(addr, &post_mcp(A_CALL)).await;
+        assert!(second.contains(r#""id":3"#), "answered:\n{second}");
+        assert!(!second.contains(LIST_CHANGED), "told once:\n{second}");
+    }
+
+    /// A paired client is told like any other caller: an assistant may hold
+    /// one, and every reader that does not care skips the frame (fleet-mobile
+    /// takes the first frame with a `result` or `error`). A peer hub, which
+    /// may call one tool, is not.
+    #[tokio::test]
+    async fn a_paired_client_is_told_and_a_peer_is_not() {
+        let (addr, store) = serve_real_tools_on(vec![]).await;
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("phone", &auth::sha256_hex("client-tok"), "full")
+                .unwrap();
+            s.insert_client_token("hub-b", &auth::sha256_hex("peer-tok"), "peer")
+                .unwrap();
+        }
+        let as_token =
+            |tok: &str| post_mcp(A_CALL).replace("Bearer s3cret", &format!("Bearer {tok}"));
+
+        let client = raw_round_trip(addr, &as_token("client-tok")).await;
+        assert!(client.contains(r#""id":3"#), "answered:\n{client}");
+        assert!(
+            client.contains(LIST_CHANGED),
+            "a paired client is told:\n{client}"
+        );
+
+        let peer = raw_round_trip(addr, &as_token("peer-tok")).await;
+        assert!(peer.contains(r#""id":3"#), "answered:\n{peer}");
+        assert!(!peer.contains(LIST_CHANGED), "a peer is not:\n{peer}");
+    }
+
+    /// A client that listed on this process holds the current list: nothing
+    /// is sent. Neither is anything on `/mcp/json`, where it would replace
+    /// the result.
+    #[tokio::test]
+    async fn a_caller_that_listed_or_uses_the_json_mount_is_not_told() {
+        let addr = serve_real_tools().await;
+        let json = raw_round_trip(addr, &post_mcp_path("/mcp/json", "127.0.0.1", A_CALL)).await;
+        assert!(json.contains(r#""id":3"#), "/mcp/json answered:\n{json}");
+        assert!(!json.contains(LIST_CHANGED), "/mcp/json:\n{json}");
+
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        raw_round_trip(addr, &post_mcp(list)).await;
+        let r = raw_round_trip(addr, &post_mcp(A_CALL)).await;
+        assert!(r.contains(r#""id":3"#), "answered:\n{r}");
+        assert!(!r.contains(LIST_CHANGED), "listed, so current:\n{r}");
     }
 
     /// `/metrics` answers the master token and refuses everything else with a

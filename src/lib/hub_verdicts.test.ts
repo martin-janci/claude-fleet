@@ -125,16 +125,15 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   ],
   // Gated by AssetsPanel.svelte's own `catalog_config` gate: `{#if
   // catalogBlocked}` swaps the ENTIRE panel body (Sync, Secrets, asset
-  // list/detail, import, lint, layers-adjacent…) for the remote note, so
-  // none of these ever fires — `catalog_config` already carries the
-  // REASONS entry that disables the panel.
+  // detail, import, lint, layers-adjacent…) for the hub's read-only
+  // overview, which calls only the two routed commands (catalog_list_assets,
+  // assets_scan_hosts), so none of these ever fires — `catalog_config`
+  // already carries the REASONS entry that disables the panel.
   gatedByAssetsPanel: [
     'catalog_configure',
     'catalog_load',
-    'catalog_list_assets',
     'catalog_get_asset',
     'catalog_import_host',
-    'assets_scan_hosts',
     'assets_inventory',
     'catalog_plan_sync',
     'catalog_apply_sync',

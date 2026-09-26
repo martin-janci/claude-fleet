@@ -47,8 +47,8 @@ impl FleetTools {
 
     #[tool(description = "Rescan the local projects directory for new or \
         removed repositories and worktrees; returns the project list. \
-        E_NOTFOUND on a hub with hub.local_host off (no local projects \
-        directory).")]
+        On a hub with hub.local_host off there is no local projects \
+        directory: nothing is scanned and the stored list is returned.")]
     pub(super) async fn refresh_projects(&self) -> Result<CallToolResult, McpError> {
         audit("refresh_projects", "");
         ok_json_compact(
