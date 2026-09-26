@@ -5,9 +5,14 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(
-        description = "Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels, plus tunnels_flapping for those supervised but crash-looping, which means the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON."
-    )]
+    #[tool(description = "Backend health: app and schema version, database \
+        readiness, the cached fleet roll-up, per-host reverse-tunnel health \
+        (tunnels_flapping: supervised but crash-looping, so the Control API \
+        is unreachable from that host), and ESTIMATED token usage and cost \
+        (micro-USD) per host and UTC day for 7 days, and trackers (each \
+        ok/degraded/failing, failures in a row, last error and success; \
+        detection_backlog: suggestions undecided for detection_backlog_days). \
+        A per-host token sees its own host's usage and its org's trackers.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -23,24 +28,31 @@ impl FleetTools {
         }
         h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
-            if let Ok(s) = self.reader().lock() {
-                health::scope_usage_to_host(&mut h, &s, host);
+            match self.reader().lock() {
+                Ok(s) => {
+                    health::scope_usage_to_host(&mut h, &s, host);
+                    // Work graph M12.4: its org's trackers, its host's backlog.
+                    // A scope that cannot be read shows no tracker at all.
+                    match caller.org_scope(&s) {
+                        Ok(scope) => health::scope_trackers(&mut h, &s, &scope),
+                        Err(_) => h.trackers = Default::default(),
+                    }
+                }
+                Err(_) => h.trackers = Default::default(),
             }
         }
+        // An agent reads it: a tracker's error is the tracker's text.
+        h.trackers.fence_errors();
         ok_json_compact(&h)
     }
 
-    #[tool(description = "Report ESTIMATED token usage and cost per session, \
-        host and UTC day, summed from each session's Claude Code transcript \
-        (collected every usage.interval_secs). Costs are micro-USD from a \
-        built-in per-model price table (override: usage.prices_json), not a \
-        bill. total and by_host sum the live session rows, each over its \
-        whole lifetime; by_day comes from the durable daily roll-up (killed \
-        sessions included). Optional host_alias; since_secs keeps only \
-        sessions whose usage changed in the last N seconds and scopes by_day \
-        to that window (default: every session, last 30 days). Sessions are \
-        sorted by cost, at most 200. A per-host token only sees its own \
-        host. Returns JSON.")]
+    #[tool(description = "ESTIMATED token usage and cost per session, host \
+        and UTC day, from each session's transcript (collected every \
+        usage.interval_secs). Costs are micro-USD from a built-in price \
+        table (usage.prices_json), not a bill. total and by_host sum live \
+        rows over their lifetime; by_day is the durable daily roll-up \
+        (killed sessions included). Sessions sorted by cost, at most 200. A \
+        per-host token only sees its own host.")]
     pub(super) async fn usage_report(
         &self,
         Extension(caller): Extension<Caller>,
@@ -64,47 +76,66 @@ impl FleetTools {
 
     // ---- hosts ----
 
-    #[tool(description = "List all registered hosts with their reachability, \
-        claude/tmux versions, and linked account. Returns JSON.")]
+    #[tool(description = "Registered hosts: reachability, claude/tmux \
+        versions, linked account.")]
     pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
         ok_json_compact(&hosts::list_hosts(self.reader()).map_err(to_mcp_err)?)
     }
 
-    #[tool(
-        description = "Which agent hosts (transport \"agent\") have a fleet-agent \
-        connected, since when (unix seconds), which agent version, host name and \
-        OS. Offline agent hosts are listed with connected=false; a call for one \
-        fails fast with E_AGENT_OFFLINE. enabled=false on a server that accepts \
-        no agents (the desktop). Returns JSON."
-    )]
+    #[tool(description = "Which agent hosts (transport \"agent\") have a \
+        fleet-agent connected: since (unix s), version, host name, OS. \
+        Offline ones show connected=false; a call for one fails fast with \
+        E_AGENT_OFFLINE. enabled=false where no agents are accepted (the \
+        desktop).")]
     pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
         audit("agent_status", "");
         let registry = self.ssh.agent_registry().map(|r| r.as_ref());
         ok_json_compact(&hosts::agent_status(&self.store, registry).map_err(to_mcp_err)?)
     }
 
-    #[tool(description = "Discover SSH hosts from the user's ~/.ssh/config. \
-        These are candidates for add_host. Returns JSON.")]
+    #[tool(description = "SSH hosts in the user's ~/.ssh/config: candidates \
+        for add_host.")]
     pub(super) async fn discover_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("discover_hosts", "");
         ok_json_compact(&hosts::discover_hosts().map_err(to_mcp_err)?)
     }
 
-    #[tool(description = "List the cached Claude accounts seen across hosts. \
-        Returns JSON.")]
+    #[tool(description = "The cached Claude accounts seen across hosts.")]
     pub(super) async fn list_accounts(&self) -> Result<CallToolResult, McpError> {
         audit("list_accounts", "");
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
-    #[tool(
-        description = "Register a new host. transport is \"ssh\" (the default: \
-        probed first, persisted only if reachable) or \"agent\" (a host the hub \
-        cannot reach, which runs fleet-agent and dials in: persisted unprobed and \
-        unreachable until its agent connects; get its token on the hub with \
-        `fleet-hub agent-token <alias>`). Returns the host row as JSON."
-    )]
+    #[tool(description = "Read or replace the fleet's quick replies: the \
+        chip row the desktop and phone composers draw above the prompt box, \
+        as [{label, text}]. No arguments reads; `set` replaces the whole \
+        list (max 24, [] restores the defaults). Errors: E_INVALID.")]
+    pub(super) async fn quick_replies(
+        &self,
+        Parameters(p): Parameters<QuickRepliesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Chip TEXT is a prompt the operator wrote; the count is the whole
+        // audit line, same rule as set_clipboard's body.
+        audit(
+            "quick_replies",
+            &match &p.set {
+                Some(entries) => format!("set={}", entries.len()),
+                None => "read".to_string(),
+            },
+        );
+        let entries = match p.set {
+            Some(entries) => quick_replies::replace(&self.store, entries).map_err(to_mcp_err)?,
+            None => quick_replies::list(&self.store).map_err(to_mcp_err)?,
+        };
+        ok_json_compact(&entries)
+    }
+
+    #[tool(description = "Register a host. transport \"ssh\" (default) is \
+        probed first and persisted only if reachable; \"agent\" (a host the \
+        hub cannot reach; it runs fleet-agent and dials in) is persisted \
+        unprobed, unreachable until its agent connects (token: `fleet-hub \
+        agent-token <alias>` on the hub). Returns the host row.")]
     pub(super) async fn add_host(
         &self,
         Parameters(args): Parameters<hosts::AddHostArgs>,
@@ -116,8 +147,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Re-probe a registered host's reachability and \
-        versions. Returns the updated host row as JSON.")]
+    #[tool(description = "Re-probe a host's reachability and versions. \
+        Returns the host row.")]
     pub(super) async fn probe_host(
         &self,
         Parameters(args): Parameters<hosts::HostAliasArgs>,
@@ -129,8 +160,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Remove a registered host. Its sessions are orphaned. \
-        Returns the removed host row as JSON.")]
+    #[tool(description = "Remove a host; its sessions are orphaned. Returns \
+        the removed row.")]
     pub(super) async fn remove_host(
         &self,
         Parameters(args): Parameters<hosts::HostAliasArgs>,
@@ -139,8 +170,8 @@ impl FleetTools {
         ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
-    #[tool(description = "Hide or show a host. Hidden hosts are skipped during \
-        reconcile. Returns the updated host row as JSON.")]
+    #[tool(description = "Hide or show a host (hidden: skipped by \
+        reconcile). Returns the host row.")]
     pub(super) async fn hide_host(
         &self,
         Parameters(args): Parameters<hosts::HideHostArgs>,
@@ -154,13 +185,11 @@ impl FleetTools {
 
     // ---- projects ----
 
-    #[tool(description = "Install fleet skills, the Stop / UserPromptSubmit / \
-        EnterWorktree http hooks, and this fleet's MCP server entry (with a per-host bearer \
-        token) into every reachable host's ~/.claude.json (reverse SSH tunnel \
-        for remote hosts when the hub is loopback-only; a hub with a public URL \
-        is reached directly). rotate=true mints fresh per-host tokens. Returns a \
-        per-host status list; each host must restart Claude to load the \
-        server.")]
+    #[tool(description = "Install fleet skills, the Stop / UserPromptSubmit \
+        / EnterWorktree http hooks and this fleet's MCP server entry \
+        (per-host bearer token) into every reachable host's ~/.claude.json \
+        (a reverse SSH tunnel when the hub is loopback-only). Returns \
+        per-host status; each host must restart Claude to load it.")]
     pub(super) async fn provision_hosts(
         &self,
         Parameters(p): Parameters<ProvisionHostsParams>,
@@ -185,16 +214,14 @@ impl FleetTools {
     // ---- paired clients ----
 
     #[tool(description = "Mint a single-use pairing code for a new client \
-        device (a phone, a laptop browser) and return the URL to show as a QR. \
-        The code — not a token — travels in the URL FRAGMENT, so no proxy or \
-        access log ever sees it; the device posts it to the hub's /pair once \
-        and gets a token of its own back. name must be 1-64 characters with no \
-        control characters and must not be one a live client already holds. \
-        mode is full (drive sessions fleet-wide), readonly (observe only), or \
-        peer (another hub's link — see peer_exchange); fleet-admin tools are \
-        out of a client's reach either way. Codes live \
-        in memory only, so a hub restart invalidates every outstanding one. \
-        Master token only. Returns JSON { url, code, expires_in_s, name, mode, \
+        device (phone, browser) and return the URL to show as a QR. The code \
+        (not a token) travels in the URL FRAGMENT, so no proxy or access log \
+        sees it; the device posts it to /pair once for a token of its own. \
+        name: 1-64 chars, no control characters, not a live client's. mode \
+        full drives sessions fleet-wide, readonly observes, peer is another \
+        hub's link (see peer_exchange); fleet-admin tools stay out of a \
+        client's reach. Codes are in memory only: a hub restart voids them. \
+        Master token only. Returns { url, code, expires_in_s, name, mode, \
         trusted }.")]
     // The master-only gate is `enforce_admin` in `call_tool` (`pair_client`
     // is in `guard::ADMIN_TOOLS`), so no caller extractor is needed here.
@@ -258,14 +285,11 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "List the paired client devices and what each one's \
-        token may do. The stored token digest is never returned — a client's \
-        token exists in plaintext only in the one /pair response that minted \
-        it. include_revoked also returns clients whose token was revoked \
-        (kept for the audit trail). Read-only, but master token only: the \
-        list names every paired device, so it is not a phone's to read. \
-        Returns JSON rows of \
-        { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.")]
+    #[tool(description = "Paired client devices and what each token may do. \
+        The token digest is never returned: a token exists in plaintext only \
+        in the /pair response that minted it. Read-only but master token \
+        only (it names every paired device). Rows: { id, name, mode, \
+        created_at, last_seen_at, revoked_at, trusted_at }.")]
     pub(super) async fn list_clients(
         &self,
         Parameters(p): Parameters<ListClientsParams>,
@@ -283,11 +307,10 @@ impl FleetTools {
         ok_json_compact(&out)
     }
 
-    #[tool(description = "Revoke a paired client's token by name. Its next \
-        request is refused (the auth layer only resolves live rows) and the \
-        name becomes free to pair again; the row itself is kept, revoked, for \
-        the audit trail. E_NOTFOUND when no live client holds that name. \
-        Master token only. Returns the revoked row as JSON.")]
+    #[tool(description = "Revoke a paired client's token by name: its next \
+        request is refused and the name is free to pair again; the row is \
+        kept, revoked, for the audit trail. E_NOTFOUND when no live client \
+        has that name. Master token only.")]
     pub(super) async fn revoke_client(
         &self,
         Parameters(p): Parameters<RevokeClientParams>,
@@ -304,11 +327,11 @@ impl FleetTools {
         ok_json(&ClientSummary::from(row))
     }
 
-    #[tool(description = "Grant or withdraw trust in a paired client by name: \
-        a trusted client's prompts and messages are delivered without the \
-        untrusted-content marker, as the master's raw=true is. Trust a device \
-        you type on, never an agent's token. E_NOTFOUND for an unknown live \
-        name. Master token only. Returns the row as JSON.")]
+    #[tool(description = "Grant or withdraw trust in a paired client by \
+        name: a trusted client's prompts and messages are delivered without \
+        the untrusted-content marker, like the master's raw=true. Trust a \
+        device you type on, never an agent's token. E_NOTFOUND for an \
+        unknown live name. Master token only.")]
     pub(super) async fn set_client_trust(
         &self,
         Parameters(p): Parameters<SetClientTrustParams>,
@@ -327,6 +350,48 @@ impl FleetTools {
             "[mcp] changed a client's trust"
         );
         ok_json(&ClientSummary::from(row))
+    }
+
+    // ---- operator settings ----
+
+    #[tool(description = "Operator settings (ticks, GC, playbooks, projects \
+        roots, move, usage, reports, work graph), each key's effective value. \
+        Read-only but master token only (it names hosts and their paths).")]
+    pub(super) async fn get_settings(&self) -> Result<CallToolResult, McpError> {
+        audit("get_settings", "");
+        let all = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings::read_all(&s)
+        };
+        ok_json_compact(&all)
+    }
+
+    #[tool(description = "Change one get_settings key, validated; E_INVALID \
+        otherwise. mcp.*, hub.* and controller.* are refused. Master token \
+        only. Returns the settings.")]
+    pub(super) async fn set_setting(
+        &self,
+        Parameters(p): Parameters<SetSettingParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // The key only: a value is not a secret here, but the audit trail
+        // keeps values out of every tool alike.
+        audit("set_setting", &format!("key={}", p.key.escape_debug()));
+        let value = match p.value {
+            serde_json::Value::String(v) => v,
+            serde_json::Value::Null => return Err(mcp_err(
+                codes::E_INVALID,
+                "value is required: to go back to the default, set the default get_settings shows",
+                None,
+            )),
+            other => other.to_string(),
+        };
+        let all = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings::set(&s, &p.key, &value).map_err(to_mcp_err)?;
+            crate::service::settings::read_all(&s)
+        };
+        tracing::info!(key = %p.key.escape_debug(), "[mcp] changed a setting");
+        ok_json_compact(&all)
     }
 
     // ---- workspace repair ----

@@ -20,6 +20,12 @@ pub struct HookContext<'a> {
     pub caller: &'a Caller,
     /// `X-Fleet-Pane` (validated `%N`), `None` outside tmux / old CLIs.
     pub pane_id: Option<String>,
+    /// `X-Fleet-Sync: 1`: the request came from the SYNCHRONOUS SessionStart
+    /// command (`hooks_install::SYNC_START_HEADER`), whose answer Claude
+    /// reads. The async form discards the body, so a SessionStart without
+    /// it must not consume anything (a handover brief) that only the
+    /// response would have carried.
+    pub sync_start: bool,
 }
 
 /// Dispatch a hook event to the appropriate handler. `ctx.caller` is the
@@ -447,6 +453,73 @@ pub fn take_pending_delivery(
     Some(packed)
 }
 
+/// Everything a UserPromptSubmit answer carries as `additionalContext`, in
+/// order: handover briefs and inbox mail ([`take_pending_delivery`]), then
+/// the classification nudge (work graph M4.6) when it fires and still fits
+/// the budget after the mail. All under ONE lock acquisition; `None` when
+/// there is nothing to say.
+///
+/// The nudge never displaces mail: when the mail took the budget it waits
+/// for a later prompt of the same conversation, unstamped. It is stamped on
+/// the conversation only when this answer actually carries it.
+pub fn prompt_submit_context(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<String> {
+    use crate::service::delivery::{CTX_MAX_CHARS, CTX_MAX_LINES};
+    let s = lock(store).ok()?;
+    let mail = take_pending_delivery_locked(&s, payload, ctx, false)
+        .map(|(p, _)| p.text)
+        .unwrap_or_default();
+    let nudge = prompt_nudge_locked(&s, payload, ctx).filter(|(_, n, _)| {
+        let sep = usize::from(!mail.is_empty());
+        mail.chars().count() + 2 * sep + n.chars().count() <= CTX_MAX_CHARS
+            && mail.lines().count() + sep + n.lines().count() <= CTX_MAX_LINES
+    });
+    let Some((row_id, text, conversation)) = nudge else {
+        return (!mail.is_empty()).then_some(mail);
+    };
+    let now = crate::service::catalog::now_secs();
+    if let Err(e) = s.mark_conversation_nudged(row_id, &conversation, now) {
+        // Unstamped, it would fire again on the next prompt: say so, and
+        // do not send it now rather than risk a note on every prompt.
+        tracing::warn!(error = %e.message, "[work] could not stamp the classification nudge");
+        return (!mail.is_empty()).then_some(mail);
+    }
+    let _ = s.insert_session_event(row_id, "work_classify_nudge", None);
+    Some(if mail.is_empty() {
+        text
+    } else {
+        format!("{mail}\n\n{text}")
+    })
+}
+
+/// The classification nudge for this prompt, if it fires: `(row id, text,
+/// conversation id)`. Only for the row's CURRENT conversation — a nested
+/// `claude -p` sharing the pane never gets it (see
+/// [`take_pending_delivery_locked`]).
+fn prompt_nudge_locked(
+    s: &Store,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<(i64, String, String)> {
+    let (row, _) = resolve_hook_row(s, payload, ctx, false).ok()??;
+    let current = row.claude_session_id.clone()?;
+    if payload.session_id.as_deref() != Some(current.as_str()) {
+        return None;
+    }
+    let now = crate::service::catalog::now_secs();
+    match crate::service::work::nudge::classify_nudge(s, &row, &current, now) {
+        Ok(Some(text)) => Some((row.id, text, current)),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!(error = %e.message, "[work] classification nudge failed");
+            None
+        }
+    }
+}
+
 /// As [`take_pending_delivery`], plus what a `Stop` should do about it, and
 /// the streak bookkeeping that keeps a block from repeating forever — decided
 /// and stamped under the SAME lock acquisition as the delivery itself (see
@@ -540,8 +613,16 @@ pub fn session_start_context(
         text.push('\n');
         text.push_str(&fence_untrusted(&ticket.join("\n"), "the tracker", 1000));
     }
-    // The M2 handover, whole or not at all.
-    let handovers = s.undelivered_handovers(row.id).unwrap_or_default();
+    // The M2 handover, whole or not at all — and only through a hook whose
+    // answer Claude reads. The async curl form (`-o /dev/null`) posts the
+    // same body without `X-Fleet-Sync`; stamping a brief delivered on it
+    // would lose the brief, since the next UserPromptSubmit finds nothing
+    // left to carry. On an async start the brief waits for that prompt.
+    let handovers = if ctx.sync_start {
+        s.undelivered_handovers(row.id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut delivered = Vec::new();
     for h in handovers {
         let Some(body) = h.body.as_deref() else {
@@ -907,10 +988,17 @@ fn apply_stop_hook(
             let in_flight = before.safe_kill_state.as_deref() == Some("requested");
             remember_transcript_path(s, before.id, payload, &session_id);
             let after = s.record_stop_hook_for_row(before.id)?;
+            // An agent-written handover's marker block (M9.3) is kept once,
+            // as the note: never in the turn's detail or its progress row.
             let detail: Option<String> = payload
                 .last_assistant_message
                 .as_deref()
-                .map(|m| m.trim().chars().take(200).collect::<String>())
+                .map(|m| {
+                    crate::service::work::agent_handover::strip_markers(m)
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                })
                 .filter(|d| !d.is_empty());
             best_effort_event_for(
                 s,
@@ -1000,7 +1088,14 @@ fn apply_prompt_submit_hook(
             Binding::Current => remember_transcript_path(s, row.id, payload, session_id),
             Binding::Rebound => {}
         }
-        s.record_prompt_submit_hook_for_row(row.id)?;
+        // Fleet's own prompts (a peer's wake nudge, the safe-kill
+        // instructions, an inbox delivery, a typed start prompt) come back
+        // through this hook like a person's; the same guard detection uses
+        // tells them apart, so they never count as a touch (work graph M7).
+        let touch = payload.prompt.as_deref().is_none_or(|p| {
+            crate::service::work::detect::loop_guard(p, row.last_prompt.as_deref(), &[]).is_none()
+        });
+        s.record_prompt_submit_hook_for_row_with(row.id, touch)?;
         if let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
             let first = s
                 .get_conversation(row.id, session_id)?
@@ -1598,11 +1693,18 @@ mod tests {
             s.set_current_branch(id, "abc-1-login").unwrap();
             id
         };
-        let start = |source: &str| {
+        let start_with = |source: &str, sync: bool| {
             let mut p = make_payload("SessionStart", "uuid-s");
             p.source = Some(source.into());
-            session_start_context(&store, &p, &ctx(&Caller::master(), None))
+            let master = Caller::master();
+            let c = if sync {
+                sync_ctx(&master, None)
+            } else {
+                ctx(&master, None)
+            };
+            session_start_context(&store, &p, &c)
         };
+        let start = |source: &str| start_with(source, true);
         assert_eq!(start("startup"), None, "off by default");
         {
             let s = store.lock().unwrap();
@@ -1617,6 +1719,24 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(start("clear"), None, "clear closes the window");
+        // The async command hook (no `X-Fleet-Sync`) discards the answer:
+        // it gets the work-context lines and consumes no brief.
+        let async_text = start_with("startup", false).expect("context");
+        assert!(async_text.starts_with("[claude-fleet: work context] This session works on ABC-1"));
+        assert!(
+            !async_text.contains("brief: carry on"),
+            "no brief on an async start: {async_text}"
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .undelivered_handovers(id)
+                .unwrap()
+                .len(),
+            2,
+            "an async start stamps nothing delivered"
+        );
         let text = start("startup").expect("context");
         assert!(text.starts_with("[claude-fleet: work context] This session works on ABC-1"));
         assert!(text.contains("Branch: abc-1-login"));
@@ -1641,6 +1761,48 @@ mod tests {
         assert_eq!(
             session_start_context(&store, &p, &ctx(&Caller::master(), None)),
             None
+        );
+    }
+
+    #[test]
+    fn a_prompt_fleet_typed_marks_working_but_is_nobodys_touch() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("hostb").unwrap();
+            let id = s
+                .upsert_session("sess", "hostb", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-b").unwrap();
+            s.set_claude_status_by_session_id("uuid-b", "idle").unwrap();
+            // What send_prompt stamps ahead of typing (036d72a).
+            s.set_last_prompt(id, "Continue with ABC-1: fix the login")
+                .unwrap();
+            id
+        };
+        let mut fleet = make_payload("UserPromptSubmit", "uuid-b");
+        fleet.prompt = Some("Continue with ABC-1: fix the login".into());
+        apply_hook(&store, &make_ssh(), &fleet, &ctx(&Caller::master(), None)).unwrap();
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("working"));
+            let t = s.tidy_sessions().unwrap();
+            assert!(
+                t.iter()
+                    .all(|x| x.row.id != id || x.last_touch_at.is_none()),
+                "fleet's own prompt is nobody's touch"
+            );
+        }
+        let mut person = make_payload("UserPromptSubmit", "uuid-b");
+        person.prompt = Some("now the signup page too".into());
+        apply_hook(&store, &make_ssh(), &person, &ctx(&Caller::master(), None)).unwrap();
+        let s = store.lock().unwrap();
+        let t = s.tidy_sessions().unwrap();
+        assert!(
+            t.iter()
+                .any(|x| x.row.id == id && x.last_touch_at.is_some()),
+            "a person's prompt touches"
         );
     }
 
@@ -2492,6 +2654,15 @@ mod tests {
         HookContext {
             caller,
             pane_id: pane.map(String::from),
+            sync_start: false,
+        }
+    }
+
+    /// A [`ctx`] from the synchronous SessionStart command (`X-Fleet-Sync`).
+    fn sync_ctx<'a>(caller: &'a Caller, pane: Option<&str>) -> HookContext<'a> {
+        HookContext {
+            sync_start: true,
+            ..ctx(caller, pane)
         }
     }
 
@@ -2946,6 +3117,38 @@ mod tests {
     }
 
     #[test]
+    fn a_handover_block_stays_out_of_turn_done_and_progress() {
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let host = host_caller("local");
+        for msg in [
+            "Here it is.\nWORK_HANDOVER_BEGIN_ab12cd\nLeft: docs.\nWORK_HANDOVER_END_ab12cd",
+            "WORK_HANDOVER_BEGIN_ab12cd\nonly the block\nWORK_HANDOVER_END_ab12cd",
+        ] {
+            let mut stop = make_payload("Stop", OLD);
+            stop.last_assistant_message = Some(msg.into());
+            apply_hook(&store, &make_ssh(), &stop, &ctx(&host, Some("%3"))).unwrap();
+        }
+        let s = store.lock().unwrap();
+        let details: Vec<Option<String>> = s
+            .list_session_events(id, 10)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "turn_done")
+            .map(|e| e.detail)
+            .collect();
+        assert_eq!(details, vec![None, Some("Here it is.".to_string())]);
+        let progress: Vec<String> = s
+            .journal_for_conversations(&[OLD.to_string()])
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == "progress")
+            .filter_map(|r| r.body)
+            .collect();
+        assert_eq!(progress, vec!["Here it is.".to_string()]);
+    }
+
+    #[test]
     fn stop_journals_progress_and_session_end_the_conversation() {
         let store = make_store();
         let id = pane_session(&store, "s", "%3");
@@ -3337,6 +3540,119 @@ mod tests {
             .unwrap()
     }
 
+    /// Beta three turns into `conv-b` with the classification nudge on and
+    /// one keyed local item to offer (work graph M4.6).
+    fn nudge_ready(store: &Arc<Mutex<Store>>) -> (i64, i64, HookPayload) {
+        let s = store.lock().unwrap();
+        let (a, b) = (seed(&s, "alpha"), seed(&s, "beta"));
+        s.rebind_conversation(b, "conv-b", StartSource::Fleet, None, None)
+            .unwrap();
+        for _ in 0..crate::service::work::nudge::NUDGE_AFTER_TURNS {
+            s.conversation_bump_turns(b, "conv-b").unwrap();
+        }
+        crate::service::settings::set(&s, crate::service::settings::WORK_CLASSIFY_NUDGE, "true")
+            .unwrap();
+        s.create_local_work_item(Some("PAY-7"), "Refund retries")
+            .unwrap();
+        let payload = HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        (a, b, payload)
+    }
+
+    /// Mail first, then the nudge; the nudge fires once per conversation.
+    #[test]
+    fn a_prompt_carries_mail_then_the_classification_nudge_once() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (a, b, payload) = nudge_ready(&store);
+        store
+            .lock()
+            .unwrap()
+            .insert_message(a, b, "ping", "message", None)
+            .unwrap();
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+            sync_start: false,
+        };
+
+        let text = prompt_submit_context(&store, &payload, &ctx).expect("mail and nudge");
+        let (mail, nudge) = (
+            text.find("ping").unwrap(),
+            text.find("[claude-fleet: work]").unwrap(),
+        );
+        assert!(mail < nudge, "the nudge is packed AFTER the mail: {text}");
+        assert!(text.contains("PAY-7") && text.contains("agent_inferred"));
+
+        assert_eq!(
+            prompt_submit_context(&store, &payload, &ctx),
+            None,
+            "mail stamped, nudge stamped: nothing more this conversation"
+        );
+        let s = store.lock().unwrap();
+        assert!(s.conversation_nudged(b, "conv-b").unwrap());
+    }
+
+    /// A nudge never displaces mail: when the mail fills the budget it waits,
+    /// unstamped, and rides the next prompt on its own.
+    #[test]
+    fn the_nudge_waits_when_the_mail_fills_the_budget() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (a, b, payload) = nudge_ready(&store);
+        store
+            .lock()
+            .unwrap()
+            .insert_message(a, b, &"m".repeat(7_700), "message", None)
+            .unwrap();
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+            sync_start: false,
+        };
+
+        let first = prompt_submit_context(&store, &payload, &ctx).expect("the mail");
+        assert!(first.contains(&"m".repeat(100)));
+        assert!(
+            !first.contains("[claude-fleet: work]"),
+            "no room left for the nudge"
+        );
+        assert!(first.chars().count() <= crate::service::delivery::CTX_MAX_CHARS);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
+
+        let second = prompt_submit_context(&store, &payload, &ctx).expect("the nudge alone");
+        assert!(second.starts_with("[claude-fleet: work]"), "{second}");
+    }
+
+    /// A nested `claude -p` sharing the pane (another conversation id) never
+    /// gets the nudge, and does not use it up.
+    #[test]
+    fn a_foreign_conversation_never_gets_the_nudge() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (_, b, _) = nudge_ready(&store);
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+            sync_start: false,
+        };
+        let foreign = HookPayload {
+            session_id: Some("conv-nested".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..Default::default()
+        };
+        assert_eq!(prompt_submit_context(&store, &foreign, &ctx), None);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
+    }
+
     #[test]
     fn take_pending_delivery_packs_stamps_and_then_returns_none() {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
@@ -3363,6 +3679,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         let packed = take_pending_delivery(&store, &payload, &ctx).expect("one message to deliver");
@@ -3415,6 +3732,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         let packed = take_pending_delivery(&store, &payload, &ctx).expect("one message to deliver");
@@ -3459,6 +3777,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
         let packed = take_pending_delivery(&store, &payload, &ctx).expect("brief + mail");
         assert_eq!(packed.handovers.len(), 1);
@@ -3502,6 +3821,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
         assert!(take_pending_delivery(&store, &payload, &ctx).is_none());
     }
@@ -3667,6 +3987,7 @@ mod tests {
         let ctx = HookContext {
             caller: &Caller::master(),
             pane_id: None,
+            sync_start: false,
         };
 
         assert!(

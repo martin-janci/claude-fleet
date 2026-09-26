@@ -8,7 +8,7 @@ use crate::ipc_error::lock;
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "RelatedSessionsParams")]
 pub struct RelatedSessionsArgs {
-    /// The session id to find siblings of (same project + worktree).
+    /// Fleet session id.
     pub session_id: i64,
 }
 

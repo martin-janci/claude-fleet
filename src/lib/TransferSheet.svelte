@@ -6,6 +6,7 @@
   import { hubConnection } from './hub_connection';
   import { moveBlockedReason, moveTargetsFor } from './moveEligibility';
   import { describeMoveError } from './moveErrors';
+  import { orgs } from './orgs';
   import { preflightAge, preflightFor, preflights, PREFLIGHT_STALE_MS, requestPreflight } from './preflight';
   import type { ResolveAction } from './moveSession';
   import { stepLabel } from './moveProgress';
@@ -153,9 +154,11 @@
         : (WAIT_END_TEXT[run.waitEnded] ?? 'The wait ended without a move.')
       : null,
   );
+  /** Org names for the cross-org refusal's sentence (work graph M5). */
+  const orgNames = $derived(new Map($orgs.map((o) => [o.id, o.name])));
   const failure = $derived(
     run && waitEndedText === null && (run.status === 'failed' || run.status === 'partial')
-      ? describeMoveError(run.error, run.status, run.toHost, reached)
+      ? describeMoveError(run.error, run.status, run.toHost, reached, (id) => orgNames.get(id))
       : null,
   );
   /** A `waiting` run's countdown to `deadlineUnix`, ticking with `now`. */
@@ -256,6 +259,13 @@
     if (id === null) return;
     confirming = null;
     retryMove(id, { cleanTarget });
+  }
+  /** "Move anyway": the same move, carrying its links across the org
+   *  boundary with a warning instead of the refusal. */
+  function moveAnyway(): void {
+    if (id === null) return;
+    confirming = null;
+    retryMove(id, { forceCrossOrg: true });
   }
   function resolve(action: ResolveAction): void {
     if (id === null) return;
@@ -618,6 +628,8 @@
               Clean up {run.toHost} and retry
             </button>
           {/if}
+        {:else if failure.action?.kind === 'force_cross_org'}
+          <button onclick={moveAnyway} data-testid="transfer-force-cross-org">Move anyway</button>
         {:else if failure.action?.kind === 'retry'}
           <button onclick={() => retry(false)} data-testid="transfer-retry">Retry</button>
         {/if}

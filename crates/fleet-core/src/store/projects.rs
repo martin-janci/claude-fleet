@@ -275,7 +275,7 @@ impl Store {
     /// own predicate) session occupants, instead of one
     /// `list_worktrees_for_project` call per project plus one
     /// `alive_sessions_for_worktree` call per worktree. The join condition
-    /// matches migration 056's partial index (`idx_sessions_worktree_live`).
+    /// matches migration 059's partial index (`idx_sessions_worktree_live`).
     ///
     /// Ordered exactly as the old N+1 path built it — by project (owner,
     /// repo, `list_projects`'s own order), then worktree name

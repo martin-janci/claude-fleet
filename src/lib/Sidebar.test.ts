@@ -72,6 +72,8 @@ import { onboardingDismissed } from './onboarding';
 import { toasts, clearToasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { workFilters, mineItemIds, DEFAULT_WORK_FILTERS } from './work_filters';
+import { trackers } from './trackers';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
@@ -1909,6 +1911,56 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
   });
 
+  it('work mode: a project header names work for the sessions that have none (M11.1)', async () => {
+    const keyed = { ...sessionFor(1, 'dev-login'), tags: ['PAY-7'] };
+    const p1 = sessionFor(2, 'dev-pos');
+    const p2 = sessionFor(2, 'dev-pos-2');
+    mockBackend(workProjects, [keyed, p1, p2]);
+    render(Sidebar);
+    await tick(); await tick();
+    // Project mode has no such control.
+    expect(screen.queryByTestId('name-work-group')).toBeNull();
+    sidebarGroupBy.set('work');
+    await tick(); await tick();
+    const buttons = await screen.findAllByTestId('name-work-group');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].getAttribute('title')).toContain('2 sessions with no work');
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      args?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cmd: string, args?: { args?: { session_id?: number } }) => {
+        if (cmd === 'name_session_work' || cmd === 'link_session_work') {
+          const id = args?.args?.session_id ?? 0;
+          const row = [p1, p2].find((r) => r.id === id)!;
+          return {
+            ...row,
+            row_version: 9,
+            work: { link_id: id, item_id: 70, key: null, title: 'POS cleanup', source: 'manual' },
+          };
+        }
+        return base(cmd, args);
+      },
+    );
+    await fireEvent.click(buttons[0]);
+    await tick();
+    const dialog = screen.getByTestId('name-work-dialog');
+    expect(within(dialog).getAllByTestId('name-work-session')).toHaveLength(2);
+    await fireEvent.input(within(dialog).getByTestId('name-work-title'), {
+      target: { value: 'POS cleanup' },
+    });
+    await fireEvent.click(within(dialog).getByTestId('name-work-submit'));
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('link_session_work', {
+        args: { session_id: p2.id, item_id: 70 },
+      }),
+    );
+    expect(mockedInvoke).toHaveBeenCalledWith('name_session_work', {
+      args: { session_id: p1.id, title: 'POS cleanup' },
+    });
+  });
+
   it('rolls up PRs and the worst CI state on the group header', async () => {
     const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'], pr_url: 'https://x/pull/1', ci_status: 'passing' as const };
     const b = { ...sessionFor(1, 'dev-b'), tags: ['PAY-7'], pr_url: 'https://x/pull/2', ci_status: 'failing' as const };
@@ -1968,6 +2020,91 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(screen.getAllByTestId('past-work-group')).toHaveLength(1);
   });
 
+  it('past work: Resume continues the last conversation from the header, without opening the group (M2.5)', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ended = {
+      id: 2, ref_key: 'ABC-9', state: 'confirmed', source: 'manual', created_at: 1,
+      ended_at: nowSec - 3 * 86400, snap_host: 'local', snap_name: 'login fix', snap_branch: 'abc-9',
+    };
+    const resumed = sessionFor(1, 'dev-resumed');
+    mockBackend(workProjects, [{ ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] }]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { key?: string } }) => {
+      if (cmd === 'session_work_links') return x?.args?.key === undefined ? [ended] : [];
+      if (cmd === 'work_resume_plan')
+        return {
+          key: 'ABC-9', live: [], link_id: 2, host_alias: 'local', branch: 'abc-9',
+          modes: [{ mode: 'last', ok: true }, { mode: 'brief', ok: true }, { mode: 'fresh', ok: true }],
+        };
+      if (cmd === 'resume_work') return resumed;
+      return base(cmd, x);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const pg = await screen.findByTestId('past-work-group');
+    const quick = within(pg).getByTestId('resume-quick');
+    expect(quick.title).toBe('Continue the last conversation on local · branch abc-9');
+    await fireEvent.click(quick);
+    // The plan is read for that link, then the last conversation resumed
+    // from the link the plan named — no brief, no host override.
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('resume_work', {
+        args: { key: 'ABC-9', mode: 'last', link_id: 2, host_alias: null, brief: null },
+      }),
+    );
+    expect(mockedInvoke).toHaveBeenCalledWith('work_resume_plan', {
+      args: { key: 'ABC-9', link_id: 2, host_alias: null, with_brief: false },
+    });
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'resume_work')).toHaveLength(1);
+    // The new session is selected and listed; the click did not toggle the
+    // header it sits in, and no dialog opened.
+    await waitFor(() => expect(get(selectedSession)?.id).toBe(resumed.id));
+    expect(get(sessions).some((r) => r.id === resumed.id)).toBe(true);
+    expect(within(pg).queryAllByTestId('past-work-row')).toHaveLength(0);
+    expect(screen.queryByTestId('resume-dialog')).toBeNull();
+  });
+
+  it('past work: Resume opens the dialog instead when the last conversation cannot be continued; ▾ always does (M2.5)', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ended = {
+      id: 2, ref_key: 'ABC-9', state: 'confirmed', source: 'manual', created_at: 1,
+      ended_at: nowSec - 3 * 86400, snap_host: 'local', snap_name: 'login fix', resumable: false,
+    };
+    mockBackend(workProjects, [{ ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] }]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { key?: string } }) => {
+      if (cmd === 'session_work_links') return x?.args?.key === undefined ? [ended] : [];
+      if (cmd === 'work_resume_plan')
+        return {
+          key: 'ABC-9', live: [], link_id: 2, host_alias: 'local',
+          modes: [
+            { mode: 'last', ok: false, reason: 'its transcripts were purged' },
+            { mode: 'brief', ok: true },
+            { mode: 'fresh', ok: true },
+          ],
+        };
+      return base(cmd, x);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const pg = await screen.findByTestId('past-work-group');
+    await fireEvent.click(within(pg).getByTestId('resume-quick'));
+    const dialog = await screen.findByTestId('resume-dialog');
+    const last = await within(dialog).findByTestId('resume-mode-last');
+    expect(last.closest('label')).toHaveTextContent('its transcripts were purged');
+    expect(mockedInvoke).not.toHaveBeenCalledWith('resume_work', expect.anything());
+    expect(get(selectedSession)).toBeNull();
+    // Cancel closes it; ▾ reopens it whatever the plan says. (The dialog
+    // renders inside the header, so its clicks bubble to the header's own
+    // toggle — Cancel here also expands the group; not asserted.)
+    await fireEvent.click(within(dialog).getByText('Cancel'));
+    await tick();
+    expect(screen.queryByTestId('resume-dialog')).toBeNull();
+    await fireEvent.click(within(within(pg).getByTestId('past-work-header')).getByTestId('resume-more'));
+    expect(await screen.findByTestId('resume-dialog')).toBeTruthy();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('resume_work', expect.anything());
+  });
+
   it('archived sessions sit in Done, one click un-archives; reopened and done headers (M7.3)', async () => {
     const work = (archived: number | null) => ({
       link_id: 5, item_id: 9, key: 'PAY-7', title: 'Retry', source: 'manual',
@@ -2012,6 +2149,34 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(within(group).getAllByTestId('sess-row').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('a focused session whose link is archived is shown as a row, not hidden under Done', async () => {
+    const work = (archived: number | null) => ({
+      link_id: 5, item_id: 9, key: 'PAY-7', title: 'Retry', source: 'manual',
+      status_category: 'done', status_name: 'Done', archived_at: archived,
+    });
+    const live = { ...sessionFor(1, 'dev-live'), work: work(null) };
+    const parked = { ...sessionFor(1, 'dev-parked'), work: work(1_700_000_000) };
+    mockBackend(workProjects, [live, parked]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    const group = await screen.findByTestId('work-groups');
+    expect(within(group).getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.getByTestId('work-done')).toHaveTextContent('Done · 1');
+    // A tidy-up candidate clicked in the sheet: the focus must reveal the row.
+    focusSession(parked.id, 'dev-parked');
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('dev-parked');
+    expect(screen.queryByTestId('work-done')).toBeNull();
+    expect(screen.getByTestId('session-focus-bar')).toHaveTextContent('Showing only dev-parked');
+    // Lifting the focus puts it back under Done.
+    await fireEvent.click(screen.getByTestId('session-focus-clear'));
+    await tick(); await tick();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.getByTestId('work-done')).toHaveTextContent('Done · 1');
+  });
+
   it('the purge confirmation names the work that loses its conversations (M2.5)', async () => {
     mockBackend(workProjects, [sessionFor(1, 'dev-a')]);
     const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
@@ -2037,5 +2202,123 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     expect(screen.queryByTestId('work-groups')).toBeNull();
     expect(await screen.findAllByTestId('proj-row')).toHaveLength(2);
     expect(screen.queryByTestId('sidebar-empty')).toBeNull();
+  });
+});
+
+describe('Sidebar work filters (work graph M10.4)', () => {
+  const w = (key: string, item: number, status: string, archived: number | null = null) => ({
+    link_id: item, item_id: item, key, title: key, source: 'manual',
+    status_category: status, archived_at: archived,
+  });
+  const jira = (id: number, prefix: string) => ({
+    id, provider: 'jira_cloud', name: `Jira ${prefix}`, site_url: `https://${prefix}.example`,
+    state: 'ok', created_at: 0, config: { key_prefixes: [prefix] },
+  });
+  const names = () => screen.queryAllByTestId('sess-row').map((r) => r.textContent ?? '');
+
+  beforeEach(() => {
+    sidebarGroupBy.set('project');
+    workFilters.set({ ...DEFAULT_WORK_FILTERS });
+    trackers.set([]);
+    mineItemIds.set(new Set());
+  });
+
+  it('no chrome without work to filter', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick();
+    expect(screen.queryByTestId('work-filters-toggle')).toBeNull();
+  });
+
+  it('status chips filter the tree, count on the pill, and persist', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
+    const b = { ...sessionFor(1, 'dev-b'), work: w('PAY-2', 2, 'todo') };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick();
+    expect(screen.queryByTestId('work-filters')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    // Has-session is work mode only; one tracker needs no tracker chips.
+    expect(screen.queryByTestId('wf-session-no')).toBeNull();
+    expect(screen.queryByTestId('wf-tracker-all')).toBeNull();
+    await fireEvent.click(screen.getByTestId('wf-status-todo'));
+    await tick();
+    expect(names().some((n) => n.includes('dev-b'))).toBe(true);
+    expect(names().some((n) => n.includes('dev-a'))).toBe(false);
+    expect(screen.getByTestId('work-filters-toggle')).toHaveTextContent('⚑ work (1)');
+    const isAny = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+    expect(readPref('sidebar.work-filters', {}, isAny)).toMatchObject({ status: 'todo' });
+    await fireEvent.click(screen.getByTestId('wf-clear'));
+    await tick();
+    expect(names()).toHaveLength(2);
+    expect(get(workFilters)).toEqual(DEFAULT_WORK_FILTERS);
+  });
+
+  it('mine reads the hub’s mine view and composes with needs-you', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
+    const b = { ...sessionFor(1, 'dev-b'), work: w('PAY-2', 2, 'in_progress') };
+    mockBackend(fakeProjects, [a, b]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: unknown) =>
+      cmd === 'work_tickets' ? [{ id: 2 }] : base(cmd, x),
+    );
+    render(Sidebar);
+    await tick();
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await fireEvent.click(screen.getByTestId('wf-mine'));
+    await waitFor(() => expect(names()).toHaveLength(1));
+    expect(names()[0]).toContain('dev-b');
+    expect(mockedInvoke).toHaveBeenCalledWith('work_tickets', { args: { view: 'mine', limit: 200 } });
+    // Needs-you on top: nothing of mine needs me.
+    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await tick();
+    expect(names()).toHaveLength(0);
+  });
+
+  it('tracker chips show with two trackers and filter by the key’s tracker', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'todo') };
+    const b = { ...sessionFor(1, 'dev-b'), work: w('OPS-2', 2, 'todo') };
+    mockBackend(fakeProjects, [a, b]);
+    trackers.set([jira(1, 'PAY'), jira(2, 'OPS')] as never);
+    render(Sidebar);
+    await tick();
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await fireEvent.click(screen.getByTestId('wf-tracker-2'));
+    await tick();
+    expect(names()).toHaveLength(1);
+    expect(names()[0]).toContain('dev-b');
+  });
+
+  it('work mode: past only and hide archived act on past work', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
+    mockBackend(fakeProjects, [a]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { key?: string } }) => {
+      if (cmd === 'session_work_links') {
+        return x?.args?.key === undefined
+          ? [{ id: 2, ref_key: 'ABC-9', state: 'confirmed', source: 'manual', created_at: 1, ended_at: nowSec - 60, snap_host: 'local', snap_name: 'old' }]
+          : [];
+      }
+      return base(cmd, x);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await screen.findByTestId('past-work-group');
+    expect(names()).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await fireEvent.click(screen.getByTestId('wf-session-no'));
+    await tick();
+    expect(names()).toHaveLength(0);
+    expect(screen.getByTestId('past-work-group')).toHaveTextContent('ABC-9');
+    await fireEvent.click(screen.getByTestId('wf-session-yes'));
+    await tick();
+    expect(names()).toHaveLength(1);
+    expect(screen.queryByTestId('past-work-group')).toBeNull();
+    await fireEvent.click(screen.getByTestId('wf-session-any'));
+    await fireEvent.click(screen.getByTestId('wf-hide-archived'));
+    await tick();
+    expect(names()).toHaveLength(1);
+    expect(screen.queryByTestId('past-work-group')).toBeNull();
   });
 });

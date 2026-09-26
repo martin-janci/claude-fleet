@@ -87,7 +87,7 @@ pub fn read_via<'a>(pool: Option<&'a ReadPool>, writer: &'a Mutex<Store>) -> &'a
 }
 
 impl Store {
-    /// The auth epoch (migration 057): a counter the `auth_epoch_*` triggers
+    /// The auth epoch (migration 060): a counter the `auth_epoch_*` triggers
     /// bump in the same transaction as every write that can change what a
     /// bearer token resolves to — any insert, update or delete on
     /// `host_tokens`, and any change to `client_tokens` other than the

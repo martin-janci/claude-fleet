@@ -4,7 +4,7 @@
 //! `detect` gathers the input from the store and applies the output; nothing
 //! here reads a clock, a store or a setting.
 //!
-//! Tiers, not scores: `explicit > strong > weak`, and inside a tier the most
+//! Tiers, not scores: `explicit > strong > inferred > weak`, and inside a tier the most
 //! recent decision. Nothing is learned. The rules are numbered so a link's
 //! evidence can name the one that made it:
 //!
@@ -22,6 +22,8 @@
 //! | R8 | a key two trackers claim | never automatic: a suggestion |
 //! | R9 | a rejected (participant, target) pair | never proposed again, from any signal |
 //!
+//! | R11 | an agent's inference, answering the classification nudge (`agent_inferred`, M4.6) | a pre-selected suggestion, never confirmed; decays at the next conversation boundary |
+//!
 //! R10 (reviews and workers inherit the parent's primary) is M2.2's carry.
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +34,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(rename_all = "snake_case")]
 pub enum Strength {
     Weak,
+    /// An agent's inference (M4.6): more than a key mentioned in passing,
+    /// less than a signal the session's own state gives.
+    Inferred,
     Strong,
     Explicit,
 }
@@ -40,6 +45,7 @@ impl Strength {
     pub fn as_str(self) -> &'static str {
         match self {
             Strength::Weak => "weak",
+            Strength::Inferred => "inferred",
             Strength::Strong => "strong",
             Strength::Explicit => "explicit",
         }
@@ -48,6 +54,7 @@ impl Strength {
     pub fn parse(s: &str) -> Option<Strength> {
         match s {
             "weak" => Some(Strength::Weak),
+            "inferred" => Some(Strength::Inferred),
             "strong" => Some(Strength::Strong),
             "explicit" => Some(Strength::Explicit),
             _ => None,
@@ -75,6 +82,9 @@ pub enum Signal {
     PromptKey,
     /// A bare `#n` in a prompt.
     PromptIssue,
+    /// The agent's answer to the classification nudge (M4.6): an event,
+    /// never a decision.
+    AgentInferred,
 }
 
 impl Signal {
@@ -86,6 +96,7 @@ impl Signal {
             Signal::Trailer => "trailer",
             Signal::PromptUrl => "url",
             Signal::PromptKey | Signal::PromptIssue => "prompt",
+            Signal::AgentInferred => "agent_inferred",
         }
     }
 
@@ -97,7 +108,7 @@ impl Signal {
 
 /// Link sources the resolver itself writes. A link with any other source is
 /// a decision (a person's, an agent's, or a carry) and is never changed here.
-pub const AUTO_SOURCES: &[&str] = &["branch", "pr", "trailer", "url", "prompt"];
+pub const AUTO_SOURCES: &[&str] = &["branch", "pr", "trailer", "url", "prompt", "agent_inferred"];
 
 /// One line of a link's explanation, stored denormalised on the link (C13).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,10 +229,13 @@ pub enum LinkChange {
     /// A suggestion whose state signal moved on: it was never decided, so it
     /// goes.
     Withdraw { link_id: i64 },
-    /// A suggestion that now meets an automatic rule.
+    /// A suggestion that now meets an automatic rule. It becomes the link
+    /// the promoting signal makes (`source` `branch` / `pr` / `url`), so R7
+    /// can end it when that signal moves on.
     Promote {
         link_id: i64,
         rule: &'static str,
+        source: &'static str,
         strength: Strength,
         evidence: Vec<Evidence>,
     },
@@ -418,6 +432,7 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
                     changes.push(LinkChange::Promote {
                         link_id: l.id,
                         rule,
+                        source: c.signal.source(),
                         strength: c.strength,
                         evidence: evidence_of(m, rule),
                     });
@@ -471,7 +486,12 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
         // PR text and trailers are re-read from the stored probe on every
         // run: seeing them again is news only in a new window.
         let rederived = matches!(c.signal, Signal::PrText | Signal::Trailer);
-        let (rule, confirm, pre) = if c.ambiguous {
+        let (rule, confirm, pre) = if c.signal == Signal::AgentInferred {
+            // R11: shown ticked, never linked by itself — the agent guessed,
+            // a person decides. Ahead of R8: an ambiguous key is still only
+            // ever a suggestion, and pre-selecting it is the agent's claim.
+            ("R11", false, true)
+        } else if c.ambiguous {
             ("R8", false, false)
         } else if url {
             ("R5", c.first_prompt_sole, false)
@@ -488,6 +508,7 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
                     changes.push(LinkChange::Promote {
                         link_id: l.id,
                         rule,
+                        source: c.signal.source(),
                         strength: c.strength,
                         evidence: evidence_of(m, rule),
                     });
@@ -530,7 +551,10 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
     // at the boundary. State suggestions follow R7 instead.
     if conv.is_some() {
         for l in &input.links {
-            let event = matches!(l.source.as_str(), "prompt" | "url" | "trailer");
+            let event = matches!(
+                l.source.as_str(),
+                "prompt" | "url" | "trailer" | "agent_inferred"
+            );
             if l.state == "suggested"
                 && event
                 && !touched.contains(&l.id)

@@ -8,6 +8,7 @@
   import { onMount, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import Modal from './Modal.svelte';
+  import SpiralLoader from './SpiralLoader.svelte';
   import { resumeWork, workResumePlan, type ResumeMode, type ResumePlan } from './work';
   import { sessions } from './sessions';
   import { selectSessionExplicitly } from './selection';
@@ -169,6 +170,10 @@
       {/if}
     {/if}
 
+    {#each plan.warnings ?? [] as w (w)}
+      <p class="warn" data-testid="resume-warning">{w}</p>
+    {/each}
+
     <ul class="modes" role="radiogroup" aria-label="Resume mode">
       {#each ['last', 'brief', 'fresh'] as const as m (m)}
         {@const info = modes.find((x) => x.mode === m)}
@@ -210,12 +215,16 @@
       class="primary"
       data-testid="resume-start"
       disabled={!plan || live.length > 0 || !current?.ok || busy || (mode === 'brief' && briefLoading)}
-      onclick={start}>{busy ? 'Starting…' : LABELS[mode]}</button
+      onclick={start}>{#if busy}<SpiralLoader size={12} class="btn-spiral" />Starting…{:else}{LABELS[mode]}{/if}</button
     >
   </div>
 </Modal>
 
 <style>
+  button :global(.btn-spiral) {
+    margin-right: 0.35em;
+    vertical-align: -1px;
+  }
   .title {
     margin: 0 0 0.6rem;
     font-size: 1rem;
@@ -271,6 +280,10 @@
   }
   .muted {
     color: var(--fg-muted, #999);
+  }
+  .warn {
+    margin: 0 0 0.5rem;
+    color: var(--warn, #f59e0b);
   }
   .linkish {
     background: none;

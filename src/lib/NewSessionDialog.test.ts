@@ -1586,6 +1586,9 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     const also = await screen.findByTestId('ticket-also-in-2');
     expect(screen.getByTestId('ticket-also-in').textContent).toContain('martin-janci/web');
     await fireEvent.click(also);
+    // The edited brief and name go with the multi start, as with a single one.
+    await fireEvent.input(screen.getByTestId('ticket-brief'), { target: { value: 'my own words' } });
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'ABC-7 login, both' } });
     await fireEvent.click(screen.getByTestId('create-btn'));
     await vi.waitFor(() => expect(onCreate).toHaveBeenCalledWith(started));
     const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
@@ -1593,9 +1596,42 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     expect((call[1] as { args: { project_ids: number[]; worktree: string } }).args).toMatchObject({
       item_id: 42,
       project_ids: [1, 2],
-      worktree: 'abc-7-fix-login',
+      // The worktree slug follows the edited name, as in a single start.
+      worktree: 'abc-7-login-both',
+      with_brief: true,
+      brief: 'my own words',
+      name: 'ABC-7 login, both',
     });
     expect(calls.some((c) => c[0] === 'start_work')).toBe(false);
+    projects.set([]);
+  });
+
+  it('forgets ticked repos when the ticket changes, and never starts in one not shown (M9.6)', async () => {
+    const { projects } = await import('./projects');
+    projects.set([
+      project as never,
+      { project: { ...project.project, id: 2, repo: 'web', base_path: '/r/web' }, worktrees: [] } as never,
+    ]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'session_work_links')
+        return JSON.stringify(a).includes('ABC-7')
+          ? [{ id: 1, state: 'confirmed', source: 'manual', created_at: 1, ended_at: 5, snap_project_id: 2 }]
+          : [];
+      if (cmd === 'start_work') return started;
+      if (cmd === 'start_work_multi') return { key: 'XYZ-9', started: [started] };
+      return null;
+    });
+    const { rerender } = render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate: () => {}, onCancel: () => {} },
+    });
+    await fireEvent.click(await screen.findByTestId('ticket-also-in-2'));
+    // Another ticket: repo 2 is no longer offered, and its tick is gone.
+    await rerender({ ticket: { ...ticket, id: 43, key: 'XYZ-9', title: 'Other' } });
+    await vi.waitFor(() => expect(screen.queryByTestId('ticket-also-in')).toBeNull());
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    await vi.waitFor(() => expect(calls.some((c) => c[0] === 'start_work')).toBe(true));
+    expect(calls.some((c) => c[0] === 'start_work_multi')).toBe(false);
     projects.set([]);
   });
 
@@ -1632,6 +1668,12 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     await tick();
     await fireEvent.click(screen.getByTestId('create-btn'));
     await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+    // The jump is the point: the live session is opened, nothing is shown
+    // as an error and no plain session is created instead.
+    expect(get(selectedSession)?.id).toBe(5);
+    expect(screen.queryByRole('alert')).toBeNull();
+    const cmds = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(cmds).not.toContain('new_session');
     sessionsModule.sessions.set([]);
   });
 });

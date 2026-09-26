@@ -237,7 +237,9 @@ and CI fails when it is stale. The workflows that tie the tools together
 
 Index by area (names only; see the reference for details):
 
-- **Fleet & hosts** — `fleet_health`, `usage_report` (estimated token
+- **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
+  health and the detection backlog, from cached sync state; a per-host token
+  sees its own org's trackers), `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
@@ -250,6 +252,9 @@ Index by area (names only; see the reference for details):
   `set_friendly_name`, `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
+- **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
+  presets the desktop and the phone both draw above their text box — call it
+  with no arguments to read, with `set` to replace the list).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
@@ -273,7 +278,11 @@ Index by area (names only; see the reference for details):
   hosts; `dry_run: true` previews instead — writes nothing to either host,
   needs no confirmation, and answers what would travel plus `unknowns`, or
   the same refusal the real move would raise; the result is tagged
-  `kind: "moved"` (the move report) or `kind: "preview"`),
+  `kind: "moved"` (the move report) or `kind: "preview"`; a live work link
+  that the target host's org would put across the org boundary is
+  `E_FORBIDDEN` with details `cross_org: true` — the same shape as a refused
+  link — unless `force_cross_org: true`, which carries it as it is and names
+  the crossing in the report's `warnings`),
   `resolve_move` (finish or undo a partial move left with both sessions
   alive),
   `restore_host_sessions` (batch resume a host's sessions lost to a reboot or
@@ -368,6 +377,11 @@ Index by area (names only; see the reference for details):
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
   sole branch key in that project link by itself (master or client token;
   refused to a per-host token). Prompts are never stored — only matches.
+  `work_link { action: "link", source: "agent_inferred", key }` is Claude's
+  answer to the opt-in classification nudge (`work.classify_nudge`, M4.6):
+  not a decision but a pre-selected suggestion (rule R11, strength
+  `inferred`) that a person confirms or rejects; a rejected pair stays
+  rejected. `source: "agent"` remains a confirmed declaration.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
   on a paired desktop the Settings → Work section says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,
@@ -435,6 +449,11 @@ Index by area (names only; see the reference for details):
   owner?, repo?, path_prefix?, host_alias? }`, `remove_rule { rule_id }`,
   `assign_host` / `unassign_host { host_alias, org_id }` and `assign_tracker
   { tracker_id, org_id? }` — master only, so a host can never move itself.
+  Retention (M12.3): `work_admin { action: "status" }` answers `{ trackers,
+  retention }`. `trackers` is M11.4's sync metrics. `retention` gives each
+  swept table's rows, its window and a dry-run `would_delete`, plus the
+  last sweep. `sweep_now` runs one bounded sweep; the GC tick is the only
+  other trigger (`docs/hub.md`, *Work retention*).
   Rows gain `org_id` (session, host, tracker, link, `work` summaries). For a
   **per-host token** the host's org is a boundary on everything above: it
   reads links, tickets, trackers, context and briefs only inside its org or
@@ -442,8 +461,9 @@ Index by area (names only; see the reference for details):
   an unknown id, a key outside links as the bare key it typed, and every
   session row it receives has other orgs' work taken out. Linking,
   confirming, starting or resuming work of one org on a session of another
-  is `E_FORBIDDEN` for every caller (details `cross_org: true`) unless
-  `force_cross_org: true`. An org with `isolate_sessions` also hides its
+  — or moving a session (`move_session`) to a host whose org its live links
+  are not in — is `E_FORBIDDEN` for every caller (details `cross_org: true`)
+  unless `force_cross_org: true`. An org with `isolate_sessions` also hides its
   sessions from other orgs' hosts (lists, `whoami`, `peer_status`,
   `session_history`, repo reads, messages, `session:*` frames). See
   [hub.md](hub.md) → *Organisations and isolation*.
@@ -502,6 +522,29 @@ Index by area (names only; see the reference for details):
   A repository where the key already runs is skipped (naming the session)
   rather than refusing the whole start; the reply is `{ key, started,
   skipped, failed }`. `project_id` and `project_ids` are exclusive.
+  Local work (M11.1, "Name this work…"): `work_link { action: "name",
+  session_id, title, key? }` creates a **new** local work item — work with a
+  title and no ticket — and links the session to it (manual, confirmed; it
+  becomes the session's primary work only when the session has none). The
+  title is trimmed, 1–120 characters, no control characters; the key goes
+  through the usual canonical spelling. A key a tracker item the caller can
+  see already carries (by key or alias) is `E_EXISTS` (details `item_id`,
+  `tracker: true`): that work has a ticket — link it with `{ action:
+  "link", key }`. A ticket of an org the caller cannot see is no collision:
+  the key names new work, exactly as an unknown key does. A key a local item
+  already carries is `E_EXISTS` for every caller (local keys are one
+  fleet-wide namespace; details `item_id` only for a caller that sees that
+  item). `work_link { action: "name", item_id, title }` renames a local
+  item (a ticket is `E_INVALID`) and returns the item; both emit
+  `session:updated` for the rows that show it and `work:item`.
+  `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
+  `created_at`, `updated_at`, `live_sessions`), newest change first.
+  Readonly tokens cannot name or rename. A per-host token names work only on
+  its own host's sessions inside its org — any other session answers as an
+  unknown one — and sees (lists, renames) a local item only through a live
+  link on its host's sessions or a past one whose session ran there, inside
+  its org; the count is of its host's sessions. The phone does not name
+  work (D20).
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
@@ -522,6 +565,16 @@ Index by area (names only; see the reference for details):
   token; a read, but master token only, since it names other fleets — the
   `fleet-hub peer add|list|remove` commands drive the same links straight on
   `state.db`).
+- **Operator settings** — `get_settings` (every registered key of the
+  settings registry, `service/settings.rs`, with its effective value; a
+  read, but master token only, since the values name hosts and their
+  projects roots) and `set_setting` (change one: validated against the
+  key's shape, `E_INVALID` for an unknown or derived key or a bad value;
+  returns the whole object). They reach the same keys as the desktop's
+  Settings dialog and no others: `mcp.*`, `hub.*` and `controller.*` are
+  set by their own flags and commands. The ticks and sweeps read their
+  settings every pass, so a change takes effect on the next one. On a hub
+  this is how `reports.*` and `work.*`, which have no flag, are set.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →
@@ -608,6 +661,11 @@ other's deltas. Pass the id `list_sessions`/`whoami` gave the session about
 itself, never a token or host identifier. An id that names no session gets a
 full read with `cursor_reset: "reader_unknown"` — nothing is stored, so the
 next call with the same bad id behaves identically rather than compounding.
+The reader is fenced like a target: a per-host token may only name a session
+on its own host (and inside its org scope), else `E_FORBIDDEN` before any
+read and no cursor is written — a token on host A can never advance a host-B
+session's watermark and blind it to its deltas. The master and a paired
+client are unbound.
 
 **Two answer shapes.** `session_history`, `inbox`, `repo_diff` and
 `list_sessions` answer with a JSON envelope `{unchanged, cursor_reset, more,
@@ -982,7 +1040,12 @@ via `curl -H @"$HOME/.claude/fleet-hook.headers"` (a single `Authorization:
 Bearer <host-token>` line, mode `0600`, written by the same provisioning /
 local-install code path as `settings.json`) so the token never appears in the
 command string itself, plus `-H "X-Fleet-Pane: ${TMUX_PANE:-}"` so `resolve_hook_row`
-can match the row by pane directly. Hosts pick up the `SessionStart` /
+can match the row by pane directly. With `work.session_start_context` on,
+the hooks are instead installed as the synchronous form, which also sends
+`X-Fleet-Sync: 1`: only a SessionStart carrying that header can have its
+answer read by Claude, so only then does fleet include a pending handover
+brief in it and stamp the brief delivered — the async form gets the work
+context alone and the brief waits for the next `UserPromptSubmit`. Hosts pick up the `SessionStart` /
 `PreCompact` / `PostCompact` entries only once re-provisioned —
 `provision_hosts` refreshes them on its next run; the local host installs them
 automatically on app start.
@@ -1036,14 +1099,19 @@ automatically on app start.
   `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard`,
   `repair_session`, `cancel_task` and `move_session` (not its `dry_run`) return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
   approve the request in the desktop dialog, then retry the call with that
-  nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
-  `broadcast_prompt` including a digest of the content / prompt — so an
-  approval cannot be replayed with different text. **The operator** (the UX
-  agent's own client token, `ux-agent`) is gated whatever the toggle says
-  (work graph M9.7, decision D12): its `new_session`, `new_shell_session`,
-  `safe_kill_session`, `work_link` `start` / `resume` and every tool above
-  return `E_CONFIRM_REQUIRED` until a person approves them on the desktop;
-  on a hub, which has no approver, they are refused with `E_FORBIDDEN`.
+  nonce. The nonce is bound to the call's tool and to EVERY argument — free
+  text as a readable prefix plus a digest of the whole, a prompt or brief as
+  a digest only — so an approval cannot be replayed with different
+  arguments, and is single use. **The operator** (the UX agent's own client
+  token, `ux-agent`) is gated whatever the toggle says (work graph M9.7,
+  decision D12): its session starts and restarts — `new_session`,
+  `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task`
+  with `new_worker`, `restore_host_sessions` (not its `dry_run`),
+  `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
+  its `safe_kill_session`, and every tool above return
+  `E_CONFIRM_REQUIRED` until a person approves them on the desktop; on a
+  hub, which has no approver, they are refused with `E_FORBIDDEN`. Every
+  other caller is unaffected: for them these tools are not gated.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

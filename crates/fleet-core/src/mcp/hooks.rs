@@ -87,6 +87,16 @@ pub fn pane_header(headers: &axum::http::HeaderMap) -> Option<String> {
         .then(|| v.to_string())
 }
 
+/// `X-Fleet-Sync: 1`: sent only by the synchronous SessionStart command
+/// (`hooks_install::SYNC_START_HEADER`), whose answer Claude reads. Absent
+/// or anything else → the async form, which discards the body.
+pub fn sync_start_header(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(crate::service::hooks_install::SYNC_START_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim() == "1")
+}
+
 /// Axum handler for `POST /hook`. Auth has already happened in the
 /// middleware; the [`Caller`] extension says which host's token signed the
 /// request (or the master token).
@@ -110,6 +120,7 @@ pub async fn handle_hook(
         return StatusCode::FORBIDDEN.into_response();
     }
     let pane_id = pane_header(&headers);
+    let sync_start = sync_start_header(&headers);
     // Every hook event lands here (several per turn): debug, not info. Only
     // identifiers are logged, never the payload body (`prompt`,
     // `last_assistant_message`, `message` stay out of the log).
@@ -124,6 +135,7 @@ pub async fn handle_hook(
     let ctx = crate::service::hooks::HookContext {
         caller: &caller,
         pane_id,
+        sync_start,
     };
     match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &ctx) {
         Ok(()) => {
@@ -182,7 +194,8 @@ pub async fn handle_hook(
             }
             // SessionStart answers only when installed synchronously (work
             // graph M4.5, `work.session_start_context`): an async command
-            // hook discards the body anyway.
+            // hook discards the body anyway, which is why the service stamps
+            // a handover brief delivered only when `ctx.sync_start`.
             if event == "SessionStart" {
                 return match crate::service::hooks::session_start_context(
                     &state.store,
@@ -205,18 +218,15 @@ pub async fn handle_hook(
             if event != "UserPromptSubmit" {
                 return StatusCode::NO_CONTENT.into_response();
             }
-            match crate::service::hooks::take_pending_delivery(&state.store, &payload, &ctx) {
-                Some(packed) if !packed.text.is_empty() => {
-                    tracing::debug!(
-                        event,
-                        delivered = packed.included.len(),
-                        remaining = packed.remaining,
-                        "[hook] carrying a delivery"
-                    );
+            // Mail, then the classification nudge (work graph M4.6) when it
+            // fires and fits: see `prompt_submit_context`.
+            match crate::service::hooks::prompt_submit_context(&state.store, &payload, &ctx) {
+                Some(text) if !text.is_empty() => {
+                    tracing::debug!(event, chars = text.len(), "[hook] carrying a delivery");
                     axum::Json(serde_json::json!({
                         "hookSpecificOutput": {
                             "hookEventName": event,
-                            "additionalContext": packed.text,
+                            "additionalContext": text,
                         }
                     }))
                     .into_response()
@@ -336,6 +346,92 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("ABC-1"));
+    }
+
+    /// A handover brief rides a SessionStart answer only when the request
+    /// says it came from the synchronous curl form (`X-Fleet-Sync: 1`); the
+    /// async form (`-o /dev/null`) gets the work context alone and the brief
+    /// stays undelivered for the next UserPromptSubmit.
+    #[tokio::test]
+    async fn a_session_start_stamps_a_handover_delivered_only_with_the_sync_header() {
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("dev", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "c1").unwrap();
+            s.link_session_work(id, crate::store::WorkTarget::Key("ABC-1"), "manual")
+                .unwrap();
+            crate::service::settings::set(
+                &s,
+                crate::service::settings::WORK_SESSION_START_CONTEXT,
+                "true",
+            )
+            .unwrap();
+            s.enqueue_handover(id, "brief: carry on", None).unwrap();
+            id
+        };
+        let call = |store: Arc<Mutex<crate::store::Store>>, sync: bool| async move {
+            let payload = HookPayload {
+                session_id: Some("c1".into()),
+                hook_event_name: Some("SessionStart".into()),
+                source: Some("startup".into()),
+                ..Default::default()
+            };
+            let mut headers = axum::http::HeaderMap::new();
+            if sync {
+                headers.insert(
+                    crate::service::hooks_install::SYNC_START_HEADER,
+                    "1".parse().unwrap(),
+                );
+            }
+            let resp = handle_hook(
+                State(HookState {
+                    store,
+                    ssh: Arc::new(SshClient::new()),
+                }),
+                Extension(Caller::master()),
+                headers,
+                Json(payload),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let text = call(store.clone(), false).await;
+        assert!(text.contains("ABC-1"), "{text}");
+        assert!(!text.contains("brief: carry on"), "{text}");
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .undelivered_handovers(id)
+                .unwrap()
+                .len(),
+            1,
+            "the async form leaves the brief undelivered"
+        );
+        let text = call(store.clone(), true).await;
+        assert!(text.contains("brief: carry on"), "{text}");
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .undelivered_handovers(id)
+                .unwrap()
+                .is_empty(),
+            "the sync form delivered it"
+        );
     }
 
     #[test]

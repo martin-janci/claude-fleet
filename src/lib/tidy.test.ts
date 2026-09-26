@@ -1,8 +1,21 @@
 // Work graph M7.3: the tidy-up vocabulary and the pure helpers the sheet,
 // the sidebar and the settings dry run share.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { get } from 'svelte/store';
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+import { invoke } from '@tauri-apps/api/core';
 import {
+  EMPTY_REPORT,
+  refreshTidy,
+  reopenedLoads,
+  reopenedWork,
+  tidyReport,
   applyItems,
+  candidatesFor,
+  requestedTicks,
+  tidyRequestLive,
+  requestedOnly,
+  TIDY_REQUEST_TTL_MS,
   autoTidyPreview,
   choicesFor,
   defaultChoice,
@@ -13,6 +26,8 @@ import {
   reopenedBadge,
   reopenedByKey,
   splitArchived,
+  tidyEvidence,
+  tidyReasonLabel,
   type ReopenedWork,
   type TidyCandidate,
 } from './tidy';
@@ -51,8 +66,8 @@ describe('tidy choices', () => {
     expect(preselected(ghost)).toBe(false);
   });
 
-  it('an unlinked candidate offers no snooze, never or archive; an archived one no archive', () => {
-    expect(choicesFor(cand(4, { link_id: null, action: 'kill' }))).toEqual(['kill']);
+  it('an unlinked candidate offers keep instead of snooze, never or archive; an archived one no archive', () => {
+    expect(choicesFor(cand(4, { link_id: null, action: 'kill' }))).toEqual(['kill', 'keep']);
     expect(choicesFor(cand(5, { archived: true }))).toEqual(['safe_kill', 'snooze', 'never']);
   });
 
@@ -146,5 +161,126 @@ describe('the sidebar scope (work graph M5)', () => {
     const cands = [cand(1), cand(2), cand(3)];
     expect(inScope(cands, rows, 'all', scopeOf).map((c) => c.session_id)).toEqual([1, 2, 3]);
     expect(inScope(cands, rows, 'org:1', scopeOf).map((c) => c.session_id)).toEqual([1, 3]);
+  });
+});
+
+describe('tidy requests (work graph M9)', () => {
+  const c = (id: number, action = 'safe_kill', reason = 'done_idle') =>
+    ({ session_id: id, host_alias: 'h', tmux_name: `s${id}`, reason, action, since: 0 }) as TidyCandidate;
+
+  it('tick the requested rows it can act on, else the preselection', () => {
+    const cands = [c(1), c(2, 'resume_or_expire', 'ghost_expiring'), c(3)];
+    expect([...requestedTicks(cands, { sessionIds: [3, 9], at: 0 })]).toEqual([3]);
+    expect([...requestedTicks(cands, { sessionIds: [], at: 0 })].sort()).toEqual(
+      cands.filter(preselected).map((x) => x.session_id).sort(),
+    );
+    expect(candidatesFor(cands, [1, 3]).map((x) => x.session_id)).toEqual([1, 3]);
+  });
+
+  it('a request lives for a short while only', () => {
+    const now = 1_000_000;
+    expect(tidyRequestLive({ sessionIds: [], at: now - TIDY_REQUEST_TTL_MS }, now)).toBe(true);
+    expect(tidyRequestLive({ sessionIds: [], at: now - TIDY_REQUEST_TTL_MS - 1 }, now)).toBe(false);
+    expect(tidyRequestLive(null, now)).toBe(false);
+  });
+});
+
+describe('requestedOnly (work graph M10.4)', () => {
+  const c = (id: number) => ({ session_id: id, host_alias: 'h', tmux_name: `s${id}`, reason: 'done_idle', action: 'safe_kill', since: 0 }) as TidyCandidate;
+  it('narrows to the requested candidates, or shows all', () => {
+    const cands = [c(1), c(2), c(3)];
+    expect([...(requestedOnly(cands, [3, 1, 9]) ?? [])].sort()).toEqual([1, 3]);
+    expect(requestedOnly(cands, [])).toBeNull();
+    expect(requestedOnly(cands, [9])).toBeNull();
+  });
+});
+
+describe('refreshTidy', () => {
+  const report = { ...EMPTY_REPORT, candidates: [cand(1)], idle_hours: 6 };
+  const list: ReopenedWork[] = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    tidyReport.set(report);
+    reopenedWork.set(list);
+    reopenedLoads.set(1);
+  });
+
+  it('keeps the last report and list when the hub refuses (an older hub answers E_INVALID)', async () => {
+    vi.mocked(invoke).mockRejectedValue({ code: 'E_INVALID', message: 'unknown work action: tidy' });
+    await refreshTidy();
+    expect(vi.mocked(invoke).mock.calls.map((c) => c[0]).sort()).toEqual(['work_reopened', 'work_tidy']);
+    expect(get(tidyReport)).toBe(report);
+    expect(get(reopenedWork)).toBe(list);
+    expect(get(reopenedLoads)).toBe(1);
+  });
+
+  it('each half is taken on its own: a good report next to a refused list, and the other way round', async () => {
+    const fresh = { candidates: [cand(2)], auto_tidy: true };
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tidy') return fresh;
+      throw { code: 'E_HUB', message: 'hub unreachable' };
+    });
+    await refreshTidy();
+    // The fields an older hub leaves out are filled from the defaults.
+    expect(get(tidyReport)).toEqual({ ...EMPTY_REPORT, ...fresh });
+    expect(get(reopenedWork)).toBe(list);
+    expect(get(reopenedLoads)).toBe(1);
+
+    const next: ReopenedWork[] = [{ item_id: 8, key: 'PAY-8', title: 'Again', reopened_at: 9, past_sessions: 1 }];
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_reopened') return next;
+      throw { code: 'E_HUB', message: 'hub unreachable' };
+    });
+    await refreshTidy();
+    expect(get(tidyReport)).toEqual({ ...EMPTY_REPORT, ...fresh });
+    expect(get(reopenedWork)).toBe(next);
+    expect(get(reopenedLoads)).toBe(2);
+  });
+
+  it('an answer that is not usable (null, or a list that is not a list) is not taken either', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_reopened' ? { items: [] } : null));
+    await refreshTidy();
+    expect(get(tidyReport)).toBe(report);
+    expect(get(reopenedWork)).toBe(list);
+    expect(get(reopenedLoads)).toBe(1);
+  });
+});
+
+describe('idle_unlinked (work graph M11.3)', () => {
+  const NOW = 2_000_000_000;
+  const lonely = cand(7, {
+    link_id: null,
+    reason: 'idle_unlinked',
+    action: 'safe_kill',
+    since: NOW - 9 * 86_400,
+    idle_secs: 12 * 86_400,
+  });
+
+  it('is labelled, offers Safe kill and Keep, and is never preselected', () => {
+    expect(tidyReasonLabel('idle_unlinked')).toBe('Idle, no work linked');
+    expect(choicesFor(lonely)).toEqual(['safe_kill', 'keep']);
+    expect(defaultChoice(lonely)).toBe('safe_kill');
+    expect(preselected(lonely)).toBe(false);
+    expect([...requestedTicks([lonely, cand(1)], { sessionIds: [7, 1], at: 0 })]).toEqual([1]);
+  });
+
+  it('shows its evidence: quiet since its last use, no work linked', () => {
+    expect(tidyEvidence(lonely, NOW)).toBe('idle 9 d · no work linked');
+    expect(tidyEvidence(cand(1), NOW)).toBe('idle 5 h');
+  });
+
+  it('keeps for 7 days per session, with no link', () => {
+    expect(applyItems([lonely], new Set([7]), new Map([[7, 'keep' as const]]))).toEqual([
+      { session_id: 7, action: 'keep', days: 7 },
+    ]);
+  });
+
+  it('ranks last, and is never in the auto-tidy dry run', () => {
+    expect(groupByReason([lonely, cand(1, { reason: 'ghost_expiring' })]).map((g) => g.reason)).toEqual([
+      'ghost_expiring',
+      'idle_unlinked',
+    ]);
+    expect(autoTidyPreview([lonely], new Set(['idle_unlinked', 'done_idle']))).toEqual([]);
   });
 });

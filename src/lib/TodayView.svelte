@@ -13,6 +13,7 @@
   import { copyText } from './clipboard';
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
+  import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
   import {
     loadToday,
     localMidnight,
@@ -44,6 +45,15 @@
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // A hub without `work_today` (older than M9.1) answers one of these for the
+  // call — by policy (E_FORBIDDEN: the gates fail closed on the tool name),
+  // at the router (E_HUB_PROTOCOL) or as an unknown action (E_INVALID).
+  // That is "no Today on this hub", not a failure: the view is the empty
+  // state of Details and keeps its plain text, and the refresh on row events
+  // stops instead of asking again after every turn. Like tidy.ts, matched by
+  // code, never by message text.
+  const HUB_HAS_NO_TODAY = ['E_INVALID', 'E_FORBIDDEN', 'E_HUB_PROTOCOL'];
+
   async function refresh() {
     loading = true;
     const r = await loadToday(localMidnight(now()));
@@ -51,6 +61,10 @@
     if (r.ok) {
       today = r.value;
       error = null;
+    } else if (HUB_HAS_NO_TODAY.includes(r.error.code)) {
+      today = null;
+      error = null;
+      stopFollowing();
     } else {
       error = r.error.message;
     }
@@ -59,7 +73,7 @@
   // Refresh on open, then on row changes — debounced, since a busy fleet
   // emits a row event per turn.
   let first = true;
-  const unsub = sessions.subscribe(() => {
+  let unsub: (() => void) | null = sessions.subscribe(() => {
     if (first) {
       first = false;
       void refresh();
@@ -68,13 +82,29 @@
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => void refresh(), 2_000);
   });
-  onDestroy(() => {
-    unsub();
+  function stopFollowing() {
+    unsub?.();
+    unsub = null;
     clearTimeout(refreshTimer);
+  }
+  onDestroy(() => {
+    stopFollowing();
     clearTimeout(copyTimer);
   });
 
   const view = $derived(today ? scopeToday(today, $effectiveScope, $sessions, $scopeOf) : null);
+
+  // Work graph M9 follow-up: the stale sessions fleet also suggests tidying
+  // (M7) open the Tidy-up sheet with just those picked.
+  void refreshTidy();
+  const staleIds = $derived(view ? view.stale.flatMap((g) => g.sessions.map((s) => s.id)) : []);
+  const staleTidy = $derived(
+    candidatesFor(inScope($tidyReport.candidates, $sessions, $effectiveScope, $scopeOf), staleIds),
+  );
+  function tidyStale() {
+    requestTidy(staleTidy.map((c) => c.session_id));
+    onclose?.();
+  }
 
   async function copyStandup() {
     if (!view) return;
@@ -177,7 +207,18 @@
       </ul>
     {/if}
     {#if view.stale.length > 0}
-      <h3 data-testid="today-stale">Stale</h3>
+      <h3 data-testid="today-stale">
+        Stale
+        {#if staleTidy.length > 0}
+          <button
+            class="btn btn--quiet tidy"
+            type="button"
+            data-testid="today-tidy"
+            title="Open Tidy up with these sessions picked; nothing happens until you confirm there"
+            onclick={tidyStale}>Tidy up · {staleTidy.length}</button
+          >
+        {/if}
+      </h3>
       {@render groups(view.stale, 'stale')}
     {/if}
   {:else if !error}
@@ -208,6 +249,11 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
+  }
+  h3 .tidy {
+    margin-left: 0.4rem;
+    text-transform: none;
+    letter-spacing: normal;
   }
   .actions {
     display: flex;

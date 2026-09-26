@@ -67,7 +67,7 @@ a confirm (or opt-in auto-tidy):
 | tmux session | kill it through **safe kill** (Claude commits and pushes first); plain-kill a session that shares its worktree with another | kill a dirty or unpushed worktree any other way |
 | Claude conversation / transcript | — | delete it |
 | worktree / branch | — (safe kill removes the worktree only after the push succeeded) | delete a branch with unpushed commits |
-| journal / history | — (retention is `work.journal_days`) | delete it |
+| journal / history | — (retention is `work.retention.*`, see `docs/hub.md`) | delete it while anything live points at it |
 
 **Archive** collapses a live session into its work group's Done; tmux keeps
 running, and the next prompt or attach brings it back. **Snooze 7 d** and

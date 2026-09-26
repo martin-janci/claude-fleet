@@ -1,6 +1,6 @@
 // Work graph M4.4: the batch review of link suggestions (pill, sheet, j/k and
 // y/n) and the Undo toast of an automatic link.
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -14,6 +14,23 @@ import { toasts, runToastAction } from './toasts';
 import { describeEvidence, newAutoLinks, autoLinkSnapshot } from './work';
 import { sessionFocus } from './session_focus';
 import { selectedSession, selectSession } from './selection';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+
+/** A desktop paired with a hub whose live link is down: confirm_session_work
+ *  and reject_session_work are routed mutations, blocked with a reason. */
+const remote: HubStatus = {
+  remote: true,
+  url: 'https://fleet.example.com',
+  client_name: 'laptop',
+  client_mode: null,
+  configured_url: 'https://fleet.example.com',
+  configured_client_name: 'laptop',
+  allow_plaintext: false,
+  warning: null,
+  restart_required: false,
+  unavailable: null,
+};
 
 const sg = (link_id: number, key: string): SessionWork => ({
   link_id,
@@ -39,6 +56,8 @@ beforeEach(() => {
   sessions.set([]);
   sessionFocus.set(null);
   selectSession(null);
+  hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
 });
 
 describe('LinkReview', () => {
@@ -72,6 +91,114 @@ describe('LinkReview', () => {
     expect(screen.queryByTestId('link-review-sheet')).toBeNull();
   });
 
+  it('j from a focused button still moves the cursor', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const close = screen.getByTestId('link-review-close');
+    close.focus();
+    const j = new KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true });
+    close.dispatchEvent(j);
+    await tick();
+    expect(j.defaultPrevented).toBe(true);
+    // Enter on the sheet now decides row 1, the cursor row.
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'Enter' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 2, link_id: 12 },
+    });
+  });
+
+  it('Enter/Backspace/y/n from a focused button are not sheet chords', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const chord = (key: string) =>
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    // Cursor is on row 0. Enter on row 1's "Not this" must reach that button
+    // (a bubbling keydown, like a real key press), not confirm row 0.
+    const notThis = screen.getAllByTestId('link-review-no')[1];
+    notThis.focus();
+    for (const key of ['Enter', 'Backspace', 'y', 'n']) {
+      const ev = chord(key);
+      notThis.dispatchEvent(ev);
+      expect(ev.defaultPrevented).toBe(false);
+    }
+    // Enter on close must close, not confirm.
+    const close = screen.getByTestId('link-review-close');
+    close.focus();
+    const onClose = chord('Enter');
+    close.dispatchEvent(onClose);
+    expect(onClose.defaultPrevented).toBe(false);
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('confirm_session_work', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+    expect(screen.getByTestId('link-review-sheet')).toBeTruthy();
+    // Escape from a focused button still closes the sheet.
+    close.focus();
+    const onEsc = chord('Escape');
+    close.dispatchEvent(onEsc);
+    await tick();
+    expect(onEsc.defaultPrevented).toBe(true);
+    expect(screen.queryByTestId('link-review-sheet')).toBeNull();
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    // From the sheet itself the chord still decides the cursor row.
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'Enter' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 1, link_id: 11 },
+    });
+  });
+
+  it('a decided row leaves the list, the cursor stays on a row, and the sheet closes itself when nothing is left', async () => {
+    sessions.set(rows());
+    // Each decision answers the row without its suggestion (a next one, if
+    // any, would ride in on the same row update).
+    vi.mocked(invoke).mockImplementation(async (_cmd: string, a?: unknown) => {
+      const id = (a as { args: { session_id: number } }).args.session_id;
+      return { ...rows().find((r) => r.id === id)!, work_suggested: null };
+    });
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const sheet = screen.getByTestId('link-review-sheet');
+    // Cursor on the second row (session 2): reject it.
+    await fireEvent.keyDown(sheet, { key: 'j' });
+    await fireEvent.keyDown(sheet, { key: 'n' });
+    expect(invoke).toHaveBeenLastCalledWith('reject_session_work', {
+      args: { session_id: 2, link_id: 12 },
+    });
+    await waitFor(() => expect(screen.getAllByTestId('link-review-row')).toHaveLength(1));
+    const left = screen.getByTestId('link-review-row');
+    expect(left.dataset.sessionId).toBe('1');
+    // The cursor was on index 1, which no longer exists: it is clamped onto
+    // the remaining row, so the next chord decides that one and not nothing.
+    expect(left.classList.contains('cursor')).toBe(true);
+    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('1 link suggestion · Review');
+    await fireEvent.keyDown(sheet, { key: 'y' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 1, link_id: 11 },
+    });
+    await waitFor(() => expect(screen.queryByTestId('link-review-sheet')).toBeNull());
+    expect(screen.queryByTestId('link-review-pill')).toBeNull();
+  });
+
+  it('a decision the hub refuses is a toast, and the row stays to be decided again', async () => {
+    sessions.set(rows());
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'confirm_session_work') throw { code: 'E_HUB', message: 'hub unreachable' };
+      return null;
+    });
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    await fireEvent.keyDown(screen.getByTestId('link-review-sheet'), { key: 'y' });
+    await waitFor(() => expect(get(toasts).map((t) => t.message)).toEqual([expect.stringMatching(/^Confirm failed: hub unreachable/)]));
+    expect(screen.getAllByTestId('link-review-row')).toHaveLength(2);
+    expect(screen.getByTestId('link-review-sheet')).toBeTruthy();
+  });
+
   it('clicking a suggestion shows only that session; closing the sheet lifts it', async () => {
     sessions.set(rows());
     render(LinkReview);
@@ -90,6 +217,32 @@ describe('LinkReview', () => {
     expect(get(sessionFocus)).toBeNull();
     // The session stays open in the center pane.
     expect(get(selectedSession)?.id).toBe(2);
+  });
+
+  it('says what a decision did, and what the session asks next', async () => {
+    sessions.set(rows());
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    // Confirming ABC-1 leaves the same session with its next suggestion:
+    // without a word, the row only changes its key and looks untouched.
+    vi.mocked(invoke).mockImplementationOnce(async () =>
+      session('h', 'a', {
+        id: 1,
+        status: 'running',
+        work: { ...sg(11, 'ABC-1'), state: 'confirmed', source: 'manual' },
+        work_suggested: { ...sg(13, 'ABC-9'), suggestions: 2 },
+      }),
+    );
+    await fireEvent.click(screen.getAllByTestId('link-review-yes')[0]);
+    await vi.waitFor(() => expect(get(toasts)).toHaveLength(1));
+    expect(get(toasts)[0].message).toBe('Linked a → ABC-1 · next: ABC-9? (2 left)');
+    expect(screen.getAllByTestId('link-review-row')[0].textContent).toContain('ABC-9?');
+
+    vi.mocked(invoke).mockImplementationOnce(async () => session('h', 'b', { id: 2, status: 'running' }));
+    await fireEvent.click(screen.getAllByTestId('link-review-no')[1]);
+    await vi.waitFor(() => expect(get(toasts)).toHaveLength(2));
+    expect(get(toasts)[1].message).toBe('b: not ABC-2');
   });
 
   it('toasts a new automatic link with an Undo that rejects it', async () => {
@@ -114,6 +267,43 @@ describe('LinkReview', () => {
     runToastAction(t[0].id);
     expect(invoke).toHaveBeenCalledWith('reject_session_work', {
       args: { session_id: 1, link_id: 21 },
+    });
+  });
+
+  it('a hub that cannot be reached blocks the sheet: the note, disabled buttons, and no chord', async () => {
+    sessions.set(rows());
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'reconnecting', attempt: 2, retry_in_secs: 5, reason: 'socket closed' });
+    render(LinkReview);
+    // The pill still counts: the suggestions are there to look at.
+    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('2 link suggestions · Review');
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const sheet = screen.getByTestId('link-review-sheet');
+    expect(screen.getByRole('note').textContent).toContain(
+      'https://fleet.example.com is unreachable right now (reconnecting, attempt 2)',
+    );
+    expect(screen.getAllByTestId('link-review-row')).toHaveLength(2);
+    for (const b of [...screen.getAllByTestId('link-review-yes'), ...screen.getAllByTestId('link-review-no')]) {
+      expect((b as HTMLButtonElement).disabled).toBe(true);
+    }
+    for (const key of ['y', 'Enter', 'n', 'Backspace']) {
+      await fireEvent.keyDown(sheet, { key });
+    }
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('confirm_session_work', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+    // Moving and closing are not hub calls: they still work.
+    await fireEvent.keyDown(sheet, { key: 'j' });
+    expect(screen.getAllByTestId('link-review-row')[1].classList.contains('cursor')).toBe(true);
+    // Once the link is back, the sheet decides again without reopening.
+    hubConnection.set({ state: 'connected' });
+    await tick();
+    expect(screen.queryByRole('note')).toBeNull();
+    expect((screen.getAllByTestId('link-review-yes')[0] as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.keyDown(sheet, { key: 'y' });
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 2, link_id: 12 },
     });
   });
 });

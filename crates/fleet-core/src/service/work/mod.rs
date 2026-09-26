@@ -8,9 +8,14 @@ pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
+pub mod local;
+pub mod nudge;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
+pub mod retention;
+#[cfg(test)]
+mod scale_tests;
 pub mod tidy;
 pub mod today;
 
@@ -86,7 +91,7 @@ pub struct WorkLinkArgs {
     /// For unlink.
     #[serde(default)]
     pub link_id: Option<i64>,
-    /// manual (default) | agent
+    /// manual (default) | agent | agent_inferred (a suggestion)
     #[serde(default)]
     pub source: Option<String>,
     /// last|brief|fresh
@@ -131,6 +136,9 @@ pub struct WorkLinkArgs {
     /// Approved nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
+    /// Name: the work's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -217,6 +225,8 @@ pub enum WorkAction {
     Tidy,
     /// Work open again that has past sessions (work graph M7).
     Reopened,
+    /// Local work items: named work with no ticket (work graph M11.1).
+    LocalItems,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -237,6 +247,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("card", WorkAction::Card),
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
+    ("local_items", WorkAction::LocalItems),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -257,6 +268,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "never",
     "dismiss",
     "tidy_apply",
+    "name",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -291,6 +303,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("never_tidy", "work_link", "never"),
     ("tidy_apply", "work_link", "tidy_apply"),
     ("dismiss_reopened", "work_link", "dismiss"),
+    ("list_local_work_items", "work", "local_items"),
+    ("name_session_work", "work_link", "name"),
+    ("rename_work_item", "work_link", "name"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -512,7 +527,7 @@ pub fn work_link<'a>(
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply"
+        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply" | "name"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -564,11 +579,43 @@ pub fn work_link<'a>(
         }
         Ok(l)
     };
+    // The live link a tidy flag goes to — `link_id`, else the primary —
+    // resolved BEFORE the visibility check, so that omitting `link_id` never
+    // reaches a primary the scope does not see (a forced cross-org link on
+    // the caller's own session). Such a session answers as one with no
+    // linked work, as the store does for a session without any.
+    let tidy_target = || -> Result<i64, IpcError> {
+        let link_id = s.tidy_link(session_id, args.link_id)?;
+        if !scope.is_all() && visible_link(link_id).is_err() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                match args.link_id {
+                    Some(l) => format!("session {session_id} has no live work link {l}"),
+                    None => format!("session {session_id} has no linked work"),
+                },
+            ));
+        }
+        Ok(link_id)
+    };
     // The lifecycle actions (work graph M7) write flags, not decisions: no
     // resolver run after them.
     match args.action.as_str() {
         "archive" => {
-            s.archive_session_work(session_id)?;
+            // A per-host token stamps only the links it sees.
+            let only = if scope.is_all() {
+                None
+            } else {
+                let mut links = s.session_work_links(session_id)?;
+                s.fill_link_orgs(&mut links)?;
+                Some(
+                    links
+                        .iter()
+                        .filter(|l| scope.sees_link(l))
+                        .map(|l| l.id)
+                        .collect::<Vec<i64>>(),
+                )
+            };
+            s.archive_session_links(session_id, only.as_deref())?;
             return lifecycle_row(&s, session_id);
         }
         // A click, or an attach: a person's touch un-archives.
@@ -582,9 +629,7 @@ pub fn work_link<'a>(
             return lifecycle_row(&s, session_id);
         }
         "snooze" => {
-            if let Some(l) = args.link_id {
-                visible_link(l)?;
-            }
+            let link_id = tidy_target()?;
             let days = args.days.unwrap_or(tidy::SNOOZE_DEFAULT_DAYS);
             if !(1..=tidy::SNOOZE_MAX_DAYS).contains(&days) {
                 return Err(IpcError::new(
@@ -593,14 +638,12 @@ pub fn work_link<'a>(
                 ));
             }
             let until = crate::service::catalog::now_secs() + i64::from(days) * 86_400;
-            s.snooze_tidy(session_id, args.link_id, until)?;
+            s.snooze_tidy(session_id, Some(link_id), until)?;
             return lifecycle_row(&s, session_id);
         }
         "never" => {
-            if let Some(l) = args.link_id {
-                visible_link(l)?;
-            }
-            s.never_tidy(session_id, args.link_id)?;
+            let link_id = tidy_target()?;
+            s.never_tidy(session_id, Some(link_id))?;
             return lifecycle_row(&s, session_id);
         }
         _ => {}
@@ -620,7 +663,14 @@ pub fn work_link<'a>(
             let source = args.source.as_deref().unwrap_or("manual");
             let (t, org) = visible_target(target()?)?;
             orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
-            s.link_session_work(session_id, t, source)?;
+            if source == AGENT_INFERRED {
+                // The classification nudge's answer (work graph M4.6): a
+                // guess, so a pre-selected suggestion (R11), never a link.
+                let (key, tracker) = inferred_target(&s, t)?;
+                detect::on_agent_inference(&s, session_id, &key, tracker)?;
+            } else {
+                s.link_session_work(session_id, t, source)?;
+            }
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
         // `reject { key | item_id }` any target.
@@ -688,6 +738,31 @@ pub fn work_link<'a>(
 fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+/// `work_link { action: link, source }`'s value for the agent's answer to
+/// the classification nudge (work graph M4.6).
+pub const AGENT_INFERRED: &str = "agent_inferred";
+
+/// The resolver target an agent inference names: the key (normalised) and,
+/// for an item, its tracker. A keyless item cannot be one — the resolver
+/// addresses work by key.
+fn inferred_target(s: &Store, t: WorkTarget<'_>) -> Result<(String, Option<i64>), IpcError> {
+    match t {
+        WorkTarget::Key(k) | WorkTarget::Ref(k) => Ok((crate::store::normalize_work_ref(k)?, None)),
+        WorkTarget::Item(id) => {
+            let item = s
+                .get_work_item(id)?
+                .ok_or_else(|| orgs::not_found("work item", id))?;
+            let key = item.key.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_INVALID,
+                    format!("work item {id} has no key; an inference names work by its key"),
+                )
+            })?;
+            Ok((crate::store::normalize_work_ref(&key)?, item.tracker_id))
+        }
+    }
 }
 
 /// A target as a sentence names it.
@@ -805,6 +880,67 @@ mod tests {
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
+    }
+
+    /// Work graph M4.6: an agent's answer to the classification nudge is a
+    /// pre-selected suggestion (R11), never the session's work; a person's
+    /// rejection is final (R9); and confirming it makes it a link.
+    #[test]
+    fn an_agent_inference_is_a_preselected_suggestion_a_person_decides() {
+        let (st, sid) = store();
+        {
+            let s = st.lock().unwrap();
+            s.create_local_work_item(Some("PAY-7"), "Retry").unwrap();
+        }
+        let infer = |key: &str| WorkLinkArgs {
+            key: Some(key.into()),
+            source: Some(AGENT_INFERRED.into()),
+            ..link(sid, "link")
+        };
+
+        let row = work_link(&infer("pay-7"), &st, &OrgScope::All).unwrap();
+        assert_eq!(row.work, None, "a guess never becomes the session's work");
+        let g = row.work_suggested.expect("the inference is suggested");
+        assert_eq!(g.key.as_deref(), Some("PAY-7"));
+        assert_eq!(g.source, AGENT_INFERRED);
+        assert_eq!(g.strength.as_deref(), Some("inferred"));
+        assert_eq!(g.rule.as_deref(), Some("R11"));
+        assert!(g.preselected, "shown ticked");
+
+        // Said twice, it is still one suggestion.
+        let again = work_link(&infer("PAY-7"), &st, &OrgScope::All).unwrap();
+        assert_eq!(again.work_suggested.map(|w| w.link_id), Some(g.link_id));
+
+        // Rejected by the person: the agent cannot bring it back.
+        work_link(
+            &WorkLinkArgs {
+                link_id: Some(g.link_id),
+                ..link(sid, "reject")
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        let after = work_link(&infer("PAY-7"), &st, &OrgScope::All).unwrap();
+        assert_eq!(
+            after.work_suggested, None,
+            "R9: a rejected pair is never proposed again"
+        );
+        assert_eq!(after.work, None);
+
+        // A fresh inference, confirmed by the person, becomes the link.
+        let row = work_link(&infer("PAY-8"), &st, &OrgScope::All).unwrap();
+        let g8 = row.work_suggested.expect("suggested");
+        let row = work_link(
+            &WorkLinkArgs {
+                link_id: Some(g8.link_id),
+                ..link(sid, "confirm")
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        assert_eq!(row.work.and_then(|w| w.key).as_deref(), Some("PAY-8"));
     }
 
     /// Work graph M4.4: confirm / reject a suggestion by link id, and trust

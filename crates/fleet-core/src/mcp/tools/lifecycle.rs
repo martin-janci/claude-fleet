@@ -6,16 +6,14 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = lifecycle_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Kill a session on a host: a tmux session by name, or \
-        a background agent row (name `bg:<uuid>`, kind `bg`) via `claude stop`. \
-        An inactive background agent (claude_status `stopped`) is removed from \
-        the list instead, without `claude stop`. Rows of kind `external` \
-        (interactive Claude sessions running outside fleet) are refused with \
-        E_INVALID_STATE — close them where they run. Use when the session's work is disposable or already \
-        pushed and you want it gone NOW; prefer safe_kill_session when the \
-        worktree may hold unpushed work. Returns the killed session's id. \
-        Address the session with session_id OR host_alias + name. May return \
-        E_CONFIRM_REQUIRED when desktop confirmation is on.")]
+    #[tool(description = "Kill a session: a tmux session, or a background \
+        agent row (`bg:<uuid>`, kind `bg`) via `claude stop`; an inactive \
+        one (claude_status `stopped`) is removed from the list instead. Rows \
+        of kind `external` (Claude running outside fleet) are refused with \
+        E_INVALID_STATE: close them where they run. For disposable or \
+        already-pushed work you want gone NOW; prefer safe_kill_session when \
+        the worktree may hold unpushed work. Returns the killed id. May \
+        return E_CONFIRM_REQUIRED when desktop confirmation is on.")]
     pub(super) async fn kill_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -52,14 +50,12 @@ impl FleetTools {
         ok_json(&id)
     }
 
-    #[tool(description = "Ask a running Claude session to safely persist its \
-        work (commit + push), then arm deletion of its worktree + tmux session. \
-        Use when retiring a session whose worktree may hold unpushed work and \
-        you can wait for it to finish. Returns the row with \
-        safe_kill_state=requested; the actual delete fires only after the \
-        SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', \
-        'failed') arrive via row events. Address the session with session_id \
-        OR host_alias + tmux_name.")]
+    #[tool(description = "Ask a running Claude session to persist its work \
+        (commit + push), then arm deletion of its worktree + tmux session: \
+        for retiring a session that may hold unpushed work. Returns the row \
+        with safe_kill_state=requested; the delete fires only after the \
+        SAFE_REMOVE_READY marker AND a clean-tree check ('ready' / 'failed' \
+        arrive as row events).")]
     pub(super) async fn safe_kill_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -95,9 +91,7 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Rename a tmux session on a host. Returns the updated \
-        session row as JSON. Address the session with session_id OR host_alias \
-        + old_name.")]
+    #[tool(description = "Rename a tmux session. Returns the updated row.")]
     pub(super) async fn rename_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -128,11 +122,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Set the session's friendly display name (shown when \
-        the user toggles friendly names on). Called once per task by the \
-        in-session agent — short (3–6 words). Empty string clears. Returns \
-        the updated row. Address the session with session_id OR host_alias + \
-        tmux_name.")]
+    #[tool(description = "Set the session's friendly display name, once per \
+        task by the in-session agent (3–6 words; empty clears). Returns the \
+        updated row.")]
     pub(super) async fn set_friendly_name(
         &self,
         Extension(caller): Extension<Caller>,
@@ -161,11 +153,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Restart a tmux session (kill and recreate it in the \
-        same place). Use when the Claude REPL is wedged but tmux and the \
-        worktree are fine — an in-place relaunch, cheaper than \
-        recreate_session. Returns the updated session row as JSON. Address \
-        the session with session_id OR host_alias + name.")]
+    #[tool(description = "Restart a tmux session in place (kill and \
+        recreate): for a wedged Claude REPL whose tmux and worktree are \
+        fine; cheaper than recreate_session. Returns the updated row.")]
     pub(super) async fn restart_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -185,6 +175,18 @@ impl FleetTools {
             p.name.as_deref(),
             "the session to restart",
         )?;
+        // The operator's restarts (a kill and a start) need a person (D12).
+        self.confirm_gate(
+            "restart_session",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "host={} name={} force={}",
+                bound_text(Some(&host_alias)),
+                bound_text(Some(&name)),
+                p.force
+            ),
+            &caller,
+        )?;
         let args = sessions::RestartSessionArgs {
             host_alias,
             name,
@@ -196,25 +198,40 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Spawn a review session: a new Claude session in the \
-        source session's worktree, seeded with a review prompt. Returns the \
-        new review session row as JSON.")]
+    #[tool(description = "Spawn a review session: a new Claude session in \
+        the source session's worktree, seeded with a review prompt. Returns \
+        its row.")]
     pub(super) async fn spawn_review(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<sessions::SpawnReviewArgs>,
+        Parameters(SpawnReviewParams {
+            args,
+            confirm_nonce,
+        }): Parameters<SpawnReviewParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "spawn_review",
             &format!("source_session_id={}", args.source_session_id),
         );
         // The review session is created on the source session's host.
-        self.resolve_target_row(
+        let source = self.resolve_target_row(
             &caller,
             Some(args.source_session_id),
             None,
             None,
             "the session to review",
+        )?;
+        self.confirm_gate(
+            "spawn_review",
+            confirm_nonce.as_deref(),
+            &format!(
+                "source_session_id={} host={} name={} prompt={}",
+                args.source_session_id,
+                bound_text(Some(&source.host_alias)),
+                bound_text(Some(&source.tmux_name)),
+                bound_body(Some(&args.prompt))
+            ),
+            &caller,
         )?;
         let row = sessions::spawn_review(args, &self.store, &self.ssh)
             .await
@@ -222,9 +239,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Read a host's current system clipboard (whatever a \
-        human would get from Ctrl+V on that machine). Probes wl-paste, xclip, \
-        xsel, pbpaste in order. E_CLIPBOARD_UNAVAILABLE if none is installed.")]
+    #[tool(description = "Read a host's system clipboard (what Ctrl+V gives \
+        there), via wl-paste, xclip, xsel or pbpaste. \
+        E_CLIPBOARD_UNAVAILABLE if none is installed.")]
     pub(super) async fn get_clipboard(
         &self,
         Parameters(args): Parameters<crate::service::clipboard::GetClipboardArgs>,
@@ -244,10 +261,9 @@ impl FleetTools {
         ok_json(&text)
     }
 
-    #[tool(description = "Write text to a host's system clipboard. Probes \
-        wl-copy, xclip, xsel, pbcopy in order. Capped at 64 KiB. \
-        E_CLIPBOARD_UNAVAILABLE if no clipboard helper is installed. May \
-        return E_CONFIRM_REQUIRED when desktop confirmation is on.")]
+    #[tool(description = "Write a host's system clipboard, via wl-copy, \
+        xclip, xsel or pbcopy. E_CLIPBOARD_UNAVAILABLE if none is installed. \
+        May return E_CONFIRM_REQUIRED when desktop confirmation is on.")]
     pub(super) async fn set_clipboard(
         &self,
         Extension(caller): Extension<Caller>,
@@ -278,19 +294,17 @@ impl FleetTools {
         )]))
     }
 
-    #[tool(
-        description = "Repair a session workspace (the Repair workspace button): make its \
-        directory a healthy git worktree on its branch and its tmux session run \
-        there. Goes past the automatic create/restart/attach checks — may \
-        unregister this worktree stale git entry, adopt its branch checkout \
-        elsewhere, recreate the branch from base once origin confirms it is gone, \
-        and respawn a pane whose directory vanished. No-op on a healthy session. \
-        Call it after any tool answers E_REPAIR_REQUIRED, then retry that tool. \
-        Gated by mcp.confirm_destructive. Returns a RepairReport (cwd, healthy, \
-        actions, warnings, branch_source, tmux, sibling_session_ids). Errors: \
-        E_REPO_MISSING, E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, \
-        E_HOST_OFFLINE, E_CONFIRM_REQUIRED."
-    )]
+    #[tool(description = "Repair a session workspace (the Repair workspace \
+        button): make its directory a healthy git worktree on its branch \
+        with its tmux session running there. Goes past the automatic checks: \
+        may unregister a stale worktree entry, adopt its branch checkout \
+        elsewhere, recreate the branch from base once origin confirms it is \
+        gone, and respawn a pane whose directory vanished. No-op when \
+        healthy. Call it after any tool answers E_REPAIR_REQUIRED, then \
+        retry that tool. Returns a RepairReport. Errors: E_REPO_MISSING, \
+        E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, \
+        E_HOST_OFFLINE, E_CONFIRM_REQUIRED (gated by \
+        mcp.confirm_destructive).")]
     pub(super) async fn repair_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -338,22 +352,19 @@ impl FleetTools {
         ok_json(&rep)
     }
 
-    #[tool(
-        description = "Move a work session to another host, carrying its work as it is: the \
-        Claude transcript, unpushed commits, staged/modified/untracked files and \
-        small git-ignored files (.env); also the session's Claude directory \
-        (subagent transcripts, tool results) and the project's Claude memory, \
-        added to the target without replacing anything there (these two only \
-        warn). Nothing is pushed, committed or stashed \
-        and the source worktree is never modified; the target resumes the same \
-        conversation and the source is killed only once the target runs \
-        (keep_source=true leaves it). strict=true refuses instead of carrying: \
-        E_MOVE_DIRTY, E_MOVE_UNPUSHED. \
-        Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
+    #[tool(description = "Move a work session to another host, carrying its \
+        work as it is: the transcript, unpushed commits, \
+        staged/modified/untracked and small git-ignored files (.env), plus \
+        the session's Claude directory and the project's Claude memory \
+        (added without replacing anything; these two only warn). Nothing is \
+        pushed, committed or stashed and the source worktree is never \
+        modified; the target resumes the conversation and the source is \
+        killed only once the target runs. strict refuses instead of \
+        carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, \
         E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both \
-        sessions left), E_CONFIRM_REQUIRED. Needs a token allowed on BOTH hosts \
-        (in practice the master). Returns a moved report, a preview or a wait."
-    )]
+        sessions left), E_CONFIRM_REQUIRED, E_FORBIDDEN (cross-org; see \
+        force_cross_org). Needs a token allowed on BOTH hosts (in practice the \
+        master). Returns a moved report, a preview or a wait.")]
     // `clean_target`'s prose lives on the parameter itself rather than in the
     // sentence above: the served tool surface is capped
     // (`the_served_definition_budget_stays_bounded`), and a flag documented
@@ -369,14 +380,15 @@ impl FleetTools {
             "move_session",
             &format!(
                 "session_id={} target={} keep_source={} strict={} clean_target={} dry_run={} \
-                 when_is={:?}",
+                 when_is={:?} force_cross_org={}",
                 p.session_id,
                 p.target_host_alias,
                 p.keep_source,
                 p.strict,
                 p.clean_target,
                 dry_run,
-                when
+                when,
+                p.force_cross_org
             ),
         );
         crate::validate::host_alias(&p.target_host_alias).map_err(to_mcp_err)?;

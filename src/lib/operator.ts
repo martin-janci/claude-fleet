@@ -228,3 +228,27 @@ export async function restartOperator(): Promise<void> {
   if (!r.ok) return;
   await refreshOperator();
 }
+
+/**
+ * Operator commands (work graph M9): one-click prompts in the agent panel.
+ * A command only fills the operator's composer — the person reads it and
+ * presses Enter — and whatever it leads to that starts or kills a session
+ * still stops at the desktop's confirmation (decision D12).
+ */
+export interface OperatorCommand {
+  label: string;
+  text: string;
+}
+
+export const OPERATOR_COMMANDS: readonly OperatorCommand[] = [
+  {
+    label: 'Tidy up done tickets',
+    text:
+      'Tidy up done tickets: read the tidy-up candidates (fleet `work` tool, action `tidy`) and ' +
+      'take the ones whose ticket is done, not planned, or whose PR merged. Show me that batch — ' +
+      'key, session, host, reason and the action — and wait for my go. Then apply it in one ' +
+      '`work_link` `tidy_apply` call, keeping each candidate\'s action (safe kill for anything ' +
+      'not clean). If there is nothing to tidy, say so in one line.',
+  },
+];
+

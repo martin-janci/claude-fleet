@@ -17,10 +17,19 @@
 # Hub C: --local-host false, plus a fleet-agent dialing it over loopback. The
 #   agent is started with `run` (never `install`: no systemd, nothing written
 #   outside $ROOT), with its own HOME and its own tmux server under $ROOT.
+# Hub W (work graph M10.2, only when WBIN is set): a fleet-hub built with the
+#   test-only `e2e` feature, with its own HOME and tmux server under $ROOT, a
+#   fake Jira Cloud (scripts/e2e-fake-jira.py) and a fake Claude
+#   (scripts/e2e-fake-claude.sh) on its PATH. See that leg's own header for
+#   what is real and what is simulated. Without WBIN the leg is skipped with
+#   a SKIP line (CI's plain build cannot run it, by design), except its first
+#   check: that $BIN refuses the fake-tracker override.
 set -uo pipefail
 
 BIN="${BIN:?set BIN to the fleet-hub binary}"
 ABIN="${ABIN:-$(dirname "$BIN")/fleet-agent}"
+WBIN="${WBIN:-}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both binaries, checked before anything is created or started. A wrong path
 # otherwise cascades into ~79 unrelated failures (every check that needs a
 # running hub), which buries the one thing actually wrong.
@@ -50,6 +59,7 @@ echo "hub-e2e: log root: $ROOT"
 # own; initialised empty here, before the trap is installed, so `set -u`
 # never trips on it and cleanup() can always test it safely.
 EV_PID=""
+WEV_PIDS=""
 # Whatever happens, leave nothing running: every hub and agent this script
 # started records a pid file under $ROOT, and the agent's tmux server lives
 # under $ROOT/tmux (a short path: a tmux socket path is capped at 108 bytes).
@@ -64,12 +74,18 @@ cleanup() {
     wait "$pid" 2>/dev/null
   done
   [ -d "${ROOT:?}/tmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/tmux" tmux kill-server 2>/dev/null
+  # Hub W's own tmux server (the work-graph leg).
+  [ -d "${ROOT:?}/wt" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/wt" tmux kill-server 2>/dev/null
   # Not pid-filed like the hubs/agent above: kill it directly if a SIGTERM
   # lands between it starting and its own explicit `kill "$EV_PID"`.
   if [ -n "$EV_PID" ]; then
     kill "$EV_PID" 2>/dev/null
     wait "$EV_PID" 2>/dev/null
   fi
+  for pid in $WEV_PIDS; do
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
   # Hub A manages this machine's own (non-isolated) tmux server directly, so a
   # session it created there can outlive a run that is interrupted before its
   # own kill_session step runs. Sweep this run's session names, if any are
@@ -183,6 +199,13 @@ h=$(tool "$PA" "$PUB" "$TOKA" fleet_health '{}')
 check "fleet_health reports the app version, not 0.1.0" 'echo "$h" | grep -qE "\\\\\"version\\\\\": ?\\\\\"0.2" ' "${h:0:300}"
 hosts=$(tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}')
 check "list_sessions (forced reconcile of local) succeeds" 'echo "$hosts" | grep -q "\"isError\":false"' "${hosts:0:400}"
+# The store is in WAL: while the daemon runs, every recent commit (tokens
+# included) sits in state.db-wal, and SQLite gives the sidecars the main
+# file's mode at creation. The `init` check above ran after that process had
+# exited, when the sidecars were already gone, so only a live daemon can show
+# them. The reconcile just above wrote rows, so both exist here.
+check "state.db-wal is 0600 while the daemon runs" '[ "$(filemode "$ROOT/a/state.db-wal")" = 600 ]' "$(filemode "$ROOT/a/state.db-wal")"
+check "state.db-shm is 0600 while the daemon runs" '[ "$(filemode "$ROOT/a/state.db-shm")" = 600 ]' "$(filemode "$ROOT/a/state.db-shm")"
 NAME="hube2e$RANDOM"
 refr=$(tool "$PA" "$PUB" "$TOKA" refresh_projects '{}')
 check "refresh_projects scans this machine" 'echo "$refr" | grep -q "\"isError\":false"' "${refr:0:300}"
@@ -282,6 +305,16 @@ pv_c=$(tool "$PA" "$PUB" "$CTOK" provision_hosts '{}')
 check "a client is refused provision_hosts even in full mode" 'echo "$pv_c" | grep -q E_FORBIDDEN' "${pv_c:0:400}"
 pr_c=$(tool "$PA" "$PUB" "$CTOK" pair_client '{"name":"a second phone"}')
 check "a client cannot pair another client" 'echo "$pr_c" | grep -q E_FORBIDDEN' "${pr_c:0:400}"
+# Operator settings: the master sets the ones with no flag; a client, even
+# full, may neither change nor read them.
+ss_m=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"work.retention.journal_days","value":30}')
+gs_m=$(tool "$PA" "$PUB" "$TOKA" get_settings '{}')
+check "set_setting changes a setting the hub has no flag for, and get_settings reads it back" 'echo "$ss_m" | grep -q "\"isError\":false" && echo "$gs_m" | grep -qE "work\.retention\.journal_days[^0-9a-z]+30[^0-9]"' "${ss_m:0:300} / ${gs_m:0:300}"
+ss_x=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"mcp.confirm_destructive","value":false}')
+check "set_setting refuses a key another subsystem owns" 'echo "$ss_x" | grep -q E_INVALID' "${ss_x:0:400}"
+ss_c=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"gc.enabled","value":true}')
+gs_c=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
+check "a client is refused set_setting and get_settings" 'echo "$ss_c" | grep -q E_FORBIDDEN && echo "$gs_c" | grep -q E_FORBIDDEN' "${ss_c:0:300} / ${gs_c:0:300}"
 
 # --- GET /events -------------------------------------------------------------
 check "/events needs a token like /mcp" '[ "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")" = 401 ]' "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")"
@@ -646,6 +679,319 @@ check "peer remove fails the waiting message back" 'echo "$out" | grep -q "1 wai
 hist=$(tool "$PD" "$PUB" "$TOKD" session_history "{\"session_id\":$SD}")
 check "the sender's timeline says message_undeliverable" 'echo "$hist" | grep -q message_undeliverable' "${hist:0:400}"
 stop_hub d
+
+echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)"
+# Work graph M10.2: link, detect, start, multi-start, handover, tidy and the
+# org boundary, driven over the wire against a real fleet-hub. What is REAL:
+# the hub binary and its MCP / hook / events routes, the Jira Cloud provider
+# code and its sync, `new_session` on a real (isolated) tmux server, real git
+# worktrees and branches, the safe-kill inspection, the tidy planner and
+# executor. What is SIMULATED, and why:
+#   * the tracker: scripts/e2e-fake-jira.py on 127.0.0.1 serves Jira-Cloud
+#     JSON. The hub reaches it only through the test-only `e2e` cargo
+#     feature's override (FLEET_E2E_TRACKER_PORT), which keeps the
+#     *.atlassian.net host fence and the https:// URL and redirects only the
+#     connection. A hub built without that feature refuses to start with the
+#     variable set (asserted first, with $BIN, so CI's plain build proves it).
+#   * Claude: scripts/e2e-fake-claude.sh is `claude` on hub W's PATH. It
+#     posts SessionStart / UserPromptSubmit / Stop to /hook the way Claude
+#     Code's hooks do (with the master token: hub W's `local` host has no
+#     per-host token of its own) and answers a hand-off request between its
+#     nonce markers. It is not a model.
+#   * time: tidy-up needs a ticket done for >= 1 day and a session idle for
+#     >= 1 hour (the settings' minimums), so the script moves those two
+#     timestamps back in state.db rather than waiting; the same way it turns
+#     mcp.confirm_destructive on and off (the hub has no settings tool).
+#   * the sync tick: its interval is read at start and never under 60 s, so a
+#     restart of hub W (whose first tick runs at once) stands in for waiting.
+#   * the operator (M9.7): a client paired under the operator's reserved name
+#     (`ux-agent`), which is what `ensure_operator` mints; no operator session
+#     is born (that needs a real Claude on the operator host).
+# Hub W runs with its own HOME and its own tmux server under $ROOT, like the
+# agent leg, so nothing here touches this account's ~/.claude or its tmux.
+out=$(FLEET_E2E_TRACKER_PORT=1 timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
+check "a hub built without the e2e feature refuses the fake-tracker override" '[ $rc -ne 0 ] && echo "$out" | grep -q "FLEET_E2E_TRACKER_PORT is set" && [ ! -e "$ROOT/refuse/state.db" ]' "rc=$rc $out"
+if [ -z "$WBIN" ]; then
+  echo "SKIP  the work-graph scenarios: set WBIN to a fleet-hub built with --features e2e (scripts/ci-local.sh --hub-e2e builds one)"
+elif [ ! -f "$WBIN" ] || [ ! -x "$WBIN" ]; then
+  bad "WBIN is an executable fleet-hub" "not an executable file: $WBIN"
+elif ! command -v jq >/dev/null 2>&1; then
+  bad "jq is installed (the work-graph leg reads its answers with it)" "jq not found on PATH"
+else
+  PW=$(free_port)
+  WHOME="$ROOT/w-home"; WT="$ROOT/wt"; WLOG="$ROOT/w-claude"; WBASE="$ROOT/w-projects"
+  mkdir -p "$WHOME" "$WT" "$WLOG" "$ROOT/wbin" "$ROOT/w-origins"; chmod 700 "$WT"
+  cp "$HERE/e2e-fake-claude.sh" "$ROOT/wbin/claude"; chmod +x "$ROOT/wbin/claude"
+  wtmux() { env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$WT" tmux "$@"; }
+  wgit() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c user.name=hub-e2e \
+    -c user.email=hub-e2e@example.invalid -c commit.gpgsign=false "$@"; }
+  # Two repositories (a multi-repo start needs two), each with a real origin:
+  # a bare repo under $ROOT, so a pushed branch has an upstream and a clean
+  # worktree is one the safe-kill inspection can call clean.
+  for r in wg-api wg-web; do
+    wgit init -q --bare -b main "$ROOT/w-origins/$r.git"
+    wgit init -q -b main "$WBASE/e2e/$r"
+    wgit -C "$WBASE/e2e/$r" commit -q --allow-empty -m "hub-e2e $r"
+    wgit -C "$WBASE/e2e/$r" remote add origin "$ROOT/w-origins/$r.git"
+    wgit -C "$WBASE/e2e/$r" push -q -u origin main
+  done
+  python3 "$HERE/e2e-fake-jira.py" --port-file "$ROOT/jira.port" >"$ROOT/jira.log" 2>&1 &
+  echo $! >"$ROOT/jira.pid"
+  until_ok 50 '[ -s "$ROOT/jira.port" ]'
+  JP=$(cat "$ROOT/jira.port" 2>/dev/null)
+  jira() { local p=$1; shift; curl -s -m 10 "http://127.0.0.1:$JP$p" "$@"; }
+  TOKW=$("$WBIN" init --data-dir "$ROOT/w" --public-url "https://$PUB" --port "$PW" --local-host true 2>&1 | grep -E '^[0-9a-f]{64}$')
+  # Written beside the running hub (WAL), with Python's own sqlite3.
+  wdb() { python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript(sys.argv[2]); c.close()' "$ROOT/w/state.db" "$1"; }
+  start_w() {
+    env -u TMUX -u TMUX_PANE HOME="$WHOME" TMUX_TMPDIR="$WT" PATH="$ROOT/wbin:$PATH" \
+      CLAUDE_FLEET_PROJECTS_BASE="$WBASE" FLEET_E2E_TRACKER_PORT="$JP" \
+      FAKE_CLAUDE_HUB="http://127.0.0.1:$PW" FAKE_CLAUDE_HOST="$PUB" \
+      FAKE_CLAUDE_TOKEN="$TOKW" FAKE_CLAUDE_LOG_DIR="$WLOG" \
+      "$WBIN" serve --data-dir "$ROOT/w" --port "$PW" --public-url "https://$PUB" --local-host true >>"$ROOT/w.log" 2>&1 &
+    echo $! >"$ROOT/w.pid"
+    until_ok 50 '[ "$(code "http://127.0.0.1:$PW/healthz")" = 200 ]'
+  }
+  # wcall TOKEN TOOL ARGS -> the JSON-RPC body, over /mcp/json (plain JSON).
+  wcall() {
+    curl -s -m 120 -X POST "http://127.0.0.1:$PW/mcp/json" -H "Host: $PUB" -H "Authorization: Bearer $1" \
+      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}"
+  }
+  # jt BODY FILTER -> jq over the tool's own answer (empty for an error).
+  jt() { printf '%s' "$1" | jq -r 'select(.result.isError != true) | .result.content[0].text // empty' 2>/dev/null | jq -r "$2" 2>/dev/null; }
+  # A session row by id, as the master reads it.
+  wrow() { jt "$(wcall "$TOKW" list_sessions '{"host_alias":"local","summary":false}')" "[.. | objects | select(.id? == $1 and has(\"tmux_name\"))][0]"; }
+  # hookw EVENT CLAUDE_ID EXTRA: a hook as Claude Code would post it.
+  hookw() {
+    curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.1:$PW/hook" -H "Host: $PUB" \
+      -H "Authorization: Bearer $TOKW" -H 'Content-Type: application/json' \
+      -d "{\"hook_event_name\":\"$1\",\"session_id\":\"$2\"$3}"
+  }
+  events_of() { jt "$(wcall "$TOKW" session_history "{\"session_id\":$1}")" '[.. | objects | .kind? // empty] | join(",")'; }
+  start_w || bad "hub W starts" "$(tail -5 "$ROOT/w.log")"
+  check "hub W (the e2e build) starts with the fake tracker override" 'grep -q "TEST BUILD" "$ROOT/w.log"' "$(tail -5 "$ROOT/w.log")"
+
+  # --- 1. work_admin connects the fake tracker; sync; work { tickets } ------
+  echo "-- 1. tracker: connect, sync, tickets"
+  add=$(wcall "$TOKW" work_admin '{"action":"add","provider":"jira","site_url":"https://e2e.atlassian.net"}')
+  TID=$(jt "$add" '.. | objects | select(has("provider")) | .id' | head -1)
+  cred=$(wcall "$TOKW" work_admin "{\"action\":\"set_credential\",\"tracker_id\":${TID:-0},\"auth_kind\":\"basic\",\"username\":\"erin@example.invalid\",\"secret\":\"e2e-secret-token\"}")
+  check "work_admin adds a Jira Cloud tracker and stores its credential, never echoing it" '[ -n "$TID" ] && [ "$(jt "$cred" .has_credential)" = true ] && ! echo "$add$cred" | grep -q e2e-secret-token' "${add:0:300} / ${cred:0:300}"
+  tst=$(wcall "$TOKW" work_admin "{\"action\":\"test\",\"tracker_id\":${TID:-0}}")
+  check "work_admin test probes the fake site: ok, with the My work view" '[ "$(jt "$tst" .ok)" = true ] && jt "$tst" ".views[]" | grep -qx "My work"' "$(jt "$tst" '{ok, error, views}')"
+  check "the probe reached the fake tracker over the override, with a credential" 'jira /_e2e/log | grep -q "GET /rest/api/3/myself"' "$(jira /_e2e/log)"
+  # Orgs before the sync, so every item lands in one: Acme holds the tracker
+  # and host `local`; Beta holds a second, never-connected host whose
+  # per-host token is the outsider of scenario 7.
+  OA=$(jt "$(wcall "$TOKW" work_admin '{"action":"add_org","name":"Acme"}')" '.. | objects | select(has("name")) | .id' | head -1)
+  OB=$(jt "$(wcall "$TOKW" work_admin '{"action":"add_org","name":"Beta"}')" '.. | objects | select(has("name")) | .id' | head -1)
+  wcall "$TOKW" add_host '{"alias":"e2eother","ssh_alias":"e2eother","transport":"agent"}' >/dev/null
+  a1=$(wcall "$TOKW" work_admin "{\"action\":\"assign_tracker\",\"tracker_id\":${TID:-0},\"org_id\":${OA:-0}}")
+  a2=$(wcall "$TOKW" work_admin "{\"action\":\"assign_host\",\"host_alias\":\"local\",\"org_id\":${OA:-0}}")
+  a3=$(wcall "$TOKW" work_admin "{\"action\":\"assign_host\",\"host_alias\":\"e2eother\",\"org_id\":${OB:-0}}")
+  check "two orgs: the tracker and local in Acme, e2eother in Beta" '[ -n "$OA" ] && [ -n "$OB" ] && ! echo "$a1$a2$a3" | grep -q "\"isError\":true"' "OA=$OA OB=$OB ${a1:0:200} ${a2:0:200} ${a3:0:200}"
+  HTOKB=$("$WBIN" agent-token e2eother --data-dir "$ROOT/w" 2>/dev/null)
+  stop_hub w; start_w || bad "hub W restarts for its first sync" "$(tail -5 "$ROOT/w.log")"
+  until_ok 100 '[ "$(jt "$(wcall "$TOKW" work "{\"action\":\"tickets\"}")" "[.. | objects | .key? // empty] | map(select(startswith(\"E2E-\"))) | unique | length")" = 5 ]'
+  tk=$(wcall "$TOKW" work '{"action":"tickets"}')
+  check "the sync fills the cache: work { tickets } lists E2E-1..5" '[ "$(jt "$tk" "[.. | objects | .key? // empty] | map(select(startswith(\"E2E-\"))) | unique | length")" = 5 ]' "${tk:0:600}"
+  check "a ticket carries its title and status from the tracker" 'jt "$tk" ".. | objects | select(.key? == \"E2E-1\")" | jq -e "select(.title == \"Fix the login redirect\" and .status_category == \"todo\")" >/dev/null' "${tk:0:600}"
+  check "the sync read the views over search/jql" 'jira /_e2e/log | grep -q "POST /rest/api/3/search/jql"' "$(jira /_e2e/log)"
+
+  wcall "$TOKW" refresh_projects '{}' >/dev/null
+  wprojs=$(wcall "$TOKW" list_projects '{}')
+  PAPI=$(jt "$wprojs" '.. | objects | select(.repo? == "wg-api") | .id' | head -1)
+  PWEB=$(jt "$wprojs" '.. | objects | select(.repo? == "wg-web") | .id' | head -1)
+  check "hub W finds both fixture repositories" '[ -n "$PAPI" ] && [ -n "$PWEB" ]' "${wprojs:0:600}"
+
+  # --- 2. work_link start on the real tmux host -----------------------------
+  echo "-- 2. start"
+  st=$(wcall "$TOKW" work_link "{\"action\":\"start\",\"key\":\"E2E-1\",\"project_id\":${PAPI:-0},\"host_alias\":\"local\",\"with_brief\":true}")
+  SST=$(jt "$st" .id); TST=$(jt "$st" .tmux_name); CST=$(jt "$st" .claude_session_id)
+  BR=e2e-1-fix-the-login-redirect
+  check "work_link start makes a session linked to E2E-1, confirmed as started" '[ -n "$SST" ] && [ "$(jt "$st" .work.key)" = E2E-1 ] && [ "$(jt "$st" .work.state)" = confirmed ] && [ "$(jt "$st" .work.source)" = started ]' "${st:0:800}"
+  check "on a real tmux session" 'wtmux has-session -t "=$TST" 2>/dev/null' "tmux=$TST"
+  check "in a worktree on branch {key}-{slug}" 'wgit -C "$WBASE/e2e/wg-api" worktree list | grep -q "\[$BR\]"' "$(wgit -C "$WBASE/e2e/wg-api" worktree list)"
+  until_ok 150 'wtmux capture-pane -p -t "$TST" 2>/dev/null | grep -q "Start on E2E-1"'
+  check "the start prompt is typed into the REPL once it is ready" 'wtmux capture-pane -p -t "$TST" | grep -q "Start on E2E-1"' "$(wtmux capture-pane -p -t "$TST" 2>&1 | tail -15)"
+  until_ok 75 'grep -q "Fix the login redirect" "$WLOG/$CST/hooks.log" 2>/dev/null'
+  check "the queued brief rides that prompt's hook answer: the ticket, fenced" 'grep -q "additionalContext" "$WLOG/$CST/hooks.log" && grep -q "Fix the login redirect" "$WLOG/$CST/hooks.log" && grep -q "untrusted" "$WLOG/$CST/hooks.log"' "$(tail -c 1500 "$WLOG/$CST/hooks.log" 2>&1)"
+  until_ok 75 'events_of "$SST" | grep -q handover_started'
+  check "the typed start prompt was acknowledged by the prompt hook" 'events_of "$SST" | grep -q handover_started' "$(events_of "$SST")"
+
+  # --- 3. detection: a prompt naming a key -----------------------------------
+  echo "-- 3. detection"
+  # Typed into the pane the way a person does: detection reads what a person
+  # types, and skips a prompt fleet sent (the loop guard). A session with no
+  # work yet (a plain new_session in wg-web's main checkout), because a weak
+  # mention surfaces as work_suggested only until a session has confirmed
+  # work (M4.6); after that it is kept as a link, and still decidable.
+  type_w() { wtmux send-keys -t "$1" -l "$2"; wtmux send-keys -t "$1" Enter; }
+  # links_of SESSION FILTER -> jq over its live links.
+  links_of() { jt "$(wcall "$TOKW" work "{\"session_id\":$1}")" "$2"; }
+  nd=$(wcall "$TOKW" new_session "{\"host_alias\":\"local\",\"project_id\":${PWEB:-0},\"name\":\"e2e-detect\"}")
+  SDT=$(jt "$nd" .id); TDT=$(jt "$nd" .tmux_name); CDT=$(jt "$nd" .claude_session_id)
+  until_ok 75 'grep -q "^--- SessionStart" "$WLOG/$CDT/hooks.log" 2>/dev/null && wtmux capture-pane -p -t "$TDT" 2>/dev/null | grep -q "for shortcuts"'
+  check "a plain Claude session with no work starts (the fake Claude up)" '[ -n "$SDT" ] && [ "$(wrow "$SDT" | jq -r .work)" = null ] && grep -q "^--- SessionStart" "$WLOG/$CDT/hooks.log"' "${nd:0:400}"
+  type_w "$TDT" "While you are there, E2E-2 has the same redirect bug"
+  until_ok 75 '[ "$(wrow "$SDT" | jq -r .work_suggested.key)" = E2E-2 ]'
+  r3=$(wrow "$SDT")
+  check "a typed prompt naming E2E-2 yields work_suggested, never work" '[ "$(echo "$r3" | jq -r .work_suggested.key)" = E2E-2 ] && [ "$(echo "$r3" | jq -r .work_suggested.state)" = suggested ] && [ "$(echo "$r3" | jq -r .work_suggested.source)" = prompt ] && [ "$(echo "$r3" | jq -r .work)" = null ]' "$(echo "$r3" | jq -c "{work, work_suggested}")"
+  L2=$(echo "$r3" | jq -r .work_suggested.link_id)
+  cf=$(wcall "$TOKW" work_link "{\"action\":\"confirm\",\"session_id\":${SDT:-0},\"link_id\":${L2:-0}}")
+  check "confirm makes it the session's work and clears the suggestion" '[ "$(jt "$cf" .work.key)" = E2E-2 ] && [ "$(jt "$cf" .work.state)" = confirmed ] && [ "$(jt "$cf" .work_suggested)" = null ]' "${cf:0:600}"
+  type_w "$TDT" "Unrelated: E2E-3 came up at standup"
+  until_ok 75 '[ -n "$(links_of "$SDT" ".[] | select(.ref_key == \"E2E-3\" and .state == \"suggested\") | .id")" ]'
+  L3=$(links_of "$SDT" '.[] | select(.ref_key == "E2E-3" and .state == "suggested") | .id' | head -1)
+  check "with confirmed work, a mention is kept as a suggested link, not surfaced (M4.6)" '[ -n "$L3" ] && [ "$(wrow "$SDT" | jq -r .work_suggested)" = null ] && [ "$(wrow "$SDT" | jq -r .work.key)" = E2E-2 ]' "$(links_of "$SDT" "[.[] | {id, ref_key, state}]" | tr -d "\n ") / $(wrow "$SDT" | jq -c "{work: .work.key, work_suggested}")"
+  rj=$(wcall "$TOKW" work_link "{\"action\":\"reject\",\"session_id\":${SDT:-0},\"link_id\":${L3:-0}}")
+  check "reject records it as rejected" 'jt "$rj" ".work_rejected[]" | grep -qx E2E-3 && [ -z "$(links_of "$SDT" ".[] | select(.ref_key == \"E2E-3\" and .state == \"suggested\") | .id")" ]' "${rj:0:600}"
+  n0=$(grep -c "^--- Stop" "$WLOG/$CDT/hooks.log")
+  type_w "$TDT" "And E2E-3 again, still the ledger"
+  until_ok 75 '[ "$(grep -c "^--- Stop" "$WLOG/$CDT/hooks.log")" -gt "$n0" ]'
+  check "a rejected key is never proposed again (R9)" '[ -z "$(links_of "$SDT" ".[] | select(.ref_key == \"E2E-3\" and .state == \"suggested\") | .id")" ]' "$(links_of "$SDT" "[.[] | {id, ref_key, state}]" | tr -d "\n ")"
+
+  # --- 4. multi-start with two projects (M10.1 semantics) -------------------
+  echo "-- 4. multi-start"
+  ms=$(wcall "$TOKW" work_link "{\"action\":\"start\",\"key\":\"E2E-1\",\"project_ids\":[${PAPI:-0},${PWEB:-0},987654],\"host_alias\":\"local\"}")
+  SWEB=$(jt "$ms" '.started[0].id')
+  check "the key already running in wg-api is skipped, naming its session" '[ "$(jt "$ms" "[.skipped[] | select(.project_id == ${PAPI:-0})][0].session_id")" = "$SST" ]' "${ms:0:800}"
+  check "wg-web gets a sibling on the same branch" '[ "$(jt "$ms" ".started | length")" = 1 ] && [ "$(jt "$ms" ".started[0].project_id")" = "$PWEB" ] && wgit -C "$WBASE/e2e/wg-web" worktree list | grep -q "\[$BR\]"' "${ms:0:800} / $(wgit -C "$WBASE/e2e/wg-web" worktree list)"
+  check "the project that cannot start is itemised in failed, with its code" '[ "$(jt "$ms" "[.failed[] | select(.project_id == 987654)][0].code")" = E_NOTFOUND ]' "${ms:0:800}"
+  ms2=$(wcall "$TOKW" work_link "{\"action\":\"start\",\"key\":\"E2E-1\",\"project_ids\":[${PAPI:-0},${PWEB:-0}],\"host_alias\":\"local\"}")
+  check "a retry starts no duplicate: both repositories are skipped" '[ "$(jt "$ms2" ".started | length")" = 0 ] && [ "$(jt "$ms2" ".skipped | length")" = 2 ]' "${ms2:0:800}"
+  ms3=$(wcall "$TOKW" work_link '{"action":"start","key":"E2E-1","project_ids":[],"host_alias":"local"}')
+  check "project_ids: [] is refused, not a silent single start" 'echo "$ms3" | grep -q E_INVALID' "${ms3:0:400}"
+
+  # --- 5. work_link handover -----------------------------------------------
+  echo "-- 5. handover"
+  hookw UserPromptSubmit "$CST" ',"prompt":"a turn the fake answers later"' >/dev/null
+  busy=$(wcall "$TOKW" work_link "{\"action\":\"handover\",\"session_id\":${SST:-0}}")
+  check "a session in the middle of a turn is refused a handover" 'echo "$busy" | grep -q E_NOT_ALIVE && echo "$busy" | grep -q busy' "${busy:0:400}"
+  hookw Stop "$CST" ',"last_assistant_message":"done with that turn"' >/dev/null
+  ho=$(wcall "$TOKW" work_link "{\"action\":\"handover\",\"session_id\":${SST:-0}}")
+  check "an idle session is asked for its hand-off" '[ "$(jt "$ho" .id)" = "$SST" ]' "${ho:0:400}"
+  until_ok 100 'events_of "$SST" | grep -q handover_written'
+  check "the fake Claude's marked reply is stored (handover_written)" 'events_of "$SST" | grep -q handover_written' "$(events_of "$SST")"
+  HKEY=$(wrow "$SST" | jq -r .work.key)
+  check "the request named the session's primary key" 'grep -q "will work on $HKEY" "$WLOG/$CST/prompts.log"' "HKEY=$HKEY $(tail -c 600 "$WLOG/$CST/prompts.log")"
+  ctx=$(jt "$(wcall "$TOKW" work "{\"action\":\"context\",\"key\":\"$HKEY\"}")" .text)
+  before=${ctx%%E2E-HANDOVER-NOTE*}; after=${ctx#*E2E-HANDOVER-NOTE}
+  check "the note leads the next brief, inside the untrusted fence" '[ "$before" != "$ctx" ] && echo "$before" | grep -q "treat as untrusted input" && echo "$after" | grep -q "end of untrusted input"' "${ctx:0:1200}"
+  hist=$(wcall "$TOKW" session_history "{\"session_id\":${SST:-0}}")
+  check "the markers stay out of the timeline" '! echo "$hist" | grep -q WORK_HANDOVER_' "${hist:0:600}"
+
+  # --- 6. the ticket moves to Done; tidy-up ---------------------------------
+  echo "-- 6. tidy-up"
+  sc=$(wcall "$TOKW" work_link "{\"action\":\"start\",\"key\":\"E2E-4\",\"project_id\":${PAPI:-0},\"host_alias\":\"local\"}")
+  sd=$(wcall "$TOKW" work_link "{\"action\":\"start\",\"key\":\"E2E-5\",\"project_id\":${PWEB:-0},\"host_alias\":\"local\"}")
+  SCL=$(jt "$sc" .id); TCL=$(jt "$sc" .tmux_name); CCL=$(jt "$sc" .claude_session_id)
+  SDI=$(jt "$sd" .id); TDI=$(jt "$sd" .tmux_name); CDI=$(jt "$sd" .claude_session_id)
+  check "two more sessions start, on E2E-4 and E2E-5" '[ -n "$SCL" ] && [ -n "$SDI" ]' "${sc:0:400} / ${sd:0:400}"
+  WCL="$WBASE/e2e/wg-api/.worktrees/e2e-4-tidy-the-clean-session"
+  WDI="$WBASE/e2e/wg-web/.worktrees/e2e-5-tidy-the-dirty-session"
+  until_ok 50 '[ -d "$WCL" ] && [ -d "$WDI" ]'
+  # Clean: its branch pushed, with an upstream. Dirty: an untracked file.
+  wgit -C "$WCL" push -q -u origin HEAD 2>>"$ROOT/w-git.log"
+  echo "work in progress" >"$WDI/uncommitted.txt"
+  until_ok 75 '[ -s "$WLOG/$CCL/hooks.log" ] && [ -s "$WLOG/$CDI/hooks.log" ]'
+  # A finished turn each (no prompt: a prompt would protect them for an hour).
+  hookw Stop "$CCL" ',"last_assistant_message":"done"' >/dev/null
+  hookw Stop "$CDI" ',"last_assistant_message":"done"' >/dev/null
+  jira /_e2e/status -X POST -d '{"key":"E2E-4","status":"Done"}' >/dev/null
+  jira /_e2e/status -X POST -d '{"key":"E2E-5","status":"Done"}' >/dev/null
+  stop_hub w; start_w || bad "hub W restarts for the sync after Done" "$(tail -5 "$ROOT/w.log")"
+  until_ok 100 '[ "$(wrow "$SCL" | jq -r .work.status_category)" = done ] && [ "$(wrow "$SDI" | jq -r .work.status_category)" = done ]'
+  check "the sync brings the Done move to both sessions' work" '[ "$(wrow "$SCL" | jq -r .work.status_category)" = done ] && [ "$(wrow "$SDI" | jq -r .work.status_category)" = done ]' "$(wrow "$SCL" | head -c 400)"
+  # Time, simulated: the tickets done 3 days ago, the sessions idle 5 hours.
+  wdb "UPDATE work_items SET status_changed_at = status_changed_at - 259200 WHERE key IN ('E2E-4','E2E-5'); UPDATE sessions SET idle_since = idle_since - 18000 WHERE id IN (${SCL:-0},${SDI:-0});"
+  td=$(wcall "$TOKW" work '{"action":"tidy"}')
+  check "work { tidy } lists both as done_idle, to be safe-killed" '[ "$(jt "$td" "[.. | objects | select(.session_id? == ${SCL:-0} and .reason? == \"done_idle\" and .action? == \"safe_kill\")] | length")" -ge 1 ] && [ "$(jt "$td" "[.. | objects | select(.session_id? == ${SDI:-0} and .reason? == \"done_idle\")] | length")" -ge 1 ]' "${td:0:800}"
+  check "and not the session still on open work" '[ "$(jt "$td" "[.. | objects | select(.session_id? == ${SST:-0})] | length")" = 0 ]' "${td:0:800}"
+  ITEMS="[{\"session_id\":${SCL:-0},\"action\":\"safe_kill\"},{\"session_id\":${SDI:-0},\"action\":\"safe_kill\"},{\"session_id\":${SST:-0},\"action\":\"safe_kill\"}]"
+  # The documented hub behaviour (docs/hub.md): with mcp.confirm_destructive
+  # on, a kill needs a confirmation this hub has no approver for.
+  wdb "INSERT OR REPLACE INTO settings (key, value) VALUES ('mcp.confirm_destructive', 'true');"
+  g1=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS}")
+  NONCE=$(printf '%s' "$g1" | grep -oE 'confirm_nonce[^0-9a-zA-Z]+[0-9a-zA-Z-]+' | head -1 | sed -E 's/.*[^0-9a-zA-Z-]//')
+  check "with confirm_destructive on, tidy_apply asks for a confirmation (a nonce)" 'echo "$g1" | grep -q E_CONFIRM_REQUIRED && [ -n "$NONCE" ]' "${g1:0:600}"
+  g2=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS,\"confirm_nonce\":\"$NONCE\"}")
+  check "the nonce is never approved on a hub: still refused, nothing killed" 'echo "$g2" | grep -q E_CONFIRM_REQUIRED && wtmux has-session -t "=$TCL" 2>/dev/null' "${g2:0:600}"
+  check "and the hub logs that it has no approver" 'grep -q "no approver" "$ROOT/w.log"' "$(grep -i approv "$ROOT/w.log" | tail -3)"
+  wdb "UPDATE settings SET value = 'false' WHERE key = 'mcp.confirm_destructive';"
+  ap=$(wcall "$TOKW" work_link "{\"action\":\"tidy_apply\",\"items\":$ITEMS}")
+  check "tidy_apply kills the clean session outright" '[ "$(jt "$ap" "[.results[] | select(.session_id == ${SCL:-0})][0].outcome")" = killed ]' "${ap:0:800}"
+  until_ok 50 '! wtmux has-session -t "=$TCL" 2>/dev/null'
+  check "its tmux session is gone" '! wtmux has-session -t "=$TCL" 2>/dev/null' "$(wtmux ls 2>&1)"
+  check "the dirty one is not discarded: safe kill asks its Claude to commit first" '[ "$(jt "$ap" "[.results[] | select(.session_id == ${SDI:-0})][0].outcome")" = safe_kill_requested ] && wtmux has-session -t "=$TDI" 2>/dev/null && [ -f "$WDI/uncommitted.txt" ]' "${ap:0:800}"
+  # The prompt's own echo carries both markers (its FAILED one with the
+  # placeholder); only the fake Claude's reply below it may count.
+  until_ok 75 '[ "$(wrow "$SDI" | jq -r .safe_kill_state)" != requested ]'
+  check "safe kill records the reason Claude gave, not the prompt's placeholder" '[ "$(wrow "$SDI" | jq -r .safe_kill_state)" = failed ] && [ "$(wrow "$SDI" | jq -r .safe_kill_detail)" = "e2e keeps uncommitted.txt uncommitted" ] && wtmux has-session -t "=$TDI" 2>/dev/null && [ -f "$WDI/uncommitted.txt" ]' "$(wrow "$SDI" | jq -c "{safe_kill_state, safe_kill_detail}")"
+  check "a protected session in the same batch is refused, the rest still applied" '[ "$(jt "$ap" "[.results[] | select(.session_id == ${SST:-0})][0].ok")" = false ] && jt "$ap" "[.results[] | select(.session_id == ${SST:-0})][0].error" | grep -q protected' "${ap:0:800}"
+
+  # --- 7. the org boundary over the wire ------------------------------------
+  echo "-- 7. org boundary"
+  bt=$(wcall "$HTOKB" work '{"action":"tickets"}')
+  check "Beta's host token reads no tickets" '[ "$(jt "$bt" "[.. | objects | .key? // empty] | length")" = 0 ] && ! echo "$bt" | grep -q "E2E-"' "${bt:0:400}"
+  bl=$(wcall "$HTOKB" list_sessions '{"host_alias":"local","summary":false}')
+  check "it sees local's sessions (isolation is off) but none of their work" '[ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\"))] | length")" -ge 1 ] && [ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\") and (.work != null or .work_suggested != null or (.work_rejected // [] | length) > 0))] | length")" = 0 ]' "${bl:0:600}"
+  bc=$(wcall "$HTOKB" work "{\"action\":\"context\",\"key\":\"${HKEY:-E2E-2}\"}")
+  check "the handover context is not its to read" '! echo "$bc" | grep -q E2E-HANDOVER-NOTE && ! echo "$bc" | grep -qE "Fix the login redirect|Add CSV export"' "${bc:0:400}"
+  bs=$(wcall "$HTOKB" work_link '{"action":"start","key":"E2E-2","host_alias":"local"}')
+  check "nor may it start Acme's ticket on local" 'echo "$bs" | grep -qE "E_FORBIDDEN|E_NOTFOUND"' "${bs:0:400}"
+  SSEM="$ROOT/w-events-master.sse"; SSEB="$ROOT/w-events-beta.sse"
+  curl -sN -m 60 "http://127.0.0.1:$PW/events" -H "Host: $PUB" -H "Authorization: Bearer $TOKW" >"$SSEM" 2>/dev/null &
+  EVM=$!
+  curl -sN -m 60 "http://127.0.0.1:$PW/events" -H "Host: $PUB" -H "Authorization: Bearer $HTOKB" >"$SSEB" 2>/dev/null &
+  EVB=$!
+  WEV_PIDS="$EVM $EVB"
+  until_ok 50 'grep -q "^event: ready" "$SSEM" && grep -q "^event: ready" "$SSEB"'
+  check "on /events, Beta's stream is opened without the work kind" 'grep -A1 "^event: ready" "$SSEB" | grep -q session && ! grep -A1 "^event: ready" "$SSEB" | grep -q "\"work\""' "$(head -4 "$SSEB")"
+  wcall "$TOKW" work_link "{\"action\":\"link\",\"session_id\":${SWEB:-0},\"key\":\"E2E-2\"}" >/dev/null
+  # And a work:* frame of its own: re-setting the credential re-emits the tracker.
+  wcall "$TOKW" work_admin "{\"action\":\"set_credential\",\"tracker_id\":${TID:-0},\"auth_kind\":\"basic\",\"username\":\"erin@example.invalid\",\"secret\":\"e2e-secret-token\"}" >/dev/null
+  until_ok 50 'grep -q "^event: work:tracker" "$SSEM" && grep -q "^event: session:updated" "$SSEB"'
+  sleep 1
+  check "the master's stream carries the link (with its key) and the work:tracker frame" 'grep "^data:" "$SSEM" | grep -q "E2E-2" && grep -q "^event: work:tracker" "$SSEM"' "$(grep "^event:" "$SSEM" | sort | uniq -c)"
+  # The boundary docs/hub.md draws: no work field and no work:* frame. With
+  # isolate_sessions off a session's own fields stay readable (its name
+  # carries the key, and so does the timeline's audit line of the link).
+  check "Beta's stream gets the session frames, with no work in them and no work frame" 'grep -q "^event: session:updated" "$SSEB" && ! grep -q "^event: work" "$SSEB" && ! grep "^data:" "$SSEB" | grep -qE "\"work(_suggested)?\":\{|\"key\":\"E2E-|e2e-secret"' "$(grep "^event:" "$SSEB" | sort | uniq -c)"
+  kill $EVM $EVB 2>/dev/null; wait $EVM $EVB 2>/dev/null; WEV_PIDS=""
+
+  # --- 8. name work with no ticket (M11.1) ---------------------------------
+  echo "-- 8. name this work"
+  nm=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"E2E local cleanup\",\"key\":\"e2e-local\"}")
+  check "work_link name links new local work to the session (its E2E-2 stays primary)" '[ "$(jt "$nm" .id)" = "${SWEB:-x}" ] && [ "$(jt "$nm" .work.key)" = E2E-2 ]' "${nm:0:600}"
+  li=$(wcall "$TOKW" work '{"action":"local_items"}')
+  LID=$(jt "$li" '.[] | select(.key == "e2e-local") | .id')
+  check "work { local_items } lists it with its one live session" '[ -n "$LID" ] && [ "$(jt "$li" ".[] | select(.id == ${LID:-0}) | .live_sessions")" = 1 ]' "${li:0:600}"
+  dup=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"dup\",\"key\":\"E2E-1\"}")
+  check "a ticket's key is not new work: E_EXISTS" 'echo "$dup" | grep -q E_EXISTS' "${dup:0:400}"
+  rn=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"item_id\":${LID:-0},\"title\":\"E2E local cleanup, renamed\"}")
+  check "work_link name { item_id } renames the local item" '[ "$(jt "$rn" .title)" = "E2E local cleanup, renamed" ]' "${rn:0:400}"
+  bn=$(wcall "$HTOKB" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"beta\"}")
+  bu=$(wcall "$HTOKB" work_link '{"action":"name","session_id":987654321,"title":"beta"}')
+  check "Beta's host token cannot name work on local's session: it reads as unknown" 'echo "$bn" | grep -q E_NOTFOUND && [ "$(echo "$bn" | grep -o "session [0-9]* not found" | sed "s/[0-9]*//g")" = "$(echo "$bu" | grep -o "session [0-9]* not found" | sed "s/[0-9]*//g")" ]' "${bn:0:300} | ${bu:0:300}"
+  bli=$(wcall "$HTOKB" work '{"action":"local_items"}')
+  check "nor list local's local work" '! echo "$bli" | grep -q "E2E local cleanup"' "${bli:0:400}"
+
+  # --- operator confirm (M9.7): no approver on a hub -------------------------
+  echo "-- operator"
+  opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')
+  OPCODE=$(jt "$opc" .code)
+  OPTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PW/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$OPCODE\"}" | jq -r .token 2>/dev/null)
+  n_before=$(wtmux ls 2>/dev/null | wc -l | tr -d ' ')
+  op=$(wcall "$OPTOK" work_link "{\"action\":\"start\",\"key\":\"E2E-2\",\"project_id\":${PWEB:-0},\"host_alias\":\"local\"}")
+  check "the operator's start is refused on a hub: no approver" 'echo "$op" | grep -q E_FORBIDDEN && echo "$op" | grep -q "no approver"' "${op:0:400}"
+  check "and no session was started" '[ "$(wtmux ls 2>/dev/null | wc -l | tr -d " ")" = "$n_before" ]' "$(wtmux ls 2>&1)"
+  opt=$(wcall "$OPTOK" work_link "{\"action\":\"tidy_apply\",\"items\":[{\"session_id\":${SDI:-0},\"action\":\"safe_kill\"}]}")
+  check "nor may the operator's tidy kill anything" 'echo "$opt" | grep -q E_FORBIDDEN && wtmux has-session -t "=$TDI" 2>/dev/null' "${opt:0:400}"
+  stop_hub w
+  check "hub W SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+fi
 
 echo "== ssh-key in an isolated HOME"
 FH="$ROOT/home"; mkdir -p "$FH"

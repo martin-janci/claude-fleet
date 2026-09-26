@@ -9,4 +9,4 @@
 CREATE INDEX IF NOT EXISTS idx_sessions_worktree_live
   ON sessions(worktree_id) WHERE lost_at IS NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+INSERT OR IGNORE INTO schema_version (version) VALUES (59);

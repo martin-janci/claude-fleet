@@ -5,18 +5,12 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = session_ops_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "List tmux sessions across reachable hosts. Slim \
-        summary rows by default; pass summary=false for the full SessionRow. \
-        Optional filters: host_alias, project_id, status, claude_status, tag, \
-        needs_attention (rows that want a person; each carries why and since), \
-        include_lost (default false drops ghosts); `limit` caps the row count \
-        after filtering (default: all); `force` runs a reconcile pass first \
-        instead of serving the recent cache. claude_status is one of working | \
-        blocked | completed | failed | stopped | idle; stuck_kind is one of \
-        auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status \
-        (full rows) is one of passing | failing | pending (null when the \
-        session has no PR or its PR has no checks). fresh_for returns only \
-        what is new since your last read.")]
+    #[tool(description = "List tmux sessions across reachable hosts: slim \
+        rows unless summary=false; the filters combine. claude_status is one \
+        of working | blocked | completed | failed | stopped | idle; \
+        stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | \
+        press_enter; ci_status (full rows) is one of passing | failing | \
+        pending (null without a PR or checks).")]
     pub(super) async fn list_sessions(
         &self,
         Extension(caller): Extension<Caller>,
@@ -189,10 +183,7 @@ impl FleetTools {
         // a reader session that no longer exists.
         let (reader_exists, stored_hash) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let reader_exists = s
-                .get_session_by_id(reader)
-                .map_err(|e| to_mcp_err(e.into()))?
-                .is_some();
+            let reader_exists = resolve_reader(&s, &caller, reader)?;
             let stored_hash = s
                 .get_read_cursor(reader, "list_sessions", &resource_key)
                 .map_err(to_mcp_err)?
@@ -212,8 +203,8 @@ impl FleetTools {
         ok_json(&decision.envelope)
     }
 
-    #[tool(description = "List sessions related to a given session — those \
-        sharing the same project and worktree. Returns JSON.")]
+    #[tool(description = "Sessions sharing this session's project and \
+        worktree.")]
     pub(super) async fn related_sessions(
         &self,
         Extension(caller): Extension<Caller>,
@@ -230,10 +221,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Mark the calling session as the fleet controller; \
-        kill/recreate/restart refuse to target it without force. Address \
-        yourself with session_id (from whoami) OR host_alias + tmux_name. A \
-        per-host token may only register a session on its own host \
-        (E_FORBIDDEN).")]
+        kill/recreate/restart refuse to target it without force. A per-host \
+        token may only register a session on its own host (E_FORBIDDEN).")]
     pub(super) async fn register_self(
         &self,
         Extension(caller): Extension<Caller>,
@@ -263,12 +252,11 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Find your own fleet row from your tmux session name \
-        (`tmux display-message -p '#S'`). Returns the single matching session \
-        as JSON (id, host_alias, is_controller, …). E_NOTFOUND when fleet has \
-        not reconciled the session yet; E_AMBIGUOUS when the same name exists \
-        on several hosts — the error's details list {session_id, host_alias} \
-        candidates, pick yours and use session_id from then on.")]
+    #[tool(description = "Find your own fleet row from your tmux session \
+        name (`tmux display-message -p '#S'`). E_NOTFOUND until fleet has \
+        reconciled it; E_AMBIGUOUS when the name exists on several hosts: \
+        pick yours from the error's {session_id, host_alias} candidates and \
+        use session_id from then on.")]
     pub(super) async fn whoami(
         &self,
         Extension(caller): Extension<Caller>,
@@ -312,12 +300,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Create a Claude Code tmux session on a host, in a \
-        project (and optional worktree). Pass new_worktree to fork a fresh \
-        worktree+branch (optional base_branch). Auto-clones the repo on \
-        remote hosts. Optional kind=\"shell\" runs a plain interactive shell \
-        instead (see new_shell_session for the same thing with start_command); \
-        optional friendly_name sets the sidebar label (omit / empty to derive \
-        one from the branch).")]
+        project (and optional worktree, or a fresh one with new_worktree). \
+        Auto-clones the repo on remote hosts.")]
     pub(super) async fn new_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -332,10 +316,7 @@ impl FleetTools {
         self.confirm_gate(
             "new_session",
             p.confirm_nonce.as_deref(),
-            &format!(
-                "host={} name={} project_id={:?}",
-                p.host_alias, p.name, p.project_id
-            ),
+            &new_session_summary(&p),
             &caller,
         )?;
         let args = sessions::NewSessionArgs {
@@ -359,14 +340,10 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(
-        description = "Create a plain-shell tmux session on a host (no Claude \
-        Code in the pane — an interactive login shell). Same project/worktree \
-        plumbing as new_session, plus an optional start_command that runs once \
-        before the shell drops to an interactive prompt; the pane stays alive \
-        after it exits so you can attach or send-keys to it. Steer it with \
-        send_prompt (typed text + Enter) and read it with capture_session."
-    )]
+    #[tool(description = "Create a plain-shell tmux session (an interactive \
+        login shell, no Claude Code): new_session's project/worktree \
+        plumbing plus a start_command. Steer it with send_prompt and read it \
+        with capture_session.")]
     pub(super) async fn new_shell_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -381,10 +358,7 @@ impl FleetTools {
         self.confirm_gate(
             "new_shell_session",
             p.confirm_nonce.as_deref(),
-            &format!(
-                "host={} name={} project_id={:?}",
-                p.host_alias, p.name, p.project_id
-            ),
+            &new_shell_session_summary(&p),
             &caller,
         )?;
         let args = sessions::NewSessionArgs {
@@ -407,10 +381,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Capture a session's terminal output — the visible \
-        tmux pane, or include scrollback history (scrollback_lines). Use after \
-        send_prompt to read the session's reply. Returns the pane as plain \
-        text (not JSON), capped to the last max_lines lines (default 200).")]
+    #[tool(description = "Capture a session's terminal: the visible tmux \
+        pane, plus scrollback_lines of history. Use after send_prompt to \
+        read the reply. Returns plain text, not JSON.")]
     pub(super) async fn capture_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -456,12 +429,10 @@ impl FleetTools {
         )]))
     }
 
-    #[tool(
-        description = "What the session's pane shows right now: claude_status, \
-        stuck_kind, current_activity, waiting_for and the spinner line. One capture, \
-        nothing stored — the cheap read behind a live indicator, where \
-        capture_session is the whole pane. E_INVALID_STATE outside tmux. JSON."
-    )]
+    #[tool(description = "What the session's pane shows now: claude_status, \
+        stuck_kind, current_activity, waiting_for and the spinner line. One \
+        capture, nothing stored: the cheap read behind a live indicator \
+        (capture_session is the whole pane). E_INVALID_STATE outside tmux.")]
     pub(super) async fn session_activity(
         &self,
         Extension(caller): Extension<Caller>,
@@ -483,15 +454,18 @@ impl FleetTools {
         ok_json(&probe)
     }
 
-    #[tool(description = "Recreate a session: kill its tmux session and rebuild \
-        it fresh in the same worktree, resuming the same Claude conversation. \
-        Use when the session is frozen, OOM-killed or out of context, or to \
-        revive a ghost — the conversation survives, the process does not. Works for \
-        running or ghost sessions. Returns the session row as JSON.")]
+    #[tool(description = "Recreate a session: kill its tmux session and \
+        rebuild it in the same worktree, resuming the same Claude \
+        conversation. For a frozen, OOM-killed or out-of-context session, or \
+        to revive a ghost: the conversation survives, the process does not. \
+        Returns the row.")]
     pub(super) async fn recreate_session(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<sessions::RecreateSessionArgs>,
+        Parameters(RecreateSessionParams {
+            args,
+            confirm_nonce,
+        }): Parameters<RecreateSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "recreate_session",
@@ -499,12 +473,25 @@ impl FleetTools {
         );
         // Gate on the stored row's host: a per-host token must not kill and
         // rebuild a session on another host by naming its fleet id.
-        self.resolve_target(
+        let (host, name) = self.resolve_target(
             &caller,
             Some(args.session_id),
             None,
             None,
             "the session to recreate",
+        )?;
+        // The operator's recreates (a kill and a start) need a person (D12).
+        self.confirm_gate(
+            "recreate_session",
+            confirm_nonce.as_deref(),
+            &format!(
+                "session_id={} host={} name={} force={}",
+                args.session_id,
+                bound_text(Some(&host)),
+                bound_text(Some(&name)),
+                args.force
+            ),
+            &caller,
         )?;
         let row = sessions::recreate_session(args, &self.store, &self.ssh)
             .await
@@ -512,42 +499,57 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(
-        description = "Restore sessions a host lost to a reboot or tmux restart: resume each \
-        one's Claude conversation in its original worktree under its original name. dry_run=true \
-        returns the plan (no ssh, no writes) — call it first, and again after a timeout to see \
-        what is still lost. One failing session never fails the others; the result lists every \
-        outcome. One restore per host at a time (E_INVALID_STATE otherwise); a lost fleet \
-        controller is skipped (recreate_session force=true). Paced by restore.batch_size / \
-        restore.stagger_ms."
-    )]
+    #[tool(description = "Restore sessions a host lost to a reboot or tmux \
+        restart: resume each one's conversation in its original worktree \
+        under its original name. Call dry_run first, and again after a \
+        timeout to see what is still lost. One failing session never fails \
+        the others; every outcome is listed. One restore per host at a time \
+        (E_INVALID_STATE otherwise); a lost fleet controller is skipped \
+        (recreate_session force=true). Paced by restore.batch_size / \
+        restore.stagger_ms.")]
     pub(super) async fn restore_host_sessions(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<sessions::RestoreHostSessionsArgs>,
+        Parameters(RestoreHostSessionsParams {
+            args,
+            confirm_nonce,
+        }): Parameters<RestoreHostSessionsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "restore_host_sessions",
             &format!("host={} dry_run={}", args.host_alias, args.dry_run),
         );
         require_host(&caller, &args.host_alias, "the lost sessions")?;
+        // A real restore starts sessions: the operator's needs a person
+        // (D12). A dry run only reads the plan.
+        if !args.dry_run {
+            self.confirm_gate(
+                "restore_host_sessions",
+                confirm_nonce.as_deref(),
+                &format!(
+                    "host={} session_ids={:?}",
+                    bound_text(Some(&args.host_alias)),
+                    args.session_ids
+                ),
+                &caller,
+            )?;
+        }
         let report = sessions::restore_host_sessions(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
         ok_json(&report)
     }
 
-    #[tool(
-        description = "Read-only: scan ~/.claude/projects on a host for Claude conversations \
-        fleet has no live pane for, ranked against the host's boot (rank_hint: before_boot | \
-        after_boot | stale | unknown) and enriched with project_id, worktree_id and \
-        existing_session_id — the last set when a fleet row (live or lost) already holds that \
-        conversation, which restore_host_sessions handles, not this. resumable is true only when \
-        the pane would start in exactly the transcript's cwd; anywhere else claude --resume \
-        silently starts an empty conversation instead, so do not resume it. Resume one with \
-        new_session { host_alias, project_id, worktree_id, name: derived_tmux_name (a hint), \
-        resume_claude_session_id }. limit: newest first, default 50, max 500."
-    )]
+    #[tool(description = "Read-only: scan ~/.claude/projects on a host for \
+        conversations fleet has no live pane for, ranked against the host's \
+        boot (rank_hint: before_boot | after_boot | stale | unknown), with \
+        project_id, worktree_id and existing_session_id (set when a fleet \
+        row, live or lost, holds it: restore_host_sessions handles that \
+        one). resumable is true only when the pane would start in exactly \
+        the transcript's cwd; anywhere else claude --resume silently starts \
+        an empty conversation, so do not resume it. Resume with new_session \
+        { host_alias, project_id, worktree_id, name: derived_tmux_name (a \
+        hint), resume_claude_session_id }.")]
     pub(super) async fn discover_lost_sessions(
         &self,
         Extension(caller): Extension<Caller>,
@@ -564,10 +566,8 @@ impl FleetTools {
         ok_json(&candidates)
     }
 
-    #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \
-        delete its row. Use when a ghost is not worth reviving — the row is \
-        the only thing left to clean up. Errors if the session is not a \
-        ghost.")]
+    #[tool(description = "Permanently delete a ghost session's row (lost \
+        from tmux, not worth reviving). Errors if it is not a ghost.")]
     pub(super) async fn dismiss_ghost_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -587,23 +587,29 @@ impl FleetTools {
     }
 
     #[tool(description = "Launch a supervised headless (background) Claude \
-        session on a host with an initial prompt. Returns JSON with the new \
-        claude_session_id AND the fleet row (`session`, registered by an \
-        immediate reconcile; the key is absent if the agent was not matched \
-        yet — it appears on the next tick) so the next call can be \
-        session_transcript { session_id }. The prompt becomes the row's default \
-        friendly name and last_prompt. Pass requester_session_id (yours, from \
-        whoami) to list it under that session's background work.")]
+        session on a host with an initial prompt, which becomes its default \
+        friendly name. Returns the claude_session_id AND the fleet row \
+        (`session`; absent until reconcile matches it, on the next tick) for \
+        session_transcript { session_id }.")]
     pub(super) async fn new_bg_session(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(args): Parameters<crate::service::bg_sessions::NewBgSessionArgs>,
+        Parameters(NewBgSessionParams {
+            args,
+            confirm_nonce,
+        }): Parameters<NewBgSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "new_bg_session",
             &format!("host={} name={}", args.host_alias, args.name),
         );
         require_host(&caller, &args.host_alias, "the new background session")?;
+        self.confirm_gate(
+            "new_bg_session",
+            confirm_nonce.as_deref(),
+            &new_bg_session_summary(&args),
+            &caller,
+        )?;
         // The requester (when given) must exist and, for a per-host caller,
         // live on that host — otherwise any agent could parent a background
         // session onto somebody else's conversation. Same gate as

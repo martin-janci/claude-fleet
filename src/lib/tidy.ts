@@ -18,13 +18,14 @@ export type TidyReason =
   | 'not_planned'
   | 'duplicate_worktree'
   | 'ghost_expiring'
+  | 'idle_unlinked'
   | (string & {});
 
 /** `service::gc::tidy::TidyAction`. */
 export type TidyAction = 'archive' | 'safe_kill' | 'kill' | 'resume_or_expire' | (string & {});
 
 /** The sheet's per-row choice: an action, or leaving the row alone. */
-export type TidyChoice = 'safe_kill' | 'kill' | 'archive' | 'snooze' | 'never';
+export type TidyChoice = 'safe_kill' | 'kill' | 'archive' | 'snooze' | 'never' | 'keep';
 
 /** Reason order: the backend's ranking, the sheet's group order. */
 export const TIDY_REASONS = [
@@ -33,7 +34,15 @@ export const TIDY_REASONS = [
   'not_planned',
   'duplicate_worktree',
   'ghost_expiring',
+  'idle_unlinked',
 ] as const;
+
+/** Reasons auto-tidy never acts on, whatever the settings say (work graph
+ *  M11.3, decision D19). */
+export const NEVER_AUTO_REASONS: ReadonlySet<string> = new Set(['idle_unlinked']);
+
+/** Days a "Keep" holds a session out of the sheet. */
+export const KEEP_DAYS = 7;
 
 export const TIDY_REASON_LABELS: Record<string, string> = {
   done_idle: 'Done and idle',
@@ -41,6 +50,7 @@ export const TIDY_REASON_LABELS: Record<string, string> = {
   not_planned: "Won't do / duplicate",
   duplicate_worktree: 'Duplicate on one worktree',
   ghost_expiring: 'Lost session about to expire',
+  idle_unlinked: 'Idle, no work linked',
 };
 
 export const TIDY_CHOICE_LABELS: Record<TidyChoice, string> = {
@@ -49,6 +59,7 @@ export const TIDY_CHOICE_LABELS: Record<TidyChoice, string> = {
   archive: 'Archive only',
   snooze: 'Snooze 7 d',
   never: 'Never for this work',
+  keep: `Keep ${KEEP_DAYS} d`,
 };
 
 export function tidyReasonLabel(r: string): string {
@@ -85,6 +96,8 @@ export interface TidyReport {
   auto_reasons: string[];
   done_days: number;
   idle_hours: number;
+  /** `work.tidy_idle_unlinked_days` (absent from an older hub). */
+  idle_unlinked_days?: number;
 }
 
 export interface TidyApplyItem {
@@ -121,6 +134,7 @@ export const EMPTY_REPORT: TidyReport = {
   auto_reasons: [],
   done_days: 2,
   idle_hours: 4,
+  idle_unlinked_days: 7,
 };
 
 /** The last tidy report and reopened list (refreshed by `refreshTidy`). */
@@ -154,7 +168,8 @@ export function newlyReopened(seen: ReadonlySet<number>, list: ReopenedWork[]): 
 /** The choices a candidate's row offers. A kill is offered only for a live
  *  session; a plain kill only where the backend itself chose one (a shared
  *  worktree, bg / shell / review rows) — everywhere else a kill is the safe
- *  kill. Snooze / never / archive need a link to live on. */
+ *  kill. Snooze / never / archive need a link to live on; a live session
+ *  without one is kept per session instead (work graph M11.3). */
 export function choicesFor(c: TidyCandidate): TidyChoice[] {
   const out: TidyChoice[] = [];
   if (c.action === 'safe_kill') out.push('safe_kill');
@@ -162,6 +177,8 @@ export function choicesFor(c: TidyCandidate): TidyChoice[] {
   if (c.link_id != null) {
     if (c.action !== 'resume_or_expire' && !c.archived) out.push('archive');
     out.push('snooze', 'never');
+  } else if (c.action === 'safe_kill' || c.action === 'kill') {
+    out.push('keep');
   }
   return out;
 }
@@ -175,9 +192,18 @@ export function defaultChoice(c: TidyCandidate): TidyChoice | null {
 }
 
 /** Whether a row starts ticked: every row whose default is an action,
- *  except a lost session (Resume is its own button). */
+ *  except a lost session (Resume is its own button) and a session with no
+ *  work linked (M11.3: fleet cannot know what it was for, so a person ticks
+ *  it, or uses its own Keep / Safe kill buttons). */
 export function preselected(c: TidyCandidate): boolean {
-  return c.action !== 'resume_or_expire' && defaultChoice(c) !== null;
+  return c.action !== 'resume_or_expire' && c.reason !== 'idle_unlinked' && defaultChoice(c) !== null;
+}
+
+/** The evidence line of a candidate: "idle 9 d · no work linked" for an
+ *  unlinked one (quiet since its last use), else "idle 5 h". */
+export function tidyEvidence(c: TidyCandidate, nowSecs: number = Math.floor(Date.now() / 1000)): string {
+  if (c.reason === 'idle_unlinked') return `idle ${formatIdle(nowSecs - c.since)} · no work linked`;
+  return `idle ${formatIdle(c.idle_secs)}`;
 }
 
 /** Candidates grouped by primary reason, in reason order. */
@@ -216,6 +242,7 @@ export function applyItems(
     const item: TidyApplyItem = { session_id: c.session_id, action };
     if (c.link_id != null) item.link_id = c.link_id;
     if (action === 'snooze') item.days = 7;
+    if (action === 'keep') item.days = KEEP_DAYS;
     out.push(item);
   }
   return out;
@@ -285,7 +312,12 @@ export function reopenedBadge(w: ReopenedWork): string {
  *  whether or not it is on (the backend's `auto` flag says only "on and
  *  allowed"). Safe kill or archive only, never a plain kill. */
 export function autoTidyPreview(cands: TidyCandidate[], reasons: ReadonlySet<string>): TidyCandidate[] {
-  return cands.filter((c) => (c.action === 'safe_kill' || c.action === 'archive') && reasons.has(c.reason));
+  return cands.filter(
+    (c) =>
+      (c.action === 'safe_kill' || c.action === 'archive') &&
+      reasons.has(c.reason) &&
+      !NEVER_AUTO_REASONS.has(c.reason),
+  );
 }
 
 /** Candidates whose session is in `scope` (`all` keeps every one; a
@@ -302,4 +334,63 @@ export function inScope(
     const r = byId.get(c.session_id);
     return !r || scopeOf(r) === scope;
   });
+}
+
+/**
+ * A request to open the Tidy-up sheet from elsewhere (the Today view's Stale
+ * section, work graph M9): `sessionIds` are ticked, the sheet shows only
+ * them until "Show all" (M10.4), and the cursor starts on the first of them;
+ * an empty list keeps the sheet's own preselection. The
+ * sheet lives in the sidebar, so App expands a collapsed sidebar on a
+ * request, and the sheet takes it once it has candidates. A request older
+ * than {@link TIDY_REQUEST_TTL_MS} is dropped rather than opening the sheet
+ * out of the blue later.
+ */
+export interface TidyRequest {
+  sessionIds: number[];
+  at: number;
+}
+
+export const TIDY_REQUEST_TTL_MS = 15_000;
+
+export const tidyRequest = writable<TidyRequest | null>(null);
+
+export function requestTidy(sessionIds: number[] = [], now: number = Date.now()): void {
+  tidyRequest.set({ sessionIds, at: now });
+}
+
+/** Whether a request is still worth honouring at `now`. */
+export function tidyRequestLive(r: TidyRequest | null, now: number = Date.now()): r is TidyRequest {
+  return r !== null && now - r.at <= TIDY_REQUEST_TTL_MS;
+}
+
+/** Which rows a sheet opened by `r` ticks: the requested ones it can act on
+ *  (never an unlinked one: M11.3, a person ticks those), or — with none
+ *  requested — the usual preselection. */
+export function requestedTicks(cands: readonly TidyCandidate[], r: TidyRequest): Set<number> {
+  if (r.sessionIds.length === 0) return new Set(cands.filter(preselected).map((c) => c.session_id));
+  const want = new Set(r.sessionIds);
+  return new Set(
+    cands
+      .filter((c) => want.has(c.session_id) && choicesFor(c).length > 0 && c.reason !== 'idle_unlinked')
+      .map((c) => c.session_id),
+  );
+}
+
+/**
+ * What a sheet opened by a request shows (work graph M10.4): just the
+ * requested candidates, so the Today view's Stale action opens a sheet about
+ * those links and nothing else. `null` — the sheet's own opening, or a
+ * request none of whose sessions is still a candidate — shows everything.
+ */
+export function requestedOnly(cands: readonly TidyCandidate[], sessionIds: readonly number[]): Set<number> | null {
+  if (sessionIds.length === 0) return null;
+  const hit = candidatesFor(cands, sessionIds);
+  return hit.length > 0 ? new Set(hit.map((c) => c.session_id)) : null;
+}
+
+/** The candidates behind the given sessions (the Today view's Stale rows). */
+export function candidatesFor(cands: readonly TidyCandidate[], sessionIds: readonly number[]): TidyCandidate[] {
+  const ids = new Set(sessionIds);
+  return cands.filter((c) => ids.has(c.session_id));
 }

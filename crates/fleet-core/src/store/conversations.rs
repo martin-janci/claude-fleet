@@ -412,6 +412,29 @@ impl Store {
             .optional()?)
     }
 
+    /// The transcript path a conversation on `host` recorded for
+    /// `claude_session_id`, newest first — as the hook stored it (validated
+    /// on write; readers validate again). `None` once every session that
+    /// held it is gone (conversations cascade with their session).
+    pub fn conversation_transcript_path_on_host(
+        &self,
+        host: &str,
+        claude_session_id: &str,
+    ) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT c.transcript_path FROM conversations c \
+                 JOIN sessions s ON s.id = c.session_id \
+                 WHERE s.host_alias = ?1 AND c.claude_session_id = ?2 \
+                   AND c.transcript_path IS NOT NULL \
+                 ORDER BY c.started_at DESC, c.id DESC LIMIT 1",
+                rusqlite::params![host, claude_session_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Count one turn of the conversation.
     pub fn conversation_bump_turns(
         &self,
@@ -422,6 +445,42 @@ impl Store {
             "UPDATE conversations SET turns = turns + 1 \
              WHERE session_id = ?1 AND claude_session_id = ?2",
             rusqlite::params![session_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the classification nudge (work graph M4.6) was already sent in
+    /// this conversation. A conversation fleet has no row for reads as sent:
+    /// the nudge never fires into a conversation it cannot stamp.
+    pub fn conversation_nudged(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+    ) -> Result<bool, IpcError> {
+        let at: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT classify_nudged_at FROM conversations \
+                 WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, claude_session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(at.is_none_or(|a| a.is_some()))
+    }
+
+    /// Stamp the classification nudge as sent in this conversation (once:
+    /// a later call keeps the first time).
+    pub fn mark_conversation_nudged(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+        at: i64,
+    ) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE conversations SET classify_nudged_at = COALESCE(classify_nudged_at, ?3) \
+             WHERE session_id = ?1 AND claude_session_id = ?2",
+            rusqlite::params![session_id, claude_session_id, at],
         )?;
         Ok(())
     }
@@ -592,6 +651,38 @@ mod tests {
         assert_eq!(row.end_reason, None);
         assert_eq!(row.model, None);
         assert_eq!(row.first_prompt, None);
+    }
+
+    /// Work graph M4.6: the classification nudge is stamped per
+    /// conversation, once; a new conversation starts un-nudged, and one
+    /// fleet has no row for never reads as "not yet".
+    #[test]
+    fn the_classify_nudge_is_stamped_once_per_conversation() {
+        let (s, _bus) = store_with_recorder();
+        let id = session(&s);
+        s.rebind_conversation(id, A, StartSource::Fleet, None, None)
+            .unwrap();
+        assert!(!s.conversation_nudged(id, A).unwrap());
+        s.mark_conversation_nudged(id, A, 100).unwrap();
+        s.mark_conversation_nudged(id, A, 200).unwrap();
+        assert!(s.conversation_nudged(id, A).unwrap());
+        let at: i64 = s
+            .conn
+            .query_row(
+                "SELECT classify_nudged_at FROM conversations WHERE claude_session_id = ?1",
+                [A],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at, 100, "the first stamp is kept");
+
+        s.rebind_conversation(id, B, StartSource::Clear, None, None)
+            .unwrap();
+        assert!(
+            !s.conversation_nudged(id, B).unwrap(),
+            "a new conversation starts un-nudged"
+        );
+        assert!(s.conversation_nudged(id, "unknown-conversation").unwrap());
     }
 
     #[test]

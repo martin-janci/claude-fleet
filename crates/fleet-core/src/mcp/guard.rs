@@ -137,6 +137,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // The composer's shared chip row. One tool both reads and replaces the
+    // list, so it is classified as a write and a `readonly` client cannot
+    // call it at all — not even to read. That is deliberate: a readonly
+    // device draws no chip row (every chip is a prompt it may not send), so
+    // the read it loses is a read it has no screen for, and the alternative
+    // — a second tool whose only job is the read — costs every connected
+    // client another definition for a list of at most 24 short strings.
+    ToolPolicy {
+        name: "quick_replies",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "add_host",
         access: Access::Master,
@@ -204,6 +218,24 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "revoke_client",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Operator settings: the values name hosts and their projects roots, and
+    // a write retunes the GC sweeper and auto-tidy for the whole fleet, so
+    // both are fleet admin. The read is `readonly: true` for the reason
+    // `list_clients` is: WHO may call it is a separate question.
+    ToolPolicy {
+        name: "get_settings",
+        access: Access::Master,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "set_setting",
         access: Access::Master,
         readonly: false,
         confirm: false,
@@ -812,11 +844,18 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// the operator (`Caller::is_operator`) these — and every `confirm: true`
 /// tool — need a person's approval whatever `mcp.confirm_destructive` says
 /// (work graph M9.7, decision D12). For anyone else they are ungated.
-/// `work_link` is gated only for `start` / `resume`, the actions that
-/// create a session.
+/// Some are gated only for the actions that create a session, at the call
+/// site: `work_link` for `start` / `resume`, `dispatch_task` for
+/// `new_worker`, `restore_host_sessions` unless `dry_run`.
 pub const OPERATOR_CONFIRMS: &[&str] = &[
     "new_session",
     "new_shell_session",
+    "new_bg_session",
+    "spawn_review",
+    "dispatch_task",
+    "restore_host_sessions",
+    "recreate_session",
+    "restart_session",
     "safe_kill_session",
     "work_link",
 ];

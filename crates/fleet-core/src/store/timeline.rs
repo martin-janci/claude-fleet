@@ -43,6 +43,8 @@ impl Store {
     ///   `safe_kill_send_failed`, `safe_kill_failed`, `safe_kill_ready`,
     ///   `safe_kill_discarded`.
     /// - GC sweeper (`service::gc`): `gc_killed`, `gc_failed`.
+    /// - tidy-up (`service::work::tidy`): `gc_tidied`, and `tidy_kept` (detail
+    ///   is the unix second a person's keep holds until, work graph M11.3).
     /// - hooks (`service::hooks`): `notification`.
     /// - playbooks (`Store::record_playbook_applied` et al.): `playbook_applied`.
     /// - MCP call audit (`mcp::tools::support`): `mcp_call`.
@@ -264,9 +266,6 @@ impl Store {
         )?)
     }
 
-    /// Return the newest-first event timeline for a session, capped at `limit`.
-    /// Ordering is `at DESC, id DESC` so events inserted within the same second
-    /// still come back in insertion order (newest first).
     /// The newest event of `session_id` whose kind is one of `kinds`.
     pub fn newest_session_event_of(
         &self,
@@ -295,6 +294,9 @@ impl Store {
             .optional()?)
     }
 
+    /// Return the newest-first event timeline for a session, capped at `limit`.
+    /// Ordering is `at DESC, id DESC` so events inserted within the same second
+    /// still come back in insertion order (newest first).
     pub fn list_session_events(
         &self,
         session_id: i64,

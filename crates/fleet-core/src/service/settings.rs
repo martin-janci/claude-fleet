@@ -161,10 +161,19 @@ pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
 /// Rows older than this are swept on the tick; `0` disables the age sweep.
 pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
 
-/// Work memory retention (work graph M2): journal rows older than this many
-/// days are swept, except those of a conversation a confirmed work link
-/// references. `0` keeps everything.
-pub const WORK_JOURNAL_DAYS: &str = "work.journal_days";
+/// Retention (work graph M12.3, `store::work_retention`): days a work
+/// journal row is kept once nothing live points at it. `0` keeps forever.
+pub const WORK_RETENTION_JOURNAL_DAYS: &str = "work.retention.journal_days";
+/// Retention: days a DONE tracker item no link names is kept. `0` forever.
+pub const WORK_RETENTION_TRACKER_ITEMS_DAYS: &str = "work.retention.tracker_items_days";
+/// Retention: days a work-graph timeline event (handover, nudge, tidy) is
+/// kept; the newest of each kind per session always stays. `0` forever.
+pub const WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS: &str =
+    "work.retention.timeline_work_events_days";
+/// M2's journal window, superseded by [`WORK_RETENTION_JOURNAL_DAYS`] and no
+/// longer writable. While the new key is unset, a stored `0` still keeps
+/// forever and a longer window still stands (`service::work::retention`).
+pub const LEGACY_WORK_JOURNAL_DAYS: &str = "work.journal_days";
 /// How far back (days) the sidebar looks for work that has only ended
 /// sessions, so reopened work has a group to show in.
 pub const WORK_RECENT_DAYS: &str = "work.recent_days";
@@ -185,6 +194,12 @@ pub const WORK_EVIDENCE_SNIPPETS: &str = "work.evidence_snippets";
 /// hook synchronous, which can add up to ~2 s to a start when the hub is
 /// down. Takes effect when the hooks are next installed.
 pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
+/// The classification nudge (work graph M4.6): after three turns with no
+/// link, and with at most five candidates in scope, one prompt per
+/// conversation carries a short note asking Claude to name its work
+/// (`work_link { source: agent_inferred }` — only ever a suggestion). Off by
+/// default: it spends context on a guess. Read on every prompt.
+pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -192,6 +207,10 @@ pub const WORK_TIDY_DONE_DAYS: &str = "work.tidy_done_days";
 /// Tidy-up: how long a session must have been idle before any reason
 /// suggests it.
 pub const WORK_TIDY_IDLE_HOURS: &str = "work.tidy_idle_hours";
+/// Tidy-up (work graph M11.3): a session with no work linked is suggested
+/// (`idle_unlinked`) once it has been idle, and unprompted, this many days.
+/// Never acted on by auto-tidy (D19).
+pub const WORK_TIDY_IDLE_UNLINKED_DAYS: &str = "work.tidy_idle_unlinked_days";
 /// Auto-tidy: the GC sweep acts on the tidy candidates of the allowed
 /// reasons (below) by itself — safe kill or archive only, never a plain
 /// kill. Off by default: tidy-up only suggests.
@@ -362,8 +381,18 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Secs,
     },
     Spec {
-        key: WORK_JOURNAL_DAYS,
-        default: "90",
+        key: WORK_RETENTION_JOURNAL_DAYS,
+        default: "365",
+        kind: Kind::Int { min: 0, max: 3650 },
+    },
+    Spec {
+        key: WORK_RETENTION_TRACKER_ITEMS_DAYS,
+        default: "180",
+        kind: Kind::Int { min: 0, max: 3650 },
+    },
+    Spec {
+        key: WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
+        default: "180",
         kind: Kind::Int { min: 0, max: 3650 },
     },
     Spec {
@@ -392,6 +421,11 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Bool,
     },
     Spec {
+        key: WORK_CLASSIFY_NUDGE,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
         key: WORK_TIDY_DONE_DAYS,
         default: "2",
         kind: Kind::Int { min: 1, max: 365 },
@@ -400,6 +434,11 @@ pub const SPECS: &[Spec] = &[
         key: WORK_TIDY_IDLE_HOURS,
         default: "4",
         kind: Kind::Int { min: 1, max: 720 },
+    },
+    Spec {
+        key: WORK_TIDY_IDLE_UNLINKED_DAYS,
+        default: "7",
+        kind: Kind::Int { min: 1, max: 90 },
     },
     Spec {
         key: WORK_AUTO_TIDY,
@@ -732,17 +771,58 @@ mod tests {
     }
 
     #[test]
+    fn retention_windows_default_to_d21_and_zero_keeps_forever() {
+        for (key, default) in [
+            (WORK_RETENTION_JOURNAL_DAYS, "365"),
+            (WORK_RETENTION_TRACKER_ITEMS_DAYS, "180"),
+            (WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS, "180"),
+        ] {
+            assert_eq!(resolve(key, None), default, "{key}");
+            for ok in ["0", "1", "3650"] {
+                assert!(validate(key, ok).is_ok(), "{key}={ok}");
+            }
+            for bad in ["3651", "-1", "1.5", "forever", ""] {
+                assert_eq!(
+                    validate(key, bad).unwrap_err().code,
+                    codes::E_INVALID,
+                    "{key}={bad}"
+                );
+            }
+        }
+        // M2's key is superseded: no longer writable through the registry.
+        assert!(spec(LEGACY_WORK_JOURNAL_DAYS).is_none());
+        assert_eq!(
+            validate(LEGACY_WORK_JOURNAL_DAYS, "90").unwrap_err().code,
+            codes::E_INVALID
+        );
+    }
+
+    #[test]
     fn tidy_settings_default_to_suggest_only_with_safe_reasons() {
         assert_eq!(resolve(WORK_AUTO_TIDY, None), "false");
         assert_eq!(resolve(WORK_TIDY_DONE_DAYS, None), "2");
         assert_eq!(resolve(WORK_TIDY_IDLE_HOURS, None), "4");
+        assert_eq!(resolve(WORK_TIDY_IDLE_UNLINKED_DAYS, None), "7");
+        assert!(validate(WORK_TIDY_IDLE_UNLINKED_DAYS, "1").is_ok());
+        assert!(validate(WORK_TIDY_IDLE_UNLINKED_DAYS, "90").is_ok());
+        for bad in ["0", "91", "-3", "a week"] {
+            assert!(
+                validate(WORK_TIDY_IDLE_UNLINKED_DAYS, bad).is_err(),
+                "{bad}"
+            );
+        }
         assert_eq!(
             resolve(WORK_AUTO_TIDY_REASONS, None),
             "done_idle,pr_merged_idle"
         );
         assert!(validate(WORK_AUTO_TIDY_REASONS, "").is_ok(), "none");
         assert!(validate(WORK_AUTO_TIDY_REASONS, " not_planned , done_idle").is_ok());
-        for bad in ["duplicate_worktree", "ghost_expiring", "done_idle,kill"] {
+        for bad in [
+            "duplicate_worktree",
+            "ghost_expiring",
+            "idle_unlinked",
+            "done_idle,kill",
+        ] {
             assert_eq!(
                 validate(WORK_AUTO_TIDY_REASONS, bad).unwrap_err().code,
                 codes::E_INVALID,

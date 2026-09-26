@@ -688,6 +688,17 @@ impl Store {
         Ok(())
     }
 
+    /// Link a session to its worktree row (`sessions.worktree_id`), which
+    /// reconcile never sets. Emits `session_updated`.
+    pub fn link_session_worktree(&self, id: i64, worktree_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET worktree_id = ?1 WHERE id = ?2",
+            rusqlite::params![worktree_id, id],
+        )?;
+        self.emit_session(id)?;
+        Ok(())
+    }
+
     /// Set a session's portable worktree key (derived from its cwd by reconcile).
     /// Emits `session_updated` so the frontend patches in place.
     pub fn set_worktree_key(&self, id: i64, key: Option<&str>) -> Result<(), rusqlite::Error> {
@@ -903,6 +914,21 @@ impl Store {
         self.emit_session(id)
     }
 
+    /// Put `last_prompt` back to an earlier value (possibly none): the send
+    /// it was stamped ahead of failed, so the prompt never reached the pane.
+    /// Emits `session_updated`.
+    pub fn restore_last_prompt(
+        &self,
+        id: i64,
+        prompt: Option<&str>,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET last_prompt=?1 WHERE id=?2",
+            rusqlite::params![prompt, id],
+        )?;
+        self.emit_session(id)
+    }
+
     /// Stamp when fleet created this session (migration 019). Only sets the
     /// value once — a re-create keeps the original start. Emits
     /// `session_updated` so the sidebar's elapsed label does not wait for a
@@ -960,18 +986,35 @@ impl Store {
     /// * `old` is remembered like a kill: that same stale pass still lists
     ///   `old`, and with no row left under that name it would insert the
     ///   session a second time.
+    ///
+    /// A `lost` row under `new` that is still restorable (host reboot
+    /// survival: `lost_at` set and a conversation to resume) is NOT a ghost
+    /// to dismiss: the rename is refused with `E_EXISTS` naming it, so its
+    /// timeline, participant and restore entry survive. The service refuses
+    /// before tmux renames anything (`reject_lost_session_name`); this is
+    /// the store's own guard. The dismissal and the rename are one
+    /// transaction.
     pub fn rename_session_row(
         &self,
         host_alias: &str,
         old: &str,
         new: &str,
         now: i64,
-    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         if old == new {
-            return self.get_session(old, host_alias);
+            return Ok(self.get_session(old, host_alias)?);
         }
-        let stale: Option<i64> = self
-            .conn
+        if let Some(lost) = self.lost_resumable_session_named(host_alias, new)? {
+            return Err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_EXISTS,
+                format!(
+                    "{new} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
+                    lost.id
+                ),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let stale: Option<i64> = tx
             .query_row(
                 "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
                 rusqlite::params![host_alias, new],
@@ -979,10 +1022,20 @@ impl Store {
             )
             .optional()?;
         if let Some(id) = stale {
-            self.delete_session(id)?;
+            // A dead ghost gives way: what `delete_session` does, inside
+            // this transaction (its event is emitted after the commit).
+            tx.execute(
+                "DELETE FROM session_events WHERE session_id=?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL \
+                 WHERE session_id = ?2 AND retired_at IS NULL",
+                rusqlite::params![now_unix(), id],
+            )?;
+            tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         }
-        let id: Option<i64> = self
-            .conn
+        let id: Option<i64> = tx
             .query_row(
                 "UPDATE sessions SET tmux_name=?3, last_reconciled_at=?4 \
                  WHERE host_alias=?1 AND tmux_name=?2 RETURNING id",
@@ -990,9 +1043,13 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
+        tx.commit()?;
+        if let Some(gone) = stale {
+            self.bus.session_killed(gone);
+        }
         self.note_kill(host_alias, old, now);
         match id {
-            Some(id) => self.emit_session(id),
+            Some(id) => Ok(self.emit_session(id)?),
             None => Ok(None),
         }
     }
@@ -1134,6 +1191,19 @@ impl Store {
         &self,
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        self.record_prompt_submit_hook_for_row_with(row_id, true)
+    }
+
+    /// [`Self::record_prompt_submit_hook_for_row`] with the touch decided by
+    /// the caller: `touch = false` for a prompt fleet itself typed (a peer's
+    /// wake nudge, the safe-kill instructions, an inbox delivery), which
+    /// marks the session working like any other but is nobody's touch and
+    /// must not keep a done session out of tidy-up or un-archive it.
+    pub fn record_prompt_submit_hook_for_row_with(
+        &self,
+        row_id: i64,
+        touch: bool,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
@@ -1145,9 +1215,11 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        // A prompt is a person's touch (work graph M7): it protects the
+        // A person's prompt is a touch (work graph M7): it protects the
         // session from tidy-up for an hour and un-archives it.
-        self.touch_for_prompt(row_id)?;
+        if touch {
+            self.touch_for_prompt(row_id)?;
+        }
         Ok(self.emit_session(row_id)?)
     }
 

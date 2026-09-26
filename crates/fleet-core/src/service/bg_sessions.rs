@@ -21,13 +21,13 @@ pub use crate::claude_cli::PurgeReport;
 #[derive(Debug, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "NewBgSessionParams")]
 pub struct NewBgSessionArgs {
-    /// Host alias to launch the background session on.
+    /// Host to launch on.
     pub host_alias: String,
-    /// Display name for the session (also its tmux/agent name).
+    /// Display name (also its tmux/agent name).
     pub name: String,
-    /// Initial prompt for the headless Claude session.
+    /// Initial prompt.
     pub prompt: String,
-    /// The session asking for this one; becomes the new row's parent.
+    /// Your session id: becomes the row's parent.
     #[serde(default)]
     pub requester_session_id: Option<i64>,
 }

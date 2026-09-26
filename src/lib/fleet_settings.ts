@@ -34,14 +34,18 @@ export const SETTING_KEYS = {
   usagePricesJson: 'usage.prices_json',
   reportsMaxRows: 'reports.max_rows',
   reportsMaxAgeSecs: 'reports.max_age_secs',
-  workJournalDays: 'work.journal_days',
+  workRetentionJournalDays: 'work.retention.journal_days',
+  workRetentionTrackerItemsDays: 'work.retention.tracker_items_days',
+  workRetentionTimelineWorkEventsDays: 'work.retention.timeline_work_events_days',
   workRecentDays: 'work.recent_days',
   workSyncIntervalSecs: 'work.sync_interval_secs',
   workTrustedBranchProjects: 'work.trusted_branch_projects',
   workEvidenceSnippets: 'work.evidence_snippets',
   workSessionStartContext: 'work.session_start_context',
+  workClassifyNudge: 'work.classify_nudge',
   workTidyDoneDays: 'work.tidy_done_days',
   workTidyIdleHours: 'work.tidy_idle_hours',
+  workTidyIdleUnlinkedDays: 'work.tidy_idle_unlinked_days',
   workAutoTidy: 'work.auto_tidy',
   workAutoTidyReasons: 'work.auto_tidy_reasons',
 } as const;
@@ -139,14 +143,18 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'usage.prices_json': '{}',
   'reports.max_rows': '5000',
   'reports.max_age_secs': '604800',
-  'work.journal_days': '90',
+  'work.retention.journal_days': '365',
+  'work.retention.tracker_items_days': '180',
+  'work.retention.timeline_work_events_days': '180',
   'work.recent_days': '14',
   'work.sync_interval_secs': '300',
   'work.trusted_branch_projects': '[]',
   'work.evidence_snippets': 'true',
   'work.session_start_context': 'false',
+  'work.classify_nudge': 'false',
   'work.tidy_done_days': '2',
   'work.tidy_idle_hours': '4',
+  'work.tidy_idle_unlinked_days': '7',
   'work.auto_tidy': 'false',
   'work.auto_tidy_reasons': 'done_idle,pr_merged_idle',
 };
@@ -269,6 +277,19 @@ export function parseHoursInput(raw: string): { secs: number } | { error: string
 /** A whole-number input (`Kind::Int`). Refuses an empty or non-integer value
  *  instead of ignoring it; an out-of-range integer is passed through so the
  *  backend's range error is shown. */
+/** `work.tidy_idle_unlinked_days`' bounds (`Kind::Int { min: 1, max: 90 }`). */
+export const TIDY_IDLE_UNLINKED_DAYS_MIN = 1;
+export const TIDY_IDLE_UNLINKED_DAYS_MAX = 90;
+
+/** {@link parseIntInput} within `min..=max`, refused here with a message. */
+export function parseBoundedIntInput(raw: string, min: number, max: number): { value: string } | { error: string } {
+  const r = parseIntInput(raw);
+  if ('error' in r) return r;
+  const v = Number.parseInt(r.value, 10);
+  if (v < min || v > max) return { error: `must be ${min}–${max}` };
+  return r;
+}
+
 export function parseIntInput(raw: string): { value: string } | { error: string } {
   const t = raw.trim();
   if (t === '') return { error: 'enter a whole number' };

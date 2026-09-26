@@ -50,7 +50,9 @@ Releases are cut manually with `scripts/release.sh <new-version>` — it bumps
 the six version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
 from the Conventional Commits since the last tag, commits, and creates the
 `vX.Y.Z` tag. Never edit the version fields by hand; run the script from a
-clean `main`. See `docs/RELEASING.md`.
+clean `main`. See `docs/RELEASING.md`. Once the release is pushed,
+`scripts/release-mobile.sh <same-version>` tags fleet-mobile's `main` so its
+own workflow builds the signed APK under the same version.
 
 `docs/control-api-reference.md` is generated from the MCP tool router. After
 editing any `#[tool(...)]` description or the `generate_handler!` list,
@@ -188,7 +190,14 @@ current, rejections are final), `detect.rs` wiring the prompt / Stop / PR
 probe / sync triggers, migration 049, `SessionRow.work_suggested` (a guess
 never groups a session), and the chip / popover / batch review UI. The
 SessionStart context (M4.5) is built but OFF behind
-`work.session_start_context` (decision D5); M4.6 is not done.
+`work.session_start_context` (decision D5; the remote-host numbers are the
+user's to take with `scripts/measure-session-start.sh`). M4.6, the opt-in classification
+nudge, is landed OFF behind `work.classify_nudge`: after three turns with no
+link and 1–5 candidates in the host's scope, one UserPromptSubmit per
+conversation carries a ≤400-char note after the mail
+(`service/work/nudge.rs`, migration 056 `conversations.classify_nudged_at`; migration 057 re-issues the read-cursor delete trigger that a rewrite of 044 left out of some databases);
+Claude's answer, `work_link { source: agent_inferred }`, is only ever a
+pre-selected suggestion (rule R11, strength `inferred`).
 Work graph M5 (organisations) is landed: migration 050 (`orgs`, text-keyed
 `org_rules`, `hosts.org_id`, `work_links.snap_org_id`), `SessionRow.org_id`
 (SQL, `session_org_sql!`, held equal to `store::org_of_session`), and the
@@ -228,6 +237,11 @@ and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
 too. Write-back (D3 none), dead-session summaries (D10 off) and webhooks
 (D13 no) are decided against and not built; see
 `docs/superpowers/plans/2026-09-24-work-graph-m9-beyond.md`.
+Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
+M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
+and the M5.5 filters (tracker / status / mine / has-session / archived)
+have chips under the sidebar's "⚑ work" pill (`work_filters.ts`, through
+`rowMatches`).
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

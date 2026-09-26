@@ -12,6 +12,15 @@ authors = ["martin-janci"]
 edition = "2021"
 license = "MIT"
 
+[features]
+default = []
+# Test-only (work graph M10.2): lets `scripts/hub-e2e.sh` point the Jira Cloud
+# provider at a loopback fake tracker (`FLEET_E2E_TRACKER_PORT`, see
+# `service::trackers::e2e_loopback_port`). Off in every shipped build; even
+# with it on, a build without debug assertions (`--release`) refuses the
+# override. Never add it to `default`.
+e2e = []
+
 [dependencies]
 sysinfo = "0.33"
 serde = { version = "1", features = ["derive"] }
@@ -77,6 +86,10 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# `trace` only in tests: the work graph's scale tests (M12.2,
+# store/scale_fixture.rs) capture the statements a call runs and check each
+# one's query plan. The same crate and version as above; no package added.
+rusqlite = { version = "0.32", features = ["bundled", "trace"] }
 # `test-util` only: `#[tokio::test(start_paused = true)]`, so the listener's
 # handshake timeout can be tested without the test waiting it out in real time.
 tokio = { version = "1", features = ["full", "test-util"] }

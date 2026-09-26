@@ -22,11 +22,15 @@ mod read_pool;
 mod reconcile;
 mod reports;
 mod rows;
+#[cfg(test)]
+pub(crate) mod scale_fixture;
 mod schema;
 mod sessions;
 mod tasks;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+pub(crate) mod testgen;
 mod timeline;
 mod tracker_items;
 mod trackers;
@@ -34,6 +38,8 @@ mod usage;
 mod work;
 mod work_detect;
 mod work_journal;
+mod work_local;
+mod work_retention;
 mod work_tidy;
 
 pub use clients::{
@@ -60,24 +66,39 @@ pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use trackers::{
-    is_allowed_tracker_host, normalize_dc_site, normalize_provider_site, normalize_site_url,
-    validate_credential_ref, validate_tracker_settings, validate_tracker_transport, Secret,
-    TrackerConfig, TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow,
-    TRACKER_AUTH_KINDS, TRACKER_PROVIDERS, TRACKER_STATES,
+    ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
+    normalize_provider_site, normalize_site_url, validate_credential_ref, validate_ghes_hostname,
+    validate_tracker_settings, validate_tracker_transport, Secret, TrackerConfig,
+    TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, TRACKER_AUTH_KINDS,
+    TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
-    canonical_key, github_ref, normalize_work_ref, WorkItemRow, WorkLinkRow, WorkSummary,
-    WorkTarget, WORK_LINK_SOURCES,
+    canonical_key, github_ref, normalize_work_ref, split_github_repo, WorkItemRow, WorkLinkRow,
+    WorkSummary, WorkTarget, WORK_LINK_SOURCES,
 };
 pub use work_detect::DetectionState;
 pub use work_journal::{
     JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };
+pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
+pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_tidy::ReopenedWork;
+
+/// One number per `Store` ever built in this process, never reused — see
+/// [`Store::instance_id`].
+static NEXT_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_instance() -> u64 {
+    NEXT_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 pub struct Store {
     conn: Connection,
     bus: StoreBus,
+    /// This store's place in a process-wide registry keyed per store (the
+    /// work resume's in-flight keys): monotonic, so a store built where a
+    /// dropped one was never inherits its entries the way an address would.
+    instance: u64,
     /// In-memory record of the sessions fleet itself killed, so a reconcile
     /// pass that probed before a kill cannot re-insert its row once the kill
     /// has reaped it. Process-local on purpose — see [`reconcile::KillMemory`].
@@ -105,6 +126,9 @@ pub struct Store {
 struct StoreBus {
     inner: Arc<dyn EventBus>,
     held: std::sync::Mutex<Option<Vec<RowChange>>>,
+    /// Frames delivered to `inner` so far (work graph M11.4's sync metrics
+    /// count a pass's frames as the difference). Process-local, never reset.
+    delivered: std::sync::atomic::AtomicU64,
 }
 
 impl StoreBus {
@@ -112,7 +136,15 @@ impl StoreBus {
         Self {
             inner,
             held: std::sync::Mutex::new(None),
+            delivered: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Hand one frame to the real bus, counted.
+    fn deliver(&self, e: &RowChange) {
+        self.delivered
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.emit(e);
     }
 
     /// Start holding emits. Returns false when already holding (nested).
@@ -141,7 +173,7 @@ impl EventBus for StoreBus {
             held.push(e.clone());
             return;
         }
-        self.inner.emit(e);
+        self.deliver(e);
     }
 }
 
@@ -175,15 +207,98 @@ fn tune_file_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// `chmod 600` one file, best-effort: a missing file is fine (a sidecar
+/// SQLite has not created yet), any other failure is logged, never fatal.
+/// No-op off unix.
+fn set_owner_only(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "[store] chmod 600 failed; the file may be readable by other users"
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// The WAL sidecars SQLite keeps beside `path` while a connection is open.
+fn sidecar_paths(path: &std::path::Path) -> [std::path::PathBuf; 2] {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_owned();
+    shm.push("-shm");
+    [wal.into(), shm.into()]
+}
+
+/// Make `path` owner-only BEFORE SQLite opens it.
+///
+/// The database holds bearer tokens (the MCP master token, client and peer
+/// link tokens, tracker secrets) in plaintext, and in WAL mode every recent
+/// commit lives in `<path>-wal` until a checkpoint. SQLite creates `-wal`
+/// and `-shm` with the main file's mode at that moment and never re-chmods
+/// them, so a chmod after the open (what the callers used to do) leaves the
+/// sidecars at the umask-derived mode for the life of the process — and
+/// across a crash, since a leftover `-wal` is reused. Creating the file 0600
+/// here means the sidecars inherit 0600; an existing file is tightened first
+/// for the same reason.
+fn restrict_before_open(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if path.exists() {
+            set_owner_only(path);
+            return;
+        }
+        // An empty file is a valid (empty) SQLite database. `create_new`: a
+        // file that appeared in between is an existing database, and the
+        // open below reads it as such.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => set_owner_only(path),
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "[store] could not pre-create the database owner-only"
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 impl Store {
     pub fn open_with_bus(path: &std::path::Path, bus: Arc<dyn EventBus>) -> Result<Self> {
+        restrict_before_open(path);
         let conn = Connection::open(path)?;
         tune_file_connection(&conn)?;
+        // A database that already existed with a wider mode may have left a
+        // `-wal` / `-shm` behind (a crash, an older build) that SQLite reuses
+        // as they are; tighten them too, now that WAL is on.
+        for sidecar in sidecar_paths(path) {
+            set_owner_only(&sidecar);
+        }
         let store = Self {
             conn,
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         };
         store.migrate()?;
@@ -222,6 +337,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         })
     }
@@ -234,6 +350,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         };
         store.migrate()?;
@@ -248,10 +365,18 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
             peer_generations: Default::default(),
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// A number no other `Store` of this process has or will have — the key
+    /// for a process-wide, per-store registry. An address is not one: a
+    /// store dropped and another built where it was would alias.
+    pub fn instance_id(&self) -> u64 {
+        self.instance
     }
 
     /// The raw connection, for a test outside `store` that has to set up a
@@ -296,6 +421,17 @@ impl Store {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             rusqlite::params![key, value],
         )?;
+        Ok(())
+    }
+
+    /// Forget a key, so the next `get_setting` answers `None` and its reader
+    /// falls back to its own default. Absent and "stored as the default" are
+    /// not the same thing: the second pins today's default forever (see
+    /// `service::quick_replies::replace`). A key that was never there is not
+    /// an error.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key=?1", rusqlite::params![key])?;
         Ok(())
     }
 
@@ -411,11 +547,20 @@ impl Store {
             let held = self.bus.release();
             if result.is_ok() {
                 for e in &held {
-                    self.bus.inner.emit(e);
+                    self.bus.deliver(e);
                 }
             }
         }
         result
+    }
+
+    /// Frames this store has handed to its event bus since it was opened
+    /// (a held frame counts once it is released; one a rollback dropped
+    /// never counts). Callers measure a span of work as the difference.
+    pub fn frames_emitted(&self) -> u64 {
+        self.bus
+            .delivered
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -502,6 +647,49 @@ mod tests {
         // lose the last commits but never corrupts the database.
         assert_eq!(pragma::<i64>(&s, "synchronous"), 1);
         assert!(pragma::<i64>(&s, "busy_timeout") >= 1000);
+    }
+
+    /// The bearer tokens live in `state.db-wal` until a checkpoint, and
+    /// SQLite gives the sidecars the main file's mode when it creates them:
+    /// the main file must be 0600 BEFORE the open, not chmodded after it.
+    #[cfg(unix)]
+    #[test]
+    fn file_store_and_its_wal_sidecars_are_owner_only_while_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let wal = dir.path().join("state.db-wal");
+        let shm = dir.path().join("state.db-shm");
+
+        // A fresh database: created 0600, so the sidecars inherit 0600.
+        let s = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        s.set_controller("mac", "dev-fleet").unwrap();
+        assert!(
+            wal.exists() && shm.exists(),
+            "WAL sidecars exist while open"
+        );
+        assert_eq!(mode(&db), 0o600, "state.db");
+        assert_eq!(mode(&wal), 0o600, "state.db-wal");
+        assert_eq!(mode(&shm), 0o600, "state.db-shm");
+
+        // A leftover sidecar with a wider mode (a crash under an older build)
+        // is tightened by the next open even though SQLite reuses it.
+        std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let again = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        assert_eq!(mode(&wal), 0o600, "leftover state.db-wal");
+        drop(again);
+        drop(s);
+
+        // A database that already existed with a wider mode is tightened
+        // before the open, so its new sidecars are 0600 too.
+        assert!(!wal.exists(), "the WAL is gone after the last close");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let s = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        s.set_controller("mac", "dev-fleet").unwrap();
+        assert_eq!(mode(&db), 0o600, "existing state.db");
+        assert_eq!(mode(&wal), 0o600, "existing database's state.db-wal");
+        assert_eq!(mode(&shm), 0o600, "existing database's state.db-shm");
     }
 
     /// `fleet-hub pair` / `token show` read beside a live daemon. In WAL a

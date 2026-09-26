@@ -288,20 +288,41 @@ pub fn canonical_key(raw: &str) -> String {
     }
 }
 
-/// `owner/repo#n` → `(owner/repo, n)`, both names `[A-Za-z0-9_.-]`.
+/// `owner/repo#n` → `(owner/repo, n)`, both names `[A-Za-z0-9_.-]`; a
+/// GitHub Enterprise Server issue's `host/owner/repo#n` (work graph M11.4)
+/// → `(host/owner/repo, n)`, the host a DNS name
+/// ([`super::trackers::ghes_host_ok`], lower case, no port).
 pub fn github_ref(s: &str) -> Option<(&str, u64)> {
     let (repo, n) = s.rsplit_once('#')?;
-    let (o, r) = repo.split_once('/')?;
+    split_github_repo(repo)?;
+    if n.is_empty() || n.len() > 9 {
+        return None;
+    }
+    Some((repo, n.parse().ok()?))
+}
+
+/// A GitHub reference's repository part → `(enterprise host, owner/repo)`:
+/// `owner/repo` is github.com's (`None`), `host/owner/repo` an enterprise
+/// instance's. `None` when it is neither.
+pub fn split_github_repo(repo: &str) -> Option<(Option<&str>, &str)> {
     let name_ok = |x: &str| {
         !x.is_empty()
             && !x.starts_with(['.', '-'])
             && x.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
     };
-    if !(name_ok(o) && name_ok(r)) || n.is_empty() || n.len() > 9 {
-        return None;
+    let parts: Vec<&str> = repo.split('/').collect();
+    match parts.as_slice() {
+        [o, r] if name_ok(o) && name_ok(r) => Some((None, repo)),
+        [h, o, r]
+            if super::trackers::ghes_host_ok(&h.to_ascii_lowercase())
+                && name_ok(o)
+                && name_ok(r) =>
+        {
+            Some((Some(h), &repo[h.len() + 1..]))
+        }
+        _ => None,
     }
-    Some((repo, n.parse().ok()?))
 }
 
 /// `PREFIX-123`: a letter, then 1–9 of `[A-Za-z0-9_]`, a dash, 1–7 digits —
@@ -413,6 +434,24 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
 }
 
 impl Store {
+    /// Keyed local work items changed since `since` (unix seconds), newest
+    /// first — the classification nudge's (work graph M4.6) local
+    /// candidates. A keyless item cannot be named back by key, so it is not
+    /// one.
+    pub fn recent_local_work_items(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<WorkItemRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM work_items \
+             WHERE source = 'local' AND key IS NOT NULL AND updated_at >= ?1 \
+             ORDER BY updated_at DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![since, limit as i64], map_item)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Create a local work item, or return the local item that already has
     /// `key` (updating its title when a non-empty one is given). A local item
     /// with no key is always new.
@@ -470,7 +509,8 @@ impl Store {
             .map_err(IpcError::from)
     }
 
-    fn local_work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
+    /// The local item that carries `key` (normalised), if any.
+    pub fn local_work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
         self.conn
             .query_row(
                 &format!(
@@ -525,7 +565,7 @@ impl Store {
     /// The live participant of `session_id`, minting one if it has none
     /// (rows from before migration 045). `E_NOTFOUND` for a session row that
     /// does not exist — an identity is never minted for a dead id.
-    fn work_participant(&self, session_id: i64) -> Result<i64, IpcError> {
+    pub(super) fn work_participant(&self, session_id: i64) -> Result<i64, IpcError> {
         let exists: bool = self
             .conn
             .query_row(
@@ -672,7 +712,7 @@ impl Store {
     /// A link write changes the row's `work` without touching `sessions`, so
     /// bump `row_version` by hand: the frontend's merge guard then orders the
     /// `session_updated` this emits after any older payload of the row.
-    fn bump_session_for_work(&self, session_id: i64) -> Result<(), IpcError> {
+    pub(super) fn bump_session_for_work(&self, session_id: i64) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
             rusqlite::params![session_id],
@@ -740,14 +780,18 @@ impl Store {
     ) -> Result<bool, IpcError> {
         // A carry is a decision fleet makes for the person: it settles a
         // live suggestion of the same target rather than sitting beside it.
+        // The same target is the same item however it was spelled (by id,
+        // or by its key), as `decide_session_work` matches it.
         self.conn.execute(
             "DELETE FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
-               AND state = 'suggested' AND item_id IS ?2 AND ref_key IS ?3",
+               AND state = 'suggested' \
+               AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2))",
             rusqlite::params![participant, item_id, ref_key],
         )?;
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
-               AND ended_at IS NULL AND item_id IS ?2 AND ref_key IS ?3)",
+               AND ended_at IS NULL \
+               AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)))",
             rusqlite::params![participant, item_id, ref_key],
             |r| r.get(0),
         )?;
@@ -965,13 +1009,17 @@ impl Store {
     }
 
     /// The work item that carries `key` (normalised): a tracker's item when
-    /// one exists, else the local one.
+    /// one exists, else the local one. A removed tracker's rows (kept for
+    /// the links that point at them) come last: they must not shadow the
+    /// same site re-added, whose fresh row carries the live title and org.
     pub fn work_item_by_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
         self.conn
             .query_row(
                 &format!(
                     "SELECT {ITEM_COLUMNS} FROM work_items WHERE key = ?1 \
-                     ORDER BY (source = 'local') ASC, id ASC LIMIT 1"
+                     ORDER BY (tracker_id IS NOT NULL \
+                               AND tracker_id NOT IN (SELECT id FROM trackers)) ASC, \
+                              (source = 'local') ASC, id ASC LIMIT 1"
                 ),
                 rusqlite::params![key],
                 map_item,
@@ -992,13 +1040,17 @@ impl Store {
             .map(|c| format!("l.{c}"))
             .collect::<Vec<_>>()
             .join(", ");
+        // `item_id IN (…)`, not a join on the item's key: both arms of the
+        // OR then have an index (`ref_key`, `item_id`), where the join made
+        // SQLite walk every live link per call — and `work { tickets }`
+        // makes one call per ticket (work graph M12.2).
         let pairs: Vec<(WorkLinkRow, i64)> = {
             let mut stmt = self.conn.prepare(&format!(
                 "SELECT {cols}, p.session_id FROM work_links l \
-                 LEFT JOIN work_items i ON i.id = l.item_id \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
-                   AND p.session_id IS NOT NULL AND (l.ref_key = ?1 OR i.key = ?1) \
+                   AND p.session_id IS NOT NULL \
+                   AND (l.ref_key = ?1 OR l.item_id IN (SELECT id FROM work_items WHERE key = ?1)) \
                  ORDER BY COALESCE(l.decided_at, l.created_at) DESC, l.id DESC"
             ))?;
             let rows = stmt.query_map(rusqlite::params![key], |r| {
@@ -1418,6 +1470,45 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].ref_key.as_deref(), Some("DEF-2"), "primary stays");
         assert!(!links[1].is_primary);
+    }
+
+    /// A tracker item is one target however it is spelled: a rejection made
+    /// by item id blocks a carry that names its key, and a repoint merge
+    /// does not stack a by-id link beside a by-key one.
+    #[test]
+    fn a_carry_and_a_repoint_match_the_item_under_either_spelling() {
+        let s = Store::open_in_memory().unwrap();
+        let t = s
+            .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+            .unwrap();
+        let item = super::super::test_support::tracker_item(&s, t.id, "10001", "ABC-1", "Pay");
+
+        let rejecting = with_conversation(&s, "rej", "c-x");
+        s.reject_session_work(rejecting, WorkTarget::Item(item))
+            .unwrap();
+        assert!(
+            !s.link_resumed_work(rejecting, "ABC-1").unwrap(),
+            "a carry by key is blocked by the rejection by id"
+        );
+        let links = s.session_work_links(rejecting).unwrap();
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].state, "rejected");
+        let row = s.get_session_by_id(rejecting).unwrap().unwrap();
+        assert_eq!(row.work, None);
+
+        let src = seed(&s, "src");
+        let dst = seed(&s, "dst");
+        s.link_session_work(src, WorkTarget::Item(item), "manual")
+            .unwrap();
+        s.link_session_work(dst, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let p = s.participant_for_session(src).unwrap().unwrap().id;
+        s.repoint_participant(p, dst).unwrap();
+        s.delete_session(src).unwrap();
+        let links = s.session_work_links(dst).unwrap();
+        assert_eq!(links.len(), 1, "one link to the item: {links:?}");
+        assert_eq!(links[0].item_id, Some(item));
+        assert!(links[0].is_primary);
     }
 
     #[test]

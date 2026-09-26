@@ -4,8 +4,9 @@
 //! org is its tracker's; a per-host token reads only what its own host's
 //! sessions work on, inside its org; a tracker never binds another org's
 //! bare reference), so this pass proves each provider's keys, URLs and
-//! references take no side door: `owner/repo#n`, `asana:<gid>`, a team key,
-//! a Data Center key, and their URLs.
+//! references take no side door: `owner/repo#n`, an enterprise
+//! `host/owner/repo#n` (M11.4), `asana:<gid>`, a team key, a Data Center
+//! key, and their URLs.
 //!
 //! The full matrix per caller kind lives in `mcp/tools/tests_isolation.rs`
 //! (M5); this is its per-provider slice at the service layer.
@@ -25,6 +26,7 @@ struct Case {
     provider: &'static str,
     site: &'static str,
     transport: &'static str,
+    settings: TrackerSettings,
     items: Vec<WorkItemSnapshot>,
 }
 
@@ -49,6 +51,16 @@ fn cases() -> Vec<Case> {
         None,
         fake.clone(),
     );
+    let ghes_settings = TrackerSettings {
+        hostname: Some("ghe.corp.example".into()),
+        ..Default::default()
+    };
+    let ghes = super::github::GitHub::new(
+        "https://ghe.corp.example/acme",
+        TrackerConfig::default(),
+        ghes_settings.clone(),
+        fake.clone(),
+    );
     let dc = super::jira_dc::JiraDc::new(
         "https://jira.corp.example/jira",
         TrackerConfig::default(),
@@ -61,6 +73,7 @@ fn cases() -> Vec<Case> {
             provider: "github",
             site: "https://github.com/acme",
             transport: "via_cli:h-b",
+            settings: TrackerSettings::default(),
             items: list(
                 fixture("github", "search_mine_p1.json")["data"]["search"]["nodes"].clone(),
             )
@@ -68,10 +81,30 @@ fn cases() -> Vec<Case> {
             .filter_map(|n| gh.snapshot(n))
             .collect(),
         },
+        // GitHub Enterprise Server: its own keys and URLs, same rules.
+        Case {
+            provider: "github",
+            site: "https://ghe.corp.example/acme",
+            transport: "via_cli:h-b",
+            settings: ghes_settings,
+            items: list(
+                fixture("github", "search_mine_p1.json")["data"]["search"]["nodes"].clone(),
+            )
+            .iter()
+            .filter_map(|n| ghes.snapshot(n))
+            .map(|mut i| {
+                i.url = i
+                    .url
+                    .map(|u| u.replacen("https://github.com/", "https://ghe.corp.example/", 1));
+                i
+            })
+            .collect(),
+        },
         Case {
             provider: "asana",
             site: "https://app.asana.com",
             transport: "direct",
+            settings: TrackerSettings::default(),
             items: list(fixture("asana", "tasks_mine_p1.json")["data"].clone())
                 .iter()
                 .filter_map(|t| asana.snapshot(t))
@@ -81,6 +114,7 @@ fn cases() -> Vec<Case> {
             provider: "linear",
             site: "https://linear.app/acme",
             transport: "direct",
+            settings: TrackerSettings::default(),
             items: list(
                 fixture("linear", "issues_mine_p1.json")["data"]["issues"]["nodes"].clone(),
             )
@@ -92,6 +126,7 @@ fn cases() -> Vec<Case> {
             provider: "jira_dc",
             site: "https://jira.corp.example/jira",
             transport: "direct",
+            settings: TrackerSettings::default(),
             items: list(fixture("jira_dc", "search_mine_p1.json")["issues"].clone())
                 .iter()
                 .filter_map(|i| dc.snapshot(i))
@@ -138,6 +173,9 @@ async fn a_company_a_host_sees_none_of_company_bs_work_in_any_provider() {
         // Company B's tracker of this provider.
         let tb = s.add_tracker(c.provider, "B tracker", c.site).unwrap();
         s.set_tracker_transport(tb.id, c.transport).unwrap();
+        if !c.settings.is_default() {
+            s.set_tracker_settings(tb.id, &c.settings).unwrap();
+        }
         s.set_tracker_org(tb.id, Some(b.id)).unwrap();
         s.set_tracker_state(tb.id, "ok", None).unwrap();
         let ids: Vec<i64> = c.items[..2]

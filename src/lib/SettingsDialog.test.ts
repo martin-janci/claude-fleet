@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 
@@ -10,7 +10,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts, type HostRow } from './hosts';
-import { composerPresets, resetComposerPresets, DEFAULT_PRESETS } from './composer_presets';
+import { composerPresets, flushComposerPresets } from './composer_presets';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const sample: HostRow[] = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -454,78 +455,145 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
   });
 
-  it('lists the composer presets and edits them in place', async () => {
-    resetComposerPresets();
+  it('lists the composer presets and edits them in place, saving through the backend', async () => {
+    // The list is fleet state now (`service::quick_replies`), so the editor
+    // starts from what the backend served and every edit is a write to it —
+    // debounced, which is why each assertion flushes.
+    const seeded = [
+      { label: 'Clear', text: '/clear' },
+      { label: 'Compact', text: '/compact' },
+    ];
+    composerPresets.set(seeded);
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a?: { entries?: unknown }) => {
+      if (cmd === 'quick_replies') return seeded;
+      if (cmd === 'set_quick_replies') return a?.entries;
+      return base(cmd, a);
+    });
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
     const section = screen.getByTestId('composer-section');
     expect(section.textContent).toContain('Conversation composer');
     const labels = screen.getAllByTestId('preset-label') as HTMLInputElement[];
-    expect(labels).toHaveLength(DEFAULT_PRESETS.length);
-    expect(labels[0].value).toBe(DEFAULT_PRESETS[0].label);
+    expect(labels).toHaveLength(seeded.length);
+    expect(labels[0].value).toBe('Clear');
 
     await fireEvent.input(labels[0], { target: { value: 'Wipe' } });
     expect(get(composerPresets)[0].label).toBe('Wipe');
     const texts = screen.getAllByTestId('preset-text') as HTMLTextAreaElement[];
     await fireEvent.input(texts[0], { target: { value: '/clear now' } });
     expect(get(composerPresets)[0].text).toBe('/clear now');
+    await flushComposerPresets();
+    expect(inv).toHaveBeenCalledWith('set_quick_replies', {
+      entries: [{ label: 'Wipe', text: '/clear now' }, seeded[1]],
+    });
 
     await fireEvent.click(screen.getByTestId('preset-add'));
-    expect(get(composerPresets)).toHaveLength(DEFAULT_PRESETS.length + 1);
-    expect(screen.getAllByTestId('preset-label')).toHaveLength(DEFAULT_PRESETS.length + 1);
+    expect(get(composerPresets)).toHaveLength(seeded.length + 1);
+    expect(screen.getAllByTestId('preset-label')).toHaveLength(seeded.length + 1);
 
     await fireEvent.click(screen.getAllByTestId('preset-remove')[0]);
-    expect(get(composerPresets)[0].label).toBe(DEFAULT_PRESETS[1].label);
+    expect(get(composerPresets)[0].label).toBe('Compact');
 
+    // Reset stores nothing and takes the backend's built-ins back.
+    inv.mockClear();
     await fireEvent.click(screen.getByTestId('preset-reset'));
-    expect(get(composerPresets)).toEqual(DEFAULT_PRESETS);
+    await flushComposerPresets();
+    expect(inv).toHaveBeenCalledWith('set_quick_replies', { entries: [] });
   });
 });
 
 describe('SettingsDialog — Work lifecycle (work graph M7.3)', () => {
-  it('shows the thresholds, auto-tidy off with its warning, and a dry run of the current candidates', async () => {
+  // The lifecycle inputs read `fleetSettings`, which the dialog loads on
+  // mount. The values here are OFF the defaults on purpose: an input that
+  // only ever showed SETTING_DEFAULTS (or a load that never happened) would
+  // fail, where `done_days: 2 / idle_hours: 4` could not tell the two apart.
+  afterEach(() => fleetSettings.set({ ...SETTING_DEFAULTS }));
+
+  it('shows the stored thresholds and reasons, and a dry run of the current candidates', async () => {
     const inv = mockedInvoke as ReturnType<typeof vi.fn>;
     const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
     inv.mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'get_fleet_settings')
+        return {
+          'work.tidy_done_days': '3',
+          'work.tidy_idle_hours': '6',
+          'work.auto_tidy_reasons': 'pr_merged_idle',
+        };
       if (cmd === 'work_tidy')
         return {
           candidates: [
             { session_id: 1, host_alias: 'h', tmux_name: 'done-one', reason: 'done_idle', action: 'safe_kill', since: 0, idle_secs: 18000, key: 'ABC-1' },
-            { session_id: 2, host_alias: 'h', tmux_name: 'dup', reason: 'duplicate_worktree', action: 'kill', since: 0, idle_secs: 90000 },
-            { session_id: 3, host_alias: 'h', tmux_name: 'wontdo', reason: 'not_planned', action: 'safe_kill', since: 0, idle_secs: 18000 },
+            { session_id: 2, host_alias: 'h', tmux_name: 'merged-one', reason: 'pr_merged_idle', action: 'safe_kill', since: 0, idle_secs: 18000, key: 'ABC-2' },
+            { session_id: 3, host_alias: 'h', tmux_name: 'dup', reason: 'duplicate_worktree', action: 'kill', since: 0, idle_secs: 90000 },
+            { session_id: 4, host_alias: 'h', tmux_name: 'wontdo', reason: 'not_planned', action: 'safe_kill', since: 0, idle_secs: 18000 },
           ],
           auto_tidy: false,
-          auto_reasons: ['done_idle', 'pr_merged_idle'],
-          done_days: 2,
-          idle_hours: 4,
+          auto_reasons: ['pr_merged_idle'],
+          done_days: 3,
+          idle_hours: 6,
         };
       if (cmd === 'work_reopened') return [];
       return base(cmd, a);
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    expect((screen.getByTestId('work-tidy-done-days') as HTMLInputElement).value).toBe('2');
-    expect((screen.getByTestId('work-tidy-idle-hours') as HTMLInputElement).value).toBe('4');
+    await waitFor(() =>
+      expect((screen.getByTestId('work-tidy-done-days') as HTMLInputElement).value).toBe('3'),
+    );
+    expect((screen.getByTestId('work-tidy-idle-hours') as HTMLInputElement).value).toBe('6');
+    expect((screen.getByTestId('work-tidy-idle-unlinked-days') as HTMLInputElement).value).toBe('7');
     expect((screen.getByTestId('work-auto-tidy') as HTMLInputElement).checked).toBe(false);
     expect(screen.getByTestId('work-auto-tidy-warning').textContent).toContain('never touched');
     const reason = (r: string) => screen.getByTestId(`work-auto-tidy-reason-${r}`) as HTMLInputElement;
     expect([reason('done_idle').checked, reason('pr_merged_idle').checked, reason('not_planned').checked]).toEqual([
-      true,
+      false,
       true,
       false,
     ]);
     await fireEvent.click(screen.getByTestId('work-auto-tidy-dry-run'));
     const preview = await screen.findByTestId('work-auto-tidy-preview');
+    // Only a safe kill / archive of an allowed reason: not the done_idle row
+    // (reason off), not the plain kill, not the not_planned row.
     const rows = screen.getAllByTestId('work-auto-tidy-preview-row');
     expect(rows).toHaveLength(1);
-    expect(rows[0].textContent).toContain('done-one');
+    expect(rows[0].textContent).toContain('merged-one');
+    expect(preview.textContent).not.toContain('done-one');
     expect(preview.textContent).toContain('once turned on');
-    // Ticking a reason writes the comma list.
+    // Ticking a reason writes the comma list, in the backend's order, from
+    // the stored value rather than the default.
     await fireEvent.click(reason('not_planned'));
     await waitFor(() =>
       expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
         key: 'work.auto_tidy_reasons',
-        value: 'done_idle,pr_merged_idle,not_planned',
+        value: 'pr_merged_idle,not_planned',
+      }),
+    );
+  });
+});
+
+describe('SettingsDialog — tidy: unlinked for (work graph M11.3)', () => {
+  it('writes work.tidy_idle_unlinked_days within 1–90 and refuses the rest here', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    const input = screen.getByTestId('work-tidy-idle-unlinked-days') as HTMLInputElement;
+    expect(input.min).toBe('1');
+    expect(input.max).toBe('90');
+    for (const bad of ['0', '91']) {
+      await fireEvent.change(input, { target: { value: bad } });
+      await tick();
+      expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'work.tidy_idle_unlinked_days',
+        value: bad,
+      });
+    }
+    expect(document.body.textContent).toContain('Tidy: unlinked for: must be 1–90');
+    await fireEvent.change(input, { target: { value: '14' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'work.tidy_idle_unlinked_days',
+        value: '14',
       }),
     );
   });

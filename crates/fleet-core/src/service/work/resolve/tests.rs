@@ -92,7 +92,12 @@ fn summary(changes: &[LinkChange]) -> Vec<String> {
             ),
             LinkChange::End { link_id, reason } => format!("end {link_id} {reason}"),
             LinkChange::Withdraw { link_id } => format!("withdraw {link_id}"),
-            LinkChange::Promote { link_id, rule, .. } => format!("promote {link_id} {rule}"),
+            LinkChange::Promote {
+                link_id,
+                rule,
+                source,
+                ..
+            } => format!("promote {link_id} {rule} {source}"),
             LinkChange::Decay { link_id } => format!("decay {link_id}"),
             LinkChange::Touch {
                 link_id,
@@ -117,7 +122,80 @@ fn the_rule_table() {
         input: ResolveInput,
         expect: &'static [&'static str],
     }
+    let inferred = |t: &str| cand(t, Signal::AgentInferred, Strength::Inferred);
     let rows = vec![
+        Row {
+            name: "R11: an agent's inference is a pre-selected suggestion",
+            input: ResolveInput {
+                events: vec![inferred("ABC-7")],
+                ..input()
+            },
+            expect: &["create ABC-7 suggested R11 agent_inferred pre"],
+        },
+        Row {
+            name: "R11: never confirmed, not even as the sole first-prompt candidate in a trusted project",
+            input: ResolveInput {
+                events: vec![Candidate {
+                    first_prompt_sole: true,
+                    ..inferred("ABC-7")
+                }],
+                trusted: true,
+                ..input()
+            },
+            expect: &["create ABC-7 suggested R11 agent_inferred pre"],
+        },
+        Row {
+            name: "R11: an ambiguous key the agent inferred is still only a suggestion",
+            input: ResolveInput {
+                events: vec![Candidate {
+                    ambiguous: true,
+                    ..inferred("ABC-7")
+                }],
+                ..input()
+            },
+            expect: &["create ABC-7 suggested R11 agent_inferred pre"],
+        },
+        Row {
+            name: "R11 + R9: a pair the person rejected is never proposed again",
+            input: ResolveInput {
+                events: vec![inferred("ABC-7")],
+                links: vec![link(3, "ABC-7", "rejected", "manual")],
+                ..input()
+            },
+            expect: &[],
+        },
+        Row {
+            name: "R11: an existing weak suggestion is raised and ticked, not duplicated",
+            input: ResolveInput {
+                events: vec![inferred("ABC-7")],
+                links: vec![ExistingLink {
+                    strength: Some(Strength::Weak),
+                    ..link(4, "ABC-7", "suggested", "prompt")
+                }],
+                ..input()
+            },
+            expect: &["touch 4 pre"],
+        },
+        Row {
+            name: "R11: a key already confirmed is left alone (R1)",
+            input: ResolveInput {
+                events: vec![inferred("ABC-7")],
+                links: vec![primary(link(5, "ABC-7", "confirmed", "manual"))],
+                ..input()
+            },
+            expect: &[],
+        },
+        Row {
+            name: "R11 + R6: an inference from an earlier window decays at the boundary",
+            input: ResolveInput {
+                links: vec![old_window(ExistingLink {
+                    strength: Some(Strength::Inferred),
+                    ..link(6, "ABC-7", "suggested", "agent_inferred")
+                })],
+                ..input()
+            },
+            expect: &["decay 6"],
+        },
         Row {
             name: "R3: one branch key in a trusted project is confirmed and primary",
             input: ResolveInput {
@@ -351,7 +429,33 @@ fn the_rule_table() {
                 trusted: true,
                 ..input()
             },
-            expect: &["promote 1 R3", "primary 1"],
+            expect: &["promote 1 R3 branch", "primary 1"],
+        },
+        Row {
+            name: "a prompt suggestion the branch promotes becomes a branch link (R7 can end it)",
+            input: ResolveInput {
+                branch: Some(vec![branch("ABC-1")]),
+                links: vec![link(1, "ABC-1", "suggested", "prompt")],
+                trusted: true,
+                ..input()
+            },
+            expect: &["promote 1 R3 branch", "primary 1"],
+        },
+        Row {
+            // The events path's Promote carries the promoting signal's
+            // source too: the link is then a `url` link, which R7 (a
+            // branch that moved on) can no longer end.
+            name: "a branch suggestion the first prompt's URL confirms becomes a url link",
+            input: ResolveInput {
+                branch: None,
+                events: vec![Candidate {
+                    first_prompt_sole: true,
+                    ..cand("ABC-1", Signal::PromptUrl, Strength::Strong)
+                }],
+                links: vec![link(1, "ABC-1", "suggested", "branch")],
+                ..input()
+            },
+            expect: &["promote 1 R5 url", "primary 1"],
         },
         Row {
             name: "PR text re-read in the same window is not news",
@@ -463,4 +567,21 @@ fn it_is_deterministic() {
     for _ in 0..5 {
         assert_eq!(resolve(&i), first);
     }
+}
+
+/// The tiers order: an inference sits between a passing mention and the
+/// session's own state (M4.6), and round-trips through its stored word.
+#[test]
+fn inferred_is_a_tier_between_weak_and_strong() {
+    assert!(Strength::Weak < Strength::Inferred);
+    assert!(Strength::Inferred < Strength::Strong);
+    assert_eq!(
+        Strength::parse(Strength::Inferred.as_str()),
+        Some(Strength::Inferred)
+    );
+    assert_eq!(Signal::AgentInferred.source(), "agent_inferred");
+    assert!(
+        AUTO_SOURCES.contains(&"agent_inferred"),
+        "the resolver owns it, so R6 can decay it"
+    );
 }

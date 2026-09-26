@@ -6,7 +6,8 @@
   //   any) opens a sheet listing each session's top suggestion with its
   //   why. j/k (or ↓/↑) move, y (or ↵) confirms, n (or ⌫) rejects — sticky,
   //   never suggested again. Deciding one brings that session's next
-  //   suggestion, if it has one, through the row update.
+  //   suggestion, if it has one, through the row update; a toast says what
+  //   was decided and what comes next.
   // - A session whose primary work becomes an automatic link (a trusted
   //   branch key, a sole ticket URL) gets a toast "Linked NAME → KEY
   //   (branch) · Undo"; Undo is "Not this" for that link.
@@ -61,8 +62,7 @@
     cursor = i;
     const r = pending[i];
     if (!r) return;
-    focused = true;
-    focusSession(r.id, rowName(r));
+    if (focusSession(r.id, rowName(r))) focused = true;
   }
 
   async function decideAt(i: number, yes: boolean) {
@@ -70,13 +70,42 @@
     const sg = r?.work_suggested;
     if (!r || !sg || busy || blocked !== null) return;
     busy = true;
+    const name = rowName(r);
+    const key = sg.key ?? sg.title;
     const res = yes ? await confirmSessionWork(r.id, sg.link_id) : await rejectWorkLink(r.id, sg.link_id);
     busy = false;
-    if (!res.ok) pushError(res.error, yes ? 'Confirm failed' : 'Not this failed');
+    if (!res.ok) {
+      pushError(res.error, yes ? 'Confirm failed' : 'Not this failed');
+      return;
+    }
+    // The session's next suggestion takes this row's place under the same
+    // name, so without a word the click looks like it did nothing.
+    const next = res.value.work_suggested;
+    const more = next ? ` · next: ${next.key ?? next.title}? (${next.suggestions ?? 1} left)` : '';
+    push({ kind: 'info', message: yes ? `Linked ${name} → ${key}${more}` : `${name}: not ${key}${more}` });
   }
 
   function onSheetKey(e: KeyboardEvent) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The chords act only from the sheet itself or a row. A keydown that
+    // bubbles up from a focused button (close, Confirm, Not this) keeps that
+    // button's own meaning: Enter activates it, and never decides the cursor
+    // row — which need not be the row whose button has focus.
+    // Escape closes the sheet from anywhere inside it; it is never destructive.
+    if (e.key === 'Escape') {
+      closeSheet();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const target = e.target as HTMLElement | null;
+    if (target !== e.currentTarget && !target?.classList.contains('review-row')) {
+      // A select owns its keys; any other control keeps its activating keys
+      // (Enter, Space, y/n/Backspace) but j/k and the arrows have no meaning
+      // on a checkbox, link or button, so they still move the cursor.
+      if (target?.tagName === 'SELECT') return;
+      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+    }
     const n = pending.length;
     switch (e.key) {
       case 'j':

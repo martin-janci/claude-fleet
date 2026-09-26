@@ -34,6 +34,7 @@
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import AnswerPrompt from './AnswerPrompt.svelte';
+  import NameWorkDialog from './NameWorkDialog.svelte';
   import { pendingInputFor } from './pending_input';
   import type { WorkKey } from './work_keys';
   import WorkChip from './WorkChip.svelte';
@@ -54,6 +55,7 @@
   import { fleetSettings, SETTING_KEYS } from './fleet_settings';
   import type { Result } from './result';
   import { orgs } from './orgs';
+  import SpiralLoader from './SpiralLoader.svelte';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -200,6 +202,8 @@
     hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection),
   );
   const workBlocked = $derived(hubActionBlocked('link_session_work', $hubStatus, $hubConnection));
+  const nameBlocked = $derived(hubActionBlocked('name_session_work', $hubStatus, $hubConnection));
+  const renameWorkBlocked = $derived(hubActionBlocked('rename_work_item', $hubStatus, $hubConnection));
 
   // ── Work menu (roadmap M1b.2): set the row's work, "Not this", "Clear". ──
   const rowWork = $derived(workOf === undefined ? workKey : workOf);
@@ -269,6 +273,33 @@
       ? { item_id: sess.work.item_id }
       : { key: w.key };
     void workAction(() => rejectSessionWork(sess.id, ref), 'Not this failed');
+  }
+
+  // ── "Name this work…" (work graph M11.1): work with a title and no
+  // ticket. A local item's title can be renamed from here too: an item with
+  // no tracker status is local (the backend refuses a ticket anyway).
+  let nameDialog = $state<
+    | { mode: 'name'; sessions: { id: number; label: string }[] }
+    | { mode: 'rename'; itemId: number; title: string; key?: string | null }
+    | null
+  >(null);
+  const localItem = $derived(
+    sess.work?.item_id != null && sess.work.status_category == null && !sess.work.url
+      ? { itemId: sess.work.item_id, title: sess.work.title, key: sess.work.key ?? null }
+      : null,
+  );
+
+  function openNameWork(e: Event) {
+    e.stopPropagation();
+    workMenuOpen = false;
+    nameDialog = { mode: 'name', sessions: [{ id: sess.id, label: primaryName }] };
+  }
+
+  function openRenameWork(e: Event) {
+    e.stopPropagation();
+    if (!localItem) return;
+    workMenuOpen = false;
+    nameDialog = { mode: 'rename', ...localItem };
   }
 
   function clearWork(e: Event) {
@@ -539,7 +570,7 @@
               data-testid="claude-chip"
               style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
               title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >{claudeStatusLabel(sess.claude_status)}</span>
+            >{#if sess.claude_status === 'working'}<SpiralLoader size={10} class="chip-spiral" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
           {/if}
           <div class="row-actions">
             {#if isInactiveAgent(sess)}
@@ -700,6 +731,22 @@
                 >Clear</button>
               {/if}
             {/if}
+            <button
+              class="work-btn"
+              data-testid="work-name"
+              disabled={workBusy || nameBlocked !== null}
+              title={nameBlocked ?? 'Work with no ticket: give it a title (and a key if you like)'}
+              onclick={openNameWork}
+            >Name this work…</button>
+            {#if localItem}
+              <button
+                class="work-btn"
+                data-testid="work-rename"
+                disabled={workBusy || renameWorkBlocked !== null}
+                title={renameWorkBlocked ?? 'Rename this local work'}
+                onclick={openRenameWork}
+              >Rename…</button>
+            {/if}
           </div>
         {/if}
         {#if answerView}
@@ -780,6 +827,9 @@
     {/if}
   {/if}
 </div>
+{#if nameDialog}
+  <NameWorkDialog target={nameDialog} onclose={() => (nameDialog = null)} />
+{/if}
 {#if isRenaming && renameError}
   <p class="err inline-err">{renameError}</p>
 {/if}
@@ -940,6 +990,10 @@
     border: 1px solid;
     flex-shrink: 0;
     white-space: nowrap;
+  }
+  .claude-chip :global(.chip-spiral) {
+    margin-right: 0.2rem;
+    vertical-align: -1px;
   }
   .stuck-chip { font-weight: 600; }
   .inactive-chip {

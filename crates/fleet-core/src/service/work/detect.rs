@@ -89,9 +89,19 @@ impl PrSignals {
                 .and_then(|o| o.get("login"))
                 .and_then(|l| l.as_str());
             let name = repo.and_then(|x| x.get("name")).and_then(|n| n.as_str());
+            // An issue on an enterprise instance (M11.4) says so by its URL's
+            // host: its key carries that host, so it can never be taken for
+            // the same-named github.com repository's.
+            let instance = r
+                .get("url")
+                .and_then(|u| u.as_str())
+                .and_then(site_host)
+                .filter(|h| crate::store::ghes_host_ok(h))
+                .map(|h| format!("{h}/"))
+                .unwrap_or_default();
             let key = match (owner, name, n) {
                 (Some(o), Some(nm), Some(n)) => Some(format!(
-                    "{}/{}#{n}",
+                    "{instance}{}/{}#{n}",
                     o.to_ascii_lowercase(),
                     nm.to_ascii_lowercase()
                 )),
@@ -214,7 +224,8 @@ fn tracker_view(s: &Store, repo: Option<String>) -> Result<TrackerView, IpcError
         repo,
         ..Default::default()
     };
-    for t in s.list_trackers()? {
+    let trackers = s.list_trackers()?;
+    for t in &trackers {
         for p in &t.config.key_prefixes {
             let p = p.to_ascii_uppercase();
             *owners.entry(p.clone()).or_default() += 1;
@@ -222,14 +233,8 @@ fn tracker_view(s: &Store, repo: Option<String>) -> Result<TrackerView, IpcError
                 ctx.prefixes.push(p);
             }
         }
-        if let Some(host) = site_host(&t.site_url) {
-            ctx.trackers.push(TrackerHost {
-                id: t.id,
-                host,
-                provider: t.provider.clone(),
-            });
-        }
     }
+    ctx.trackers = tracker_hosts(&trackers);
     Ok(TrackerView {
         ctx,
         shared_prefixes: owners
@@ -238,6 +243,21 @@ fn tracker_view(s: &Store, repo: Option<String>) -> Result<TrackerView, IpcError
             .map(|(p, _)| p)
             .collect(),
     })
+}
+
+/// Configured trackers as recognition sees them: each one's site host (an
+/// enterprise GitHub tracker's names its instance, M11.4).
+pub(crate) fn tracker_hosts(trackers: &[crate::store::TrackerRow]) -> Vec<TrackerHost> {
+    trackers
+        .iter()
+        .filter_map(|t| {
+            site_host(&t.site_url).map(|host| TrackerHost {
+                id: t.id,
+                host,
+                provider: t.provider.clone(),
+            })
+        })
+        .collect()
 }
 
 fn site_host(url: &str) -> Option<String> {
@@ -251,6 +271,24 @@ fn prefix_of(key: &str) -> Option<&str> {
 }
 
 impl TrackerView {
+    /// A GitHub tracker of `r`'s instance is configured: github.com's for
+    /// `owner/repo#n`, the enterprise host's for `host/owner/repo#n`.
+    fn github_instance_tracked(&self, r: &str) -> bool {
+        let host = crate::store::github_ref(r)
+            .and_then(|(repo, _)| crate::store::split_github_repo(repo))
+            .map(|(h, _)| h.map(str::to_ascii_lowercase));
+        let Some(host) = host else {
+            return false;
+        };
+        self.ctx.trackers.iter().any(|t| {
+            t.provider == "github"
+                && match &host {
+                    None => t.host == "github.com" || t.host == "www.github.com",
+                    Some(h) => t.host.eq_ignore_ascii_case(h),
+                }
+        })
+    }
+
     /// A key whose prefix two trackers claim (R8). A URL's host settles it.
     fn ambiguous(&self, key: &str, tracker_id: Option<i64>) -> bool {
         tracker_id.is_none()
@@ -346,8 +384,8 @@ fn state_candidates(
         }
     }
     // A GitHub issue ref is only a bare `owner/repo#n` until a GitHub
-    // tracker exists (M6): never auto-linked before then (R3u).
-    let github_tracker = tv.ctx.trackers.iter().any(|t| t.provider == "github");
+    // tracker of ITS instance exists (M6; github.com or the enterprise host,
+    // M11.4): never auto-linked before then (R3u).
     for r in sig.closing.iter().filter(|r| tv.admits(r)) {
         let mut c = candidate(
             r.clone(),
@@ -355,14 +393,21 @@ fn state_candidates(
             Strength::Strong,
             evidence(Signal::PrClosing, r, now, conv),
         );
-        c.untracked = r.contains('#') && !github_tracker;
+        c.untracked = r.contains('#') && !tv.github_instance_tracked(r);
         pr.push(c);
     }
+    // A PR text naming more than the dump guard's worth of work (a release
+    // PR, an audit) is a reference list: none of it is this session's work,
+    // and dropping it here withdraws what a shorter text proposed (R7).
+    let text_distinct: BTreeSet<&str> = sig.text.iter().map(String::as_str).collect();
+    let no_refs = Vec::new();
+    let text = if text_distinct.len() > DUMP_GUARD_MAX {
+        &no_refs
+    } else {
+        &sig.text
+    };
     let mut events = Vec::new();
-    for (signal, refs) in [
-        (Signal::PrText, &sig.text),
-        (Signal::Trailer, &sig.trailers),
-    ] {
+    for (signal, refs) in [(Signal::PrText, text), (Signal::Trailer, &sig.trailers)] {
         for r in refs {
             let target = match (r.strip_prefix('#'), st.repo.as_deref()) {
                 (Some(n), Some(repo)) => format!("{}#{n}", repo.to_ascii_lowercase()),
@@ -535,8 +580,22 @@ fn run(
     mut events: Vec<Candidate>,
 ) -> Result<bool, IpcError> {
     let now = crate::service::catalog::now_secs();
-    let (branch, pr, pr_events) = state_candidates(st, tv, now);
+    let (mut branch, mut pr, pr_events) = state_candidates(st, tv, now);
     events.extend(pr_events);
+    // One spelling per target: a candidate naming a tracker item by an
+    // alias (a moved issue) reads as the item's current key, the same key
+    // `detection_links` labels its links with.
+    for c in branch
+        .iter_mut()
+        .flatten()
+        .chain(pr.iter_mut().flatten())
+        .chain(events.iter_mut())
+    {
+        let canonical = s.canonical_work_target(&c.target, c.tracker_id)?;
+        if canonical != c.target {
+            c.target = canonical;
+        }
+    }
     let links = s
         .detection_links(st.participant)?
         .into_iter()
@@ -608,6 +667,39 @@ pub fn on_prompt(
         }
     };
     run(s, &st, &tv, events)
+}
+
+/// The agent's answer to the classification nudge (work graph M4.6):
+/// `work_link { action: link, source: agent_inferred }`. Never a decision —
+/// one [`Signal::AgentInferred`] event through the same resolver run as a
+/// prompt, which makes it a pre-selected suggestion (R11) and keeps R9: a
+/// pair the person rejected is not proposed again. `target` is normalised
+/// (`ABC-7`); `tracker_id` binds it when the caller named an item.
+pub fn on_agent_inference(
+    s: &Store,
+    session_id: i64,
+    target: &str,
+    tracker_id: Option<i64>,
+) -> Result<bool, IpcError> {
+    let Some(st) = s.detection_state(session_id)? else {
+        return Ok(false);
+    };
+    let tv = tracker_view(s, st.repo.clone())?;
+    let now = crate::service::catalog::now_secs();
+    let ev = evidence(
+        Signal::AgentInferred,
+        target,
+        now,
+        st.claude_session_id.as_deref(),
+    );
+    let mut c = candidate(
+        target.to_string(),
+        Signal::AgentInferred,
+        Strength::Inferred,
+        ev,
+    );
+    c.tracker_id = tracker_id;
+    run(s, &st, &tv, vec![c])
 }
 
 /// A person confirmed or rejected suggestion `link_id`. Confirming a branch

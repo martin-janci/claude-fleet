@@ -98,6 +98,12 @@ const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet admin
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
      configure them on the hub with `fleet-hub tracker add|set-credential|test`";
 
+/// Retention (work graph M12.3): the hub sweeps its own store.
+const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
+     status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
+     the fleet's administrator; set the windows with set_setting and read the status on the \
+     hub";
+
 const CATALOG_IS_A_CHECKOUT: &str =
     "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
      no tool for this; work on the catalog there";
@@ -302,6 +308,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // Work graph M9.6: one ticket, one sibling session per repository.
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
+    // Work graph M11.1: "Name this work…" — local work items, listed from
+    // `work`, named and renamed through `work_link { name }`.
+    ("list_local_work_items", Verdict::Routed { tool: "work" }),
+    ("name_session_work", Verdict::Routed { tool: "work_link" }),
+    ("rename_work_item", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
@@ -333,6 +344,28 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "remove_tracker",
         Verdict::LocalOnly {
             instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    // Work graph M11.4: the sync's per-tracker counters are
+    // `work_admin { action: status }`, master-only like the rest.
+    (
+        "tracker_sync_metrics",
+        Verdict::LocalOnly {
+            instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    // Work graph M12.3: retention is the hub's own sweep; its status and
+    // sweep_now are `work_admin`, master-only.
+    (
+        "work_retention_status",
+        Verdict::LocalOnly {
+            instead: RETENTION_IS_ADMIN,
+        },
+    ),
+    (
+        "work_retention_sweep",
+        Verdict::LocalOnly {
+            instead: RETENTION_IS_ADMIN,
         },
     ),
     // Work graph M3.4: reading tickets and starting work route like every
@@ -484,12 +517,27 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       connections and the hub exposes no tool for it; purge from the hub",
         },
     ),
+    // The chip row is fleet state (see `service::quick_replies`), so a
+    // paired desktop edits the hub's list — the same one the phone draws —
+    // rather than a private copy that would disagree with it.
+    (
+        "quick_replies",
+        Verdict::Routed {
+            tool: "quick_replies",
+        },
+    ),
+    (
+        "set_quick_replies",
+        Verdict::Routed {
+            tool: "quick_replies",
+        },
+    ),
     (
         "get_fleet_settings",
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; read and change \
-                      them on the hub",
+                      playbooks, which the hub runs and this app does not; read them on the \
+                      hub with get_settings (master token)",
         },
     ),
     (
@@ -497,7 +545,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \
                       playbooks, which the hub runs and this app does not; change them on \
-                      the hub",
+                      the hub with set_setting (master token)",
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),

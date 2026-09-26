@@ -52,7 +52,17 @@
     type WorkGroup,
   } from './sidebar_index';
   import { workGroupPrSummary, workGroupTicket, workKeyFor, worktreeBranchById } from './work_keys';
-  import { statusDotClass, unavailableLabel } from './trackers';
+  import { statusDotClass, trackers, unavailableLabel } from './trackers';
+  import {
+    bothPredicates,
+    effectiveWorkFilters,
+    loadMine,
+    mineItemIds,
+    pastWorkFields,
+    toRowFilters,
+    workFilterPredicate,
+    workFilters,
+  } from './work_filters';
   import {
     ciStatusColor,
     ciStatusLabel,
@@ -63,11 +73,12 @@
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
-  import { hubStatus, hubBlock } from './hub';
+  import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
+  import NameWorkDialog from './NameWorkDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
   import SessionRowItem from './SessionRowItem.svelte';
@@ -186,20 +197,44 @@
   );
   // A clicked suggestion narrows the tree to its one session (see
   // session_focus.ts): past every other filter, so the row can't be hidden
-  // by the host, bg-agent, scope, recency or search filters it arrived under.
+  // by the host, bg-agent, scope, recency or search filters it arrived under
+  // — nor by a work group's collapsed Done section when its link is archived.
   const focus = $derived($sessionFocus);
   const viewHost = $derived(focus ? 'all' : $hostFilter);
   const viewBg = $derived(focus ? true : $showBgAgents);
   const viewScope = $derived(focus ? null : scopeSel);
   const viewSearch = $derived(focus ? '' : searchQuery);
+  // The work filters (M10.4): tracker, status, mine, has-session, archived
+  // — persisted chips in SidebarFilters, applied through `rowMatches` and
+  // composed with needs-you. A focused suggestion is past them too.
+  const workFilterView = $derived(
+    effectiveWorkFilters($workFilters, $trackers, $sidebarGroupBy === 'work'),
+  );
+  const workFilterCtx = $derived({ trackers: $trackers, mine: $mineItemIds });
+  const workPredicate = $derived(workFilterPredicate(workFilterView, workFilterCtx));
+  // "Mine" reads the hub's `mine` view; re-read while the chip is on.
+  const mineOn = $derived($workFilters.assignee === 'mine');
+  $effect(() => {
+    if (!mineOn) return;
+    void $trackers.length;
+    untrack(() => void loadMine());
+    const t = setInterval(() => void loadMine(), 120_000);
+    return () => clearInterval(t);
+  });
+  /** A past link passes the work filters (host and scope are the caller's). */
+  function pastPassesWorkFilters(key: string, l: WorkLink): boolean {
+    return rowMatches(
+      { ...pastFilterRow(l), ...pastWorkFields(key, l.item_id, workFilterCtx) },
+      toRowFilters(workFilterView),
+    );
+  }
   const rowPredicate = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
       return (s) => s.id === id;
     }
-    if (!needsYouOnly) return null;
     const opts = attentionOpts;
-    return (s) => needsYou(s, opts);
+    return bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, workPredicate);
   });
 
   // Multi-select for bulk Kill / Send prompt. Rows are toggled with
@@ -475,8 +510,10 @@
     for (const [key, links] of $pastWork) {
       if (live.has(key) || links.length === 0) continue;
       // Hosts (and scopes) outside the filter hide their past work too.
-      const shown = links.filter((l) =>
-        rowMatches(pastFilterRow(l), { host: $hostFilter, scope: $effectiveScope }),
+      const shown = links.filter(
+        (l) =>
+          rowMatches(pastFilterRow(l), { host: $hostFilter, scope: $effectiveScope }) &&
+          pastPassesWorkFilters(key, l),
       );
       if (shown.length === 0) continue;
       if (
@@ -562,7 +599,11 @@
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
-  const outsideFleet = $derived(focus ? [] : buildOutsideFleet($sessions, $hostFilter, scopeSel));
+  const outsideFleet = $derived(
+    focus
+      ? []
+      : buildOutsideFleet($sessions, $hostFilter, scopeSel).filter((s) => !workPredicate || workPredicate(s)),
+  );
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
@@ -873,6 +914,17 @@
   let bgModalError = $state<string | null>(null);
   let bgModalLoading = $state(false);
 
+  // --- Name this work… (work graph M11.1) ---
+  // In work mode a project group holds the sessions no work group took: its
+  // header names one piece of work for them (each session chosen in the
+  // dialog; every one by default).
+  const nameWorkBlocked = $derived(hubActionBlocked('name_session_work', $hubStatus, $hubConnection));
+  let nameWorkFor: { id: number; label: string }[] | null = $state(null);
+  function openNameWork(list: readonly SessionRow[], e: Event) {
+    e.stopPropagation();
+    nameWorkFor = list.map((s) => ({ id: s.id, label: s.friendly_name || s.tmux_name }));
+  }
+
   // --- Purge Project ---
   let pendingPurge: ProjectRow | null = $state(null);
 
@@ -992,7 +1044,9 @@
           {@const isCollapsed = collapsedWork.has(g.key)}
           {@const pr = workGroupPrSummary(g.sessions)}
           {@const ticket = workGroupTicket(g.key, g.sessions)}
-          {@const split = splitArchived(g.sessions, (s) => needsYou(s, attentionOpts))}
+          {@const split = focus
+            ? { live: g.sessions, archived: [] }
+            : splitArchived(g.sessions, (s) => needsYou(s, attentionOpts))}
           {@const reopened = reopenedKeys.get(g.key)}
           {@const groupColor = orgColorOf(
             { org_id: g.sessions[0]?.work?.org_id ?? g.sessions[0]?.org_id ?? null },
@@ -1051,7 +1105,7 @@
               {#each split.live as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
               {/each}
-              {@const past = $pastWork.get(g.key) ?? []}
+              {@const past = ($pastWork.get(g.key) ?? []).filter((l) => pastPassesWorkFilters(g.key, l))}
               {#if past.length + split.archived.length > 0}
                 <div
                   class="done-row"
@@ -1140,6 +1194,17 @@
                   >{/if}<span class="repo">{row.project.repo}</span>
               </span>
               <span class="count">{projectSessions.length}</span>
+              {#if $sidebarGroupBy === 'work' && projectSessions.length > 0}
+                <button
+                  class="icon-btn small"
+                  data-testid="name-work-group"
+                  disabled={nameWorkBlocked !== null}
+                  title={nameWorkBlocked ??
+                    `Name this work… (${projectSessions.length} session${projectSessions.length === 1 ? '' : 's'} with no work)`}
+                  aria-label="Name this work"
+                  onclick={(e) => openNameWork(projectSessions, e)}
+                >#</button>
+              {/if}
               <button
                 class="icon-btn"
                 onclick={(e) => openNew(row, e)}
@@ -1342,6 +1407,12 @@
   </Modal>
 {/if}
 
+{#if nameWorkFor}
+  <NameWorkDialog
+    target={{ mode: 'name', sessions: nameWorkFor }}
+    onclose={() => (nameWorkFor = null)}
+  />
+{/if}
 {#if pendingPurge}
   <ConfirmDialog
     title="Purge project?"

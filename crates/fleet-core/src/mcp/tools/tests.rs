@@ -924,6 +924,18 @@ fn a_remote_messages_inbox_preview_strips_the_untrusted_marker() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "short reply");
+    // D8: every rendering of peer text says it is untrusted — the slim row
+    // lost the marker to the preview cap, so it carries the flag instead.
+    assert!(summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert_eq!(v["untrusted"], true, "{v}");
+    assert!(
+        !v["body_preview"]
+            .as_str()
+            .unwrap()
+            .contains("[claude-fleet"),
+        "{v}"
+    );
 }
 
 /// A local message's `body` carries no marker, so the preview is untouched.
@@ -943,6 +955,12 @@ fn a_local_messages_inbox_preview_is_the_raw_body() {
     };
     let summary = InboxSummary::from(m);
     assert_eq!(summary.body_preview, "hi there");
+    assert!(!summary.untrusted);
+    let v = serde_json::to_value(&summary).unwrap();
+    assert!(
+        v.get("untrusted").is_none(),
+        "a local row carries no flag: {v}"
+    );
 }
 
 #[test]
@@ -999,10 +1017,6 @@ fn list_sessions_docs_quote_status_vocabulary() {
         list_sessions_param_doc("claude_status").contains(&ClaudeStatus::vocabulary_doc()),
         "ListSessionsParams.claude_status doc must quote the vocabulary verbatim"
     );
-    assert!(
-        list_sessions_param_doc("summary").contains(&StuckKind::vocabulary_doc()),
-        "ListSessionsParams.summary doc must quote the stuck_kind vocabulary verbatim"
-    );
     let tools = FleetTools::tool_router_for_doc().list_all();
     let desc = tools
         .iter()
@@ -1011,6 +1025,34 @@ fn list_sessions_docs_quote_status_vocabulary() {
         .expect("list_sessions description");
     assert!(desc.contains(&ClaudeStatus::vocabulary_doc()));
     assert!(desc.contains(&StuckKind::vocabulary_doc()));
+}
+
+/// Wherever a served description or parameter doc lists a status vocabulary,
+/// it lists all of it, as the enum renders it (M11.5 moved the lists to the
+/// places a caller reads them; this keeps any that remain from drifting).
+#[test]
+fn every_served_status_list_quotes_the_enum() {
+    let claude = ClaudeStatus::vocabulary_doc();
+    let stuck = StuckKind::vocabulary_doc();
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let t = present::present(t);
+        let mut texts = vec![t.description.as_deref().unwrap_or_default().to_string()];
+        if let Some(props) = t.input_schema.get("properties").and_then(|p| p.as_object()) {
+            texts.extend(
+                props
+                    .values()
+                    .filter_map(|p| p["description"].as_str().map(str::to_string)),
+            );
+        }
+        for text in texts {
+            if text.contains("working | blocked") {
+                assert!(text.contains(&claude), "{}: {text}", t.name);
+            }
+            if text.contains("auth_menu |") {
+                assert!(text.contains(&stuck), "{}: {text}", t.name);
+            }
+        }
+    }
 }
 
 #[test]
@@ -1289,11 +1331,14 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.new_bg_session(
             Extension(a.clone()),
-            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: "hostb".into(),
-                name: "x".into(),
-                prompt: "p".into(),
-                requester_session_id: None,
+            Parameters(NewBgSessionParams {
+                args: crate::service::bg_sessions::NewBgSessionArgs {
+                    host_alias: "hostb".into(),
+                    name: "x".into(),
+                    prompt: "p".into(),
+                    requester_session_id: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1302,10 +1347,13 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.spawn_review(
             Extension(a.clone()),
-            Parameters(sessions::SpawnReviewArgs {
-                source_session_id: on_b,
-                prompt: "review".into(),
-                call_id: None,
+            Parameters(SpawnReviewParams {
+                args: sessions::SpawnReviewArgs {
+                    source_session_id: on_b,
+                    prompt: "review".into(),
+                    call_id: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1324,6 +1372,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 prompt: "read hostb's secrets".into(),
                 requester_session_id: None,
                 raw: false,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1339,6 +1388,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 prompt: "x".into(),
                 requester_session_id: None,
                 raw: false,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1386,6 +1436,7 @@ async fn dispatch_task_into_a_blocked_worker_fails_the_task_and_sends_nothing() 
                 prompt: "do the thing".into(),
                 requester_session_id: None,
                 raw: false,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1417,11 +1468,14 @@ async fn a_background_session_cannot_name_a_requester_on_another_host() {
     forbidden(
         t.new_bg_session(
             Extension(a),
-            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: "hosta".into(),
-                name: "x".into(),
-                prompt: "p".into(),
-                requester_session_id: Some(on_b),
+            Parameters(NewBgSessionParams {
+                args: crate::service::bg_sessions::NewBgSessionArgs {
+                    host_alias: "hosta".into(),
+                    name: "x".into(),
+                    prompt: "p".into(),
+                    requester_session_id: Some(on_b),
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1438,11 +1492,14 @@ async fn a_background_session_cannot_name_a_requester_that_does_not_exist() {
     let err = t
         .new_bg_session(
             Extension(Caller::master()),
-            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: "hosta".into(),
-                name: "x".into(),
-                prompt: "p".into(),
-                requester_session_id: Some(9_999),
+            Parameters(NewBgSessionParams {
+                args: crate::service::bg_sessions::NewBgSessionArgs {
+                    host_alias: "hosta".into(),
+                    name: "x".into(),
+                    prompt: "p".into(),
+                    requester_session_id: Some(9_999),
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1501,9 +1558,12 @@ async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
     forbidden(
         t.recreate_session(
             Extension(a.clone()),
-            Parameters(sessions::RecreateSessionArgs {
-                session_id: on_b,
-                force: true,
+            Parameters(RecreateSessionParams {
+                args: sessions::RecreateSessionArgs {
+                    session_id: on_b,
+                    force: true,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -1852,7 +1912,7 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1873,7 +1933,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 86);
+    assert_eq!(served, 89);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2008,14 +2068,16 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
     // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
     // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
     // may reach must also be something a full client may reach. `list_peer_links`
-    // is the same shape for the same reason (it names other fleets).
+    // is the same shape for the same reason (it names other fleets), and so
+    // is `get_settings` (it names hosts and their paths).
     for name in guard::READONLY_TOOLS {
         assert!(
             guard::CLIENT_TOOLS.contains(name)
                 || *name == "list_clients"
-                || *name == "list_peer_links",
+                || *name == "list_peer_links"
+                || *name == "get_settings",
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients/list_peer_links special case"
+             documented list_clients/list_peer_links/get_settings special case"
         );
     }
 }
@@ -3346,7 +3408,51 @@ fn the_served_definition_budget_stays_bounded() {
     // Hub federation merged onto M9 (main): `list_peer_links` and the
     // federation clauses on the messaging tools. Measured at 71,066 on
     // 2026-09-25 (+301 over M9's 70,765); plus 100.
-    const BUDGET_BYTES: usize = 71_166;
+    // M9.7 review fix: the operator gate covers every start and restart, so
+    // `confirm_nonce` on new_bg_session, spawn_review, dispatch_task,
+    // restore_host_sessions, recreate_session and restart_session (no new
+    // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
+    // plus 100.
+    // M11.5: paid back 16,944 B (M0.6). Descriptions and parameter docs
+    // reworded, no tool, action or parameter renamed and no schema shape
+    // changed: prose that restated a schema default, a parameter's own doc,
+    // or a vocabulary listed twice was cut; every confirm gate, untrusted
+    // marker, host fence and "never" clause kept. Measured at 71,590 before
+    // and 54,646 after on 2026-09-25; plus 100. Re-measure when the M11.1 /
+    // M11.3 / M11.4 branches land: whichever lands second merges and
+    // re-measures.
+    // Merged over main (#285: `inbox` gains the hub-link from_addr
+    // untrusted clause): measured at 54,700 (+54), inside the headroom.
+    // Review follow-up: `move_session { force_cross_org }` (work graph M5 —
+    // a move whose live links would cross the org boundary is refused
+    // unless forced), one flag with a one-line doc plus a clause on the
+    // errors list. Measured at 54,927 on 2026-09-25 (+227); plus 100.
+    // M11.4 (`work_admin` `status`), 2026-09-25: measured at 54,934; plus 100.
+    // M11.1: +96 B for work_link name / work local_items (`work_link` gains
+    // `name` and a `title` parameter, `work` gains `local_items`; no
+    // description change). Merged over M11.2 / M11.4: measured at 55,030 on
+    // 2026-09-25; plus 100.
+    // M11.3 merged over M11.1: `keep` on `tidy_apply`'s item action, nothing
+    // else. Measured at 55,035 on 2026-09-25 (+5); plus 100.
+    // get_settings/set_setting: +580 B (two master-only tools, M11.5's
+    // terse style). Measured at 55,610 on 2026-09-25; plus 100.
+    // M11.3 merged over get_settings/set_setting: `keep` on `tidy_apply`'s
+    // item action. Measured at 55,615 on 2026-09-26 (+5); plus 100.
+    // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
+    // description; `set_setting`'s example key now `work.recent_days`),
+    // merged over M11.3: measured at 55,635 on 2026-09-26 (+20); plus 100.
+    // Work graph M12.4 (`fleet_health` names its `trackers` roll-up and
+    // the org scope of a per-host token's): measured at 55,804 on
+    // 2026-09-26 (+169); plus 100.
+    // `quick_replies` (the composer's shared chip row): one tool that both
+    // reads and replaces the fleet's list, so the desktop and the phone stop
+    // keeping private copies of the same buttons. A second, read-only tool
+    // would have cost another definition for a list of at most 24 short
+    // strings, so the read is this tool with `set` omitted. Written in
+    // M11.5's terse style from the start: 825 B over that baseline, measured
+    // at 56,560 on 2026-09-26 (55,735 before, after M12.3); plus 100.
+    // Merged with M12.4 (+169): measured at 56,729 on 2026-09-26; plus 100.
+    const BUDGET_BYTES: usize = 56_829;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3630,6 +3736,7 @@ async fn move_session_dry_run_skips_the_confirm_gate_but_a_real_move_still_needs
         confirm_nonce: None,
         dry_run,
         when: crate::service::move_session::When::Now,
+        force_cross_org: false,
     };
 
     let err = t
@@ -4325,10 +4432,13 @@ async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
     forbidden(
         t.restore_host_sessions(
             Extension(a),
-            Parameters(sessions::RestoreHostSessionsArgs {
-                host_alias: "hostb".into(),
-                dry_run: true,
-                session_ids: None,
+            Parameters(RestoreHostSessionsParams {
+                args: sessions::RestoreHostSessionsArgs {
+                    host_alias: "hostb".into(),
+                    dry_run: true,
+                    session_ids: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -4341,10 +4451,13 @@ async fn restore_host_sessions_is_host_scoped_and_dry_run_returns_the_plan() {
     let r = t
         .restore_host_sessions(
             Extension(Caller::master()),
-            Parameters(sessions::RestoreHostSessionsArgs {
-                host_alias: "hostb".into(),
-                dry_run: true,
-                session_ids: None,
+            Parameters(RestoreHostSessionsParams {
+                args: sessions::RestoreHostSessionsArgs {
+                    host_alias: "hostb".into(),
+                    dry_run: true,
+                    session_ids: None,
+                },
+                confirm_nonce: None,
             }),
         )
         .await
@@ -4417,6 +4530,9 @@ fn one_full_row() -> serde_json::Value {
         suggestions: 1,
         ..Default::default()
     });
+    // With an org, for the same reason: `org_id` is skipped when no org
+    // claims the session.
+    row.org_id = Some(3);
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -4446,6 +4562,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_stop_at",
             "last_turn_at",
             "needs_attention",
+            "org_id",
             "pending_input",
             "project_id",
             "safe_kill_state",
@@ -5729,6 +5846,106 @@ async fn session_history_with_an_unknown_fresh_for_answers_full_and_writes_no_cu
     assert_eq!(n, 0, "an unknown fresh_for must never get a cursor row");
 }
 
+/// `fresh_for` names the reader whose cursor the call advances, so it is
+/// fenced like a target: a per-host token naming a session on ANOTHER host
+/// is refused with `E_FORBIDDEN` before any read, and no cursor row is
+/// written — otherwise host A could advance host B's watermark and blind
+/// that session to its deltas. The same fence, through one helper, on all
+/// five tools: here session_history, inbox and list_sessions (the two
+/// SSH-backed ones, session_transcript and repo_diff, share it).
+#[tokio::test]
+async fn fresh_for_naming_another_hosts_session_is_forbidden_and_writes_no_cursor() {
+    let s = Store::open_in_memory().unwrap();
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let target = s
+        .upsert_session("target", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    let foreign_reader = s
+        .upsert_session("reader-b", "hostb", None, None, 1, 1, "running", None)
+        .unwrap();
+    let own_reader = s
+        .upsert_session("reader-a", "hosta", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.insert_session_event(target, "prompt_sent", None).unwrap();
+    s.insert_message(own_reader, target, "hi", "chat", None)
+        .unwrap();
+    let t = test_tools(s);
+    let host_a = host_caller("hosta", TokenMode::Full);
+    let cursor_rows = || -> i64 {
+        t.store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM read_cursors", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    let err = t
+        .session_history(
+            Extension(host_a.clone()),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(foreign_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let err = t
+        .inbox(
+            Extension(host_a.clone()),
+            Parameters(InboxParams {
+                session_id: target,
+                unread_only: false,
+                limit: Some(50),
+                mark_read: false,
+                summary: true,
+                fresh_for: Some(foreign_reader),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let mut p: ListSessionsParams = serde_json::from_value(serde_json::json!({})).unwrap();
+    p.fresh_for = Some(foreign_reader);
+    let err = t
+        .list_sessions(Extension(host_a.clone()), Parameters(p))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert_eq!(cursor_rows(), 0, "a foreign reader never gets a cursor row");
+
+    // The same token naming its own host's session reads and writes as
+    // before; the master is unbound.
+    let out = t
+        .session_history(
+            Extension(host_a),
+            Parameters(SessionHistoryParams {
+                session_id: target,
+                limit: Some(50),
+                fresh_for: Some(own_reader),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&out)["data"].as_array().unwrap().len(), 1);
+    t.session_history(
+        Extension(Caller::master()),
+        Parameters(SessionHistoryParams {
+            session_id: target,
+            limit: Some(50),
+            fresh_for: Some(foreign_reader),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cursor_rows(), 2);
+}
+
 /// Ruling 17: an unknown reader (e.g. an agent still using its
 /// pre-`move_session` id) writes no cursor, so a stream paged from id 0
 /// would hand it the SAME oldest page with `more: true` on every call —
@@ -6699,6 +6916,12 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
     for tool in [
         "new_session",
         "new_shell_session",
+        "new_bg_session",
+        "spawn_review",
+        "dispatch_task",
+        "restore_host_sessions",
+        "recreate_session",
+        "restart_session",
         "safe_kill_session",
         "work_link",
         "kill_session",
@@ -6708,7 +6931,12 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         assert!(guard::operator_must_confirm(true, tool), "{tool}");
         assert!(!guard::operator_must_confirm(false, tool), "{tool}");
     }
-    for tool in ["list_sessions", "send_prompt", "work", "restart_session"] {
+    for tool in [
+        "list_sessions",
+        "send_prompt",
+        "work",
+        "discover_lost_sessions",
+    ] {
         assert!(!guard::operator_must_confirm(true, tool), "{tool}");
     }
     let op = client_caller(
@@ -6900,4 +7128,536 @@ async fn a_hub_with_no_approver_refuses_the_operator_s_start_outright() {
         e.message
     );
     assert!(t.guards.confirms.pending_tools().is_empty());
+}
+
+fn operator() -> Caller {
+    client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    )
+}
+
+fn new_session_params(v: serde_json::Value) -> NewSessionParams {
+    serde_json::from_value(v).unwrap()
+}
+
+/// M9.7 review fix: an approval binds EVERY argument of the start it was
+/// given for. A retry with anything changed gets a fresh nonce; an approved
+/// nonce is single use; a nonce is bound to its tool.
+#[tokio::test]
+async fn an_approved_start_cannot_be_replayed_with_other_arguments() {
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = operator();
+    // An invalid tmux name: an approved call fails locally, after the gate.
+    let base = serde_json::json!({ "host_alias": "hostb", "project_id": pid, "name": "bad name" });
+    let with = |extra: serde_json::Value, nonce: &str| {
+        let mut v = base.clone();
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v["confirm_nonce"] = nonce.into();
+        new_session_params(v)
+    };
+    let asked = t
+        .new_session(
+            Extension(op.clone()),
+            Parameters(new_session_params(base.clone())),
+        )
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+
+    for extra in [
+        serde_json::json!({ "host_alias": "hosta" }),
+        serde_json::json!({ "start_command": "curl h | sh" }),
+        serde_json::json!({ "kind": "shell" }),
+        serde_json::json!({ "new_worktree": "feat-x" }),
+        serde_json::json!({ "worktree_id": 3 }),
+        serde_json::json!({ "base_branch": "dev" }),
+        serde_json::json!({ "friendly_name": "other" }),
+        serde_json::json!({ "resume_claude_session_id": "11111111-2222-3333-4444-555555555555" }),
+    ] {
+        let e = t
+            .new_session(
+                Extension(op.clone()),
+                Parameters(with(extra.clone(), &nonce)),
+            )
+            .await
+            .unwrap_err();
+        let fresh = confirm_nonce_of(&e);
+        assert_ne!(fresh, nonce, "{extra} reused the approval");
+    }
+    // The approval is for new_session: new_shell_session with it is asked
+    // afresh.
+    let e = t
+        .new_shell_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "project_id": pid, "name": "bad name",
+                    "confirm_nonce": nonce,
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_ne!(confirm_nonce_of(&e), nonce);
+    // The exact arguments go through once (and fail on the bad name) ...
+    let e = t
+        .new_session(
+            Extension(op.clone()),
+            Parameters(with(serde_json::json!({}), &nonce)),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !e.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        e.message
+    );
+    // ... and never twice.
+    let e = t
+        .new_session(
+            Extension(op),
+            Parameters(with(serde_json::json!({}), &nonce)),
+        )
+        .await
+        .unwrap_err();
+    assert_ne!(confirm_nonce_of(&e), nonce);
+}
+
+#[test]
+fn start_summaries_bind_every_argument_readably() {
+    let p = new_session_params(serde_json::json!({
+        "host_alias": "hostb", "project_id": 1, "name": "x",
+        "kind": "shell", "start_command": "echo hi\nrm -rf ~",
+    }));
+    let sum = new_session_summary(&p);
+    // Readable, escaped (no raw newline), and digested.
+    let shown = format!("start_command={:?}", "echo hi\nrm -rf ~");
+    assert!(sum.contains(&shown), "{sum}");
+    assert!(!sum.contains('\n'), "{sum}");
+    assert!(
+        sum.contains(&guard::content_digest("echo hi\nrm -rf ~")),
+        "{sum}"
+    );
+    assert!(sum.contains("kind=\"shell\""), "{sum}");
+    // A long text shows only its prefix, but its digest covers all of it.
+    let long = "a".repeat(BOUND_TEXT_PREFIX + 10);
+    let b = bound_text(Some(&long));
+    assert!(b.contains('…') && !b.contains(&long), "{b}");
+    assert_ne!(b, bound_text(Some(&format!("{long}b"))));
+    assert_eq!(bound_text(None), "-");
+    // A brief is a digest only.
+    let a = crate::service::work::WorkLinkArgs {
+        action: "start".into(),
+        brief: Some("secret plan".into()),
+        force_cross_org: Some(true),
+        ..Default::default()
+    };
+    let w = work_link_start_summary(&a, &["4:o/r".into()]);
+    assert!(!w.contains("secret plan"), "{w}");
+    assert!(
+        w.contains("force_cross_org=Some(true)") && w.contains("repos=[4:o/r]"),
+        "{w}"
+    );
+}
+
+#[tokio::test]
+async fn an_approved_work_start_is_bound_to_force_cross_org_and_the_rest() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = operator();
+    let start = |nonce: Option<String>, f: &dyn Fn(&mut WorkLinkArgs)| {
+        let mut a = WorkLinkArgs {
+            action: "start".into(),
+            item_id: Some(9_999),
+            project_ids: Some(vec![pid]),
+            confirm_nonce: nonce,
+            ..Default::default()
+        };
+        f(&mut a);
+        a
+    };
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(start(None, &|_| {})))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let changes: [&dyn Fn(&mut WorkLinkArgs); 6] = [
+        &|a| a.force_cross_org = Some(true),
+        &|a| a.worktree = Some("wt".into()),
+        &|a| a.name = Some("other".into()),
+        &|a| a.with_brief = Some(true),
+        &|a| a.brief = Some("do x".into()),
+        &|a| a.host_alias = Some("hosta".into()),
+    ];
+    for f in changes {
+        let e = t
+            .work_link(
+                Extension(op.clone()),
+                Parameters(start(Some(nonce.clone()), f)),
+            )
+            .await
+            .unwrap_err();
+        assert_ne!(confirm_nonce_of(&e), nonce);
+    }
+    // The approved arguments go through once (the ticket, resolved once for
+    // every repo, is then unknown), then never again.
+    let ran = t
+        .work_link(
+            Extension(op.clone()),
+            Parameters(start(Some(nonce.clone()), &|_| {})),
+        )
+        .await
+        .unwrap_err();
+    assert!(ran.message.starts_with("E_NOTFOUND"), "{}", ran.message);
+    let e = t
+        .work_link(
+            Extension(op),
+            Parameters(start(Some(nonce.clone()), &|_| {})),
+        )
+        .await
+        .unwrap_err();
+    assert_ne!(confirm_nonce_of(&e), nonce);
+}
+
+/// M10.1: a multi-repo start's projects are checked before the operator's
+/// confirmation — a request that can only be refused is never put to a
+/// person — and `project_ids: []` is refused, never a silent single start.
+#[tokio::test]
+async fn a_bad_multi_start_is_refused_before_the_confirmation() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    for (project_id, ids) in [
+        (None, vec![]),
+        (Some(pid), vec![pid]),
+        (None, (1..=9).collect::<Vec<i64>>()),
+    ] {
+        for who in [operator(), Caller::master()] {
+            let e = t
+                .work_link(
+                    Extension(who),
+                    Parameters(WorkLinkArgs {
+                        action: "start".into(),
+                        key: Some("ABC-1".into()),
+                        project_id,
+                        project_ids: Some(ids.clone()),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                e.message.starts_with("E_INVALID"),
+                "{project_id:?} {ids:?}: {}",
+                e.message
+            );
+        }
+    }
+    // The multi-start's own clock stops short of the call's.
+    assert!(
+        crate::service::trackers::tickets::MULTI_START_BUDGET + std::time::Duration::from_secs(15)
+            <= super::support::LIFECYCLE_CAP
+    );
+}
+
+/// M9.7 review fix: every other path that starts or restarts a session is
+/// gated for the operator too — before anything runs.
+#[tokio::test]
+async fn the_operator_s_other_starts_and_restarts_are_gated() {
+    let (s, pid, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let op = operator();
+    let e = t
+        .new_bg_session(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "host_alias": "hostb", "name": "bg", "prompt": "go"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .spawn_review(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "source_session_id": on_b, "prompt": "review"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .dispatch_task(
+            Extension(op.clone()),
+            Parameters(DispatchTaskParams {
+                worker_session_id: None,
+                new_worker: Some(NewWorkerSpec {
+                    host_alias: "hostb".into(),
+                    project_id: pid,
+                    name: None,
+                }),
+                prompt: "do".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .restore_host_sessions(
+            Extension(op.clone()),
+            Parameters(
+                serde_json::from_value(serde_json::json!({ "host_alias": "hostb" })).unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .recreate_session(
+            Extension(op.clone()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    let e = t
+        .restart_session(
+            Extension(op.clone()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": on_b })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&e);
+    // A restore's dry run only reads the plan: not gated.
+    t.restore_host_sessions(
+        Extension(op.clone()),
+        Parameters(
+            serde_json::from_value(serde_json::json!({ "host_alias": "hostb", "dry_run": true }))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("a dry run is not gated");
+    // Six starts asked for, nothing more.
+    assert_eq!(t.guards.confirms.pending_tools().len(), 6);
+
+    // Dispatching into an existing worker starts nothing: not gated (the
+    // worker is blocked, so the delivery gate refuses it instead).
+    t.store
+        .lock()
+        .unwrap()
+        .record_notification_hook_for_row(
+            on_b,
+            crate::service::pane_intel::ClaudeStatus::Blocked,
+            None,
+        )
+        .unwrap();
+    let e = t
+        .dispatch_task(
+            Extension(op),
+            Parameters(DispatchTaskParams {
+                worker_session_id: Some(on_b),
+                new_worker: None,
+                prompt: "do".into(),
+                requester_session_id: None,
+                raw: false,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !e.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        e.message
+    );
+}
+
+/// …and for every caller that is not the operator, nothing changes: the
+/// newly gated tools stay ungated, with `mcp.confirm_destructive` off or on.
+#[tokio::test]
+async fn the_new_operator_gates_change_nothing_for_anyone_else() {
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let callers = [
+        Caller::master(),
+        host_caller("hostb", TokenMode::Full),
+        host_caller("hostb", TokenMode::Readonly),
+        client_caller("phone", TokenMode::Full),
+        client_caller("phone", TokenMode::Readonly),
+    ];
+    let tools = [
+        "new_bg_session",
+        "spawn_review",
+        "dispatch_task",
+        "restore_host_sessions",
+        "recreate_session",
+        "restart_session",
+    ];
+    for toggle in ["false", "true"] {
+        t.store
+            .lock()
+            .unwrap()
+            .set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, toggle)
+            .unwrap();
+        for c in &callers {
+            assert!(!c.is_operator());
+            for tool in tools {
+                assert!(!guard::needs_confirmation(tool), "{tool}");
+                t.confirm_gate(tool, None, "any", c)
+                    .unwrap_or_else(|e| panic!("{tool} for {}: {}", c.label(), e.message));
+            }
+        }
+    }
+    assert!(t.guards.confirms.pending_tools().is_empty());
+    // At tool level: a phone's dry-run restore and a master's restart of an
+    // unknown session behave as before.
+    t.restore_host_sessions(
+        Extension(client_caller("phone", TokenMode::Full)),
+        Parameters(
+            serde_json::from_value(serde_json::json!({ "host_alias": "hostb", "dry_run": true }))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("dry run");
+    let e = t
+        .restart_session(
+            Extension(Caller::master()),
+            Parameters(serde_json::from_value(serde_json::json!({ "session_id": 9_999 })).unwrap()),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+}
+
+// ---- operator settings ----
+
+/// The settings name hosts and their projects roots, and a write retunes the
+/// GC sweeper and auto-tidy for the whole fleet: only the master token may
+/// read or change them, whatever a client's or per-host token's mode.
+#[test]
+fn the_settings_tools_are_master_only() {
+    for t in ["get_settings", "set_setting"] {
+        assert!(enforce_admin(&Caller::master(), t).is_ok(), "{t}");
+        for (label, c) in every_caller_kind() {
+            if c.is_master() {
+                continue;
+            }
+            assert!(
+                enforce_mode(&c, t)
+                    .and_then(|()| enforce_admin(&c, t))
+                    .is_err(),
+                "{t}: {label}"
+            );
+        }
+    }
+    assert!(guard::is_readonly_tool("get_settings"));
+    assert!(!guard::is_readonly_tool("set_setting"));
+}
+
+#[tokio::test]
+async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
+    let (tools, _guards, store) = client_tools();
+    let set = |key: &str, value: serde_json::Value| {
+        tools.set_setting(Parameters(SetSettingParams {
+            key: key.into(),
+            value,
+        }))
+    };
+    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    assert_eq!(
+        v["work.retention.journal_days"], "365",
+        "the default when unset: {v}"
+    );
+
+    // A string, a number and a boolean are each stored as their text.
+    set("work.retention.journal_days", serde_json::json!("30"))
+        .await
+        .expect("string");
+    let v = result_json(
+        &set("work.recent_days", serde_json::json!(7))
+            .await
+            .expect("number"),
+    );
+    assert_eq!(
+        (
+            v["work.retention.journal_days"].as_str(),
+            v["work.recent_days"].as_str()
+        ),
+        (Some("30"), Some("7"))
+    );
+    set("gc.enabled", serde_json::json!(true))
+        .await
+        .expect("bool");
+    // An array is stored as its JSON (an id set, normalised).
+    set("work.trusted_branch_projects", serde_json::json!([7, 3, 7]))
+        .await
+        .expect("array");
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_setting("gc.enabled").unwrap().as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            s.get_setting("work.trusted_branch_projects")
+                .unwrap()
+                .as_deref(),
+            Some("[3,7]")
+        );
+    }
+    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    assert_eq!(v["work.retention.journal_days"], "30");
+
+    // Refused: a bad value, an unknown key, a derived key, keys other
+    // subsystems own, and no value at all. None of them is written.
+    for (key, value) in [
+        ("work.retention.journal_days", serde_json::json!("soon")),
+        ("no.such_key", serde_json::json!("1")),
+        ("projects.resolved_base", serde_json::json!("{}")),
+        ("mcp.confirm_destructive", serde_json::json!(false)),
+        ("hub.allow_plaintext", serde_json::json!(true)),
+        ("work.retention.journal_days", serde_json::Value::Null),
+        // M2's superseded window, and the retention sweep's own record.
+        ("work.journal_days", serde_json::json!("30")),
+        (
+            "internal.work_retention_last_sweep",
+            serde_json::json!("{}"),
+        ),
+    ] {
+        let err = set(key, value.clone()).await.expect_err(key);
+        assert!(
+            err.message.starts_with("E_INVALID"),
+            "{key}={value}: {}",
+            err.message
+        );
+    }
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_setting("work.retention.journal_days")
+            .unwrap()
+            .as_deref(),
+        Some("30")
+    );
+    assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
+    assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
 }

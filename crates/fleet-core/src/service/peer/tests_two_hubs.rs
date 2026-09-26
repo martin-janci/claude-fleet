@@ -33,6 +33,9 @@ enum Fault {
     /// Hold the next call started until the test releases it, then answer
     /// it with this listener error code: a call in flight across a re-pair.
     HoldThenRefuse(&'static str),
+    /// Append a message with this id to the answer of the next call started,
+    /// as a hostile peer would: an id that is not one of the listener's rows.
+    Plant(i64),
 }
 
 #[derive(Default)]
@@ -87,7 +90,9 @@ impl Loopback {
         match f {
             Fault::DropWhenSending => a.drop_when_sending = true,
             Fault::DropWhenCarrying => a.drop_when_carrying = true,
-            Fault::Transport | Fault::Refuse(_) | Fault::HoldThenRefuse(_) => a.next = Some(f),
+            Fault::Transport | Fault::Refuse(_) | Fault::HoldThenRefuse(_) | Fault::Plant(_) => {
+                a.next = Some(f)
+            }
         }
     }
     fn fired(&self) -> Vec<Fault> {
@@ -111,7 +116,9 @@ impl PeerCall for Loopback {
             self.down_hits.fetch_add(1, Ordering::SeqCst);
             return Err(CallError::Transport("peer is down".into()));
         }
+        let mut plant = None;
         match next {
+            Some(f @ Fault::Plant(id)) => plant = Some((f, id)),
             Some(f @ Fault::HoldThenRefuse(code)) => {
                 self.held.store(true, Ordering::SeqCst);
                 self.release.notified().await;
@@ -146,9 +153,22 @@ impl PeerCall for Loopback {
         .await;
         guard.done = true;
         drop(guard);
-        let got = got
+        let mut got = got
             .map_err(|_| CallError::Transport("timeout".into()))?
             .map_err(|e| classify(&e.code, e.message))?;
+        if let Some((f, id)) = plant {
+            got.messages.push(WireMessage {
+                id,
+                from_addr: "fleet-b/session/local/b1".into(),
+                to_addr: "fleet-a/session/local/a1".into(),
+                body: "planted".into(),
+                kind: "message".into(),
+                reply_to: None,
+                sent_at: 1,
+                wake: false,
+            });
+            self.fire(f);
+        }
         {
             let mut a = self.armed.lock().unwrap();
             if a.drop_when_sending && !req.send.is_empty() {
@@ -476,6 +496,9 @@ async fn a_dialer_that_crashed_before_its_watermark_stores_the_batch_once() {
         )
         .unwrap();
     let calls = p.call.calls.load(Ordering::SeqCst);
+    // Checked before the loop starts: on a loaded box a worker can run the
+    // whole resend before this thread reads B's outbox.
+    assert_eq!(p.b_pending(b_link), 1);
     let restart = CancellationToken::new();
     let h = tokio::spawn(run_link(
         p.a.clone(),
@@ -485,7 +508,6 @@ async fn a_dialer_that_crashed_before_its_watermark_stores_the_batch_once() {
         p.call.clone(),
         restart.clone(),
     ));
-    assert_eq!(p.b_pending(b_link), 1);
     p.until("B handed it over again", || p.b_pending(b_link) == 0)
         .await;
     assert!(p.call.calls.load(Ordering::SeqCst) > calls);
@@ -505,6 +527,13 @@ async fn a_dialer_that_drops_its_parked_call_to_send_loses_nothing() {
     p.parked().await;
     let dropped = p.call.dropped.load(Ordering::SeqCst);
     p.send_a_to_b("a1").await;
+    // B sends only once the dialer has dropped its parked call to carry
+    // a1: sent sooner, b1 answers that call and a1 rides the next one, so
+    // nothing is ever dropped.
+    p.until("the parked call was dropped to carry a1", || {
+        p.call.dropped.load(Ordering::SeqCst) > dropped
+    })
+    .await;
     p.send_b_to_a("b1").await;
     p.send_a_to_b("a2").await;
     p.until("both sides have theirs", || {
@@ -803,6 +832,72 @@ async fn a_re_pair_rebinds_onto_the_older_row_and_its_pending_rows_go_out() {
     assert_eq!(kept.state, "retrying");
     let h = p.start_link(old);
     p.until("B has it", || p.b_inbox().len() == 1).await;
+    p.cancel.cancel();
+    assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
+}
+
+/// A hostile peer can plant any watermark: the ids in its answer are its
+/// own rows, so the dialer cannot tell `i64::MAX` from a real one and
+/// `after` takes it (results for ids the dialer never sent are dropped
+/// already). What the plant must not do is outlive that peer: after a
+/// re-pair — the merge onto this row that `peer add` takes for a fleet
+/// already linked — the honest peer's queued row still goes out, because
+/// the merge starts the watermark from 0. Kept at `i64::MAX`, B would mark
+/// that row accepted on the first exchange without ever handing it over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planted_watermark_does_not_survive_a_re_pair() {
+    let p = pair();
+    let h = p.start();
+    p.handshake().await;
+    p.parked().await;
+    p.call.arm(Fault::Plant(i64::MAX));
+    p.send_a_to_b("hi").await; // drops the parked poll; the next answer is planted
+    p.until("the plant took", || p.row().after == i64::MAX)
+        .await;
+    assert_eq!(p.call.fired(), vec![Fault::Plant(i64::MAX)]);
+    // The link then stops on a refusal (the token revoked on B, say)...
+    p.parked().await;
+    p.call.arm(Fault::Refuse("E_UNAUTHORIZED"));
+    p.send_a_to_b("y").await;
+    let exit = tokio::time::timeout(Duration::from_secs(5), h)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit, LinkExit::Refused);
+    assert_eq!(p.row().after, i64::MAX, "a refusal keeps the watermark");
+    // ...and the honest peer queues a row while the link is down.
+    p.send_b_to_a("honest").await;
+    let b_link = p.b_listener().id;
+    assert_eq!(p.b_pending(b_link), 1);
+    // A re-pair: `peer add` with a new token merges onto the old row.
+    let tmp =
+        p.a.lock()
+            .unwrap()
+            .insert_dialer_link("https://b.example", "t2")
+            .unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(5), p.start_link(tmp))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit, LinkExit::Rebound(p.link));
+    let kept = p.row();
+    assert_eq!(kept.token.as_deref(), Some("t2"));
+    assert_eq!(kept.after, 0, "the merge sheds the planted watermark");
+    assert_eq!(
+        p.b_pending(b_link),
+        1,
+        "the handshake alone accepts nothing"
+    );
+    // The supervisor starts the kept row: B's row is delivered, then accepted.
+    let h = p.start_link(p.link);
+    p.until("B's row reaches A", || {
+        p.a_inbox().iter().any(|m| m.body.ends_with("honest"))
+    })
+    .await;
+    p.until("B marks it accepted by the real watermark", || {
+        p.b_pending(b_link) == 0
+    })
+    .await;
     p.cancel.cancel();
     assert_eq!(h.await.unwrap(), LinkExit::Cancelled);
 }
@@ -1345,75 +1440,11 @@ async fn a_listener_already_dialling_us_refuses_the_link_terminally() {
 
 // ---- the supervisor -----------------------------------------------------------
 
-struct Unreachable {
-    calls: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl crate::http_client::HubTransport for Unreachable {
-    async fn post_json(
-        &self,
-        _url: &str,
-        _bearer: &str,
-        _body: String,
-    ) -> Result<crate::http_client::HubResponse, String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err("connection refused".into())
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_supervisor_runs_a_dialer_link_and_stops_it_once_revoked() {
-    let (a, a_ssh) = hub("fleet-a");
-    let link = a
-        .lock()
-        .unwrap()
-        .insert_dialer_link("https://b.example", "t")
-        .unwrap();
-    let transport = Arc::new(Unreachable {
-        calls: AtomicUsize::new(0),
-    });
-    let cancel = CancellationToken::new();
-    let h = super::supervisor::spawn_peer_supervisor(
-        a.clone(),
-        a_ssh,
-        transport.clone(),
-        cancel.clone(),
-    );
-    let row = || a.lock().unwrap().peer_link(link).unwrap().unwrap();
-    let t0 = std::time::Instant::now();
-    loop {
-        let r = row();
-        if r.last_error.is_some() {
-            assert_eq!(r.state, "retrying");
-            assert!(
-                r.last_error
-                    .as_deref()
-                    .unwrap()
-                    .contains("connection refused"),
-                "{:?}",
-                r.last_error
-            );
-            break;
-        }
-        assert!(t0.elapsed() < Duration::from_secs(1), "no attempt in 1 s");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    a.lock().unwrap().revoke_peer_link(link, 1).unwrap();
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    let settled = transport.calls.load(Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(
-        transport.calls.load(Ordering::SeqCst),
-        settled,
-        "a revoked link is no longer dialled"
-    );
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(6), h)
-        .await
-        .unwrap()
-        .unwrap();
-}
+// The supervisor's own stop of a revoked link (the loop parked in the
+// peer's long-poll, cancelled by the rescan, not restarted) is in
+// `supervisor.rs`'s tests, where the running map and the loop's exit are in
+// reach: over the public `spawn_peer_supervisor` a cancel and the loop's
+// own `Revoked` exit read the same from outside.
 
 /// B's `/mcp` as a `HubTransport`: the bearer names a peer client token on
 /// B (401 once revoked, as the auth layer answers), the body is the

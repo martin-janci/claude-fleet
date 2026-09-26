@@ -50,6 +50,23 @@ fn trust(f: &Fx) {
     set_project_trust(&f.s, f.project, true).unwrap();
 }
 
+/// A tracker item with `key` under `tracker`; its id.
+fn tracker_item(s: &Store, tracker: i64, ext: &str, key: &str) -> i64 {
+    s.upsert_tracker_item(
+        tracker,
+        &crate::store::TrackerItemWrite {
+            external_id: ext.into(),
+            key: Some(key.into()),
+            title: "Pay".into(),
+            status_name: "To Do".into(),
+            status_category: "todo".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .id
+}
+
 #[test]
 fn a_first_prompt_reference_is_a_preselected_suggestion_that_never_regroups() {
     let f = fx();
@@ -396,6 +413,75 @@ fn an_untracked_closing_ref_is_only_suggested_in_a_trusted_project() {
     );
 }
 
+/// R3u per GitHub instance (M11.4): an enterprise tracker does not make
+/// github.com's `owner/repo#n` resolvable, nor the other way round — each
+/// stays a pre-selected suggestion until a tracker of ITS instance exists.
+#[test]
+fn a_closing_ref_is_untracked_until_a_tracker_of_its_own_instance_exists() {
+    for (tracker_site, closing, untracked) in [
+        ("https://ghe.corp.example/acme", "acme/api#42", true),
+        (
+            "https://github.com/acme",
+            "ghe.corp.example/acme/api#42",
+            true,
+        ),
+        (
+            "https://ghe.other.example/acme",
+            "ghe.corp.example/acme/api#42",
+            true,
+        ),
+        ("https://github.com/acme", "acme/api#42", false),
+        (
+            "https://ghe.corp.example/acme",
+            "ghe.corp.example/acme/api#42",
+            false,
+        ),
+    ] {
+        let f = fx();
+        trust(&f);
+        f.s.add_tracker("github", "gh", tracker_site).unwrap();
+        let sid = session(&f, "dev", "c1");
+        f.s.set_pr_signals(
+            "h",
+            "dev",
+            Some(&serde_json::json!({ "closing": [closing] }).to_string()),
+        )
+        .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+        let rule = row
+            .work
+            .as_ref()
+            .and_then(|w| w.rule.clone())
+            .or(row.work_suggested.as_ref().and_then(|s| s.rule.clone()));
+        assert_eq!(
+            rule.as_deref() == Some("R3u"),
+            untracked,
+            "{tracker_site} / {closing}: {rule:?}"
+        );
+    }
+}
+
+#[test]
+fn an_enterprise_closing_ref_carries_its_host() {
+    let v = serde_json::json!({
+        "headRefName": "fix",
+        "closingIssuesReferences": [
+            {"number": 42, "url": "https://GHE.corp.example/Acme/API/issues/42",
+             "repository": {"name": "API", "owner": {"login": "Acme"}}},
+            {"number": 7, "url": "https://github.com/acme/web/issues/7",
+             "repository": {"name": "web", "owner": {"login": "acme"}}},
+            {"number": 8, "url": "https://127.0.0.1/acme/web/issues/8",
+             "repository": {"name": "web", "owner": {"login": "acme"}}}
+        ]
+    });
+    let sig = PrSignals::from_gh_json(&v);
+    assert_eq!(
+        sig.closing,
+        vec!["ghe.corp.example/acme/api#42", "acme/web#7", "acme/web#8"]
+    );
+}
+
 #[test]
 fn pr_json_and_trailers_parse_without_keeping_the_body() {
     let v = serde_json::json!({
@@ -429,4 +515,276 @@ fn the_branch_is_the_last_main_thread_git_branch() {
     .join("\n");
     assert_eq!(branch_from_jsonl(&jsonl).as_deref(), Some("abc-3-z"));
     assert_eq!(branch_from_jsonl(""), None);
+}
+
+/// Work graph M5: a state candidate that crosses orgs is neither created
+/// nor promoted — and the Primary change that follows it must not demote
+/// the primary the session already has (a manual link from an earlier
+/// conversation), or the session would be left with no work at all.
+#[test]
+fn a_cross_org_branch_candidate_leaves_the_existing_primary_alone() {
+    let f = fx();
+    trust(&f);
+    let a = f.s.add_org("A", None, false).unwrap();
+    let b = f.s.add_org("B", None, false).unwrap();
+    f.s.set_host_org("h", Some(a.id)).unwrap();
+    let other =
+        f.s.add_tracker("jira", "Other", "https://other.atlassian.net")
+            .unwrap();
+    f.s.set_tracker_probe(
+        other.id,
+        None,
+        &TrackerConfig {
+            key_prefixes: vec!["XYZ".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    f.s.set_tracker_org(other.id, Some(b.id)).unwrap();
+    tracker_item(&f.s, other.id, "9", "XYZ-9");
+
+    let sid = session(&f, "dev", "c1");
+    f.s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    f.s.rebind_conversation(sid, "c2", StartSource::Clear, None, None)
+        .unwrap();
+    assert!(f.s.set_current_branch(sid, "xyz-9-fix").unwrap());
+    resolve_session(&f.s, sid).unwrap();
+
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(
+        row.work.as_ref().and_then(|w| w.key.as_deref()),
+        Some("ABC-1"),
+        "the manual primary survives a skipped cross-org candidate: {row:?}"
+    );
+    assert_eq!(
+        links(&f.s, sid),
+        vec![("ABC-1".into(), "confirmed".into(), "manual".into(), None)],
+        "another org's item is never linked or suggested here"
+    );
+}
+
+/// A prompt suggestion the branch promotes becomes the branch's link: when
+/// the branch moves on, R7 ends it like any other auto link, instead of
+/// leaving a confirmed 'prompt' link the resolver never retires.
+#[test]
+fn a_promoted_suggestion_takes_the_promoting_signals_source_so_r7_ends_it() {
+    let f = fx();
+    trust(&f);
+    let sid = session(&f, "dev", "c1");
+    on_prompt(&f.s, sid, "see ABC-1", true).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        vec![(
+            "ABC-1".into(),
+            "suggested".into(),
+            "prompt".into(),
+            Some("R5".into())
+        )]
+    );
+    assert!(f.s.set_current_branch(sid, "abc-1-fix").unwrap());
+    resolve_session(&f.s, sid).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        vec![(
+            "ABC-1".into(),
+            "confirmed".into(),
+            "branch".into(),
+            Some("R3".into())
+        )],
+        "promoted by the branch: a branch link"
+    );
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-1"));
+
+    assert!(f.s.set_current_branch(sid, "abc-2-other").unwrap());
+    resolve_session(&f.s, sid).unwrap();
+    let live: Vec<String> = links(&f.s, sid).into_iter().map(|l| l.0).collect();
+    assert_eq!(
+        live,
+        vec!["ABC-2".to_string()],
+        "ABC-1 ended with the branch"
+    );
+    let ended = f.s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].end_reason.as_deref(), Some("branch_changed"));
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-2"));
+}
+
+/// A moved issue (ABC-1 became NEW-1; ABC-1 is an alias) is one target:
+/// a branch still named after the alias links it once, under the item's
+/// current key, and every later run finds that link instead of adding
+/// another; a rejection made under the current key blocks the alias
+/// candidate (R9).
+#[test]
+fn an_alias_candidate_meets_the_link_and_the_rejection_of_the_items_current_key() {
+    let f = fx();
+    trust(&f);
+    let tracker = f.s.list_trackers().unwrap()[0].id;
+    f.s.set_tracker_probe(
+        tracker,
+        None,
+        &TrackerConfig {
+            key_prefixes: vec!["ABC".into(), "NEW".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let item = tracker_item(&f.s, tracker, "77", "ABC-1");
+    assert_eq!(
+        tracker_item(&f.s, tracker, "77", "NEW-1"),
+        item,
+        "the key moved; the item stayed"
+    );
+    assert_eq!(
+        f.s.get_work_item(item).unwrap().unwrap().aliases,
+        vec!["ABC-1".to_string()]
+    );
+
+    let sid = session(&f, "dev", "c1");
+    assert!(f.s.set_current_branch(sid, "abc-1-fix").unwrap());
+    assert!(resolve_session(&f.s, sid).unwrap());
+    let want = vec![(
+        "NEW-1".to_string(),
+        "confirmed".to_string(),
+        "branch".to_string(),
+        Some("R3".to_string()),
+    )];
+    assert_eq!(links(&f.s, sid), want, "linked once, under the current key");
+    let ls = f.s.session_work_links(sid).unwrap();
+    assert_eq!(
+        (ls[0].item_id, ls[0].ref_key.as_deref()),
+        (Some(item), Some("NEW-1"))
+    );
+    // The next Stop: the same branch, the same link — nothing to add.
+    assert!(!resolve_session(&f.s, sid).unwrap(), "idempotent");
+    on_prompt(&f.s, sid, "still on ABC-1", false).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        want,
+        "the alias in a prompt is the same link"
+    );
+
+    // Rejected under the current key: the alias candidate is never proposed.
+    let other = session(&f, "other", "c2");
+    f.s.reject_session_work(other, WorkTarget::Key("NEW-1"))
+        .unwrap();
+    f.s.set_current_branch(other, "abc-1-fix").unwrap();
+    resolve_session(&f.s, other).unwrap();
+    on_prompt(&f.s, other, "look at ABC-1", true).unwrap();
+    assert_eq!(
+        links(&f.s, other),
+        vec![("NEW-1".into(), "rejected".into(), "manual".into(), None)]
+    );
+    assert_eq!(
+        f.s.get_session_by_id(other)
+            .unwrap()
+            .unwrap()
+            .work_suggested,
+        None
+    );
+}
+
+/// A PR description that lists tickets (a release PR, an audit) names none
+/// of them as the session's work: past the dump guard its text proposes
+/// nothing, and what an earlier, shorter text proposed is withdrawn.
+#[test]
+fn a_pr_text_listing_tickets_proposes_none_of_them() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    let probe = |text: &[&str]| {
+        let sig = PrSignals {
+            text: text.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        f.s.set_pr_signals("h", "dev", Some(&serde_json::to_string(&sig).unwrap()))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+    };
+    probe(&["ABC-1"]);
+    assert_eq!(
+        links(&f.s, sid).len(),
+        1,
+        "one key in a PR text is a suggestion"
+    );
+    probe(&["ABC-1", "ABC-2", "ABC-3", "ABC-4"]);
+    assert!(
+        links(&f.s, sid).is_empty(),
+        "a list is a reference, not a suggestion: {:?}",
+        links(&f.s, sid)
+    );
+    assert_eq!(
+        f.s.get_session_by_id(sid).unwrap().unwrap().work_suggested,
+        None
+    );
+}
+
+/// R7's snapshot of a link whose only state evidence is a PR closing ref
+/// records the worktree's branch, not the closing ref's text (a ticket
+/// key) — the handover brief and the resume button read `snap_branch` as
+/// a git branch.
+#[test]
+fn ending_a_closing_ref_link_snapshots_the_branch_not_the_ticket_key() {
+    let f = fx();
+    trust(&f);
+    let wt =
+        f.s.upsert_worktree(f.project, "wt", "/src/api/wt", Some("fix-login"))
+            .unwrap();
+    let sid =
+        f.s.upsert_session("dev", "h", Some(f.project), Some(wt), 1, 1, "running", None)
+            .unwrap();
+    f.s.rebind_conversation(sid, "c1", StartSource::Startup, None, None)
+        .unwrap();
+    f.s.set_pr_signals("h", "dev", Some(r#"{"closing":["ABC-1"]}"#))
+        .unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    assert_eq!(
+        links(&f.s, sid),
+        vec![(
+            "ABC-1".into(),
+            "confirmed".into(),
+            "pr".into(),
+            Some("R3".into())
+        )]
+    );
+    // The PR is gone (closed or re-targeted): the link ends.
+    f.s.set_pr_signals("h", "dev", None).unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    assert!(links(&f.s, sid).is_empty());
+    let ended = f.s.ended_work_links_for_key("ABC-1").unwrap();
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].end_reason.as_deref(), Some("pr_changed"));
+    assert_eq!(
+        ended[0].snap_branch.as_deref(),
+        Some("fix-login"),
+        "the worktree's branch, never the closing ref"
+    );
+}
+
+/// Once a session has confirmed work, a weak mention (a prompt key, a PR
+/// text key, a trailer) no longer asks for a decision: deciding one
+/// suggestion must not bring up the next mention. A strong suggestion (the
+/// branch or PR moved on) still does.
+#[test]
+fn a_session_with_confirmed_work_surfaces_only_strong_suggestions() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    on_prompt(&f.s, sid, "see ABC-1, ABC-2 and ABC-3", false).unwrap();
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    let sg = row
+        .work_suggested
+        .expect("weak suggestions show while no work is confirmed");
+    assert_eq!(sg.suggestions, 3);
+    decide(&f.s, sid, sg.link_id, true).unwrap();
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    assert!(row.work.is_some());
+    assert_eq!(row.work_suggested, None, "the other mentions stay quiet");
+    assert_eq!(row.work.unwrap().suggestions, 0);
+
+    f.s.set_current_branch(sid, "abc-7-retry").unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let sg = f.s.get_session_by_id(sid).unwrap().unwrap().work_suggested;
+    let sg = sg.expect("a strong suggestion still asks");
+    assert_eq!((sg.key.as_deref(), sg.suggestions), (Some("ABC-7"), 1));
 }

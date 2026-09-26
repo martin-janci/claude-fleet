@@ -6,7 +6,7 @@
 //!
 //! # Why a revoked token is refused on the very next request
 //!
-//! The cache is keyed on the store's auth epoch (migration 057): triggers in
+//! The cache is keyed on the store's auth epoch (migration 060): triggers in
 //! the database bump it inside the transaction of every write that can change
 //! what a token resolves to — mint, rotate, mode change, host removal, pair,
 //! trust, untrust, revoke, peer-link removal — whichever process wrote it.

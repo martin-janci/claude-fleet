@@ -1,18 +1,26 @@
 <script lang="ts">
   import WorkSettings from './WorkSettings.svelte';
+  import WorkRetention from './WorkRetention.svelte';
   import { onMount, tick } from 'svelte';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
-  import { composerPresets, resetComposerPresets, addPreset, updatePreset, removePreset } from './composer_presets';
+  import {
+    composerPresets,
+    resetComposerPresets,
+    addPreset,
+    updatePreset,
+    removePreset,
+    flushComposerPresets,
+  } from './composer_presets';
   import { copyOnSelect } from './prefs';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
   import Modal from './Modal.svelte';
   import McpSettings from './McpSettings.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -24,7 +32,10 @@
     settingSecs,
     settingInt,
     parseHoursInput,
+    parseBoundedIntInput,
     parseIntInput,
+    TIDY_IDLE_UNLINKED_DAYS_MAX,
+    TIDY_IDLE_UNLINKED_DAYS_MIN,
     parsePricesJsonInput,
     secsToHours,
     hoursToSecs,
@@ -69,7 +80,19 @@
     type NotificationPermissionState,
   } from './notify';
 
-  let { onClose }: { onClose: () => void } = $props();
+  let { onClose: closeDialog }: { onClose: () => void } = $props();
+
+  /**
+   * Chip edits are debounced (the editor saves on every keystroke), so a
+   * dialog closed straight after the last character would otherwise leave
+   * that character's save to a timer on an unmounted component. Flushing
+   * here is fire-and-forget: it is the same write, only sooner, and the
+   * dialog must not wait on a hub round trip to disappear.
+   */
+  function onClose() {
+    void flushComposerPresets();
+    closeDialog();
+  }
 
   // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
   // a one-line summary that opens the view.
@@ -147,6 +170,18 @@
       hubError = r.error.message;
     }
   }
+
+  // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
+  // graph M12.4): scroll it into view once, then forget the request.
+  onMount(() => {
+    const section = $settingsSection;
+    if (!section) return;
+    settingsSection.set(null);
+    void tick().then(() => {
+      const el = document.querySelector<HTMLElement>(`[data-testid="${section}-section"]`);
+      el?.scrollIntoView?.({ block: 'start' });
+    });
+  });
 
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
@@ -328,6 +363,18 @@
       return;
     }
     void applyLimit(key, r.value);
+  }
+  function onIdleUnlinkedDaysChange(e: Event) {
+    const r = parseBoundedIntInput(
+      (e.currentTarget as HTMLInputElement).value,
+      TIDY_IDLE_UNLINKED_DAYS_MIN,
+      TIDY_IDLE_UNLINKED_DAYS_MAX,
+    );
+    if ('error' in r) {
+      limitsError = `Tidy: unlinked for: ${r.error}`;
+      return;
+    }
+    void applyLimit(SETTING_KEYS.workTidyIdleUnlinkedDays, r.value);
   }
   function onUsagePricesChange(e: Event) {
     const r = parsePricesJsonInput((e.currentTarget as HTMLTextAreaElement).value);
@@ -1050,16 +1097,6 @@
         <span class="hook-desc" id="reports-max-age-desc">hours an error/warn report is kept before the age sweep deletes it (0 = never)</span>
       </div>
       <div class="mcp-field">
-        <label class="lbl" for="work-journal-days">work memory</label>
-        <input class="port" id="work-journal-days" type="number" min="0" max="3650" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workJournalDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-journal-days-desc"
-          data-testid="work-journal-days"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workJournalDays, 'Work memory', e)} />
-        <span class="hook-desc" id="work-journal-days-desc">days the resume journal of unlinked conversations is kept (0 = forever; linked work is always kept)</span>
-      </div>
-      <div class="mcp-field">
         <label class="lbl" for="work-recent-days">recent work</label>
         <input class="port" id="work-recent-days" type="number" min="1" max="365" step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.workRecentDays)}
@@ -1097,6 +1134,47 @@
           onchange={() => toggleSetting(SETTING_KEYS.workSessionStartContext)} />
         Give Claude the linked ticket at session start (makes the start hook wait up to 2 s when the hub is down; applies when hooks are reinstalled)
       </label>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.workClassifyNudge)}
+          disabled={automationBusy}
+          data-testid="work-classify-nudge"
+          onchange={() => toggleSetting(SETTING_KEYS.workClassifyNudge)} />
+        After three prompts with no ticket, ask Claude once which of your few open tickets it is on (only ever a suggestion)
+      </label>
+      <h5 class="sub" data-testid="work-retention">Retention</h5>
+      <div class="mcp-field">
+        <label class="lbl" for="work-retention-journal-days">journal</label>
+        <input class="port" id="work-retention-journal-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionJournalDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-retention-journal-days-desc"
+          data-testid="work-retention-journal-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionJournalDays, 'Retention: journal', e)} />
+        <span class="hook-desc" id="work-retention-journal-days-desc">days a work journal row is kept once its conversation ended and its work is done or unlinked (0 = forever)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-retention-tracker-items-days">done tickets</label>
+        <input class="port" id="work-retention-tracker-items-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionTrackerItemsDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-retention-tracker-items-days-desc"
+          data-testid="work-retention-tracker-items-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTrackerItemsDays, 'Retention: done tickets', e)} />
+        <span class="hook-desc" id="work-retention-tracker-items-days-desc">days a done ticket no session links to is kept in the cache (0 = forever)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-retention-timeline-days">work timeline</label>
+        <input class="port" id="work-retention-timeline-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionTimelineWorkEventsDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-retention-timeline-days-desc"
+          data-testid="work-retention-timeline-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTimelineWorkEventsDays, 'Retention: work timeline', e)} />
+        <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge and tidy events are kept; the newest of each per session stays (0 = forever)</span>
+      </div>
+      <WorkRetention />
       <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
       <div class="mcp-field">
         <label class="lbl" for="work-tidy-done-days">tidy: done for</label>
@@ -1117,6 +1195,17 @@
           data-testid="work-tidy-idle-hours"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workTidyIdleHours, 'Tidy: idle for', e)} />
         <span class="hook-desc" id="work-tidy-idle-hours-desc">hours a session must be idle before any reason suggests it</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-tidy-idle-unlinked-days">tidy: unlinked for</label>
+        <input class="port" id="work-tidy-idle-unlinked-days" type="number"
+          min={TIDY_IDLE_UNLINKED_DAYS_MIN} max={TIDY_IDLE_UNLINKED_DAYS_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workTidyIdleUnlinkedDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-tidy-idle-unlinked-days-desc"
+          data-testid="work-tidy-idle-unlinked-days"
+          onchange={onIdleUnlinkedDaysChange} />
+        <span class="hook-desc" id="work-tidy-idle-unlinked-days-desc">days a session with no work linked must sit idle and unprompted before Tidy up suggests it (1–90; only ever suggested, never auto-tidied)</span>
       </div>
       <label class="toggle">
         <input

@@ -5,15 +5,14 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = orchestration_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Block until a session reaches a state, or time out. \
-        until=\"idle\": claude_status is idle | completed | stopped | failed \
-        (true even for a session that never started a turn). \
-        until=\"turn_gt\": turn_seq > `turn` — pass the turn_seq_before that \
-        send_prompt returned to wait for the reply to YOUR prompt. Polls the \
-        store every 500 ms for up to timeout_s (default 120, max 600). \
-        Returns JSON { status: satisfied | timeout, claude_status, turn_seq, \
-        last_stop_at, stuck_kind }. Read-only. A per-host token may only \
-        wait on sessions on its own host.")]
+    #[tool(description = "Block until a session reaches a state, or \
+        timeout_s. until=\"idle\": claude_status is idle | completed | \
+        stopped | failed (true even before a first turn). until=\"turn_gt\": \
+        turn_seq > `turn`; pass send_prompt's turn_seq_before to wait for \
+        the reply to YOUR prompt. Polls every 500 ms. Returns { status: \
+        satisfied | timeout, claude_status, turn_seq, last_stop_at, \
+        stuck_kind }. Read-only; a per-host token only for sessions on its \
+        own host.")]
     pub(super) async fn wait_for_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -43,16 +42,12 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Read a session's Claude Code transcript (the JSONL \
-        Claude writes, not the pane) and return the last assistant turn as \
-        plain text — text blocks verbatim, one summary line per tool call, \
-        no thinking. since_turn returns every turn after that turn_seq \
-        (use send_prompt's turn_seq_before). max_chars caps the text \
-        (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE \
-        (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). \
-        Read-only; prefer it over capture_session for the reply text. fresh_for \
-        returns only what is new since your last read. unchanged costs no \
-        transcript read.")]
+    #[tool(description = "Read a session's Claude Code transcript (the \
+        JSONL, not the pane): the last assistant turn as plain text, text \
+        blocks verbatim, one line per tool call, no thinking. Errors: \
+        E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing \
+        written yet). Read-only; prefer it over capture_session for the \
+        reply. unchanged costs no transcript read.")]
     pub(super) async fn session_transcript(
         &self,
         Extension(caller): Extension<Caller>,
@@ -87,10 +82,7 @@ impl FleetTools {
         let resource_key = row.id.to_string();
         let (decision, generation, stored_anchor, stored_watermark) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let reader_exists = s
-                .get_session_by_id(reader)
-                .map_err(|e| to_mcp_err(e.into()))?
-                .is_some();
+            let reader_exists = resolve_reader(&s, &caller, reader)?;
             let stored = s
                 .get_read_cursor(reader, "session_transcript", &resource_key)
                 .map_err(to_mcp_err)?;
@@ -218,20 +210,13 @@ impl FleetTools {
         )]))
     }
 
-    #[tool(
-        description = "Read a session conversation as structured turns — the shape of the \
-        exchange, where session_transcript gives one flat blob. Each turn carries \
-        the prompt, its timestamps, and items by kind: text, tool, subagent, \
-        compact, command, interrupt (tool inputs and results are never included). \
-        Also returns events (this conversation timeline, newest events_limit: \
-        default 50, max 200, 0 for none) and context (context-window usage, or \
-        null). turns \
-        defaults to 10, max 100; the character budget scales with it. Pass \
-        claude_session_id (from session_conversations) for an earlier \
-        conversation. since_turn narrows the window to what came after that \
-        turn_seq. Read-only. Errors: E_INVALID, E_INVALID_STATE, \
-        E_NO_TRANSCRIPT."
-    )]
+    #[tool(description = "Read a session conversation as structured turns \
+        (session_transcript is one flat blob): each turn's prompt, \
+        timestamps and items by kind (text, tool, subagent, compact, \
+        command, interrupt; tool inputs and results are never included), \
+        plus events (the conversation timeline) and context (context-window \
+        usage, or null). Read-only. Errors: E_INVALID, E_INVALID_STATE, \
+        E_NO_TRANSCRIPT.")]
     pub(super) async fn session_conversation(
         &self,
         Extension(caller): Extension<Caller>,
@@ -266,12 +251,10 @@ impl FleetTools {
     }
 
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
-        session_transcript in one call: deliver the prompt, wait up to \
-        timeout_s (default 120, max 600) for the turn to complete, and return \
-        JSON { turn_seq, status: satisfied | timeout, transcript } where \
-        transcript is the reply as plain text (null with transcript_error \
-        when it cannot be read). Marked as untrusted unless raw=true (master \
-        token only). Address the session with session_id.")]
+        session_transcript in one call. Returns { turn_seq, status: \
+        satisfied | timeout, transcript } (the reply as plain text; null \
+        with transcript_error when unreadable). Marked untrusted unless \
+        raw=true (master token only).")]
     pub(super) async fn run_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -319,17 +302,14 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Dispatch a unit of work to a worker session and \
-        track it as a task. Pass worker_session_id (an existing session) OR \
-        new_worker { host_alias, project_id, name? } (spawns one via \
-        new_session). The prompt is delivered with an appended instruction to \
-        print FLEET_TASK_DONE_<nonce> on its own line followed by a \
-        one-paragraph result; fleet detects the marker on the worker's next \
-        Stop and flips the task to done with that paragraph as `result` \
-        (also delivered to requester_session_id's inbox as kind=task_result). \
-        Returns the task row (id, state=running, worker_session_id, …); \
-        follow with wait_for_task. A per-host token must name a requester on \
-        its own host. Marked as untrusted unless raw=true (master only).")]
+    #[tool(description = "Dispatch work to a worker session and track it as \
+        a task. The prompt gets an appended instruction to print \
+        FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph \
+        result; on the worker's next Stop fleet flips the task to done with \
+        that paragraph as `result` (also sent to the requester's inbox as \
+        kind=task_result). Returns the task row; follow with wait_for_task. \
+        A per-host token must name a requester on its own host. Marked \
+        untrusted unless raw=true (master only).")]
     pub(super) async fn dispatch_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -373,6 +353,13 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
+                // A new worker is a start: the operator's needs a person (D12).
+                self.confirm_gate(
+                    "dispatch_task",
+                    p.confirm_nonce.as_deref(),
+                    &dispatch_new_worker_summary(&spec, p.requester_session_id, p.raw, &p.prompt),
+                    &caller,
+                )?;
                 let name = spec.name.unwrap_or_default();
                 let row = sessions::new_session(
                     sessions::NewSessionArgs {
@@ -435,12 +422,11 @@ impl FleetTools {
         ok_json(&started)
     }
 
-    #[tool(description = "Block until a task reaches done | failed | cancelled \
-        or timeout_s elapses (default 120, max 600; polls every 500 ms). \
-        Returns JSON { status: satisfied | timeout, task } — task.result \
-        holds the worker's paragraph when done. Read-only. A per-host token \
-        may only wait on tasks it requested or whose worker is on its host \
-        (E_FORBIDDEN).")]
+    #[tool(description = "Block until a task is done | failed | cancelled, \
+        or timeout_s (polls every 500 ms). Returns { status: satisfied | \
+        timeout, task }; task.result holds the worker's paragraph. \
+        Read-only. A per-host token may only wait on tasks it requested or \
+        whose worker is on its host (E_FORBIDDEN).")]
     pub(super) async fn wait_for_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -465,10 +451,9 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "List tasks, newest-first (default 50 rows). Filters: \
-        requester_session_id, state (queued | running | done | failed | \
-        cancelled). Read-only. A per-host token sees only tasks it requested \
-        from its host or whose worker is on its host.")]
+    #[tool(description = "Tasks, newest first. Read-only. A per-host token \
+        sees only tasks it requested from its host or whose worker is on its \
+        host.")]
     pub(super) async fn list_tasks(
         &self,
         Extension(caller): Extension<Caller>,
@@ -498,11 +483,11 @@ impl FleetTools {
         ok_json_compact(&rows)
     }
 
-    #[tool(description = "Cancel a queued or running task: marks it cancelled \
-        (E_TASK_TERMINAL if it already finished). The worker session keeps \
-        running — kill or re-prompt it separately if needed. May return \
-        E_CONFIRM_REQUIRED when desktop confirmation is on. A per-host token \
-        may only cancel tasks it can see (E_FORBIDDEN).")]
+    #[tool(description = "Cancel a queued or running task (E_TASK_TERMINAL \
+        if it already finished). The worker session keeps running: kill or \
+        re-prompt it separately. May return E_CONFIRM_REQUIRED when desktop \
+        confirmation is on. A per-host token may only cancel tasks it can \
+        see (E_FORBIDDEN).")]
     pub(super) async fn cancel_task(
         &self,
         Extension(caller): Extension<Caller>,
@@ -523,10 +508,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Replace a session's tags (short labels such as \
-        `review`, `infra`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]; \
-        an empty list clears). Tags show in list_sessions rows and \
-        list_sessions { tag } filters on them. Returns the updated row. \
-        Address the session with session_id OR host_alias + tmux_name.")]
+        `review`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]), shown \
+        and filterable in list_sessions. Returns the updated row.")]
     pub(super) async fn set_session_tags(
         &self,
         Extension(caller): Extension<Caller>,
@@ -652,6 +635,10 @@ impl FleetTools {
             WorkAction::Reopened => ok_json_compact(
                 &crate::service::work::tidy::reopened(&self.store, &scope).map_err(to_mcp_err)?,
             ),
+            WorkAction::LocalItems => ok_json_compact(
+                &crate::service::work::local::local_items(&self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            ),
         }
     }
 
@@ -695,24 +682,25 @@ impl FleetTools {
             ));
         }
         let scope = self.org_scope(&caller)?;
+        // A multi-repo start's projects are checked before anything else,
+        // the operator's confirmation included: a request that can only be
+        // refused is never put to a person.
+        let multi = match (args.action.as_str(), args.project_ids.as_deref()) {
+            ("start", Some(ids)) => Some(
+                crate::service::trackers::tickets::multi_start_ids(args.project_id, ids)
+                    .map_err(to_mcp_err)?,
+            ),
+            _ => None,
+        };
         if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
             // start or resume is never gated.)
+            let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
             self.confirm_gate(
                 "work_link",
                 args.confirm_nonce.as_deref(),
-                &format!(
-                    "{} key={:?} url={:?} item_id={:?} host={:?} project_id={:?} project_ids={:?} mode={:?}",
-                    args.action,
-                    args.key,
-                    args.url,
-                    args.item_id,
-                    args.host_alias,
-                    args.project_id,
-                    args.project_ids,
-                    args.mode
-                ),
+                &work_link_start_summary(&args, &repos),
                 &caller,
             )?;
         }
@@ -769,6 +757,26 @@ impl FleetTools {
                 &crate::service::work::dismiss_reopened(&args, &self.store).map_err(to_mcp_err)?,
             );
         }
+        if args.action == "name" {
+            // Work graph M11.1: name new local work on a session, or rename
+            // a local item. The host and org fences are inside, and answer
+            // another host's session as an unknown one (no existence oracle),
+            // so the session is not resolved through the host gate here.
+            use crate::service::work::local;
+            return match (args.session_id, args.item_id) {
+                (Some(_), None) => ok_json(
+                    &local::name_session_work(&args, &self.store, &scope).map_err(to_mcp_err)?,
+                ),
+                (None, Some(_)) => ok_json(
+                    &local::rename_local_item(&args, &self.store, &scope).map_err(to_mcp_err)?,
+                ),
+                _ => Err(mcp_err(
+                    "E_INVALID",
+                    "name takes exactly one of session_id (name new work) or item_id (rename)",
+                    None,
+                )),
+            };
+        }
         if args.action == "tidy_apply" {
             let items = args.items.clone().unwrap_or_default();
             let summary = format!(
@@ -807,15 +815,8 @@ impl FleetTools {
             return ok_json(&report);
         }
         if args.action == "start" {
-            if let Some(ids) = args.project_ids.as_ref().filter(|v| !v.is_empty()) {
+            if let Some(ids) = multi.as_deref() {
                 // Work graph M9.6: one sibling per repository, same branch.
-                if args.project_id.is_some() {
-                    return Err(mcp_err(
-                        "E_INVALID",
-                        "pass project_id or project_ids, not both",
-                        None,
-                    ));
-                }
                 let out = crate::service::trackers::tickets::start_work_many(
                     &self.store,
                     &self.ssh,
@@ -856,8 +857,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Trackers and orgs; see action. Never \
-        returns a secret.")]
+    #[tool(description = "Trackers, orgs and retention; see action. \
+        Never returns a secret.")]
     pub(super) async fn work_admin(
         &self,
         Extension(caller): Extension<Caller>,
@@ -870,6 +871,21 @@ impl FleetTools {
         let summary = args.audit_summary();
         audit("work_admin", &summary);
         match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
+            // M11.4's sync metrics and M12.3's retention (rows, dry run,
+            // last sweep), each read under its own short locks.
+            AdminAction::Status => {
+                let trackers = a::admin_sync(&args, &self.store).map_err(to_mcp_err)?;
+                let retention = crate::service::work::retention::status(
+                    &self.store,
+                    crate::service::catalog::now_secs(),
+                )
+                .map_err(to_mcp_err)?;
+                ok_json(&serde_json::json!({ "trackers": trackers, "retention": retention }))
+            }
+            AdminAction::SweepNow => ok_json(&crate::service::work::retention::sweep(
+                &self.store,
+                crate::service::catalog::now_secs(),
+            )),
             AdminAction::Test => {
                 let id = args
                     .tracker_id
@@ -891,6 +907,22 @@ impl FleetTools {
             }
             _ => ok_json(&a::admin_sync(&args, &self.store).map_err(to_mcp_err)?),
         }
+    }
+
+    /// `id:owner/repo` for each project id, for a confirm summary; an
+    /// unknown id is shown bare (the start refuses it later).
+    fn repo_labels(&self, ids: &[i64]) -> Result<Vec<String>, McpError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        Ok(ids
+            .iter()
+            .map(|id| match s.get_project(*id) {
+                Ok(Some(p)) => format!("{id}:{}/{}", p.owner, p.repo),
+                _ => id.to_string(),
+            })
+            .collect())
     }
 
     /// The caller's org scope (work graph M5), read under a short lock.
