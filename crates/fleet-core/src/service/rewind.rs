@@ -13,6 +13,14 @@ use std::sync::{Arc, Mutex};
 /// transcript — so the caller maps it to a code instead of parsing prose.
 pub const NO_ANCHOR: &str = "__CF_NO_ANCHOR__";
 
+/// Sentinel the script prints (on stderr) when the truncated copy holds no
+/// conversation entry at all — rewinding to the FIRST turn, whose prefix is
+/// nothing but the transcript's metadata header. Spec §4.3 refuses that: it is
+/// `/clear` by a longer route and under a misleading label, and the engine
+/// would otherwise succeed at it. The guard lives here, in the one place that
+/// can actually know, rather than in a client (spec §5.1).
+pub const NO_TURNS: &str = "__CF_NO_TURNS__";
+
 /// The bash script that copies the head of a transcript into a new
 /// conversation's `.jsonl`.
 ///
@@ -43,7 +51,9 @@ pub const NO_ANCHOR: &str = "__CF_NO_ANCHOR__";
 ///
 /// The output is written to a temp file and moved into place only on success,
 /// so a missing anchor leaves no half-written transcript for `--resume` to
-/// find.
+/// find — and a copy that turned out to hold no conversation entry at all
+/// (the header alone: rewinding to the very first turn) is removed and
+/// reported with [`NO_TURNS`], the second sentinel beside [`NO_ANCHOR`].
 #[allow(clippy::too_many_arguments)]
 pub fn rewind_script(
     tmux_name: Option<&str>,
@@ -101,6 +111,11 @@ if [ "$rc" -ne 0 ]; then
   rm -f -- "$tmp"
   if [ "$rc" -eq 3 ]; then printf '{NO_ANCHOR} %s\n' "$anchor" >&2; fi
   exit "$rc"
+fi
+if ! grep -q -F -e '"uuid":"' -- "$tmp"; then
+  rm -f -- "$tmp"
+  printf '{NO_TURNS}\n' >&2
+  exit 5
 fi
 mv -- "$tmp" "$dest" || exit 1
 printf '%s\n' "$dest"
@@ -233,7 +248,7 @@ pub async fn rewind_conversation(
         ));
     }
     // Snapshot under one short lock; every I/O below happens with it released.
-    let (sess, claude_id, stored_transcript_path) = {
+    let (sess, claude_id, stored_transcript_path, fallback_cwd) = {
         let s = lock(store)?;
         let sess = s
             .get_session_by_id(args.session_id)?
@@ -270,7 +285,26 @@ pub async fn rewind_conversation(
         // conversation rows do); the session table's copy is a separate
         // getter, same as `transcript::resolve_args` uses.
         let stored_transcript_path = s.session_transcript_path(sess.id)?;
-        (sess, claude_id, stored_transcript_path)
+        // Locate the transcript the way EVERY other reader of it does
+        // (`transcript::resolve_args`): the worktree's path, else the
+        // project's, as the fallback cwd. Without it, a `tmux display-message`
+        // that yields no cwd sends `locate_script` to its
+        // `~/.claude/projects/*/<id>.jsonl` glob, and `dest_dir` becomes the
+        // `dirname` of whatever that found — which need not be the encoded
+        // dir for the session's actual cwd, so `cl --resume <newid>` would
+        // then find nothing, silently.
+        let wt = match sess.worktree_id {
+            Some(wid) => s.worktree_path(wid).ok().flatten(),
+            None => None,
+        };
+        let fallback_cwd = match wt {
+            Some(p) => Some(p),
+            None => match sess.project_id {
+                Some(pid) => s.project_base_path(pid).ok().flatten(),
+                None => None,
+            },
+        };
+        (sess, claude_id, stored_transcript_path, fallback_cwd)
     };
 
     // Rewind respawns the pane, so doing it mid-turn throws the turn away.
@@ -283,10 +317,13 @@ pub async fn rewind_conversation(
     }
 
     let new_id = mint_conversation_id();
+    // Same rule as `resolve_args`: a row with no pane (`bg` / `external`) has
+    // no `tmux display-message` to ask, so do not pretend it has one.
+    let no_pane = crate::store::has_no_pane(&sess.kind) || sess.tmux_name.starts_with("bg:");
     let script = rewind_script(
-        Some(sess.tmux_name.as_str()),
+        (!no_pane).then_some(sess.tmux_name.as_str()),
         stored_transcript_path.as_deref(),
-        None,
+        fallback_cwd.as_deref(),
         &claude_id,
         &new_id,
         args.anchor_uuid.as_deref(),
@@ -306,6 +343,12 @@ pub async fn rewind_conversation(
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
                 "that reply is no longer in the transcript",
+            ));
+        }
+        if stderr.contains(NO_TURNS) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "there is nothing before this turn to rewind to; use /clear to start fresh",
             ));
         }
         if stderr.contains(crate::service::transcript::NO_TRANSCRIPT) {
@@ -383,7 +426,7 @@ pub async fn rewind_conversation(
             // starts exactly where `rewind_script` already wrote the
             // transcript above.
             let project_id = project_id_for_fork(sess.project_id)?;
-            crate::service::sessions::new_session(
+            let row = crate::service::sessions::new_session(
                 crate::service::sessions::NewSessionArgs {
                     host_alias: sess.host_alias.clone(),
                     project_id,
@@ -395,13 +438,36 @@ pub async fn rewind_conversation(
                     kind: None,
                     start_command: None,
                     friendly_name: None,
-                    resume_claude_session_id: Some(new_id),
+                    resume_claude_session_id: Some(new_id.clone()),
                 },
                 store,
                 ssh,
                 reg,
             )
-            .await
+            .await?;
+            // `new_session` records the resumed id through
+            // `set_claude_session_id`, which is `rebind_conversation(...,
+            // StartSource::Fleet, ...)`: the forked conversation would be
+            // labelled `fleet`, not `fork`, and `Fleet` also
+            // `resets_context()` — so the new row would report 0 context for a
+            // transcript it inherited whole. Relabel it, with the path the
+            // script actually wrote. Best-effort: the spawn has succeeded and
+            // its row is what the caller asked for; a label is not worth
+            // failing it.
+            match lock(store).and_then(|s| {
+                s.relabel_conversation(row.id, &new_id, StartSource::Fork, Some(&new_path))
+            }) {
+                Ok(Some(relabelled)) => Ok(relabelled),
+                Ok(None) => Ok(row),
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = row.id,
+                        error = %e.message,
+                        "[rewind] labelling the forked conversation failed"
+                    );
+                    Ok(row)
+                }
+            }
         }
     }
 }
@@ -630,6 +696,61 @@ mod tests {
             "a `gsub` would treat '.' as 'any char' and clobber this line too; \
              rep() must leave it untouched: {written}"
         );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// I1 / spec §4.3: rewinding to the FIRST turn leaves nothing but the
+    /// transcript's metadata header — a conversation with no entries at all,
+    /// which is `/clear` under a misleading label. The engine is the only
+    /// layer that can know, so the refusal is a script sentinel, not a
+    /// client-side gate.
+    #[test]
+    fn a_prefix_with_no_conversation_entry_fails_with_its_own_sentinel() {
+        let d = tmp();
+        let src = fixture(&d);
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            Some(A1), // the first turn: only the header survives
+            None,
+            None,
+        ));
+        assert_eq!(out.status.code(), Some(5));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(NO_TURNS), "stderr: {stderr}");
+        assert!(
+            !stderr.contains(NO_ANCHOR),
+            "the anchor WAS found; this is a different refusal: {stderr}"
+        );
+        assert!(
+            !d.join(format!("{NEW}.jsonl")).exists(),
+            "a refused truncation leaves no half-written transcript"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The counterpart: a prefix that DOES hold a turn is written, so the
+    /// sentinel above cannot be firing on the ordinary case.
+    #[test]
+    fn a_prefix_with_one_turn_is_written() {
+        let d = tmp();
+        let src = fixture(&d);
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            Some(A2),
+            None,
+            None,
+        ));
+        assert!(out.status.success());
+        assert!(!String::from_utf8_lossy(&out.stderr).contains(NO_TURNS));
+        assert!(d.join(format!("{NEW}.jsonl")).exists());
         std::fs::remove_dir_all(&d).ok();
     }
 
