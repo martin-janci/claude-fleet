@@ -6,11 +6,15 @@
 //!   It never follows a redirect (a 3xx comes back as a [`Response`] for the
 //!   caller to refuse), caps the body, bounds the whole exchange by the
 //!   request's timeout, refuses plaintext, and refuses any host its policy
-//!   does not allow — the SSRF fence (`service::trackers` allows only
-//!   `*.atlassian.net`).
+//!   does not allow — the SSRF fence. The policy comes from
+//!   [`crate::service::trackers::host_policy`]: only the tracker
+//!   provider's own API host (`*.atlassian.net` for Jira Cloud, the
+//!   configured site for Jira Data Center or GitHub Enterprise Server).
 //! * [`FakeTransport`] answers from a script and records every request, so no
 //!   test ever reaches a real tracker.
-//! * A `ViaHost` transport (curl / `gh` / `acli` on a host) arrives with M6.
+//! * The transports that run on a fleet host over SSH — `gh` and `curl` —
+//!   are in [`super::via_host`] (M6). There is no `acli` transport
+//!   (decision D17).
 //!
 //! [`Request`]'s `Debug` masks credential headers, so a request logged by
 //! accident does not leak one.
