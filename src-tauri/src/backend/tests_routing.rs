@@ -1000,6 +1000,7 @@ fn routed_mutation_cases() -> Vec<Case> {
     use fleet_core::service::hosts::HostAliasArgs;
     use fleet_core::service::move_session::resolve::{ResolveMoveAction, ResolveMoveArgs};
     use fleet_core::service::move_session::MoveSessionArgs;
+    use fleet_core::service::rewind::{RewindArgs, RewindMode};
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
         DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs,
@@ -1420,6 +1421,32 @@ fn routed_mutation_cases() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "rewind_conversation",
+            "rewind_conversation",
+            json!({
+                "session_id": 7,
+                "anchor_uuid": "aaaaaaaa-0000-0000-0000-000000000002",
+                "mode": "fork",
+                "new_worktree": null,
+            }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::rewind_conversation(
+                    b,
+                    RewindArgs {
+                        session_id: 7,
+                        anchor_uuid: Some("aaaaaaaa-0000-0000-0000-000000000002".into()),
+                        mode: RewindMode::Fork,
+                        new_worktree: None,
+                    },
+                    s,
+                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),

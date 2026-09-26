@@ -410,6 +410,31 @@ export async function restartSession(hostAlias: string, name: string): Promise<R
   return r;
 }
 
+/** Truncate this session's transcript into a new conversation.
+ *
+ *  `mode: 'rewind'` restarts THIS session on the copy; `'fork'` leaves it
+ *  running and starts a new session on the copy. `anchorUuid` is the turn's
+ *  `prompt_uuid` for a rewind, and the NEXT later turn's for a fork — `null`
+ *  keeps the whole transcript, which is what forking the newest turn means.
+ */
+export async function rewindConversation(
+  sessionId: number,
+  mode: 'rewind' | 'fork',
+  anchorUuid: string | null,
+  newWorktree: string | null = null,
+): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('rewind_conversation', {
+    args: {
+      session_id: sessionId,
+      mode,
+      anchor_uuid: anchorUuid,
+      new_worktree: newWorktree,
+    },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
 /** What `repair_session` found and did (mirrors `service::repair::RepairReport`). */
 export interface RepairReport {
   session_id: number | null;

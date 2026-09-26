@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
 import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
 import type { SessionRow } from './sessions';
 
@@ -92,6 +92,28 @@ describe('sessions store', () => {
       'restart_session',
       { args: { host_alias: 'local', name: 'dev-foo' } },
     ]);
+  });
+
+  it('rewindConversation invokes the command with snake_case args and accepts the row', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sample[0]);
+    const r = await rewindConversation(7, 'fork', 'aaaaaaaa-0000-0000-0000-000000000002');
+    expect(r.ok).toBe(true);
+    expect(mockedInvoke).toHaveBeenCalledWith('rewind_conversation', {
+      args: {
+        session_id: 7,
+        mode: 'fork',
+        anchor_uuid: 'aaaaaaaa-0000-0000-0000-000000000002',
+        new_worktree: null,
+      },
+    });
+  });
+
+  it('rewindConversation passes a null anchor through as null', async () => {
+    // Forking the newest turn has no later prompt, and null means "keep it all".
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sample[0]);
+    await rewindConversation(7, 'fork', null);
+    const args = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.at(-1)![1].args;
+    expect(args.anchor_uuid).toBeNull();
   });
 
   it('repairSession passes the session id and returns the report untouched', async () => {

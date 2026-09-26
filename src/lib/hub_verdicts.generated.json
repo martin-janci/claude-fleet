@@ -135,6 +135,7 @@
     "restart_session",
     "restore_host_sessions",
     "resume_work",
+    "rewind_conversation",
     "safe_kill_session",
     "send_prompt",
     "session_activity",
