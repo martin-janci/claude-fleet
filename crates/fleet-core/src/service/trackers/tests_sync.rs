@@ -6,9 +6,10 @@ use super::*;
 use crate::events::RecordingEventBus;
 use crate::net::https::{FakeTransport, Method, Response};
 use crate::service::trackers::jira::VIEW_MINE;
-use crate::service::trackers::TrackerNet;
+use crate::service::trackers::{StatusSnapshot, TrackerNet};
 use crate::store::{TrackerConfig, WorkTarget};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 const T0: i64 = 1_790_000_000;
 
@@ -99,6 +100,25 @@ impl Fx {
             .tracker_item_for_key(key)
             .unwrap()
             .unwrap_or_else(|| panic!("{key} not cached"))
+    }
+
+    fn item_opt(&self, key: &str) -> Option<crate::store::WorkItemRow> {
+        self.store
+            .lock()
+            .unwrap()
+            .tracker_item_for_key(key)
+            .unwrap()
+    }
+
+    fn watermark(&self, view_id: &str) -> Option<i64> {
+        self.store
+            .lock()
+            .unwrap()
+            .list_tracker_views(self.tracker)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.view_id == view_id)
+            .and_then(|v| v.watermark)
     }
 }
 
@@ -1006,7 +1026,17 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
 
 /// The token moves only once the items it stands for are stored: a store
 /// write that fails leaves the token where it was, so the next pass reads
-/// the same changes again instead of skipping them.
+/// the same changes again instead of skipping them. (2026-09-26: a batch
+/// with SOME good items tolerates a per-item failure silently — see
+/// `store_items_tolerates_one_poison_item_mid_batch` — but this provider's
+/// `changes` answers with exactly one item, and that is also the WHOLE
+/// PASS's only item (a single view, nothing linked or unbound): with
+/// nothing anywhere in the pass stored, `run_provider`'s end-of-pass check
+/// still fails it visibly, exactly as before per-item tolerance existed,
+/// rather than let the tracker settle on "ok" with nothing refreshed.
+/// Either way the token does not move: the view loop's own per-view gate
+/// (`failed == 0`) already skips the update for THIS view regardless of
+/// whether the pass later fails as a whole.)
 #[tokio::test]
 async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
     let fx = Fx::new();
@@ -1044,7 +1074,10 @@ async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
     let r = sync
         .run_provider(&row, &bad, views.clone(), &fx.store, T0, &mut pass)
         .await;
-    assert!(r.is_err(), "the store refused the item");
+    assert!(
+        r.is_err(),
+        "the pass's only item failing means nothing in the pass was stored: {r:?}"
+    );
     assert_eq!(
         mark(&fx).as_deref(),
         Some("tok-1"),
@@ -1059,4 +1092,624 @@ async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
         .unwrap();
     assert_eq!(mark(&fx).as_deref(), Some("tok-2"));
     assert_eq!(pass.changed, 1);
+}
+
+// ── tracker per-item tolerance (2026-09-26): one poison item in a batch
+//    must not roll back the rest, and a lost transaction still must ──
+
+fn poison_snap(ext: &str, key: &str, updated: i64) -> WorkItemSnapshot {
+    WorkItemSnapshot {
+        external_id: ext.into(),
+        key: Some(key.into()),
+        title: format!("{key} title"),
+        status: StatusSnapshot {
+            name: "To Do".into(),
+            category: "todo".into(),
+            ..Default::default()
+        },
+        updated: Some(updated),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn store_items_tolerates_one_poison_item_mid_batch() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_mid_batch BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'poison-2' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let items = vec![
+        poison_snap("item-1", "ABC-1", 1),
+        poison_snap("poison-2", "ABC-2", 2),
+        poison_snap("item-3", "ABC-3", 3),
+    ];
+    fx.bus.take();
+    let mut seen = HashSet::new();
+    let mut pass = TrackerPass {
+        tracker_id: fx.tracker,
+        ..Default::default()
+    };
+    let failed = sync
+        .store_items(fx.tracker, items, &fx.store, &mut seen, &mut pass)
+        .unwrap();
+    assert_eq!(failed, 1, "{pass:?}");
+    assert_eq!(
+        pass.failed, 1,
+        "a mixed batch reports Ok, but still counts the failure: {pass:?}"
+    );
+    assert_eq!((pass.seen, pass.changed), (2, 2), "{pass:?}");
+    assert!(
+        fx.item_opt("ABC-1").is_some(),
+        "the item before the poison one is stored"
+    );
+    assert!(
+        fx.item_opt("ABC-3").is_some(),
+        "the item after the poison one is stored"
+    );
+    assert!(
+        fx.item_opt("ABC-2").is_none(),
+        "the poisoned item must never persist"
+    );
+    assert_eq!(
+        fx.bus.names().iter().filter(|n| **n == "work:item").count(),
+        2,
+        "no event for the poison item: {:?}",
+        fx.bus.names()
+    );
+}
+
+#[tokio::test]
+async fn store_items_propagates_a_lost_outer_transaction_and_persists_nothing() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER lose_tx_mid_batch BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'boom' \
+             BEGIN SELECT RAISE(ROLLBACK, 'lost'); END;",
+        )
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let items = vec![
+        poison_snap("item-1", "ABC-1", 1),
+        poison_snap("boom", "ABC-2", 2),
+    ];
+    let mut seen = HashSet::new();
+    let mut pass = TrackerPass {
+        tracker_id: fx.tracker,
+        ..Default::default()
+    };
+    let err = sync
+        .store_items(fx.tracker, items, &fx.store, &mut seen, &mut pass)
+        .unwrap_err();
+    assert!(
+        matches!(&err, TrackerError::Invalid(m) if m.contains("rolled back")),
+        "names the lost transaction: {err:?}"
+    );
+    assert!(
+        fx.item_opt("ABC-1").is_none(),
+        "nothing from the batch persisted, not even the earlier good item"
+    );
+}
+
+#[tokio::test]
+async fn run_pass_does_not_advance_the_watermark_when_a_view_batch_has_a_poison_item() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_10104 BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = '10104' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    let passes = sync.run_pass(&fx.store).await.unwrap();
+    let p = &passes[0];
+    assert_eq!(
+        p.error, None,
+        "a per-item failure must not fail the whole pass: {p:?}"
+    );
+    assert_eq!(p.seen, 6, "the poison item is not counted: {p:?}");
+    assert_eq!(
+        fx.watermark("mine"),
+        None,
+        "the watermark must not advance while one item of the view failed"
+    );
+    assert!(
+        fx.item_opt("ABC-103").is_some(),
+        "the good items are stored"
+    );
+    assert!(
+        fx.item_opt("ABC-104").is_none(),
+        "the poison item never persisted"
+    );
+
+    // Remove the trigger: the next pass (still a whole listing, since the
+    // watermark never advanced) stores everything and moves the watermark.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch("DROP TRIGGER poison_10104")
+        .unwrap();
+    fx.fake.clear_routes();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    let passes2 = sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(passes2[0].error, None, "{:?}", passes2[0]);
+    assert_eq!(
+        fx.watermark("mine"),
+        Some(1_789_892_130),
+        "now the watermark advances"
+    );
+    assert!(
+        fx.item_opt("ABC-104").is_some(),
+        "retried on the next pass and stored"
+    );
+}
+
+// ── fix round 1 (2026-09-26 review): a systemic, every-item failure must
+//    still fail the PASS visibly — silent tolerance is only for a poison
+//    item AMONG good ones, never for a batch, not even a whole pass, with
+//    zero successes. Fix round 2: the all-fail check moved from per-BATCH
+//    (which wrongly aborted the rest of the pass — later views, the
+//    linked-item refresh, the unbound-key fetch — whenever a single-item
+//    incremental batch was the poison one, stalling the pass on it every
+//    time) to per-PASS, decided once at the end of `run_provider` ──
+
+/// `store_items` itself never fails for a per-item cause any more, however
+/// many items in ONE batch fail — that used to be true only for a MIXED
+/// batch (`store_items_tolerates_one_poison_item_mid_batch`); fix round 2
+/// makes it true even when every item in the batch fails, because a batch
+/// is scoped to one view (or one fetch), and the pass-wide visibility rule
+/// now lives in `run_provider` instead (see
+/// `a_pass_fails_visibly_when_every_item_of_a_batch_fails` and
+/// `a_poison_view_does_not_stall_the_rest_of_the_pass` below).
+#[tokio::test]
+async fn store_items_tolerates_every_item_in_a_batch_failing() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_all BEFORE INSERT ON work_items \
+             BEGIN SELECT RAISE(ABORT, 'systemic poison'); END;",
+        )
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let items = vec![
+        poison_snap("item-1", "ABC-1", 1),
+        poison_snap("item-2", "ABC-2", 2),
+    ];
+    let mut seen = HashSet::new();
+    let mut pass = TrackerPass {
+        tracker_id: fx.tracker,
+        ..Default::default()
+    };
+    let failed = sync
+        .store_items(fx.tracker, items, &fx.store, &mut seen, &mut pass)
+        .unwrap();
+    assert_eq!(failed, 2, "{pass:?}");
+    assert_eq!(pass.failed, 2, "{pass:?}");
+    assert!(
+        pass.last_item_error
+            .as_deref()
+            .is_some_and(|m| m.contains("systemic poison")),
+        "{pass:?}"
+    );
+    assert_eq!(
+        (pass.seen, pass.changed),
+        (0, 0),
+        "nothing succeeded in this batch: {pass:?}"
+    );
+    assert!(fx.item_opt("ABC-1").is_none());
+    assert!(fx.item_opt("ABC-2").is_none());
+}
+
+#[tokio::test]
+async fn a_pass_fails_visibly_when_every_item_of_a_batch_fails() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_all BEFORE INSERT ON work_items \
+             BEGIN SELECT RAISE(ABORT, 'systemic poison'); END;",
+        )
+        .unwrap();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    let passes = fx.sync(|| T0).run_pass(&fx.store).await.unwrap();
+    let p = &passes[0];
+    assert!(
+        p.error
+            .as_deref()
+            .is_some_and(|e| e.contains("systemic poison")),
+        "a batch with zero successes must fail the pass visibly, exactly \
+         as before per-item tolerance existed: {p:?}"
+    );
+    assert_eq!(
+        (p.seen, p.changed),
+        (0, 0),
+        "nothing from the listing was stored: {p:?}"
+    );
+    assert_eq!(p.failed, 7, "every listed item failed: {p:?}");
+    let row = fx.row();
+    assert_eq!(
+        row.last_sync_at, None,
+        "set_tracker_synced must not advance on a batch that stored nothing: {row:?}"
+    );
+    assert!(
+        row.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("systemic poison")),
+        "the tracker's error state is set, as before this task: {row:?}"
+    );
+}
+
+// ── fix round 1 (2026-09-26 review), Minor 4: test-gap coverage for the
+//    `last_full` / dedupe-retry mechanics the per-item fix relies on ──
+
+/// A watermark-style provider whose `list` just returns whatever the test
+/// queued next, recording the `since` `read_view` computed so the test can
+/// tell a forced-whole listing from an incremental one.
+#[derive(Default)]
+struct RecordingWatermarkProvider {
+    pages: std::sync::Mutex<std::collections::VecDeque<Vec<WorkItemSnapshot>>>,
+    since_seen: std::sync::Mutex<Vec<Option<i64>>>,
+}
+
+#[async_trait::async_trait]
+impl TrackerProvider for RecordingWatermarkProvider {
+    fn caps(&self) -> crate::service::trackers::Caps {
+        crate::service::trackers::Caps {
+            incremental: Incremental::Watermark,
+            ..Default::default()
+        }
+    }
+    async fn probe(&self) -> Result<crate::service::trackers::TrackerInfo, TrackerError> {
+        unreachable!()
+    }
+    async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+        unreachable!()
+    }
+    async fn list(
+        &self,
+        _: &ViewDef,
+        since: Option<i64>,
+        _: Option<String>,
+    ) -> Result<crate::service::trackers::Page, TrackerError> {
+        self.since_seen.lock().unwrap().push(since);
+        let items = self.pages.lock().unwrap().pop_front().unwrap_or_default();
+        Ok(crate::service::trackers::Page { items, next: None })
+    }
+    async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+        Ok(vec![])
+    }
+    fn recognize(&self, _: &str, _: crate::service::trackers::RefCtx<'_>) -> Vec<ItemRef> {
+        vec![]
+    }
+}
+
+/// Distinct from `run_pass_does_not_advance_the_watermark_when_a_view_batch_has_a_poison_item`
+/// (a first-ever, watermark-`None` listing): here the watermark is already
+/// set from an earlier, clean pass, and this pass is forced whole only
+/// because `last_full` is stale (`>= FULL_EVERY_SECS`) — the exact branch
+/// that must not refresh `last_full` when one item of THAT forced-whole
+/// listing fails, or the next pass would wrongly believe a whole listing
+/// happened recently and stay incremental, hiding the poison item (and any
+/// view-membership change) for another `FULL_EVERY_SECS`.
+#[tokio::test]
+async fn last_full_is_not_refreshed_when_a_forced_full_listing_has_a_poison_item() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_boom BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'boom' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let row = fx.row();
+    let mut pass = TrackerPass::default();
+    let provider = RecordingWatermarkProvider::default();
+
+    // Pass 1 (T0): no `last_full` entry yet, one good item — a genuinely
+    // whole listing that sets the watermark and records `last_full`.
+    let views = fx
+        .store
+        .lock()
+        .unwrap()
+        .list_tracker_views(fx.tracker)
+        .unwrap();
+    provider
+        .pages
+        .lock()
+        .unwrap()
+        .push_back(vec![poison_snap("item-1", "ABC-1", 1)]);
+    sync.run_provider(&row, &provider, views, &fx.store, T0, &mut pass)
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.since_seen.lock().unwrap().as_slice(),
+        [None],
+        "the first listing is whole: no `last_full` entry yet"
+    );
+    assert_eq!(
+        sync.last_full
+            .lock()
+            .unwrap()
+            .get(&(fx.tracker, "mine".to_string()))
+            .copied(),
+        Some(T0)
+    );
+
+    // Pass 2, long after `FULL_EVERY_SECS`: the watermark is already set
+    // (from pass 1), but `last_full` is stale, so this listing is forced
+    // whole again — and this time one item is poisoned.
+    let t2 = T0 + FULL_EVERY_SECS + 10;
+    let views2 = fx
+        .store
+        .lock()
+        .unwrap()
+        .list_tracker_views(fx.tracker)
+        .unwrap();
+    assert!(
+        views2[0].watermark.is_some(),
+        "pass 2 must be forced whole by staleness, not by a missing watermark"
+    );
+    provider.pages.lock().unwrap().push_back(vec![
+        poison_snap("item-2", "ABC-2", 2),
+        poison_snap("boom", "ABC-3", 3),
+    ]);
+    sync.run_provider(&row, &provider, views2, &fx.store, t2, &mut pass)
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.since_seen.lock().unwrap().as_slice(),
+        [None, None],
+        "pass 2 is forced whole by `last_full` staleness, not incremental"
+    );
+    assert_eq!(
+        sync.last_full
+            .lock()
+            .unwrap()
+            .get(&(fx.tracker, "mine".to_string()))
+            .copied(),
+        Some(T0),
+        "a failed item in a forced-whole listing must not refresh `last_full`"
+    );
+}
+
+/// A provider whose `list` (the view) and `fetch` (the unbound-key lookup)
+/// each answer once, for the dedupe-retry test below.
+struct RetryProvider {
+    listed: Vec<WorkItemSnapshot>,
+    fetch_item: WorkItemSnapshot,
+}
+
+#[async_trait::async_trait]
+impl TrackerProvider for RetryProvider {
+    fn caps(&self) -> crate::service::trackers::Caps {
+        crate::service::trackers::Caps {
+            incremental: Incremental::None,
+            ..Default::default()
+        }
+    }
+    async fn probe(&self) -> Result<crate::service::trackers::TrackerInfo, TrackerError> {
+        unreachable!()
+    }
+    async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+        unreachable!()
+    }
+    async fn list(
+        &self,
+        _: &ViewDef,
+        _: Option<i64>,
+        _: Option<String>,
+    ) -> Result<crate::service::trackers::Page, TrackerError> {
+        Ok(crate::service::trackers::Page {
+            items: self.listed.clone(),
+            next: None,
+        })
+    }
+    async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+        Ok(vec![Fetched::Found(Box::new(self.fetch_item.clone()))])
+    }
+    fn recognize(&self, _: &str, _: crate::service::trackers::RefCtx<'_>) -> Vec<ItemRef> {
+        vec![]
+    }
+}
+
+/// The view listing (section 1) lists "X" first, which fails (a poison
+/// trigger that only fires before a `marker-seed` item — listed right
+/// after "X" in the same view — exists). Because a failed item's dedupe
+/// key is freed (`seen.remove`), the SAME "X" — same external id, same
+/// `updated`, so the same dedupe key — is retried later in the SAME pass,
+/// by the unbound-key fetch (section 3, a bare `ABC-X` link a session made
+/// before the tracker knew the item): by then `marker-seed` has committed
+/// (section 1's `store_items` batch has already committed), so the
+/// trigger's condition no longer holds and "X" stores on its second try.
+/// Without freeing the dedupe key, this second occurrence would silently
+/// no-op (`seen.insert` returns `false`) and "X" would never be stored
+/// even once the poison condition clears mid-pass.
+#[tokio::test]
+async fn a_failed_items_dedupe_key_is_freed_so_a_later_occurrence_in_the_same_pass_retries_it() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER retry_within_pass BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'X' \
+               AND (SELECT COUNT(*) FROM work_items WHERE external_id = 'marker-seed') = 0 \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let sid = fx.session("dev");
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(sid, WorkTarget::Key("ABC-X"), "manual")
+        .unwrap();
+    let views = fx
+        .store
+        .lock()
+        .unwrap()
+        .list_tracker_views(fx.tracker)
+        .unwrap();
+    let provider = RetryProvider {
+        listed: vec![
+            poison_snap("X", "ABC-X", 5),
+            poison_snap("marker-seed", "ABC-SEED", 6),
+        ],
+        fetch_item: poison_snap("X", "ABC-X", 5),
+    };
+    let sync = fx.sync(|| T0);
+    let row = fx.row();
+    let mut pass = TrackerPass::default();
+    sync.run_provider(&row, &provider, views, &fx.store, T0, &mut pass)
+        .await
+        .unwrap();
+    assert!(
+        fx.item_opt("ABC-X").is_some(),
+        "X fails its first attempt (the view listing) but is retried later \
+         in the SAME pass (the unbound-key fetch) once the poison \
+         condition clears, because its dedupe key was freed on failure"
+    );
+    assert_eq!(pass.failed, 1, "{pass:?}");
+    assert_eq!(pass.seen, 2, "marker-seed, then X on its retry: {pass:?}");
+}
+
+// ── fix round 2 (2026-09-26 review): a poison VIEW (its whole batch is one
+//    failed item) must not stall the rest of the pass — later views, the
+//    linked-item refresh, the unbound-key fetch, the bind ──
+
+/// A provider that answers view "a" with one poisoned item and view "b"
+/// with one good one, so the sole failure in view A's batch cannot be
+/// confused with "the pass stored nothing" — view B alone is proof enough.
+struct TwoViewProvider;
+
+#[async_trait::async_trait]
+impl TrackerProvider for TwoViewProvider {
+    fn caps(&self) -> crate::service::trackers::Caps {
+        crate::service::trackers::Caps {
+            incremental: Incremental::None,
+            ..Default::default()
+        }
+    }
+    async fn probe(&self) -> Result<crate::service::trackers::TrackerInfo, TrackerError> {
+        unreachable!()
+    }
+    async fn views(&self, _: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+        unreachable!()
+    }
+    async fn list(
+        &self,
+        view: &ViewDef,
+        _: Option<i64>,
+        _: Option<String>,
+    ) -> Result<crate::service::trackers::Page, TrackerError> {
+        let items = if view.id == "a" {
+            vec![poison_snap("boom", "ABC-BOOM", 1)]
+        } else {
+            vec![poison_snap("good", "ABC-GOOD", 2)]
+        };
+        Ok(crate::service::trackers::Page { items, next: None })
+    }
+    async fn fetch(&self, _: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+        Ok(vec![])
+    }
+    fn recognize(&self, _: &str, _: crate::service::trackers::RefCtx<'_>) -> Vec<ItemRef> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn a_poison_view_does_not_stall_the_rest_of_the_pass() {
+    let fx = Fx::new();
+    // `Fx::new` already wires a "mine" view; disable it so only "a" and
+    // "b" (below) are processed — otherwise its own fake-transport-shaped
+    // listing would collide with `TwoViewProvider`'s made-up items.
+    fx.store
+        .lock()
+        .unwrap()
+        .set_tracker_view_enabled(fx.tracker, "mine", false)
+        .unwrap();
+    fx.store
+        .lock()
+        .unwrap()
+        .sync_tracker_views(
+            fx.tracker,
+            &[
+                ("a".into(), "View A".into(), "qa".into()),
+                ("b".into(), "View B".into(), "qb".into()),
+            ],
+        )
+        .unwrap();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_boom BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'boom' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let views = fx
+        .store
+        .lock()
+        .unwrap()
+        .list_tracker_views(fx.tracker)
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let row = fx.row();
+    let mut pass = TrackerPass::default();
+    sync.run_provider(&row, &TwoViewProvider, views, &fx.store, T0, &mut pass)
+        .await
+        .unwrap();
+    assert_eq!(
+        pass.failed, 1,
+        "view A's one item failed; the pass is still Ok: {pass:?}"
+    );
+    assert!(
+        fx.item_opt("ABC-GOOD").is_some(),
+        "view B's item is stored despite view A's poison"
+    );
+    assert!(fx.item_opt("ABC-BOOM").is_none());
+    let after = fx
+        .store
+        .lock()
+        .unwrap()
+        .list_tracker_views(fx.tracker)
+        .unwrap();
+    let a = after.iter().find(|v| v.view_id == "a").unwrap();
+    let b = after.iter().find(|v| v.view_id == "b").unwrap();
+    assert_eq!(a.watermark, None, "view A's watermark must not advance");
+    assert_eq!(b.watermark, Some(2), "view B's watermark advances normally");
 }

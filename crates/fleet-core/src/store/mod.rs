@@ -64,6 +64,7 @@ pub use rows::*;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
@@ -173,6 +174,29 @@ impl StoreBus {
             .unwrap_or_else(|p| p.into_inner())
             .take()
             .unwrap_or_default()
+    }
+
+    /// How many events are held right now — `0` when not holding. A caller
+    /// about to run a nested, individually-abortable scope (a tracker
+    /// sync's per-item `Store::in_savepoint`) takes this first and hands it
+    /// to [`StoreBus::discard_since`] if that scope fails, so an event the
+    /// scope queued does not survive the write it announced rolling back.
+    fn checkpoint(&self) -> usize {
+        self.held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or(0, Vec::len)
+    }
+
+    /// Drop every held event queued since `mark` ([`StoreBus::checkpoint`],
+    /// taken before the scope that queued them). Not holding: a no-op,
+    /// there is nothing queued to drop.
+    fn discard_since(&self, mark: usize) {
+        if let Some(held) = self.held.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+            let mark = mark.min(held.len());
+            held.truncate(mark);
+        }
     }
 }
 
