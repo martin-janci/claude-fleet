@@ -3,9 +3,14 @@
 Releases are cut **manually** with `scripts/release.sh`: it is the single
 source of truth for version bumps and the changelog. Never edit the version
 fields by hand. Pushing the tag it creates triggers the
-[GitHub release job](#github-release-job), which builds every asset, attaches
-them to a draft release, checksums all of them, and **fails the run unless
-the release is complete** — then the owner publishes it.
+[GitHub release job](#github-release-job), which builds every asset, checksums
+all of them, **fails the run unless the release is complete** — and then
+**publishes the release itself**. There is no button to press afterwards.
+
+The version is the one decision left to a human. Everything after
+`git push --follow-tags` is automatic, and everything before it is checked:
+the script refuses to tag unless [CI is green on the commit you are
+releasing](#the-ci-gate).
 
 Two files decide what a release *is*, and neither has a second copy anywhere:
 
@@ -31,19 +36,29 @@ generated from it.
    pnpm install --frozen-lockfile && pnpm run check && pnpm run test && pnpm run build
    ```
 
-2. Pick the next version from the Conventional Commits since the last tag
-   (`git log --oneline $(git describe --tags --abbrev=0)..HEAD`): `feat` → minor,
-   `fix`/`perf`/`refactor`/`docs` → patch, `feat!`/`BREAKING CHANGE` → major.
+2. Pick the next version. The script will do it for you from the
+   Conventional Commits since the last tag — `feat` → minor,
+   `feat!`/`BREAKING CHANGE` → major, anything else → patch:
+
+   ```bash
+   scripts/release.sh --next      # prints it, changes nothing
+   ```
+
+   Use `scripts/release.sh auto` to release that version, or name one
+   yourself. A release candidate is always named explicitly
+   (`scripts/release.sh 0.3.0-rc.1`) — see [the RC channel](#the-rc-channel).
 
 3. Run the script:
 
    ```bash
-   scripts/release.sh 0.3.0
+   scripts/release.sh 0.3.0        # or: scripts/release.sh auto
    ```
 
-   It refuses to run on a dirty tree, off `main`, or if `v0.3.0` already exists.
-   When it pauses, open `CHANGELOG.md`, polish the generated section (the
-   bullets are raw commit subjects), save, and press Enter.
+   It refuses to run on a dirty tree, off `main`, if `v0.3.0` already exists,
+   or if [CI is not green on `HEAD`](#the-ci-gate). When it pauses, open
+   `CHANGELOG.md`, polish the generated section (the bullets are raw commit
+   subjects), save, and press Enter — **that text becomes the release notes
+   verbatim**, so it is worth the minute.
 
 4. Push the release commit and tag:
 
@@ -51,11 +66,15 @@ generated from it.
    git push origin main --follow-tags
    ```
 
-5. Wait for the `release` workflow to finish (it starts on the tag push). Its
-   last job, `verify-release`, goes red if anything is missing — a green run
-   means the draft carries all 11 assets and a `SHA256SUMS` that covers every
-   one of them. Open the draft, check the assets, paste the CHANGELOG section
-   into the notes if you want them inline, and **Publish**. See
+5. Wait for the `release` workflow to finish (it starts on the tag push).
+   `verify-release` goes red if anything is missing; when it passes, the
+   `publish` job publishes the release — all 11 assets, a `SHA256SUMS`
+   covering every one of them, and this version's CHANGELOG section as the
+   notes. A green run means the release is live.
+
+   **If the run is red**, the release is still a draft with whatever it
+   managed to build. Nothing was published; fix the failing leg and re-run
+   the workflow from the same tag. See
    [GitHub release job](#github-release-job) below.
 
 6. Release the phone app under the same version:
@@ -158,11 +177,12 @@ The jobs, in order:
 |-----|--------------|--------------------------------------|
 | `version-consistency` | `scripts/check-version-consistency.sh --expect-tag` — the six carriers, the four `Cargo.lock` entries and this tag must all agree | **no** — everything else `needs:` it |
 | `plan` | turns `scripts/release-assets.sh` into the two build matrices | **no** |
-| `create-release` | creates (or reuses) the one draft, records the build commit in its body | **no** |
+| `create-release` | creates (or reuses) the one release, as a draft, with this version's CHANGELOG section as its notes and the build commit recorded | **no** |
 | `build` | three `tauri-action` legs; then renames the macOS updater bundle to carry the version | **no** |
 | `agent-hub-binaries` | two native Linux legs → four tarballs | yes (`continue-on-error`) |
 | `checksums` | downloads every asset on the release, hashes it, uploads `SHA256SUMS` | yes (`continue-on-error`) |
 | `verify-release` | the release is complete and fully checksummed | **no — this is the gate** |
+| `publish` | flips the draft to published | **no** — and it is skipped, leaving the draft, whenever anything above failed |
 
 ### Why some legs are allowed to fail and the release is not
 
@@ -180,8 +200,29 @@ release's **actual** assets by numeric id, and fails the run unless
 So a failed leg no longer hides behind a green checkmark: the run goes red at
 the end, in one place, with an `::error::` naming each missing asset. Fix the
 leg and re-run the workflow from the same tag — every asset is reproducible
-from it, so a re-run is always a complete fix, and the existing draft is
+from it, so a re-run is always a complete fix, and the existing release is
 reused with its assets replaced.
+
+`publish` then hangs off `verify-release` on the **default** "every `needs:`
+succeeded" condition, which is where "publish automatically, draft only when
+something went wrong" comes from. It is not a second rule written down
+somewhere: a failed leg, a failed gate or a cancelled run skips the job, and
+what is left is a draft carrying exactly what the run managed to build, for
+you to look at.
+
+**Re-running over a release that is already published is safe** — that is
+why `create-release` matches on the tag alone and not on "a draft with this
+tag". It reuses the release, replaces the assets it rebuilds, and leaves the
+body alone (so notes you edited on the release survive). Two things to know
+before you do it:
+
+- `scripts/upload-release-asset.sh` deletes an asset before re-uploading it,
+  so for a few seconds a **published** release is missing that download. On a
+  draft nobody could see it; on a published one they can.
+- Re-running does not un-publish anything. If a release must be withdrawn,
+  delete it deliberately — and record why in `CHANGELOG.md`, because
+  [the drift check](#the-drift-check) will otherwise report the tag as one
+  whose release went missing, which is exactly its job.
 
 ### The assets
 
@@ -260,7 +301,8 @@ fails the run for the missing asset regardless.
 
 ### Verifying a download
 
-What a user does, and what you should do once on the draft before publishing:
+What a user does, and what you should spot-check once on a fresh release
+(`verify-release` has already done it by digest, for every asset):
 
 ```bash
 v=0.3.0
@@ -273,6 +315,95 @@ sha256sum -c SHA256SUMS --ignore-missing     # macOS: shasum -a 256 -c …
 print `OK`. The release body records the commit the bundles were built from,
 and each `fleet-*` tarball repeats it in its `README.txt` — so a downloaded
 tarball can always be traced back to a tree, even if the tag later moves.
+
+### The RC channel
+
+A version with a pre-release suffix — `0.3.0-rc.1` — is a first-class
+release here, not a special case: same eleven assets, same checksums, same
+gate, same automatic publication. What differs is decided by the `-` in the
+tag and nothing else:
+
+- the GitHub release is marked **`prerelease: true`**, so it never becomes
+  the "Latest" release a user lands on;
+- ghcr's `fleet-hub:latest` is **not** moved (`hub-image.yml`), so hub
+  operators pinning `latest` in `deploy/hub/docker-compose.yml` never get a
+  release candidate by surprise. The `ghcr.io/martin-janci/fleet-hub:0.3.0-rc.1`
+  tag is published as usual, for anyone who wants to test it.
+
+```bash
+scripts/release.sh 0.3.0-rc.1
+git push origin main --follow-tags
+# … test it … then cut the real thing:
+scripts/release.sh auto          # from 0.3.0-rc.1, `auto` gives you 0.3.0
+```
+
+`auto` never invents a pre-release; an rc is always someone's explicit
+decision. From a pre-release base it *finalises* (`0.3.0-rc.2` → `0.3.0`)
+rather than bumping to `0.3.1`.
+
+Two things an rc carries that are worth knowing: its `CHANGELOG.md` section
+is a real section (it lands between released versions, which is why the rc
+line is worth keeping short), and `+build` metadata is refused outright —
+`+` is not a legal character in a Docker tag, so `hub-image.yml` could not
+publish an image for such a version.
+
+### The CI gate
+
+`scripts/release.sh` refuses to create the tag unless `ci.yml` has passed on
+the exact commit you are releasing. `scripts/check-ci-green.sh` is where
+"passed" is defined, and the important half of the definition is what it
+**refuses**:
+
+| state of `ci.yml` for this sha | verdict |
+|---|---|
+| newest run `completed` + `success` | green — the only pass |
+| no run at all for this sha | refused — this is what a never-pushed `HEAD` looks like |
+| newest run queued / in progress | refused — there is no verdict yet |
+| `failure`, `cancelled`, `timed_out`, `skipped`, … | refused, naming the conclusion |
+| `gh` missing, unauthenticated, or offline | refused (exit 2) — a check that could not run is not a pass |
+
+It asks about a **sha**, never a branch: ci.yml runs per commit, so "main is
+green" could easily be answering with somebody else's run.
+
+What it cannot cover, and you should not claim it does: the
+`chore(release): vX.Y.Z` commit is created *on top of* the commit that was
+checked, and the tag points at that new commit, which no CI run has ever
+seen. It only touches the version carriers, `Cargo.lock` and `CHANGELOG.md`,
+and `release.yml`'s own `version-consistency` job re-checks exactly those
+against the tag. That is the cover for it.
+
+`RELEASE_SKIP_CI_CHECK=1` skips the gate and says so, loudly, on stderr.
+
+### The drift check
+
+`.github/workflows/release-drift.yml` runs `scripts/check-release-drift.sh`
+once a day. `verify-release` proves a release is complete *at the moment it
+is built*; this is the only thing that looks at the releases that already
+exist. It reports:
+
+1. a `vX.Y.Z` tag with no release object — a release deleted by hand, or a
+   tag whose workflow never ran (both have happened here: v0.2.22, v0.2.24
+   and v0.2.25 have tags and no releases; v0.2.27 was bumped and never
+   tagged);
+2. a draft older than six hours — since publication is automatic, a
+   lingering draft means a leg failed and nobody went back to it;
+3. the newest ten releases still carrying every asset, checked by
+   `scripts/verify-release.sh` itself — not a second copy of the rule;
+4. a release whose tag no longer resolves.
+
+Everything lands in **one** issue labelled `release-drift`, rewritten in
+place. The report deliberately contains no timestamps, so an unchanged
+problem produces an identical body, the edit is skipped and nobody is
+notified again; when the drift clears, the issue is closed with a comment.
+
+A tag that is *meant* to have no release goes in `.github/release-drift-ignore`
+with the reason in a `#` comment. That is the only way to silence a line.
+
+Run it yourself any time — it writes nothing:
+
+```bash
+scripts/check-release-drift.sh --verify-tags 3
+```
 
 ### Hub image
 
@@ -335,11 +466,19 @@ https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
 Then it commits `chore(release): vX.Y.Z` and creates the annotated tag
 `vX.Y.Z`. It prints the push command but **does not push**.
 
+The tag is annotated (`git tag -a`), not signed by the script. The tags in
+this repository *are* SSH-signed, but only because the owner's own git config
+sets `tag.gpgsign=true` — on another machine the same script would produce
+unsigned tags. If signed tags are meant to be part of the release contract,
+that belongs in the script, not in a `~/.gitconfig`.
+
 ## Verifying before you tag
 
 `RELEASE_DRY_RUN=1 scripts/release.sh 0.3.0` edits the files and stops (no
 `cargo update`, no commit, no tag) so you can inspect `git diff`. Discard with
-`git checkout -- .` when done.
+`git checkout -- .` when done. A dry run still runs every precondition,
+[the CI gate](#the-ci-gate) included — it is a rehearsal, not a shortcut;
+`RELEASE_SKIP_CI_CHECK=1` is there if you only want to see the diff.
 
 After a real run, before pushing:
 
@@ -361,9 +500,21 @@ re-run.
 ## Docs workflow
 
 `.github/workflows/docs.yml` builds rustdoc and deploys it to GitHub Pages on
-`release: published` — i.e. when the owner publishes the draft that the
-release job created. It can also be triggered by hand via `workflow_dispatch`
-on the Actions tab.
+`release: published` — i.e. when `release.yml`'s `publish` job publishes the
+release. It can also be triggered by hand via `workflow_dispatch` on the
+Actions tab. It checks out the released tag, so the published docs describe
+the code that was released.
+
+**It has never succeeded.** All 11 runs failed, none of them in the Rust
+build: `cargo doc` completes and `actions/configure-pages` then 404s, because
+GitHub Pages has never been enabled on this repository. Since the trigger is
+`release: published`, the practical effect was that publishing a release
+earned a red X. `enablement: true` on that step asks the action to create the
+Pages site itself; **this is unverified** — a workflow that only runs on a
+publish cannot be tested from a branch. If the next publish is still red
+there, the rest of the fix is one click and no code: **Settings → Pages →
+Source: GitHub Actions**. If Pages is not wanted at all, drop the
+`release: published` trigger instead.
 
 ## Generated docs
 
@@ -377,7 +528,8 @@ REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
 
 ## Conventional Commits
 
-Commit subjects drive both the version choice and the changelog grouping:
+Commit subjects drive both the version choice and the changelog grouping.
+`scripts/release.sh --next` applies this table for you:
 
 | Prefix      | Bump  | Changelog section |
 |-------------|-------|-------------------|
@@ -387,3 +539,7 @@ Commit subjects drive both the version choice and the changelog grouping:
 | `perf:` / `refactor:` / `chore:` / `ci:` / `test:` / other | patch or none | Changed |
 
 A `feat!:` / `fix!:` or a `BREAKING CHANGE:` footer means a **major** bump.
+
+Both the version derivation and the CHANGELOG grouping read the same commit
+range (last tag → `HEAD`), so what you see in `--next` is decided by exactly
+the commits whose subjects end up in the release notes.
