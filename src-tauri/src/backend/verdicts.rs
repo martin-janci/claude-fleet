@@ -501,8 +501,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "get_fleet_settings",
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; read and change \
-                      them on the hub",
+                      playbooks, which the hub runs and this app does not; read them on the \
+                      hub with get_settings (master token)",
         },
     ),
     (
@@ -510,7 +510,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \
                       playbooks, which the hub runs and this app does not; change them on \
-                      the hub",
+                      the hub with set_setting (master token)",
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),

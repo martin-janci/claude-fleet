@@ -83,6 +83,10 @@ Read a host's system clipboard (what Ctrl+V gives there), via wl-paste, xclip, x
 
 Parameters: `host_alias`
 
+### `get_settings`
+
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
+
 ### `hide_host`
 
 Hide or show a host (hidden: skipped by reconcile). Returns the host row.
@@ -444,6 +448,12 @@ Parameters: `host_alias`, `name`, `value`
 Replace a session's tags (short labels such as `review`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]), shown and filterable in list_sessions. Returns the updated row.
 
 Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
+
+### `set_setting`
+
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings.
+
+Parameters: `key`, `value`
 
 ### `spawn_review`
 
