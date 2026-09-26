@@ -18,6 +18,7 @@ mod participants;
 mod peer_links;
 mod projects;
 mod read_cursors;
+mod read_pool;
 mod reconcile;
 mod reports;
 mod rows;
@@ -51,6 +52,7 @@ pub use peer_links::{
     PEER_PENDING_MAX_SECS,
 };
 pub use read_cursors::CursorRow;
+pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
 #[cfg(test)]

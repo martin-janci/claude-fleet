@@ -549,6 +549,9 @@ const MIGRATIONS: &[Migration] = &[
         56,
         include_str!("../../migrations/056_session_worktree_index.sql"),
     ),
+    // The auth epoch and its triggers on the token tables (hub store
+    // latency, task 7): `IF NOT EXISTS` / `OR IGNORE`, safe to re-run.
+    Migration::plain(57, include_str!("../../migrations/057_auth_epoch.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2701,5 +2704,119 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1, "the re-run touched no rows");
+    }
+
+    /// The triggers of migration 057, by name. Each is what keeps the hub's
+    /// token cache honest for one kind of write; a migration that rebuilds
+    /// `host_tokens` or `client_tokens` (CREATE new / copy / DROP / RENAME)
+    /// drops them silently, and this is what then fails.
+    const AUTH_EPOCH_TRIGGERS: [&str; 6] = [
+        "auth_epoch_host_tokens_insert",
+        "auth_epoch_host_tokens_update",
+        "auth_epoch_host_tokens_delete",
+        "auth_epoch_client_tokens_insert",
+        "auth_epoch_client_tokens_update",
+        "auth_epoch_client_tokens_delete",
+    ];
+
+    /// Hub store latency, task 7: the token cache in `authorize` keys on
+    /// `auth_epoch`, which these triggers bump in the writing transaction —
+    /// in whichever process wrote.
+    #[test]
+    fn migration_057_adds_the_auth_epoch_and_its_triggers() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let epoch: i64 = s
+            .conn
+            .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(epoch, 0, "a fresh database starts at epoch 0");
+        for name in AUTH_EPOCH_TRIGGERS {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "trigger {name} is missing");
+        }
+    }
+
+    /// The `client_tokens` update trigger lists the columns that change what
+    /// a token resolves to (everything but `last_seen_at`). A new column on
+    /// either token table must be judged against it: this pins both tables'
+    /// columns so adding one fails here until the trigger is reviewed.
+    #[test]
+    fn the_token_tables_columns_are_the_ones_the_auth_epoch_triggers_know() {
+        let s = Store::open_in_memory().unwrap();
+        let cols = |t: &str| -> Vec<String> {
+            let mut stmt = s
+                .conn
+                .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+                .unwrap();
+            stmt.query_map([t], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            cols("host_tokens"),
+            ["host_alias", "token", "created_at", "mode"],
+            "host_tokens changed: every UPDATE fires its trigger, but check resolve_token"
+        );
+        assert_eq!(
+            cols("client_tokens"),
+            [
+                "id",
+                "name",
+                "token_sha256",
+                "mode",
+                "created_at",
+                "last_seen_at",
+                "revoked_at",
+                "trusted_at"
+            ],
+            "client_tokens changed: add the column to auth_epoch_client_tokens_update \
+             (migration 057) unless it is liveness-only like last_seen_at"
+        );
+    }
+
+    /// Migration 057 on a populated v56 database: the counter starts at 0,
+    /// the tokens are untouched, and running it again (as the tests' roll
+    /// back and re-migrate does) neither fails nor resets the counter.
+    #[test]
+    fn migration_057_on_a_populated_v56_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 56;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT INTO host_tokens (host_alias, token, created_at) VALUES ('box', 't', 1);
+                 INSERT INTO client_tokens (name, token_sha256, created_at) VALUES ('p', 'h', 1);",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        s.conn
+            .execute("UPDATE host_tokens SET token = 't2'", [])
+            .unwrap();
+        s.conn
+            .execute_batch(include_str!("../../migrations/057_auth_epoch.sql"))
+            .unwrap();
+        let epoch: i64 = s
+            .conn
+            .query_row("SELECT epoch FROM auth_epoch WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(epoch, 1, "the re-run kept the counter");
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_tokens", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the re-run touched no rows");
     }
 }
