@@ -338,4 +338,142 @@ mod tests {
     fn fleet_core_max_bytes() -> usize {
         crate::service::attachments::MAX_BYTES as usize
     }
+
+    /// The spec's happy path, and until now the only part of this route with
+    /// no coverage at all: a `full` token uploads and is told the absolute
+    /// path the file landed at. Everything between — resolving the worktree
+    /// root off the live pane, staging the directory and its `info/exclude`
+    /// line, moving the bytes, answering `{"path": …}` — ran in no test.
+    ///
+    /// It is a real round trip rather than a mock. `transfer_all`'s
+    /// `host == "local"` branch copies with `std::fs` instead of SSH, and
+    /// `run_shell` short-circuits `local` to `bash -lc` before it ever
+    /// touches an `SshExec` — so there is no seam to inject a fake into on
+    /// this path, and the only way to exercise it is to give it the two real
+    /// things it asks for: a tmux pane whose `pane_current_path` is a git
+    /// working tree, and a session row pointing at it.
+    ///
+    /// Skipped, loudly, where `tmux` is not on PATH — the assertions below
+    /// are the evidence, and a machine without tmux cannot produce it.
+    #[tokio::test]
+    async fn a_full_client_uploads_and_is_told_where_the_file_landed() {
+        let Some(pane) = LivePane::start() else {
+            eprintln!(
+                "[attachment] SKIPPED a_full_client_uploads_and_is_told_where_the_file_landed: \
+                 tmux is not on PATH, and this route resolves its destination from a live pane"
+            );
+            return;
+        };
+
+        let (addr, store) = app().await;
+        let session_id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session(&pane.name, "local", None, None, 0, 0, "running", None)
+                .unwrap()
+        };
+
+        let (st, body) = http(
+            addr,
+            "POST",
+            &format!("/attachment?session_id={session_id}&name=notes.txt"),
+            "full-tok",
+            "hello from the phone",
+        )
+        .await;
+        assert_eq!(st, 200, "the upload should succeed; body: {body}");
+
+        let answer: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("not JSON ({e}): {body}"));
+        let path = answer["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no `path` in the answer: {body}"));
+
+        // The destination is the LIVE pane's git toplevel, which is what the
+        // pane was started in — not anything the session row carries, because
+        // the row carries no path at all.
+        let suffix = format!("/{}/notes.txt", attachments::ATTACH_DIR);
+        assert!(
+            path.ends_with(&suffix),
+            "the path should be <worktree>/{}/notes.txt, got {path}",
+            attachments::ATTACH_DIR
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).expect("the staged file should exist on disk"),
+            "hello from the phone",
+            "the bytes that went up are the bytes on disk"
+        );
+
+        // …and the directory it landed in is excluded, untracked, so the file
+        // never shows up as a change the user has to explain.
+        let root = path.trim_end_matches(&suffix);
+        let exclude = std::fs::read_to_string(format!("{root}/.git/info/exclude"))
+            .expect("git's info/exclude should exist");
+        assert!(
+            exclude.contains(&format!("/{}/", attachments::ATTACH_DIR)),
+            "stage_script should have added the exclude line: {exclude}"
+        );
+    }
+
+    /// A tmux session on whatever server the ambient environment points at,
+    /// with a git working tree as its pane's cwd, killed on drop.
+    ///
+    /// The ambient server on purpose: the script under test
+    /// (`attachments::root_script`) runs `tmux display-message` through
+    /// `bash -lc` with no socket of its own, so a private server would need
+    /// `TMUX_TMPDIR` in the *process* environment — global, and racing every
+    /// other test in this binary. A uniquely named session on the server the
+    /// production code would have used costs nothing and leaves nothing.
+    struct LivePane {
+        name: String,
+        _dir: tempfile::TempDir,
+    }
+
+    impl LivePane {
+        fn start() -> Option<LivePane> {
+            let has_tmux = std::process::Command::new("tmux")
+                .arg("-V")
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !has_tmux {
+                return None;
+            }
+            let dir = tempfile::tempdir().ok()?;
+            let ok = std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .status()
+                .is_ok_and(|s| s.success());
+            assert!(ok, "git init should succeed in the temp worktree");
+
+            let name = format!(
+                "fleet-attach-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let started = std::process::Command::new("tmux")
+                .args(["new-session", "-d", "-s", &name, "-c"])
+                .arg(dir.path())
+                .args(["sleep", "300"])
+                .status()
+                .is_ok_and(|s| s.success());
+            if !started {
+                return None;
+            }
+            Some(LivePane { name, _dir: dir })
+        }
+    }
+
+    impl Drop for LivePane {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &crate::tmux::exact_pane(&self.name)])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
 }
