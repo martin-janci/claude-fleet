@@ -10,7 +10,6 @@ mod reports;
 mod serve;
 mod tls;
 mod tracker;
-mod work;
 
 use clap::{Parser, Subcommand};
 use config::HubOptions;
@@ -113,14 +112,6 @@ enum Cmd {
     Tracker {
         #[command(subcommand)]
         cmd: tracker::TrackerCmd,
-        #[command(flatten)]
-        opts: HubOptions,
-    },
-    /// Read-only work graph administration (work graph M13.2): `usage`
-    /// counts. Needs a running hub.
-    Work {
-        #[command(subcommand)]
-        cmd: work::WorkCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -283,7 +274,6 @@ async fn main() -> ExitCode {
         },
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
-        Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,

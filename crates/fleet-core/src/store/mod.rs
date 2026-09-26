@@ -41,7 +41,6 @@ mod work_journal;
 mod work_local;
 mod work_retention;
 mod work_tidy;
-mod work_usage;
 
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
@@ -85,7 +84,6 @@ pub use work_journal::{
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_tidy::ReopenedWork;
-pub use work_usage::{DetectionCounts, JournalCounts};
 
 /// One number per `Store` ever built in this process, never reused — see
 /// [`Store::instance_id`].

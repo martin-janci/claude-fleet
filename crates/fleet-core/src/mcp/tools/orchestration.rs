@@ -857,8 +857,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Trackers, orgs, retention and usage counts; see \
-        action. Never returns a secret.")]
+    #[tool(description = "Trackers, orgs and retention; see action. \
+        Never returns a secret.")]
     pub(super) async fn work_admin(
         &self,
         Extension(caller): Extension<Caller>,

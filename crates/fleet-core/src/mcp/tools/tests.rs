@@ -3452,10 +3452,7 @@ fn the_served_definition_budget_stays_bounded() {
     // M11.5's terse style from the start: 825 B over that baseline, measured
     // at 56,560 on 2026-09-26 (55,735 before, after M12.3); plus 100.
     // Merged with M12.4 (+169): measured at 56,729 on 2026-09-26; plus 100.
-    // Work graph M13.2 (`work_admin` `usage` and its `days` window, "usage
-    // counts" in the description): measured at 56,873 on 2026-09-26
-    // (+144); plus 100.
-    const BUDGET_BYTES: usize = 56_973;
+    const BUDGET_BYTES: usize = 56_829;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -151,16 +151,6 @@ pub struct SyncMetrics {
     /// `warn` log line names the view.
     #[serde(default)]
     pub last_item_error: Option<String>,
-    /// Passes that ran since the process started (work graph M13.2's
-    /// `work_admin { usage }`); a skipped tracker's pass does not count.
-    #[serde(default)]
-    pub passes_total: u64,
-    /// Of those, the passes that ended in an error.
-    #[serde(default)]
-    pub passes_failed_total: u64,
-    /// Items skipped over all those passes.
-    #[serde(default)]
-    pub items_failed_total: u64,
 }
 
 /// Longest `SyncMetrics.last_error`.
@@ -402,21 +392,26 @@ impl TrackerSync {
                 outcome.get_or_insert_with(|| e.explain());
             }
         }
-        let prev = self
-            .metrics
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&t.id).cloned())
-            .unwrap_or_default();
         let consecutive_failures = match outcome {
             None => 0,
-            Some(_) => prev.consecutive_failures.saturating_add(1),
+            Some(_) => self
+                .metrics
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&t.id).map(|p| p.consecutive_failures))
+                .unwrap_or(0)
+                .saturating_add(1),
         };
         // Work graph M13.1: a pass that skipped items, ok or not.
         let consecutive_partial = if pass.failed == 0 {
             0
         } else {
-            prev.consecutive_partial.saturating_add(1)
+            self.metrics
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&t.id).map(|p| p.consecutive_partial))
+                .unwrap_or(0)
+                .saturating_add(1)
         };
         let m = SyncMetrics {
             tracker_id: t.id,
@@ -426,11 +421,6 @@ impl TrackerSync {
             last_item_error: (pass.failed > 0)
                 .then(|| pass.last_item_error.as_deref().map(metric_error))
                 .flatten(),
-            passes_total: prev.passes_total.saturating_add(1),
-            passes_failed_total: prev
-                .passes_failed_total
-                .saturating_add(u64::from(outcome.is_some())),
-            items_failed_total: prev.items_failed_total.saturating_add(pass.failed as u64),
             last_pass_at: Some(now),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             items_listed: pass.listed as u64,

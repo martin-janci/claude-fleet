@@ -1100,17 +1100,6 @@ Does any organisation you work with forbid API tokens (which would bring
 
 Answer:
 
-### Usage summary
-
-After the run, paste `fleet-hub work usage --days 30` (or `call work_admin
-'{"action":"usage","days":30}'`) into this record. It is counts and ids
-only; the next decision revisit reads its numbers
-([work guide → Usage summary](work-graph.md#usage-summary)).
-
-```
-(paste here)
-```
-
 ### Tracker health: the quota baseline
 
 After the run, paste `fleet-hub tracker status` and

@@ -229,30 +229,6 @@ pub async fn work_retention_sweep(
     ))
 }
 
-// --- usage (work graph M13.2) --------------------------------------------------
-
-/// `work_admin { action: usage, days? }`: how the work graph is used over
-/// the window, as counts and ids. `LocalOnly` like the rest of `work_admin`
-/// (master-only on the hub; `fleet-hub work usage` there).
-#[tauri::command]
-pub async fn work_usage(
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-    days: Option<i64>,
-) -> Result<fleet_core::service::work::usage::UsageSummary, IpcError> {
-    backend.refuse_local_only("work_usage")?;
-    let v = admin::admin_sync(
-        &WorkAdminArgs {
-            action: "usage".into(),
-            days,
-            ..Default::default()
-        },
-        &store,
-    )?;
-    serde_json::from_value(v)
-        .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
-}
-
 // --- reads and start (routed) -------------------------------------------------
 
 /// Cached tickets, filtered by view (`mine`, `sprint`, `recent`,

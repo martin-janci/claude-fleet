@@ -81,8 +81,7 @@
     "update_org",
     "update_tracker",
     "work_retention_status",
-    "work_retention_sweep",
-    "work_usage"
+    "work_retention_sweep"
   ],
   "routed": [
     "archive_session_work",
