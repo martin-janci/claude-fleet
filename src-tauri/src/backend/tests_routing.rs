@@ -640,6 +640,52 @@ fn routed_read_cases() -> Vec<Case> {
             Box::new(|b, s, _| block_on(commands::work::routed::work_reopened(b, s)).map(|_| ())),
         ),
         (
+            "list_local_work_items",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "local_items" }),
+            r#"[{"id":3,"key":"OPS","title":"Ops cleanup","created_at":1,"live_sessions":2}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::list_local_work_items(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "name_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "name", "key": "OPS", "item_id": null,
+                    "link_id": null, "source": null, "title": "Ops cleanup" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::name_session_work(
+                    b,
+                    commands::work::NameSessionWorkArgs {
+                        session_id: 7,
+                        title: "Ops cleanup".into(),
+                        key: Some("OPS".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "rename_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "name", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "title": "Ops, renamed" }),
+            r#"{"id":3,"source":"local","key":"OPS","title":"Ops, renamed","status_category":"todo","created_at":1,"updated_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::rename_work_item(
+                    b,
+                    commands::work::RenameWorkItemArgs {
+                        item_id: 3,
+                        title: "Ops, renamed".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "session_history",
             "session_history",
             // The clamp runs on this side, so the hub is asked for the same

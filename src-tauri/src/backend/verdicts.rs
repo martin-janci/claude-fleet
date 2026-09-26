@@ -302,6 +302,11 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // Work graph M9.6: one ticket, one sibling session per repository.
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
+    // Work graph M11.1: "Name this work…" — local work items, listed from
+    // `work`, named and renamed through `work_link { name }`.
+    ("list_local_work_items", Verdict::Routed { tool: "work" }),
+    ("name_session_work", Verdict::Routed { tool: "work_link" }),
+    ("rename_work_item", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
@@ -496,8 +501,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "get_fleet_settings",
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; read and change \
-                      them on the hub",
+                      playbooks, which the hub runs and this app does not; read them on the \
+                      hub with get_settings (master token)",
         },
     ),
     (
@@ -505,7 +510,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \
                       playbooks, which the hub runs and this app does not; change them on \
-                      the hub",
+                      the hub with set_setting (master token)",
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),

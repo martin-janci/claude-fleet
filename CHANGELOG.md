@@ -8,6 +8,155 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.2.41] - 2026-09-26
+
+### Added
+- **ui:** Settings → Work connects GitHub Enterprise and shows sync metrics
+- **desktop:** tracker_sync_metrics command, LocalOnly like the tracker admin
+- **trackers:** GitHub Enterprise Server and per-tracker sync metrics (M11.4)
+- **ui:** "Name this work…" dialog, row menu and group header
+- **desktop:** Routed commands for local work items
+- **work:** name local work items (work graph M11.1)
+- **work:** resume planning probes that the transcript is still on the host
+- **move:** refuse a cross-org move unless force_cross_org
+- **trackers:** a test-only loopback override for the e2e fake tracker
+- **work:** show the latest handover outcome and offer Start anyway on a cross-org multi-start
+
+### Changed
+- **transcript:** a one-turn window stops costing a megabyte of SSH
+- **work:** ignore tracker_sync_metrics in the Data Center re-connect command list
+- **e2e:** name local work on hub W (work graph M11.1)
+- **mcp:** pay back the tool-description budget (M11.5, M0.6)
+- **sidebar:** the past-work header's Resume continues the last conversation, or opens the dialog
+- **work:** startWorkMulti takes the started rows into the store, refreshTidy keeps the last report on an error
+- **orgs:** the colour picker, the host / tracker assign selects and createFromSuggestion's tracker branch
+- **session-row:** Pick another… goes to the key box, Escape closes the work menu
+- **work:** TicketCard reload on a key change, TodayView's Refresh / Close / links, ResumeDialog's last mode
+- **work:** the hub-blocked state of both review sheets, the tidy refresh tick and the Reopened pill
+- **sheets:** navigation from a focused control and a refused focus never claiming ownership
+- **org-settings:** the add form, rules, unassign, remove and a failure
+- **work-settings:** Test and Remove on a listed tracker
+- **resume:** the host override reaches the plan, the brief and the start
+- **tidy-review:** reopened toast, partial failure and hub refusal
+- **link-review:** a decided row leaves the list and the sheet closes itself
+- **quick-switcher:** Ctrl+Enter on a ticket opens what it started
+- **new-session:** the E_EXISTS jump asserts the session it lands on
+- **http_client:** pin the transport-side half of the moved trust-store assertion and the TLS-handshake prefix
+- **settings:** the lifecycle test reads off-default thresholds and reasons
+- **peer:** read B's pending outbox before the restarted dialer can drain it
+- **trackers:** rustfmt and clippy over the tests of the review fixes
+- **e2e:** detection on a session with no work yet, after M4.6
+- **gc:** feed the tidy planner offline rows, not only a remote host
+- **trackers:** fail the extra_ca TLS test loudly without openssl
+- **trackers:** reach the per-host start fence on another host
+- **peer:** pin the supervisor's own stop of a revoked link
+- **trackers:** prove the 429 wait expires on the same sync
+- **isolation:** check row redaction on rows that carry work
+- **orgs:** announce org moves in one transaction
+- **tidy:** bundle apply_one's caller context
+- **e2e:** the work graph end to end in scripts/hub-e2e.sh (M10.2)
+- **isolation:** compare the link-id oracle against a live link
+- **work:** measure and guard replay-ring pressure under tracker sync
+- **mcp:** assert per-caller outcomes for handover and multi-start in the isolation matrix
+
+### Fixed
+- **clippy:** collapse the org-scope guard into its match arm
+- **review:** six follow-ups from the M5/M6 second-round review
+- **safe-kill:** read the marker below the prompt's echo, not the echo
+- **orgs:** run the org admin commands off the main thread
+- **peer:** drop a useless format! in the marker-defusing test
+- **trackers:** a lost start race names the winner only when the caller may see it
+- **trackers:** the row's 429 deadline alone decides whether the sync waits
+- **trackers:** a Jira key's shape bounds the prefix at 50 chars, not Cloud's 10
+- **trackers:** a key over KEY_MAX_CHARS is dropped, not cut to another item's key
+- **store:** a removed tracker's rows come last in work_item_by_key and never make a key known
+- **via_host:** the curl script also unsets tr, break and continue
+- **sheets:** navigation keys still work from a focused control; focus ownership only when set
+- **hooks:** a prompt fleet typed is nobody's touch on the hook path either
+- **peer:** a re-pair merge sheds the old watermark instead of keeping it
+- **sessions:** only a person's prompt touches a session, never fleet's own
+- **resume:** key the in-flight resume registry per store
+- **mcp:** keep the inbox description inside the served-definition budget
+- **net:** unlink the curl header file before curl runs and sweep stale dirs
+- **hub:** open state.db read-only for peer list and say a re-pair needs a new code
+- **trackers:** a Retry-After from the tracker is capped at an hour
+- **github:** the issue URL is built from the validated repository and number
+- **trackers:** a tracker key is kept only in a key's shape
+- **jira_dc:** a URL is this site's only with the exact host and context path
+- **github:** a RATE_LIMITED GraphQL error waits until the reset
+- **trackers:** the key in a brief and a start prompt is tracker text
+- **net:** refuse a truncated body in parse_response instead of returning it
+- **store:** migration 057 re-issues the read_cursors session-delete trigger
+- **trackers:** a lookup honours the sync's Retry-After back-off
+- **trackers:** bound every short tracker field before it is stored
+- **trackers:** a start re-checks for a live session before it links
+- **net:** let the curl transport report an over-cap body as TooLarge
+- **peer:** defuse every fleet marker in a peer body, not only the listed prefixes
+- **trackers:** refuse a via_host / via_cli transport on a fleet-agent host
+- **trackers:** clamp a 429's wait and add it without overflow
+- **net:** anchor the via-host parsers on a start marker, not byte 0
+- **trackers:** a lookup by URL reads the cache of that URL's tracker
+- **mcp:** flag peer-originated inbox summaries as untrusted
+- **jira:** a key inside another site's URL is not recognised as ours
+- **asana:** a failed batch action is a batch error, never a missing task
+- **jira_dc:** a moved key is found next to other references in a fetch
+- **jira:** a moved key is found next to other references in a bulkfetch
+- **store:** a removed tracker's rows no longer shadow the re-added one
+- **trackers:** write a view's sync mark only after its items are stored
+- **trackers:** a successful test re-enables the views a 403 disabled
+- **trackers:** a bare link from another org is not live work on a ticket
+- **mcp:** bind a fresh_for reader to the caller's host before touching its cursor
+- **ssh:** run a stdin-fed command on `local` locally, never `ssh local`
+- **hooks:** stamp a handover delivered on SessionStart only for the sync curl form
+- **linear:** a missing issue in a batched fetch no longer fails the chunk
+- **orgs:** remove_org unassigns the org's past links, in one transaction
+- **sessions:** never dismiss a restorable lost session on a rename
+- **move:** warn when a carried work link crosses the org boundary
+- **tidy:** a tree a live review uses is only ever plain-killed
+- **resume:** refuse a concurrent resume of the same key
+- **tidy:** honour a snooze or never on any live confirmed link
+- **sessions:** link a new session to the worktree it was started in
+- **work:** percent-decode ticket URLs all or nothing, like the TS twin
+- **sessions:** stamp last_prompt before the tmux send, roll back on failure
+- **work:** match a carried or merged link by item under either spelling
+- **work:** snapshot the branch, not a closing ref, when R7 ends a link
+- **work:** key detection candidates by the item's current key
+- **work:** a promoted suggestion takes the promoting signal's source
+- **work:** keep the session's primary when a cross-org candidate is skipped
+- **store:** create state.db owner-only before the open so the WAL sidecars inherit 0600
+- **net:** refuse a curl answer whose exit is non-zero even with a status
+- **resume:** a blank edited brief is no brief, and a brief never fails the resume after the spawn
+- **work:** refresh session rows that show a tracker item as a suggestion or rejection
+- **trackers:** first-sync needs a known tracker; list loads never overwrite newer frames
+- **session-focus:** never focus a session the store does not have
+- **work:** check the primary link's visibility for snooze, never and archive
+- **tidy:** never write gc_failed to a session outside the caller's scope
+- **sheets:** Escape closes the tidy and link-review sheets from any focused control
+- **today:** a hub without work_today is the plain empty state, not an error
+- **work-settings:** forget the token and email on Cancel and failure
+- **new-session:** multi-repo start carries the edited brief and name
+- **sidebar:** a focused session is never hidden under a work group's Done
+- **work-settings:** re-connecting a site keeps its transport and settings
+- **trackers:** retro-link reveal skips GitHub and Asana keys before taking a prefix
+- **link-review:** sheet chords ignore keydowns from focused buttons
+- **quick-switcher:** place a ticket by its key family, not the text before the first dash
+- **tidy:** sheet chords ignore keydowns from focused controls
+- **work:** send session:updated for a tracker item only when the row shows the change
+- **work:** bind a handover request to its turn and keep the markers out of the timeline
+- **work:** settle the multi-repo start's leftovers (M10.1)
+- **pane_intel:** OOM text above a live REPL is scrollback, not a crash
+
+### Documentation
+- M11 plan with the M11.4 revision line; regenerate the control API reference
+- **plan:** add the M11 plan with the M11.5 revision
+- **plan:** add the M11 plan with the M11.1 revision
+- **review:** record the second-round review, the test audits and the workspace-wide validation
+- **claude-md:** name migration 057 next to the classify-nudge note
+- **review:** record the fix status, the deliberate non-changes and the final validation
+- **hub:** say why hosts are assigned before a second tracker
+- **review:** deep code review of the 48 hours ending 2026-09-25
+- **work:** record the M10.6 replay-ring pressure numbers and decision
+- **store:** put list_session_events' doc comment back on it
 ## [0.2.40] - 2026-09-25
 
 ### Added
@@ -1519,6 +1668,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.2.41]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.41
 [0.2.40]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.40
 [0.2.39]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.39
 [0.2.38]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.38

@@ -83,6 +83,10 @@ Read a host's system clipboard (what Ctrl+V gives there), via wl-paste, xclip, x
 
 Parameters: `host_alias`
 
+### `get_settings`
+
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
+
 ### `hide_host`
 
 Hide or show a host (hidden: skipped by reconcile). Returns the host row.
@@ -445,6 +449,12 @@ Replace a session's tags (short labels such as `review`, `wip`; up to 16 of 1–
 
 Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
+### `set_setting`
+
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings.
+
+Parameters: `key`, `value`
+
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
@@ -497,7 +507,7 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `color`, `confirm_nonce`, `crede
 
 Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty).
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `force_cross_org`, `host_alias`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `project_ids`, `session_id`, `source`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `force_cross_org`, `host_alias`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `project_ids`, `session_id`, `source`, `title`, `url`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -543,6 +553,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::work_today`
 - `commands::work::work_ticket_card`
 - `commands::work::request_work_handover`
+- `commands::work::list_local_work_items`
+- `commands::work::name_session_work`
+- `commands::work::rename_work_item`
 - `commands::trackers::add_tracker`
 - `commands::trackers::update_tracker`
 - `commands::trackers::set_tracker_credential`

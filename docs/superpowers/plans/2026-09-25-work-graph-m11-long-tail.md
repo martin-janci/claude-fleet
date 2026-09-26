@@ -149,3 +149,18 @@ M11.6    docs; any time, finalised after M11.1–M11.5
 - 2026-09-25: M11.5 built on `claude/cloud-fleet-work-graph-m11-budget`. The master surface measured 71,590 B before and 54,646 B after (16,944 B paid back, M0.6); `BUDGET_BYTES` is 54,746. Only description and parameter-doc wording changed: no tool, action or parameter renamed, no schema shape changed, and every confirm gate, untrusted marker, host fence and "never" clause kept. The `work` / `work_link` / `work_admin` texts, already cut in M5.1 and M8.0, were left as they are so M11.1 / M11.3 / M11.4 merge cleanly. The final `BUDGET_BYTES` must be re-measured once the M11.1, M11.3 and M11.4 branches land: whichever lands second merges and re-measures. The roadmap's *Revisions* and M0.6 status wait for the M11.6 docs pass.
 - 2026-09-25: M11.2 built. The probe checks the path a conversation row recorded (when it still validates), then `"$HOME"/.claude/projects/*/<uuid>.jsonl`, since a conversation row is gone once its session is (cascade) and the cwd slug is not always derivable; "absent" means absent from both. It runs in `resume_plan` when `last` is possible, and in `resume` only for mode `last`; an unknown answer adds `ResumePlan.warnings` (new, `#[serde(default)]`), shown in the Resume dialog.
 - 2026-09-25: M11.4 built (branch `claude/cloud-fleet-work-graph-m11-ghes`), no migration. GHES: `trackers.settings.hostname` (admin-fenced DNS name, optional port; `gh --hostname`, only `https://<host>/api/graphql`); keys `host/owner/repo#n`, recognised only for configured GitHub trackers' hosts; R3u is per GitHub instance. Metrics: `work_admin { action: status }`, in memory; Settings → Work, `fleet-hub tracker status`; new LocalOnly command `tracker_sync_metrics` (174 commands).
+- 2026-09-25: M11.1 built (branch `claude/cloud-fleet-work-graph-m11-name`).
+  `work_link { action: name, session_id, title, key? }` names new local work
+  and links the session (manual, confirmed, primary only when it has none);
+  `work_link { action: name, item_id, title }` renames a local item;
+  `work { action: local_items }` lists them. Title 1–120 characters, no
+  control characters. A key a ticket the caller can see carries is refused
+  (`E_EXISTS`: link the ticket instead, chosen over linking to it silently);
+  another org's ticket is no collision, so no oracle; a taken local key is
+  refused for everyone. A per-host token names work only on its own host's
+  sessions in its org (others read as unknown) and sees a local item only
+  through its host's links. No migration: `session_id | link_id` became
+  `session_id` only. Desktop: Routed `list_local_work_items`,
+  `name_session_work`, `rename_work_item`; "Name this work…" on a row's `#`
+  menu and, in work mode, on a project group header (its sessions with no
+  work). Tool budget: see `BUDGET_BYTES`'s M11.1 note. No tool description changed.

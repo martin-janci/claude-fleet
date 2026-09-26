@@ -147,10 +147,10 @@ impl Visible {
 /// `SESSION_COLUMNS` in `rows.rs`): `work` (the primary link), `work_suggested`
 /// (the top suggestion) and `work_rejected` (keys).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct SessionChange {
-    primary: bool,
-    suggested: bool,
-    rejected: bool,
+pub(super) struct SessionChange {
+    pub(super) primary: bool,
+    pub(super) suggested: bool,
+    pub(super) rejected: bool,
 }
 
 impl SessionChange {
@@ -500,7 +500,7 @@ impl Store {
     /// would repeat the row with only `row_version` changed, and it was most
     /// of the session frames a sync sent (work graph M10.6, measured in
     /// `docs/superpowers/reviews/2026-09-25-replay-ring-pressure.md`).
-    fn emit_work_item(&self, id: i64, change: SessionChange) -> Result<(), IpcError> {
+    pub(super) fn emit_work_item(&self, id: i64, change: SessionChange) -> Result<(), IpcError> {
         if let Some(row) = self.get_work_item(id)? {
             self.bus
                 .emit(&crate::events::RowChange::WorkItemUpdated(row));

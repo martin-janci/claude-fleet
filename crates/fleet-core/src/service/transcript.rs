@@ -324,6 +324,29 @@ pub const CONV_MAX_CHARS: usize = 64_000;
 /// char-derived budget.
 pub const CONV_READ_BYTES: usize = 1_048_576;
 
+/// The smallest tail [`conv_read_bytes`] will read, however narrow the window.
+///
+/// **Measured, not chosen.** Across 263 real transcripts over 50 KB (the
+/// largest 22 MB), the bytes of tail that actually contain a given number of
+/// complete turns:
+///
+/// | turns | p50 | p90 | max |
+/// |---|---|---|---|
+/// | 1 | 8 KB | 18 KB | 159 KB |
+/// | 2 | 16 KB | 52 KB | 171 KB |
+/// | 5 | 59 KB | 116 KB | 399 KB |
+/// | 10 | 98 KB | 171 KB | 421 KB |
+///
+/// So 256 KB is above the worst single-turn and two-turn tail seen, with
+/// headroom, and a quarter of what a one-turn window used to cost. The
+/// default ten-turn window is unchanged — its budget was already
+/// [`CONV_READ_BYTES`] and still is.
+///
+/// Reading short is not silent: `fetch_conversation` sets
+/// [`Conversation::truncated`] when the tail filled its budget, and a caller
+/// that wants more asks with `turns`, which wins over `since_turn`.
+pub const MIN_CONV_READ_BYTES: usize = 256 * 1024;
+
 /// One turn of a conversation: the human prompt that opened it and what the
 /// assistant said / did in reply.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1881,10 +1904,16 @@ fn conversation_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
 
 /// PURE: bytes of tail to read for a `turns` window. The default window
 /// reads [`CONV_READ_BYTES`]; a wider one ("Load older") scales with it,
-/// capped at [`MAX_READ_BYTES`].
+/// capped at [`MAX_READ_BYTES`]; a narrower one scales down to
+/// [`MIN_CONV_READ_BYTES`].
+///
+/// The floor used to be [`CONV_READ_BYTES`] itself, which made sense while
+/// ten turns was the only window anyone asked for. `since_turn` changed that:
+/// a caller that is caught up asks for one turn, and was still costing a
+/// megabyte of `tail -c` over SSH on every poll to render it.
 pub fn conv_read_bytes(turns: usize) -> usize {
     (CONV_READ_BYTES.saturating_mul(turns.max(1)) / CONV_TURNS)
-        .clamp(CONV_READ_BYTES, MAX_READ_BYTES)
+        .clamp(MIN_CONV_READ_BYTES, MAX_READ_BYTES)
 }
 
 /// Run a read `script` built for `args`. Errors: `E_NO_TRANSCRIPT` (file
@@ -2682,9 +2711,31 @@ mod tests {
     #[test]
     fn conv_read_bytes_scales_with_the_window_and_caps() {
         assert_eq!(conv_read_bytes(CONV_TURNS), CONV_READ_BYTES);
-        assert_eq!(conv_read_bytes(0), CONV_READ_BYTES);
         assert_eq!(conv_read_bytes(20), CONV_READ_BYTES * 2);
         assert_eq!(conv_read_bytes(CONV_MAX_TURNS), MAX_READ_BYTES);
+    }
+
+    /// A caught-up `since_turn` caller asks for one turn. It used to cost a
+    /// megabyte of `tail -c` over SSH to render it; the floor is now a
+    /// measured 256 KB (see [`MIN_CONV_READ_BYTES`]), and the default window
+    /// is untouched.
+    #[test]
+    fn a_narrow_window_reads_a_measured_floor_not_a_megabyte() {
+        assert_eq!(conv_read_bytes(1), MIN_CONV_READ_BYTES);
+        assert_eq!(conv_read_bytes(2), MIN_CONV_READ_BYTES);
+        assert_eq!(
+            conv_read_bytes(0),
+            MIN_CONV_READ_BYTES,
+            "no window is one turn"
+        );
+        // Both are compile-time facts about the constants, so they are checked
+        // at compile time: the floor is smaller than the default budget (the
+        // whole point), and above the worst one- and two-turn tail measured
+        // across 263 real transcripts (159 KB and 171 KB), with headroom.
+        const _: () = assert!(MIN_CONV_READ_BYTES < CONV_READ_BYTES);
+        const _: () = assert!(MIN_CONV_READ_BYTES > 200 * 1024);
+        // And the window everybody else asks for did not move.
+        assert_eq!(conv_read_bytes(CONV_TURNS), CONV_READ_BYTES);
     }
 
     /// A caller that says where it got to asks for what it is missing, not
@@ -4267,14 +4318,25 @@ mod tests {
     }
 
     #[test]
-    fn conversation_reads_a_fixed_one_mib_tail() {
+    fn the_default_window_reads_one_mib_whatever_the_char_budget() {
         // The Conversation panel polls every 5 s; a 4 MB tail per poll over
-        // ssh is too heavy, so it reads a fixed 1 MiB regardless of budget.
+        // ssh is too heavy, so the read is derived from the TURN window and
+        // not from the character budget — a 100-char budget over ten turns
+        // still has to read the ten turns.
         assert_eq!(CONV_READ_BYTES, 1_048_576);
-        let script = conversation_read_script(&tail_args(CONV_MAX_CHARS)).unwrap();
-        assert!(script.contains("tail -c 1048576 "), "{script}");
-        let script = conversation_read_script(&tail_args(100)).unwrap();
-        assert!(script.contains("tail -c 1048576 "), "{script}");
+        for budget in [CONV_MAX_CHARS, 100] {
+            let script = conversation_read_script(&tail_args(budget)).unwrap();
+            assert!(script.contains("tail -c 1048576 "), "{script}");
+        }
+        // A narrow window is where it does move: see
+        // `a_narrow_window_reads_a_measured_floor_not_a_megabyte`.
+        let mut narrow = tail_args(CONV_MAX_CHARS);
+        narrow.turns = 1;
+        let script = conversation_read_script(&narrow).unwrap();
+        assert!(
+            script.contains(&format!("tail -c {MIN_CONV_READ_BYTES} ")),
+            "{script}"
+        );
     }
 
     #[test]
