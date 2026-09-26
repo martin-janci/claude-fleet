@@ -1830,9 +1830,50 @@ Expected: FAIL — no `ForkSheet.svelte`; the script assertion fails on the dest
 
 - [ ] **Step 4: Honour `new_worktree` in the service**
 
-In `crates/fleet-core/src/service/rewind.rs`, replace the `RewindMode::Fork` arm's `let _ = &args.new_worktree;` with: resolve or create the target worktree for `sess.project_id` on `sess.host_alias`, compute its absolute path, and pass `dest_dir = Some(format!("$HOME/.claude/projects/{}", encode_project_dir(&new_cwd)))` plus `cwd_rewrite = Some((&old_cwd, &new_cwd))` into `rewind_script`. Reuse the worktree machinery `new_session` already calls (`crates/fleet-core/src/service/worktrees.rs`); do not add a second way to make a worktree.
+**Read this before writing anything — the naive version is wrong.**
 
-When `new_worktree` is `None`, pass `None` for both, which is the same-worktree behaviour Task 3 shipped.
+`NewSessionArgs` already has a `new_worktree: Option<String>` field, and
+`new_session` creates the worktree itself (`lifecycle.rs:349-357` validates the
+name, `:464-476` derives the worktree key). So the tempting one-line change is
+to stop passing `new_worktree: None` and pass `args.new_worktree.clone()`
+through.
+
+That alone is **not enough**, and shipping it would produce a fork that silently
+starts an empty conversation. Here is the constraint:
+
+- The pane runs `cl --resume '<new id>'` in the new worktree's directory.
+- Claude Code finds a conversation by looking under the encoded project dir for
+  **the cwd it was launched in**.
+- `rewind_script` runs BEFORE `new_session`, and by default writes the truncated
+  transcript beside the SOURCE transcript — i.e. under the *source* worktree's
+  encoded dir, with `cwd` still naming the source path.
+- So `--resume` in the new worktree looks somewhere the file is not, finds
+  nothing, and starts fresh. No error, just a fork with no history.
+
+This is exactly what `rewind_script`'s `dest_dir` and `cwd_rewrite` parameters
+exist for (Task 2 built and tested both). The ordering therefore has to be:
+
+1. determine the new worktree's absolute path on the host **before** the script
+   runs;
+2. call `rewind_script` with `dest_dir = <that path's encoded project dir under
+   $HOME/.claude/projects>` and `cwd_rewrite = Some((old_cwd, new_cwd))`;
+3. then call `new_session` with `new_worktree` set.
+
+Step 1 is the part to verify rather than assume. Find how the path is actually
+decided — `ensure_remote_project` / `RemoteWorktree` (`lifecycle.rs:45-56`) say
+the path is the one the host scan RECORDED, not one re-derived from the name,
+precisely because a checkout can live under `.worktrees/`, under
+`.claude/worktrees/`, or anywhere git has it. If the path for a not-yet-created
+worktree genuinely cannot be known before `new_session` creates it, then this
+ordering is impossible as written — **report BLOCKED with what you found and
+stop**. Do not guess a path convention, and do not fall back to writing the
+transcript in the source worktree and hoping.
+
+When `args.new_worktree` is `None`, pass `None` for both `dest_dir` and
+`cwd_rewrite` — that is the same-worktree behaviour Task 3 already shipped and
+it must keep working unchanged.
+
+Do not add a second way to create a worktree; `new_session`'s is the only one.
 
 - [ ] **Step 5: Write the sheet**
 
