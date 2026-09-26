@@ -1040,13 +1040,17 @@ impl Store {
             .map(|c| format!("l.{c}"))
             .collect::<Vec<_>>()
             .join(", ");
+        // `item_id IN (…)`, not a join on the item's key: both arms of the
+        // OR then have an index (`ref_key`, `item_id`), where the join made
+        // SQLite walk every live link per call — and `work { tickets }`
+        // makes one call per ticket (work graph M12.2).
         let pairs: Vec<(WorkLinkRow, i64)> = {
             let mut stmt = self.conn.prepare(&format!(
                 "SELECT {cols}, p.session_id FROM work_links l \
-                 LEFT JOIN work_items i ON i.id = l.item_id \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
-                   AND p.session_id IS NOT NULL AND (l.ref_key = ?1 OR i.key = ?1) \
+                   AND p.session_id IS NOT NULL \
+                   AND (l.ref_key = ?1 OR l.item_id IN (SELECT id FROM work_items WHERE key = ?1)) \
                  ORDER BY COALESCE(l.decided_at, l.created_at) DESC, l.id DESC"
             ))?;
             let rows = stmt.query_map(rusqlite::params![key], |r| {

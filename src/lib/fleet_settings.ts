@@ -43,6 +43,7 @@ export const SETTING_KEYS = {
   workClassifyNudge: 'work.classify_nudge',
   workTidyDoneDays: 'work.tidy_done_days',
   workTidyIdleHours: 'work.tidy_idle_hours',
+  workTidyIdleUnlinkedDays: 'work.tidy_idle_unlinked_days',
   workAutoTidy: 'work.auto_tidy',
   workAutoTidyReasons: 'work.auto_tidy_reasons',
 } as const;
@@ -149,6 +150,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'work.classify_nudge': 'false',
   'work.tidy_done_days': '2',
   'work.tidy_idle_hours': '4',
+  'work.tidy_idle_unlinked_days': '7',
   'work.auto_tidy': 'false',
   'work.auto_tidy_reasons': 'done_idle,pr_merged_idle',
 };
@@ -271,6 +273,19 @@ export function parseHoursInput(raw: string): { secs: number } | { error: string
 /** A whole-number input (`Kind::Int`). Refuses an empty or non-integer value
  *  instead of ignoring it; an out-of-range integer is passed through so the
  *  backend's range error is shown. */
+/** `work.tidy_idle_unlinked_days`' bounds (`Kind::Int { min: 1, max: 90 }`). */
+export const TIDY_IDLE_UNLINKED_DAYS_MIN = 1;
+export const TIDY_IDLE_UNLINKED_DAYS_MAX = 90;
+
+/** {@link parseIntInput} within `min..=max`, refused here with a message. */
+export function parseBoundedIntInput(raw: string, min: number, max: number): { value: string } | { error: string } {
+  const r = parseIntInput(raw);
+  if ('error' in r) return r;
+  const v = Number.parseInt(r.value, 10);
+  if (v < min || v > max) return { error: `must be ${min}–${max}` };
+  return r;
+}
+
 export function parseIntInput(raw: string): { value: string } | { error: string } {
   const t = raw.trim();
   if (t === '') return { error: 'enter a whole number' };

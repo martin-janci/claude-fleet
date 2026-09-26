@@ -1018,6 +1018,7 @@ under Settings → Work → Lifecycle or `set_fleet_setting`:
 |---|---|---|
 | `work.tidy_done_days` | `2` | a linked ticket must have been done this many days (from the tracker transition) |
 | `work.tidy_idle_hours` | `4` | a session must have been idle this long before any reason suggests it |
+| `work.tidy_idle_unlinked_days` | `7` | a session with no work linked is suggested (`idle_unlinked`) after this many days idle and unprompted (1–90) |
 | `work.auto_tidy` | `false` | the sweep acts on the allowed reasons by itself |
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | comma list of `done_idle`, `pr_merged_idle`, `not_planned` |
 
@@ -1031,6 +1032,19 @@ blocked, stuck or dialog-waiting sessions, sessions linked to in-progress
 work, the controller and the operator, anything prompted or attached to in
 the last hour, and background agents with open tasks are never touched. The
 idle killer (`gc.enabled`, `gc.*_idle_secs`) is separate and unchanged.
+
+**Idle, no work linked** (`idle_unlinked`, work graph M11.3). A work
+session with its own worktree and no live or suggested link, idle and
+unprompted (no prompt, attach or finished turn) for
+`work.tidy_idle_unlinked_days`, is also suggested. It only ever suggests:
+auto-tidy never acts on it, whatever `work.auto_tidy`, the org override or
+the reason list say (decision D19; the setting cannot name it). Its kill is
+refused unless the worktree inspects clean and pushed — with no work linked,
+fleet does not guess what uncommitted work is for, so it is not safe-killed
+either — and only while the fresh plan still names it. **Keep** (`tidy_apply`
+item `{ action: "keep", days }`, 1–90, default 7) holds any live session out
+of tidy-up per session; it is a `tidy_kept` timeline event, no column. A
+per-host token keeps only its own host's and org's sessions.
 
 **Per organisation.** An org can override `work.auto_tidy` for its own
 sessions: `fleet-hub org set 1 --auto-tidy on|off|inherit` (or `work_admin

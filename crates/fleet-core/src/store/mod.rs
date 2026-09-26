@@ -21,6 +21,8 @@ mod read_cursors;
 mod reconcile;
 mod reports;
 mod rows;
+#[cfg(test)]
+pub(crate) mod scale_fixture;
 mod schema;
 mod sessions;
 mod tasks;

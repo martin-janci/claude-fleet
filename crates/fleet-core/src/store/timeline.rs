@@ -43,6 +43,8 @@ impl Store {
     ///   `safe_kill_send_failed`, `safe_kill_failed`, `safe_kill_ready`,
     ///   `safe_kill_discarded`.
     /// - GC sweeper (`service::gc`): `gc_killed`, `gc_failed`.
+    /// - tidy-up (`service::work::tidy`): `gc_tidied`, and `tidy_kept` (detail
+    ///   is the unix second a person's keep holds until, work graph M11.3).
     /// - hooks (`service::hooks`): `notification`.
     /// - playbooks (`Store::record_playbook_applied` et al.): `playbook_applied`.
     /// - MCP call audit (`mcp::tools::support`): `mcp_call`.

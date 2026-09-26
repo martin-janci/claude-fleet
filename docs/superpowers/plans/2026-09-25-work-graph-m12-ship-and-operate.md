@@ -187,3 +187,82 @@ M12.6        docs; after the user's M10.3 acceptance run
 ## Revisions
 - 2026-09-25: first version.
 - 2026-09-25: M12.1 landed. `store::testgen` builds the pre-work-graph database from the historical files 001–044. That is v0.2.37, not v0.2.38: v0.2.38 already shipped 045–055, peer links included, so 054/055 run after the work graph and belong to the chain. `store::schema::tests_upgrade` runs every later migration (045–057, read from `MIGRATIONS`). Measured: ~120 ms in debug and ~44 ms in release, against a 5 s budget. No migration was slow or wrong on the generated data. There was no downgrade guard: M12.1 adds one in `migrate()`. It is a behaviour change: an older build now refuses a newer database instead of running against it. The `docs/RELEASING.md` section *Upgrading into the work graph* covers the upgrade.
+- 2026-09-25: **M12.2 (scale) landed**, with its numbers:
+  - **Fixture.** `store/scale_fixture.rs` (test-only, seeded splitmix64):
+    20 hosts, 3 orgs (4 placement rules, one org isolating), 40 projects,
+    2,000 sessions with worktrees and participants, 3 trackers with 5,000
+    items, 20,000 work links (≈4,000 live in every state, the rest ended on
+    4,000 retired participants), 50,000 journal rows of every kind, 4,000
+    conversations, 40,000 timeline events. Built in ≈3.6 s by plain SQL in one
+    transaction. It is independent of M12.1's `store::testgen`, which was
+    built in parallel.
+  - **Budget tests.** `service/work/scale_tests.rs` (plain `cargo test`;
+    `-- --nocapture` prints p50/p95). Every call is timed over 11 runs, and its
+    statements are traced (`rusqlite`'s `trace` feature, dev-only) and put
+    through `EXPLAIN QUERY PLAN`. A call fails on any `SCAN` of `work_links`,
+    `work_items`, `work_journal`, `session_events`, `conversations` or
+    `participants`, unless the scan walks a partial index. The shape check is
+    exact, and the time budgets are 5–10× the measured p95.
+  - **Measured.** p50 / p95 in ms, unoptimised test build, the development
+    container, after the fixes:
+
+    | Call | p50 | p95 | budget |
+    |---|---|---|---|
+    | `list_sessions` (All, 2,000 rows with `work` / `work_suggested` / `org_id`) | 163 | 165 | 1,500 |
+    | `list_sessions` (per-host token h01, filter + redact) | 163 | 166 | 1,500 |
+    | `list_sessions_for_host` (100 rows) | 7.4 | 8.3 | 300 |
+    | `work { today }` (All) | 241 | 262 | 2,000 |
+    | `work { today }` (All, since 30 days) | 273 | 308 | 2,000 |
+    | `work { today }` (per host) | 271 | 295 | 2,000 |
+    | `work { tickets }` (page of 50) | 80 | 85 | 1,000 |
+    | `work { tickets, limit: 200 }` | 136 | 154 | 1,500 |
+    | `work { tickets, view: mine }` | 135 | 140 | 1,000 |
+    | `work { tickets, query: <key> }` | 69 | 70 | 1,000 |
+    | `work { tickets }` (per host) | 121 | 122 | 1,500 |
+    | `work { tidy }` (read + plan, all candidates) | 181 | 214 | 2,000 |
+    | `plan_tidy` alone (pure, 2,000 sessions) | 3.7 | 4.7 | 500 |
+    | `resolve_session` (busiest session, 40+ live links) | 0.4 | 0.4 | 200 |
+    | `on_prompt` (loop guard + recognise + resolve) | 7.7 | 8.8 | 200 |
+    | `resolve` (pure, 60 candidates × 60 links) | 0.3 | 0.3 | 50 |
+    | `recent_ended_work_links` (7 days / a year, 200) | 1.7 | 1.8 | 100 |
+
+  - **Fixes.** Before / after p95 on the same fixture:
+    - `recent_ended_work_links`: `SCAN work_links` plus a temp B-tree sort
+      (it also runs inside `work { today }`). Fixed by
+      `idx_work_links_ended ON work_links(ended_at) WHERE ended_at IS NOT
+      NULL`. p95 8.3 → 1.8 ms (7 days) and 12.4 → 1.7 ms (a year).
+    - The prompt trigger's loop guard (`recent_handover_bodies`):
+      `SCAN work_journal` (50,000 rows) on every UserPromptSubmit, because
+      047's partial index covers only undelivered handovers. Fixed by
+      `idx_work_journal_participant_handover ON work_journal(participant_id)
+      WHERE kind = 'handover'`. `on_prompt` p95 18.2 → 8.8 ms.
+    - `live_work_sessions_for_key`, called once per ticket by
+      `work { tickets }`, joined `work_items` to match the key. SQLite then
+      walked every live link per ticket: no full scan, but O(tickets × live
+      links). Rewritten to `item_id IN (SELECT id FROM work_items WHERE key =
+      ?)`, so the OR has an index on both arms (`idx_work_links_ref`,
+      `idx_work_links_item`). Same rows. `tickets` p95: page of 50,
+      243 → 85 ms; 200, 618 → 154 ms; `mine`, 619 → 140 ms; per host,
+      246 → 122 ms.
+    - `scale_plans_pin_the_m12_fixes` pins all three by plan shape.
+  - **Migration 058** (`058_work_graph_scale_indexes.sql`) holds the two
+    indexes. It is index-only, `IF NOT EXISTS`, and makes no row changes.
+    It is numbered after 057, the highest on `main` at push time.
+  - **Not changed (within budget, noted for later).**
+    - `list_all_sessions` is ≈165 ms for 2,000 rows in a debug build: the
+      per-row work subqueries all SEARCH by index, and the cost is the JSON
+      building. `today` and `tidy` inherit it.
+    - `tracker_items` reads every item of every tracker (5,000 rows plus
+      their JSON meta) for `today` and `tickets`. A `done since` filter in
+      SQL is the next step if a larger board needs it.
+  - **Frontend.** `src/lib/work_scale.test.ts` (Vitest, jsdom, seeded
+    mulberry32, 2,000 rows), p95 on the same container:
+    - `buildSessionsByWork` + `sortWorkGroups` under the work filters:
+      4.6 ms (budget 250);
+    - `rowMatches` × 7 filter combinations: 3.6 ms (100);
+    - `sessionWorkRow` × 2,000: 3.0 ms (150);
+    - `scopeToday` + `standupText` over a 200-group digest: 4.8 ms (150).
+
+    Each also asserts shape: the key, scope, predicate and severity
+    callbacks run once per row, never per row × group, and the output
+    matches a direct reading of the fixture.

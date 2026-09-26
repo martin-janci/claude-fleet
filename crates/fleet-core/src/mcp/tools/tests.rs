@@ -3333,16 +3333,20 @@ fn the_served_definition_budget_stays_bounded() {
     // `name` and a `title` parameter, `work` gains `local_items`; no
     // description change). Merged over M11.2 / M11.4: measured at 55,030 on
     // 2026-09-25; plus 100.
+    // M11.3 merged over M11.1: `keep` on `tidy_apply`'s item action, nothing
+    // else. Measured at 55,035 on 2026-09-25 (+5); plus 100.
     // get_settings/set_setting: +580 B (two master-only tools, M11.5's
     // terse style). Measured at 55,610 on 2026-09-25; plus 100.
+    // M11.3 merged over get_settings/set_setting: `keep` on `tidy_apply`'s
+    // item action. Measured at 55,615 on 2026-09-26 (+5); plus 100.
     // `quick_replies` (the composer's shared chip row): one tool that both
     // reads and replaces the fleet's list, so the desktop and the phone stop
     // keeping private copies of the same buttons. A second, read-only tool
     // would have cost another definition for a list of at most 24 short
     // strings, so the read is this tool with `set` omitted. Written in
     // M11.5's terse style from the start: 825 B over that baseline, measured
-    // at 56,535 on 2026-09-26 (55,710 before); plus 100.
-    const BUDGET_BYTES: usize = 56_635;
+    // at 56,540 on 2026-09-26 (55,715 before, after M11.3's `keep`); plus 100.
+    const BUDGET_BYTES: usize = 56_640;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
