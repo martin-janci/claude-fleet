@@ -371,6 +371,18 @@ pub struct ConvTurn {
     /// words — the panel folds them into a chip instead of printing them.
     #[serde(default)]
     pub reminders: Vec<String>,
+    /// The JSONL `uuid` of the entry that OPENED this turn — the anchor every
+    /// truncation is expressed against ("keep strictly before this prompt").
+    ///
+    /// `None` for a turn no prompt opened: a compact boundary, a
+    /// notification-only turn, or assistant output whose prompt lies before
+    /// the read tail. Those turns offer no Rewind and no Retry, which is
+    /// right on its own terms — there is no prompt to put back in the
+    /// composer.
+    ///
+    /// `serde(default)` because a client may read a hub that predates it.
+    #[serde(default)]
+    pub prompt_uuid: Option<String>,
 }
 
 /// One line of a turn's reply.
@@ -895,6 +907,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     at: at(),
                     ended_at: None,
                     reminders: std::mem::take(&mut pending_reminders),
+                    prompt_uuid: None,
                     items: vec![ConvItem::Compact {
                         trigger: meta
                             .and_then(|m| m.get("trigger"))
@@ -1028,6 +1041,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 at: at(),
                                 ended_at: None,
                                 reminders: std::mem::take(&mut pending_reminders),
+                                prompt_uuid: None,
                                 items: Vec::new(),
                             });
                         }
@@ -1051,6 +1065,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             at: at(),
                             ended_at: None,
                             reminders: std::mem::take(&mut pending_reminders),
+                            prompt_uuid: None,
                             items: vec![ConvItem::Command {
                                 name,
                                 args: tag_text(&text, "command-args"),
@@ -1088,6 +1103,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 at: at(),
                                 ended_at: None,
                                 reminders: std::mem::take(&mut pending_reminders),
+                                prompt_uuid: None,
                                 items: vec![ConvItem::Bash {
                                     command,
                                     stdout: tag_text(&text, "bash-stdout")
@@ -1109,6 +1125,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             at: at(),
                             ended_at: None,
                             reminders: std::mem::take(&mut pending_reminders),
+                            prompt_uuid: None,
                             items: vec![ConvItem::Harness {
                                 tag,
                                 body: cap_chars(&body, COMMAND_OUTPUT_MAX_CHARS),
@@ -1127,6 +1144,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             ended_at: None,
                             items: Vec::new(),
                             reminders: Vec::new(),
+                            prompt_uuid: None,
                         });
                         turn.items.push(ConvItem::Interrupt {
                             during_tool: text.contains("for tool use"),
@@ -1147,6 +1165,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         ended_at: None,
                         items: Vec::new(),
                         reminders: std::mem::take(&mut pending_reminders),
+                        prompt_uuid: v.get("uuid").and_then(|u| u.as_str()).map(String::from),
                     });
                 }
             }
@@ -1158,6 +1177,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         ended_at: None,
                         items: Vec::new(),
                         reminders: std::mem::take(&mut pending_reminders),
+                        prompt_uuid: None,
                     });
                     if let Some(ts) = at() {
                         turn.ended_at = Some(ts);
@@ -3812,6 +3832,7 @@ mod tests {
             at: None,
             ended_at: None,
             reminders: Vec::new(),
+            prompt_uuid: None,
             items: vec![ConvItem::Text {
                 text: "x".repeat(n),
             }],
@@ -3854,6 +3875,7 @@ mod tests {
                 at: Some("2026-09-13T10:00:00Z".into()),
                 ended_at: None,
                 reminders: Vec::new(),
+                prompt_uuid: None,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
                     tool_item("Bash(command=ls)", false),
@@ -3865,7 +3887,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
-            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"reminders":[],"items":[
+            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"reminders":[],"prompt_uuid":null,"items":[
                 {"kind":"text","text":"hi"},
                 {"kind":"tool","summary":"Bash(command=ls)","error":false,"id":null,"name":"","target":null,"at":null,"ended_at":null,"done":false}]}],
                 "truncated":false,"context":null,"events":[]})
@@ -3890,6 +3912,7 @@ mod tests {
             at: None,
             ended_at: None,
             reminders: Vec::new(),
+            prompt_uuid: None,
             items: vec![
                 ConvItem::Text {
                     text: "a".repeat(10),
@@ -3932,6 +3955,7 @@ mod tests {
             at: None,
             ended_at: None,
             reminders: Vec::new(),
+            prompt_uuid: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -3954,6 +3978,7 @@ mod tests {
             at: None,
             ended_at: None,
             reminders: Vec::new(),
+            prompt_uuid: None,
             items: vec![ConvItem::Text {
                 text: "earlier".into(),
             }],
@@ -3963,6 +3988,7 @@ mod tests {
             at: None,
             ended_at: None,
             reminders: Vec::new(),
+            prompt_uuid: None,
             items: vec![
                 tool_item("Bash(command=ls)", false),
                 ConvItem::Text {
@@ -3992,6 +4018,7 @@ mod tests {
             at: None,
             ended_at: None,
             reminders: Vec::new(),
+            prompt_uuid: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -4011,6 +4038,7 @@ mod tests {
             at: None,
             ended_at: None,
             reminders: Vec::new(),
+            prompt_uuid: None,
             items: vec![ConvItem::Text { text: "abc".into() }],
         };
         let c = trim_conversation(vec![tiny], 10, 1);
@@ -4831,6 +4859,7 @@ mod tests {
                 text: "i".repeat(10),
             }],
             reminders: vec!["r".repeat(500)],
+            prompt_uuid: None,
         };
         // Two turns, ~1 022 chars of which 1 000 are reminders: a 100 budget
         // has to see them.
@@ -4898,5 +4927,62 @@ mod tests {
         };
         assert!(tag.contains("quantum_thing"), "the tag names it: {tag}");
         assert!(body.contains("quantum_thing"), "so does the body: {body}");
+    }
+
+    #[test]
+    fn a_prompted_turn_carries_the_uuid_of_its_prompt_entry() {
+        let jsonl = concat!(
+            r#"{"type":"user","uuid":"aaaaaaaa-0000-0000-0000-000000000001","sessionId":"s","timestamp":"2026-09-26T09:00:00Z","message":{"role":"user","content":"first"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"bbbbbbbb-0000-0000-0000-000000000001","sessionId":"s","timestamp":"2026-09-26T09:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"aaaaaaaa-0000-0000-0000-000000000002","sessionId":"s","timestamp":"2026-09-26T09:01:00Z","message":{"role":"user","content":"second"}}"#,
+            "\n",
+        );
+        let turns = parse_conversation(jsonl);
+        assert_eq!(turns.len(), 2, "two prompts open two turns");
+        assert_eq!(
+            turns[0].prompt_uuid.as_deref(),
+            Some("aaaaaaaa-0000-0000-0000-000000000001"),
+            "the anchor is the uuid of the entry that OPENED the turn, not of its reply"
+        );
+        assert_eq!(
+            turns[1].prompt_uuid.as_deref(),
+            Some("aaaaaaaa-0000-0000-0000-000000000002")
+        );
+    }
+
+    #[test]
+    fn a_turn_with_no_prompt_has_no_anchor() {
+        // A compact boundary opens a turn with `prompt: None`. There is no prompt
+        // to rewind to, so there must be no anchor either — the clients key Rewind
+        // and Retry off exactly this being `None`.
+        let jsonl = concat!(
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"cccccccc-0000-0000-0000-000000000001","sessionId":"s","timestamp":"2026-09-26T09:00:00Z","compactMetadata":{"trigger":"auto","preTokens":1000}}"#,
+            "\n",
+        );
+        let turns = parse_conversation(jsonl);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].prompt_uuid, None);
+    }
+
+    #[test]
+    fn a_prompt_entry_with_no_uuid_field_leaves_the_anchor_none() {
+        // Defensive: the field is `Option` precisely so a transcript shape without
+        // it degrades to "no anchor" instead of panicking or inventing one.
+        let jsonl = concat!(
+            r#"{"type":"user","sessionId":"s","timestamp":"2026-09-26T09:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+        );
+        let turns = parse_conversation(jsonl);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].prompt_uuid, None);
+    }
+
+    #[test]
+    fn an_older_hub_sending_no_prompt_uuid_still_deserialises() {
+        let wire = r#"{"prompt":"hi","at":null,"ended_at":null,"items":[],"reminders":[]}"#;
+        let turn: ConvTurn = serde_json::from_str(wire).expect("must decode without prompt_uuid");
+        assert_eq!(turn.prompt_uuid, None);
     }
 }

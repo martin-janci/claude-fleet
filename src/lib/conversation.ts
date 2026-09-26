@@ -58,6 +58,11 @@ export interface ConvTurn {
    *  Never the human's words — the panel folds them into a chip. Optional on
    *  the wire, so an older hub still decodes. */
   reminders?: string[];
+  /** The JSONL uuid of the entry that opened this turn — the truncation
+   *  anchor for Rewind/Retry (this turn's own) and Fork (the next later
+   *  turn's). `null`/absent for a turn no prompt opened, and for a hub that
+   *  predates the field. */
+  prompt_uuid?: string | null;
 }
 
 /** Current-conversation context size, read from the same transcript tail. */
