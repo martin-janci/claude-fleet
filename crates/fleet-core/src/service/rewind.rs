@@ -167,6 +167,21 @@ fn mint_conversation_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Fork needs a concrete project to spawn into: `SessionRow.project_id` is
+/// `Option<i64>` (a `bg`/`external` row, or one whose project id never got
+/// set, has none) while `NewSessionArgs.project_id` is required. Pulled out
+/// of the Fork arm so it is reachable by a plain unit test without a live
+/// SSH round trip — `service::work::resume::resume_session_args` guards the
+/// identical Option-to-required-field situation the same way.
+fn project_id_for_fork(project_id: Option<i64>) -> Result<i64, IpcError> {
+    project_id.ok_or_else(|| {
+        IpcError::new(
+            codes::E_INVALID_STATE,
+            "this session has no project to fork",
+        )
+    })
+}
+
 /// Truncate a session's transcript into a new conversation and act on it.
 ///
 /// One engine for three buttons: Fork here spawns on the copy, Rewind here
@@ -287,12 +302,7 @@ pub async fn rewind_conversation(
             // Left for Task 7 to extend with `new_worktree`; reusing the
             // source's worktree is the shape that needs no git.
             let _ = &args.new_worktree;
-            let project_id = sess.project_id.ok_or_else(|| {
-                IpcError::new(
-                    codes::E_INVALID_STATE,
-                    "this session has no project to fork",
-                )
-            })?;
+            let project_id = project_id_for_fork(sess.project_id)?;
             crate::service::sessions::new_session(
                 crate::service::sessions::NewSessionArgs {
                     host_alias: sess.host_alias.clone(),
@@ -611,12 +621,21 @@ mod tests {
     // `use super::*` (this module's own top-level `use`), so no extra import
     // is needed here.
 
-    fn store_with_session(status: &str, claude_status: Option<&str>) -> (Store, i64) {
+    /// The bare session row, with NO Claude conversation bound yet — the
+    /// "not reconciled" case `rewind_conversation`'s own claude-id guard
+    /// must refuse before any SSH happens. `store_with_session` below adds
+    /// the conversation on top rather than duplicating this.
+    fn new_test_session(status: &str) -> (Store, i64) {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h1").unwrap();
         let id = s
             .upsert_session("sess", "h1", None, None, 0, 0, status, None)
             .unwrap();
+        (s, id)
+    }
+
+    fn store_with_session(status: &str, claude_status: Option<&str>) -> (Store, i64) {
+        let (s, id) = new_test_session(status);
         s.set_claude_session_id(id, OLD).unwrap();
         if let Some(cs) = claude_status {
             s.set_session_claude_status_for_test(id, cs);
@@ -697,5 +716,41 @@ mod tests {
     fn the_new_conversation_id_is_a_fresh_uuid_each_time() {
         assert_ne!(mint_conversation_id(), mint_conversation_id());
         assert!(crate::validate::claude_session_id(&mint_conversation_id()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_claude_conversation_is_refused() {
+        // Nothing has bound a Claude conversation to this row yet (not
+        // reconciled, or not a Claude session at all) — refused before any
+        // SSH happens, same shape as the mid-turn guard above.
+        let (s, id) = new_test_session("running");
+        let err = rewind_conversation(
+            RewindArgs {
+                session_id: id,
+                anchor_uuid: None,
+                mode: RewindMode::Rewind,
+                new_worktree: None,
+            },
+            &std::sync::Mutex::new(s),
+            &std::sync::Arc::new(SshClient::new()),
+            &CancellationRegistry::new(),
+        )
+        .await
+        .expect_err("no claude_session_id bound yet");
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(
+            err.message.contains("no Claude conversation"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn forking_without_a_project_is_refused() {
+        assert_eq!(
+            project_id_for_fork(None).unwrap_err().code,
+            codes::E_INVALID_STATE
+        );
+        assert_eq!(project_id_for_fork(Some(7)).unwrap(), 7);
     }
 }
