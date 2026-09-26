@@ -223,7 +223,10 @@ jobs:
               name: `claude-fleet ${tag}`,
               body,
               draft: true,
-              prerelease: false,
+              // `v0.3.0-rc.1` is a release candidate, `v0.3.0` is not: the
+              // suffix on the tag is the only thing that decides, here, in
+              // the publish job and in hub-image.yml's `latest` guard.
+              prerelease: tag.slice(1).includes('-'),
             });
             core.info(`Created draft release ${data.id} for ${tag}`);
             return data.id;

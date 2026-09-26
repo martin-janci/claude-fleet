@@ -24,7 +24,13 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/fleet-hub
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # `latest` only for a real release. deploy/hub/docker-compose.yml
+            # pins `fleet-hub:latest`, so an `v0.3.0-rc.1` tag moving it would
+            # push a release candidate onto every hub operator who runs
+            # `docker compose pull` — silently, since nothing about the tag
+            # they pinned changed. A pre-release is a tag with a `-` in its
+            # version, the same rule release.yml and scripts/release.sh use.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
             type=sha
 
   # One native leg per platform — no QEMU. A Rust release build the size of
