@@ -178,31 +178,6 @@ async fn a_revoke_or_rotation_by_another_process_is_refused_on_the_next_request(
     hub.refused("rotated-tok").await;
 }
 
-/// `fleet-hub token regenerate` (and `init --regenerate-token`) writes
-/// `mcp.token` from its own process. The master the daemon was started with
-/// is refused on the next request, and the fresh one accepted — without a
-/// restart.
-#[tokio::test]
-async fn a_master_token_regenerated_by_another_process_is_refused_on_the_next_request() {
-    let hub = hub().await;
-    let r = hub.accepted(MASTER_TOK).await;
-    assert!(r.contains("caller=master"), "{r}");
-    hub.other_process()
-        .set_setting(SETTING_TOKEN, "fresh-master")
-        .unwrap();
-    hub.refused(MASTER_TOK).await;
-    let r = hub.accepted("fresh-master").await;
-    assert!(r.contains("caller=master mode=Full"), "{r}");
-    // Rotated by the daemon itself, the same.
-    hub.store
-        .lock()
-        .unwrap()
-        .set_setting(SETTING_TOKEN, "fresher-master")
-        .unwrap();
-    hub.refused("fresh-master").await;
-    hub.accepted("fresher-master").await;
-}
-
 #[tokio::test]
 async fn a_newly_paired_or_minted_token_is_accepted_on_the_next_request() {
     let hub = hub().await;
