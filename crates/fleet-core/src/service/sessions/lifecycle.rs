@@ -784,7 +784,11 @@ pub(super) async fn new_session_inner(
 /// script made). Reconcile only ever sets `worktree_key`, never this FK, and
 /// tidy-up, safe kill and the idle killer inspect a work session's tree only
 /// through it: without it a started session could only ever be archived.
-/// A system project (`fixed`) has no worktree. Returns the linked id.
+/// A system project (`fixed`) has no worktree, and a `main` row (the clone
+/// itself, never a `worktree add`) is never linked either — safe kill and
+/// discard `git worktree remove` a linked tree, and the repo root is not
+/// one; `discover_lost_sessions` hands `new_session` a main row's id for a
+/// remote project root. Returns the linked id.
 pub(super) fn link_new_session_worktree(
     s: &Store,
     row_id: i64,
@@ -796,7 +800,10 @@ pub(super) fn link_new_session_worktree(
         return Ok(None);
     }
     let wid = match (args.worktree_id, args.new_worktree.as_deref()) {
-        (Some(w), _) => w,
+        (Some(w), _) => match s.get_worktree_row(w)? {
+            Some(row) if row.name == "main" => return Ok(None),
+            _ => w,
+        },
         (None, Some(name)) => {
             s.upsert_worktree_on(&args.host_alias, args.project_id, name, cwd, Some(name))?
         }

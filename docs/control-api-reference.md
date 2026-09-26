@@ -75,7 +75,7 @@ Ensure the UX agent's operator session exists; returns its row.
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days. A per-host token's usage covers its own host only.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers.
 
 ### `get_clipboard`
 
@@ -234,6 +234,12 @@ Propose a layer split from the last scan, grouping assets by the exact set of ho
 Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it.
 
 Parameters: `rotate`
+
+### `quick_replies`
+
+Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text}]. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
+
+Parameters: `set`
 
 ### `recreate_session`
 
@@ -596,6 +602,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`
+- `commands::quick_replies::quick_replies`
+- `commands::quick_replies::set_quick_replies`
 - `commands::sessions::get_fleet_settings`
 - `commands::sessions::set_fleet_setting`
 - `commands::tasks::list_tasks`

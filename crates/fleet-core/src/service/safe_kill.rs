@@ -372,7 +372,7 @@ pub async fn discard_kill_session(
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
-    let (session_id, worktree_id, worktree_path, project_base) = {
+    let (session_id, removable, project_base) = {
         let s = lock(store)?;
         let row = s
             .get_session(&args.tmux_name, &args.host_alias)?
@@ -385,16 +385,15 @@ pub async fn discard_kill_session(
                     ),
                 )
             })?;
-        let wt = match row.worktree_id {
-            Some(wid) => s.worktree_path(wid)?,
-            None => None,
-        };
         let base = match row.project_id {
             Some(pid) => s.project_base_path(pid)?,
             None => None,
         };
-        (row.id, row.worktree_id, wt, base)
+        let removable = removable_worktree(&s, row.worktree_id, base.as_deref())?;
+        (row.id, removable, base)
     };
+    let worktree_id = removable.as_ref().map(|(wid, _)| *wid);
+    let worktree_path = removable.map(|(_, path)| path);
 
     if let (Some(ref wt), Some(ref base)) = (&worktree_path, &project_base) {
         let force_flag = if force_discard { " --force" } else { "" };
@@ -448,6 +447,35 @@ pub async fn discard_kill_session(
     .await
 }
 
+/// The tree safe kill and discard may `git worktree remove` for a session:
+/// its linked worktree row, as `(id, path)`, unless that row is the `main`
+/// checkout or sits at the project base. The clone itself is never a
+/// `worktree add`, and removing it would remove the repository — a `main`
+/// row can reach a session through `discover_lost_sessions` (a remote
+/// project root) or a repair. `None` for no row, an unknown row, or a tree
+/// that is not removable.
+fn removable_worktree(
+    s: &Store,
+    worktree_id: Option<i64>,
+    project_base: Option<&str>,
+) -> Result<Option<(i64, String)>, IpcError> {
+    let Some(wid) = worktree_id else {
+        return Ok(None);
+    };
+    let Some(row) = s.get_worktree_row(wid)? else {
+        return Ok(None);
+    };
+    if row.name == "main" || project_base.is_some_and(|b| b == row.path) {
+        tracing::warn!(
+            worktree_id = wid,
+            path = %row.path,
+            "[safe_kill] the linked worktree is the main checkout; not removing it"
+        );
+        return Ok(None);
+    }
+    Ok(Some((wid, row.path)))
+}
+
 /// Outcome of one marker scan. `NotYet` means the assistant has not yet
 /// emitted the marker (only the prompt echo is visible) — we leave the
 /// session in `requested` and wait for the next Stop hook.
@@ -479,10 +507,23 @@ pub fn scan_pane_for_marker(pane: &str, nonce: &str) -> MarkerOutcome {
     };
     let lines: Vec<&str> = pane.lines().collect();
     // The placeholder may be cut by the pane's wrap (capture has no -J), so
-    // a FAILED line whose reason opens with `<` is the echo.
-    let after_echo = lines
-        .iter()
-        .rposition(|l| failed_rest(l).is_some_and(|r| r.starts_with('<')))
+    // a FAILED line whose reason opens with `<` is the echo — and so is one
+    // the wrap cut right after `FAILED_<nonce>:`, leaving the placeholder to
+    // open the next line.
+    let is_echo = |i: usize| {
+        failed_rest(lines[i]).is_some_and(|r| {
+            if r.is_empty() {
+                lines
+                    .get(i + 1)
+                    .is_some_and(|next| next.trim_start().starts_with('<'))
+            } else {
+                r.starts_with('<')
+            }
+        })
+    };
+    let after_echo = (0..lines.len())
+        .rev()
+        .find(|&i| is_echo(i))
         .map_or(0, |i| i + 1);
     let Some(last) = lines[after_echo..]
         .iter()
@@ -635,19 +676,19 @@ async fn finalize_safe_kill(
     worktree_id: Option<i64>,
     _project_id: Option<i64>,
 ) -> Result<(), IpcError> {
-    // Resolve paths under a brief lock.
-    let (worktree_path, project_base): (Option<String>, Option<String>) = {
+    // Resolve paths under a brief lock. Only a removable tree (never the
+    // `main` checkout) is inspected, removed and dropped below.
+    let (removable, project_base): (Option<(i64, String)>, Option<String>) = {
         let s = lock(store)?;
-        let wt_path = match worktree_id {
-            Some(wid) => s.worktree_path(wid)?,
-            None => None,
-        };
         let proj_base = match _project_id {
             Some(pid) => s.project_base_path(pid)?,
             None => None,
         };
-        (wt_path, proj_base)
+        let removable = removable_worktree(&s, worktree_id, proj_base.as_deref())?;
+        (removable, proj_base)
     };
+    let worktree_id = removable.as_ref().map(|(wid, _)| *wid);
+    let worktree_path = removable.map(|(_, path)| path);
 
     // Belt + suspenders: even after READY, double-check the worktree is clean.
     // `git status --porcelain` on a non-existent path errors out, which we
@@ -882,6 +923,37 @@ SAFE_REMOVE_READY_n1";
     }
 
     #[test]
+    fn an_echo_wrapped_right_after_the_failed_tag_is_still_the_echo() {
+        // The wrap lands after `FAILED_<nonce>:` (or the space after it) and
+        // the placeholder opens the next line: still the prompt's echo, not
+        // a failure "(no reason given)".
+        for cut in [
+            "  SAFE_REMOVE_FAILED_0badf00d:\n<one-line reason>\n",
+            "  SAFE_REMOVE_FAILED_0badf00d: \n <one-line\n reason>\n",
+        ] {
+            let pane = format!("  SAFE_REMOVE_READY_0badf00d\n{cut}● Working…\n");
+            assert_eq!(
+                scan_pane_for_marker(&pane, "0badf00d"),
+                MarkerOutcome::NotYet,
+                "{cut:?}"
+            );
+            // A reply below that echo is still read.
+            let ready = format!("{pane}● Pushed.\n  SAFE_REMOVE_READY_0badf00d\n");
+            assert_eq!(
+                scan_pane_for_marker(&ready, "0badf00d"),
+                MarkerOutcome::Ready
+            );
+        }
+        // A reply's FAILED marker with no reason, on a line of its own, is a
+        // failure — only a placeholder underneath makes it the echo.
+        let pane = "  SAFE_REMOVE_READY_0badf00d\n  SAFE_REMOVE_FAILED_0badf00d: <one-line reason>\n● SAFE_REMOVE_FAILED_0badf00d:\n";
+        assert_eq!(
+            scan_pane_for_marker(pane, "0badf00d"),
+            MarkerOutcome::Failed("(no reason given)".into())
+        );
+    }
+
+    #[test]
     fn a_reply_with_no_echo_in_the_pane_is_read() {
         // Claude Code folds a long paste into one line, so the reply's
         // marker is the only one in the capture.
@@ -901,6 +973,34 @@ SAFE_REMOVE_READY_n1";
         assert_eq!(
             scan_pane_for_marker(&pane, "22222222"),
             MarkerOutcome::NotYet
+        );
+    }
+
+    #[test]
+    fn the_main_checkout_is_never_the_tree_to_remove() {
+        // A session linked to the `main` row, or to a row at the project
+        // base, has nothing to `git worktree remove`: the clone itself.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let main = s
+            .upsert_worktree(pid, "main", "/p/o/r", Some("main"))
+            .unwrap();
+        let at_base = s
+            .upsert_worktree(pid, "root-alias", "/p/o/r", Some("main"))
+            .unwrap();
+        let feature = s
+            .upsert_worktree(pid, "abc-1", "/p/o/r/.worktrees/abc-1", Some("abc-1"))
+            .unwrap();
+        let base = Some("/p/o/r");
+        assert_eq!(removable_worktree(&s, None, base).unwrap(), None);
+        assert_eq!(removable_worktree(&s, Some(9999), base).unwrap(), None);
+        assert_eq!(removable_worktree(&s, Some(main), base).unwrap(), None);
+        assert_eq!(removable_worktree(&s, Some(main), None).unwrap(), None);
+        assert_eq!(removable_worktree(&s, Some(at_base), base).unwrap(), None);
+        assert_eq!(
+            removable_worktree(&s, Some(feature), base).unwrap(),
+            Some((feature, "/p/o/r/.worktrees/abc-1".to_string()))
         );
     }
 

@@ -6,14 +6,21 @@
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
-  import { composerPresets, resetComposerPresets, addPreset, updatePreset, removePreset } from './composer_presets';
+  import {
+    composerPresets,
+    resetComposerPresets,
+    addPreset,
+    updatePreset,
+    removePreset,
+    flushComposerPresets,
+  } from './composer_presets';
   import { copyOnSelect } from './prefs';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
   import Modal from './Modal.svelte';
   import McpSettings from './McpSettings.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -73,7 +80,19 @@
     type NotificationPermissionState,
   } from './notify';
 
-  let { onClose }: { onClose: () => void } = $props();
+  let { onClose: closeDialog }: { onClose: () => void } = $props();
+
+  /**
+   * Chip edits are debounced (the editor saves on every keystroke), so a
+   * dialog closed straight after the last character would otherwise leave
+   * that character's save to a timer on an unmounted component. Flushing
+   * here is fire-and-forget: it is the same write, only sooner, and the
+   * dialog must not wait on a hub round trip to disappear.
+   */
+  function onClose() {
+    void flushComposerPresets();
+    closeDialog();
+  }
 
   // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
   // a one-line summary that opens the view.
@@ -151,6 +170,18 @@
       hubError = r.error.message;
     }
   }
+
+  // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
+  // graph M12.4): scroll it into view once, then forget the request.
+  onMount(() => {
+    const section = $settingsSection;
+    if (!section) return;
+    settingsSection.set(null);
+    void tick().then(() => {
+      const el = document.querySelector<HTMLElement>(`[data-testid="${section}-section"]`);
+      el?.scrollIntoView?.({ block: 'start' });
+    });
+  });
 
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';

@@ -451,21 +451,43 @@ connecting a second company's tracker.** The details and commands are in
 
 ## Trackers in fleet health
 
-<!-- M12.4: verify after merge -->
+`fleet_health` carries a `trackers` roll-up, read from the cached sync
+state and the store. It never calls a tracker or a host. For each tracker:
 
-*Being built (work graph M12.4); this section follows the plan and will be
-checked against the code once it lands.*
+- `health`: `ok`, `degraded` or `failing`. `auth_failed`, `captcha` and an
+  unconfigured tracker are `failing` at once, since the sync stops polling
+  them. Three failed passes in a row are `failing` too. A transient state
+  (`rate_limited`, `unreachable`) with fewer failures is `degraded`: the sync
+  retries it by itself.
+- `state`, `consecutive_failures`, `last_error` (redacted, one line, at most
+  300 characters, fenced as untrusted), `last_success_at`, `last_pass_at`,
+  and its org.
 
-`fleet_health` gains a tracker roll-up read from the cached sync state (it
-never calls a tracker): per tracker, whether it is ok, degraded or failing,
-its consecutive failures, its last error (redacted) and its last success,
-plus the fleet-wide detection backlog (suggestions waiting for a decision
-for several days). A per-host token sees only its org's trackers. On the
-desktop, a failing tracker (for example an expired token) raises one
-Attention item, **Reconnect Jira (acme)**, which opens Settings → Work.
+Fleet-wide it also counts `failing`, `degraded`, and the **detection
+backlog**: link suggestions on live sessions that have waited more than 7
+days for a decision (`detection_backlog`, `detection_backlog_days`). A
+per-host token sees only its own org's trackers (a host in no org, only
+unassigned ones) and its own host's backlog.
 
-Until then, the same numbers are in `fleet-hub tracker status` and Settings
-→ Work.
+On the desktop:
+
+- The footer shows a one-line summary when there is something to say, for
+  example `trackers: 1 failing · 3 suggestions undecided > 7 d`. Clicking it
+  opens Settings → Work.
+- Each **failing** tracker raises one item in the attention strip,
+  **⚠ Reconnect Jira (acme) →**, which opens Settings scrolled to Work.
+  Hover it for the error, the failure count and the org. A degraded tracker
+  raises none.
+- The roll-up is read at startup and every 60 seconds. On a paired desktop
+  it is the hub's `fleet_health`.
+
+After you set a new credential and **Test** it, the item goes away once the
+tracker is `ok` and a sync pass has succeeded, at the next read after that. The same numbers, with each pass's details, are in `fleet-hub tracker
+status` and Settings → Work. See
+[troubleshooting.md → Tracker sync fails](troubleshooting.md#tracker-sync-fails).
+
+> **[Screenshot placeholder]** The attention strip with a Reconnect item,
+> and the footer's trackers line.
 
 ## The phone
 

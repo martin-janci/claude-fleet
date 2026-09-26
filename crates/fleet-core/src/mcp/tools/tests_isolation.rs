@@ -322,6 +322,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
             fx.t.whoami(ext, Parameters(serde_json::from_value(args).unwrap()))
                 .await
         }
+        "fleet_health" => fx.t.fleet_health(ext).await,
         other => panic!("no harness arm for {other}"),
     };
     match r {
@@ -2189,6 +2190,65 @@ fn every_routed_work_command_names_a_covered_action() {
 
 /// M3's interim fence survives M5: two hosts of the SAME org still read
 /// only the tickets their own sessions work on.
+/// Work graph M12.4: `fleet_health.trackers` is org-scoped for a per-host
+/// token — its own org's trackers only (a host in no org: unassigned ones
+/// only), its own host's backlog — and every caller gets the errors fenced.
+#[tokio::test]
+async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
+    let fx = fixture(false);
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.set_tracker_state(fx.tracker_a, "auth_failed", Some("SECRET-A token expired"))
+            .unwrap();
+        s.set_tracker_state(fx.tracker_b, "auth_failed", Some("SECRET-B token expired"))
+            .unwrap();
+    }
+    let rollup = |a: &Answer| -> Vec<i64> {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        v["trackers"]["trackers"]
+            .as_array()
+            .map(|ts| {
+                ts.iter()
+                    .map(|t| t["tracker_id"].as_i64().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for who in EVERYONE {
+        let a = call(&fx, *who, "fleet_health", json!({})).await;
+        assert_eq!(code(&a), "OK", "{who:?}: {a:?}");
+        for m in who.forbidden_markers() {
+            assert!(!text(&a).contains(m), "{who:?} read {m}: {}", text(&a));
+        }
+        let want = match who {
+            Who::HostA => vec![fx.tracker_a],
+            Who::HostB => vec![fx.tracker_b],
+            Who::HostNone => vec![],
+            _ => vec![fx.tracker_a, fx.tracker_b],
+        };
+        assert_eq!(rollup(&a), want, "{who:?}");
+        if !want.is_empty() {
+            let v: Value = serde_json::from_str(text(&a)).unwrap();
+            let e = v["trackers"]["trackers"][0]["last_error"].as_str().unwrap();
+            assert!(
+                e.starts_with(&crate::mcp::guard::untrusted_marker(
+                    crate::service::health::TRACKER_ERROR_FROM
+                )),
+                "{who:?}: {e}"
+            );
+            assert_eq!(v["trackers"]["failing"], json!(want.len()), "{who:?}");
+        }
+        if who.is_host() {
+            let other = if *who == Who::HostA {
+                "B Jira"
+            } else {
+                "A Jira"
+            };
+            assert!(!text(&a).contains(other), "{who:?}: {}", text(&a));
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
     let fx = fixture(false);

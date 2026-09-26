@@ -410,7 +410,11 @@ The feature itself is explained in the [work guide](work-graph.md).
 
 A tracker's state is shown as a badge in **Settings → Work** (hover it for
 the last error, redacted) with its last sync pass, and on a hub by
-`fleet-hub tracker status` (`work_admin { action: status }`). Nothing waits
+`fleet-hub tracker status` (`work_admin { action: status }`). A **failing**
+tracker also raises **⚠ Reconnect <tracker> →** in the attention strip, and
+the footer's `trackers: …` line counts failing and degraded ones
+(`fleet_health.trackers`; see the
+[work guide](work-graph.md#trackers-in-fleet-health)). Nothing waits
 on a tracker: while it fails, chips, ⌘K and Today answer from the cache, and
 a chip shows ◷ once the tracker has not synced for two intervals.
 

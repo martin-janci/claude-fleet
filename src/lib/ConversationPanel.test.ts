@@ -36,7 +36,7 @@ import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, sessions, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
-import { composerPresets, resetComposerPresets } from './composer_presets';
+import { composerPresets } from './composer_presets';
 import { composerDrafts, insertIntoComposer } from './conversation';
 import { scrollMemory } from './conversation_nav';
 import { openPathRequest } from './app_views';
@@ -141,7 +141,10 @@ beforeEach(() => {
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
   composerDrafts.clear();
   scrollMemory.clear();
-  resetComposerPresets();
+  composerPresets.set([
+    { label: 'Clear', text: '/clear' },
+    { label: 'Compact', text: '/compact' },
+  ]);
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
   sessions.set([]);
