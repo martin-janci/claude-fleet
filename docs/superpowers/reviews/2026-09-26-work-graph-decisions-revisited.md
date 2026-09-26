@@ -432,10 +432,9 @@ the D15 row:
 No usage evidence exists. What the repository shows:
 
 - **Code.** `net/via_host.rs` has `GhCliTransport` and `CurlTransport` only.
-  `net/https.rs`'s module comment still says "A `ViaHost` transport (curl /
-  `gh` / `acli` on a host) arrives with M6". That is stale: `acli` never
-  arrived. It is left as is, since this milestone is docs only; fix it with
-  the next code change there.
+  `net/https.rs`'s module comment said "A `ViaHost` transport (curl /
+  `gh` / `acli` on a host) arrives with M6", but `acli` never arrived. The
+  comment was corrected on 2026-09-26 (see *Revisions*).
 - **The case `acli` was for** is covered two ways:
   - a Jira reachable only from a VPN host → `via_host` (curl, token on stdin
     into a `umask 077` temp dir, never in argv);
@@ -540,3 +539,5 @@ record, besides pass / fail:
   the roadmap.
 - 2026-09-26: the user restated D15 in the roadmap as "multi-start on the
   phone?" (handover recorded as built), as recommended above.
+- 2026-09-26: `net/https.rs`'s module comment no longer promises `acli`.
+  It now points to `net/via_host.rs` (`gh`, `curl`) and D17.

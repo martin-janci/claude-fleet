@@ -10,7 +10,9 @@
 //!   `*.atlassian.net`).
 //! * [`FakeTransport`] answers from a script and records every request, so no
 //!   test ever reaches a real tracker.
-//! * A `ViaHost` transport (curl / `gh` / `acli` on a host) arrives with M6.
+//! * The transports that run on a fleet host over SSH — `gh` and `curl` —
+//!   are in [`super::via_host`] (M6). There is no `acli` transport
+//!   (decision D17).
 //!
 //! [`Request`]'s `Debug` masks credential headers, so a request logged by
 //! accident does not leak one.
