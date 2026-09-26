@@ -107,12 +107,13 @@ free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0)
 # CI runner) and BSD (`stat -f`, a macOS dev box) stat.
 filemode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%OLp' "$1" 2>/dev/null; }
 
-# rpc PORT HOST TOKEN METHOD PARAMS_JSON -> prints the JSON-RPC body (SSE "data:" line stripped)
+# rpc PORT HOST TOKEN METHOD PARAMS_JSON -> prints the JSON-RPC body: the LAST
+# SSE "data:" line, stripped, so a notification framed ahead of it is skipped
 rpc() {
   curl -s -m 60 -X POST "http://127.0.0.1:$1/mcp" \
     -H "Host: $2" -H "Authorization: Bearer $3" \
     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$4\",\"params\":$5}" | sed -n 's/^data: //p'
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$4\",\"params\":$5}" | sed -n 's/^data: //p' | tail -n 1
 }
 tool() { rpc "$1" "$2" "$3" tools/call "{\"name\":\"$4\",\"arguments\":$5}"; }
 code() { curl -s -o /dev/null -w '%{http_code}' -m 10 "$@"; }

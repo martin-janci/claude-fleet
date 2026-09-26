@@ -107,6 +107,21 @@ port or token change, or a reverse-tunnel bounce therefore needs no reconnect
 on the client side — the next call simply works. Responses are SSE-framed so a
 long poll keeps receiving a keep-alive every 15 s.
 
+The SSE mount advertises `tools.listChanged`. With no `GET /mcp` stream to
+push on, `notifications/tools/list_changed` rides a `tools/call`'s own
+response, one frame ahead of the result. A caller is told on its next call
+when the tool list it may see differs from the one it last listed (or was
+last told about), and on its first call after a fleet restart if it has not
+listed since, because the new process cannot know what the client cached.
+In practice that is a client left connected across a fleet upgrade: it
+re-lists and sees the new tools without a manual reconnect. Each change is sent once per token, so two clients sharing
+one token share one notice. Only the master token and per-host tokens are
+told: a paired client (a phone, or a paired desktop) calls a fixed set of
+tools, and a peer hub calls one. `/mcp/json` neither advertises nor sends it,
+because its answer is the handler's first message. A reader that takes the
+last `data:` frame of an SSE body (as `wire::last_event_payload` does) is
+unaffected.
+
 ### Endpoints
 
 | Path | Auth | What it is |
