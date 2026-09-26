@@ -320,6 +320,7 @@
       "pending_input",
       "pr_url",
       "project_id",
+      "prompt_submit_seq",
       "reviews_session_id",
       "row_version",
       "safe_kill_detail",

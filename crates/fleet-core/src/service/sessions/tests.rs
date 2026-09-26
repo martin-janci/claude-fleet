@@ -179,6 +179,7 @@ fn row(
     SessionRow {
         id,
         row_version: 0,
+        prompt_submit_seq: 0,
         tmux_name: tmux.into(),
         host_alias: host.into(),
         project_id,

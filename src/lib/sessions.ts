@@ -117,6 +117,10 @@ export interface SessionRow {
    *  command's return value against a row event. Absent on rows built
    *  client-side and on rows from a hub older than the column. */
   row_version?: number;
+  /** How many UserPromptSubmit hooks the backend has recorded for this row
+   *  (migration 042): the composer's "Claude took it" receipt. Absent from
+   *  a hub older than the field, which has no receipts to give. */
+  prompt_submit_seq?: number;
   // Pane dialog (migration 040): the permission/question dialog a blocked
   // pane is showing, derived alongside current_activity. Null whenever the
   // pane shows no such dialog.
