@@ -906,6 +906,25 @@ impl HubBackend {
     pub async fn ensure_operator(&self) -> Result<SessionRow, IpcError> {
         self.route("ensure_operator", &json!({})).await
     }
+
+    /// `commands::assets::catalog_list_assets`: the hub's catalog with each
+    /// asset's per-host state, the same `AssetListing` the local command
+    /// builds.
+    pub async fn catalog_list_assets(
+        &self,
+    ) -> Result<fleet_core::service::catalog::AssetListing, IpcError> {
+        self.route("catalog_list_assets", &json!({})).await
+    }
+
+    /// `commands::assets::assets_scan_hosts`: `None` scans every reachable
+    /// host.
+    pub async fn assets_scan_hosts(
+        &self,
+        host_alias: Option<String>,
+    ) -> Result<Vec<fleet_core::service::catalog::inventory::HostScanResult>, IpcError> {
+        self.route("assets_scan_hosts", &json!({ "host_alias": host_alias }))
+            .await
+    }
 }
 
 // --- the mutations that are more than their arguments ------------------------
