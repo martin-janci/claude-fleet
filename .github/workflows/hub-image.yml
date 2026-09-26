@@ -198,6 +198,9 @@ jobs:
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success' }}
     needs: [version-consistency, meta, build]
     runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.inspect.outputs.digest }}
+      status: ${{ steps.digests.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -246,8 +249,109 @@ jobs:
             echo
             echo "The arm64 build leg failed. The manifest just published for this tag covers **linux/amd64 only** for \`$IMAGE\`. An arm64 host pulling it will fail until a later run publishes both platforms."
           } >>"$GITHUB_STEP_SUMMARY"
+      # Two calls on purpose: the bare one for the log (the whole manifest,
+      # both platforms, readable), and the `--format` one for the index
+      # digest alone, which `record-digest` below writes onto the release.
+      # `.Manifest.Digest` is the digest of the multi-arch index just pushed
+      # — the thing an operator puts after `@` to pin a deployment to an
+      # image that cannot be re-pointed.
       - name: Inspect the pushed manifest
+        id: inspect
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
           VERSION: ${{ needs.meta.outputs.version }}
-        run: docker buildx imagetools inspect "$IMAGE:$VERSION"
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          {
+            echo "### fleet-hub image"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tag | \`$IMAGE:$VERSION\` |"
+            echo "| Digest | \`$digest\` |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # The version -> digest mapping, written where an operator will look for it:
+  # the release page for this tag. Without it, "which image is 0.3.0?" is only
+  # answerable by querying ghcr, which needs a token with `read:packages`.
+  #
+  # Deliberately soft. The release is created by release.yml, a different
+  # workflow triggered by the same tag push; this job runs after two container
+  # builds, so in practice the release exists long before it — but if it does
+  # not, this warns and succeeds rather than failing a run whose image was
+  # published perfectly well. Re-running the tag then fills it in.
+  #
+  # The block is delimited by HTML comments and rewritten in place, so a re-run
+  # replaces it instead of appending a second copy, and nothing the owner has
+  # edited into the body above it is touched (create-release makes the same
+  # promise about the body on reuse). Body text never goes through a `run:`.
+  #
+  # This is the only job here that needs `contents: write`, so it is the only
+  # one that has it — and it is a separate job from `merge` precisely so the
+  # job that pushes images does not also hold a token that can rewrite
+  # releases.
+  record-digest:
+    if: ${{ github.ref_type == 'tag' && needs.merge.result == 'success' }}
+    needs: [meta, merge]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/fleet-hub
+          VERSION: ${{ needs.meta.outputs.version }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+          STATUS: ${{ needs.merge.outputs.status }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace(/^refs\/tags\//, '');
+            const { IMAGE, VERSION, DIGEST, STATUS } = process.env;
+            if (!DIGEST) {
+              core.warning('The merge job reported no manifest digest; nothing to record.');
+              return;
+            }
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const release = releases.find(r => r.tag_name === tag);
+            if (!release) {
+              core.warning(`No release exists for ${tag} yet — the image digest was not recorded on it. Re-run this workflow once release.yml has created it.`);
+              return;
+            }
+            const START = '<!-- fleet-hub-image -->';
+            const END = '<!-- /fleet-hub-image -->';
+            const block = [
+              START,
+              '### Hub image',
+              '',
+              `\`${IMAGE}:${VERSION}\` — digest \`${DIGEST}\``,
+              '',
+              STATUS === 'amd64-only'
+                ? '> **linux/amd64 only.** The arm64 build leg failed on this run; an arm64 host pulling this tag will fail until a later run publishes both platforms.'
+                : 'Platforms: `linux/amd64`, `linux/arm64`.',
+              '',
+              'The version tag is what `deploy/hub/docker-compose.yml` pins. To pin an image that can never be re-pointed, use the digest instead:',
+              '',
+              '```yaml',
+              `image: ${IMAGE}@${DIGEST}`,
+              '```',
+              END,
+            ].join('\n');
+            const body = release.body || '';
+            const from = body.indexOf(START);
+            const to = body.indexOf(END);
+            let next;
+            if (from !== -1 && to !== -1 && to > from) {
+              next = body.slice(0, from) + block + body.slice(to + END.length);
+              if (next === body) {
+                core.info('The release already records this digest; nothing to do.');
+                return;
+              }
+            } else {
+              next = `${body.trimEnd()}\n\n${block}\n`;
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, body: next });
+            core.info(`Recorded ${IMAGE}:${VERSION}@${DIGEST} on release ${release.id} (${tag}).`);
