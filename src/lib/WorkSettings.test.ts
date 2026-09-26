@@ -485,6 +485,27 @@ describe('Settings → Work, GitHub Enterprise Server and sync metrics (work gra
     expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(true);
   });
 
+  it('shows the items a pass skipped and why (M13.1)', async () => {
+    route([ghe()], {
+      tracker_sync_metrics: [
+        {
+          tracker_id: 9,
+          last_pass_at: 1000,
+          duration_ms: 80,
+          items_failed: 1,
+          consecutive_partial: 2,
+          last_item_error: 'UNIQUE constraint failed',
+          last_error: null,
+        },
+      ],
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('tracker-metrics-skipped')).toBeInTheDocument());
+    expect(screen.getByTestId('tracker-metrics').textContent).toContain('1 skipped (2 passes in a row)');
+    expect(screen.getByTestId('tracker-metrics-skipped').textContent).toContain('UNIQUE constraint failed');
+    expect(screen.queryByTestId('tracker-metrics-error')).toBeNull();
+  });
+
   it('shows a failed pass’s error, and asks for no metrics on a paired desktop', async () => {
     route([ghe()], {
       tracker_sync_metrics: [

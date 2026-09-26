@@ -15,6 +15,7 @@ import TrackerAttention from './TrackerAttention.svelte';
 import {
   plainTrackerError,
   reconnectLabel,
+  skippingLabel,
   trackerAttentionItems,
   trackersHealth,
   trackersSummary,
@@ -94,6 +95,52 @@ describe('tracker attention items (pure)', () => {
     expect(reconnectLabel({ tracker_id: 1, provider: 'future', name: 'x' })).toBe('Reconnect future (x)');
   });
 
+  it('words a tracker failing on skipped items as such, never as Reconnect (M13.1)', () => {
+    const h: TrackersHealth = {
+      trackers: [
+        {
+          tracker_id: 7,
+          provider: 'jira',
+          name: 'acme',
+          health: 'failing',
+          state: 'ok',
+          reason: 'items_skipped',
+          items_failed: 2,
+          consecutive_partial: 3,
+          // A skipped item's error that happens to mention credentials:
+          // the wording comes from `reason`, not from this text.
+          last_error: 'token column: UNIQUE constraint failed',
+        },
+        // The same tracker again: still one item.
+        { tracker_id: 7, provider: 'jira', name: 'acme', health: 'failing', reason: 'items_skipped' },
+        // Skipping, but only degraded: no item yet.
+        { tracker_id: 8, provider: 'asana', name: 'Asana', health: 'degraded', reason: 'items_skipped', items_failed: 1 },
+        // A credential problem still says Reconnect.
+        { tracker_id: 9, provider: 'linear', name: 'ops', health: 'failing', reason: 'credential' },
+      ],
+    };
+    const items = trackerAttentionItems(h);
+    expect(items.map((i) => i.key)).toEqual(['tracker-7', 'tracker-9']);
+    expect(items[0].label).toBe('Sync skipping items — Jira (acme)');
+    expect(items[0].label).not.toContain('Reconnect');
+    expect(items[0].section).toBe('work');
+    expect(items[0].detail).toContain('2 items skipped');
+    expect(items[0].detail).toContain('3 passes in a row');
+    expect(items[0].detail).toContain('UNIQUE constraint failed');
+    expect(items[0].detail).not.toContain('reconnect');
+    expect(items[1].label).toBe('Reconnect Linear (ops)');
+    expect(skippingLabel({ tracker_id: 1, provider: 'github', name: 'acme (GitHub)' })).toBe(
+      'Sync skipping items — acme (GitHub)',
+    );
+  });
+
+  it('keeps Reconnect for an older hub that sends no reason', () => {
+    const [it] = trackerAttentionItems({
+      trackers: [{ tracker_id: 1, provider: 'jira', name: 'acme', health: 'failing', items_failed: 3 }],
+    });
+    expect(it.label).toBe('Reconnect Jira (acme)');
+  });
+
   it('strips only a whole fence', () => {
     expect(plainTrackerError(FENCED)).toBe('Jira answered 401: the API token has expired');
     expect(plainTrackerError('plain text')).toBe('plain text');
@@ -134,6 +181,21 @@ describe('TrackerAttention', () => {
     expect(items[0].getAttribute('title')).toContain('token has expired');
     await fireEvent.click(items[0]);
     expect(get(settingsOpen)).toBe(true);
+    expect(get(settingsSection)).toBe('work');
+  });
+
+  it('renders a skipping tracker with its own wording and opens Settings → Work', async () => {
+    trackersHealth.set({
+      trackers: [
+        { tracker_id: 5, provider: 'jira', name: 'acme', health: 'failing', reason: 'items_skipped', items_failed: 1 },
+      ],
+      failing: 1,
+    });
+    render(TrackerAttention);
+    await tick();
+    const [item] = screen.getAllByTestId('tracker-attention-item');
+    expect(item.textContent?.trim()).toBe('⚠ Sync skipping items — Jira (acme) →');
+    await fireEvent.click(item);
     expect(get(settingsSection)).toBe('work');
   });
 

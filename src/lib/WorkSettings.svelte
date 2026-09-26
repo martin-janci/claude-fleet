@@ -289,6 +289,12 @@
           <li class="hint" data-testid="tracker-metrics">
             {pass}{#if metrics[t.id]?.last_error}<span class="err" data-testid="tracker-metrics-error">
                 · {metrics[t.id].last_error}</span
+              >{/if}{#if (metrics[t.id]?.items_failed ?? 0) > 0 && metrics[t.id]?.last_item_error}<span
+                class="err"
+                data-testid="tracker-metrics-skipped"
+                title="The sync skips an item it cannot store and retries it every pass; the hub's log names the view."
+              >
+                · skipped: {metrics[t.id].last_item_error}</span
               >{/if}
           </li>
         {/if}
