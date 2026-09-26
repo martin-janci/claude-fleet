@@ -897,6 +897,30 @@ async fn a_failed_pass_records_a_redacted_one_line_error_and_a_frame_outside_the
     );
 }
 
+/// Work graph M12.4: `fleet_health` reads how many passes in a row failed.
+#[tokio::test]
+async fn consecutive_failures_count_up_and_a_pass_that_ends_ok_resets_them() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    // Offline (no route): unreachable, which is transient, so every pass runs.
+    for n in 1..=3 {
+        let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+        assert!(!p.skipped && p.error.is_some(), "{p:?}");
+        let m = sync.metrics(&[fx.tracker]).remove(0);
+        assert_eq!(m.consecutive_failures, n, "{m:?}");
+        assert!(m.last_error.is_some());
+    }
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!(
+        (m.consecutive_failures, m.last_error.as_deref()),
+        (0, None),
+        "{m:?}"
+    );
+}
+
 #[test]
 fn a_metric_error_is_redacted_defused_flattened_and_capped() {
     let e = metric_error(
