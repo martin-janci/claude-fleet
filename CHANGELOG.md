@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.3.1] - 2026-09-26
+
+A tracker sync fix, and a release pipeline that keeps releases on their tag.
+No migrations, so upgrading from v0.3.0 is a plain image or app update.
+
+### Fixed
+- **trackers:** before this release, one tracker item that failed to store
+  (bad data, a constraint) rolled back its whole batch and aborted the
+  tracker's sync pass. The view's watermark then never moved, so the same item
+  stalled the tracker on every pass. It could be a single changed item in an
+  incremental listing. Now:
+  - The item is skipped with a warning and the rest of the batch is stored.
+  - The item's view keeps its watermark, so the item is read again on the next
+    pass and nothing is lost.
+  - Every other view, the linked items and the binding still run.
+  - The tracker reports an error only when a whole pass stores nothing.
+  - A transaction SQLite itself rolls back (I/O error, full disk) still aborts
+    the batch.
+- **release:** a published release is kept on its `vX.Y.Z` tag. v0.3.0 went
+  out under an `untagged-…` placeholder until it was re-bound by hand.
+- **ci:** the hub end-to-end check of `fleet_health`'s version now reads the
+  version from `Cargo.toml` rather than assuming `0.2.x`.
+
+### Changed
+- **ci:** the work-graph end-to-end leg (hub W) runs in `hub-headless` on
+  every PR.
+
+### Documentation
+- **work:** the M10.3 manual acceptance run is written down.
+
 ## [0.3.0] - 2026-09-26
 
 A faster hub. On a NAS with spinning disks every store write held the one
@@ -1786,6 +1816,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.3.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.1
 [0.3.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.0
 [0.2.42]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.42
 [0.2.41]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.41
