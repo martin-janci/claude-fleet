@@ -1723,18 +1723,28 @@ describe('Outside fleet group', () => {
     expect(row.querySelector('[aria-label="Kill"]')).not.toBeNull();
   });
 
-  it('a ghosted external row stays read-only: no Recreate / Dismiss', async () => {
-    const ext = { ...sessionFor(null, 'claude-desktop-ghost'), kind: 'external', status: 'ghost', lost_at: 1 };
-    mockBackend(fakeProjects, [ext]);
+  it('a ghosted external row is not listed: fleet cannot restore it', async () => {
+    const live = { ...sessionFor(null, 'claude-desktop-live'), kind: 'external' };
+    const ghost = { ...sessionFor(null, 'claude-desktop-ghost'), kind: 'external', status: 'ghost', lost_at: 1 };
+    mockBackend(fakeProjects, [live, ghost]);
     render(Sidebar);
     await tick(); await tick();
+    expect(screen.getByTestId('outside-fleet')).toHaveTextContent('Outside fleet (1)');
     await fireEvent.click(screen.getByTestId('outside-fleet'));
     await tick();
     const section = screen.getByTestId('outside-fleet-section');
     expect(section.querySelectorAll('[data-testid="sess-row"]')).toHaveLength(1);
-    expect(section.querySelector('[data-testid="ghost-recreate"]')).toBeNull();
-    expect(section.querySelector('[data-testid="ghost-dismiss"]')).toBeNull();
-    expect(section.querySelector('.row-actions')).toBeNull();
+    expect(screen.queryByText('claude-desktop-ghost')).toBeNull();
+    expect(screen.queryByTestId('ghost-recreate')).toBeNull();
+    expect(screen.queryByTestId('ghost-dismiss')).toBeNull();
+  });
+
+  it('only ghosted external rows: no Outside fleet group at all', async () => {
+    const ghost = { ...sessionFor(null, 'claude-desktop-ghost'), kind: 'external', status: 'ghost', lost_at: 1 };
+    mockBackend(fakeProjects, [ghost]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('outside-fleet')).toBeNull();
   });
 
   it('Outside fleet rows cannot be bulk-selected (modifier click or select mode)', async () => {

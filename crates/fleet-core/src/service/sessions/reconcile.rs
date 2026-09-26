@@ -1233,7 +1233,8 @@ pub(super) fn reconcile_agent_rows(
     // Same TTL cutoff as the tmux-keyed prune in `reconcile_write_one_host`
     // (a `host_reboot` verdict marks bg rows lost too — only
     // `tmux_server_gone` is tmux-only — so a resumable bg row deserves the
-    // same exemption). Read fresh here rather than threaded through as a
+    // same exemption; an `external` row never gets it, see
+    // `Store::ghost_and_clean`). Read fresh here rather than threaded through as a
     // parameter so this function's signature (and its many direct callers
     // in tests) is unchanged.
     let lost_ttl_raw = s
