@@ -101,6 +101,12 @@ pub fn stage_script(root: &str) -> String {
     )
 }
 
+mod transfer;
+pub use transfer::{
+    basenames_of, dedupe_names, last_nonempty_line, resolve_worktree_root, run_script,
+    transfer_all, UPLOAD_TIMEOUT_SECS,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
