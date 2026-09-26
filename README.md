@@ -114,6 +114,7 @@ chmod +x claude-fleet_*.AppImage
 
 - [Getting Started](docs/getting-started.md)
 - [Concepts](docs/concepts.md)
+- [Work guide](docs/work-graph.md) — work items, trackers, detection, resume, Today, tidy-up
 - [Troubleshooting](docs/troubleshooting.md)
 - [Control API](docs/control-api.md)
 - [Docs index](docs/README.md)
