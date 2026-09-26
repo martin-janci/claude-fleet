@@ -237,7 +237,9 @@ and CI fails when it is stale. The workflows that tie the tools together
 
 Index by area (names only; see the reference for details):
 
-- **Fleet & hosts** — `fleet_health`, `usage_report` (estimated token
+- **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
+  health and the detection backlog, from cached sync state; a per-host token
+  sees its own org's trackers), `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
