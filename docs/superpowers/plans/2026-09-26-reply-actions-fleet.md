@@ -17,7 +17,7 @@
 - **New `ConvTurn` field is `Option<String>` + `#[serde(default)]`.** An older hub sends nothing and must still deserialise.
 - **Rewind confirmation copy, verbatim:** "The conversation is rewound to before this turn. **Your files are left as they are.**"
 - **Adding a command means:** a row in `src-tauri/src/backend/verdicts.rs`, `route` **by command name** (never a second tool literal), then `REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen`, then `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current`.
-- **The MCP definition budget is guarded.** `BUDGET_BYTES` in `the_served_definition_budget_stays_bounded` (`crates/fleet-core/src/mcp/tools/tests.rs:3291`) is currently `71_658`. Trim first; raise only with the measured before/after numbers written into its doc comment, as every previous raise there does.
+- **The MCP definition budget is guarded.** `BUDGET_BYTES` in `the_served_definition_budget_stays_bounded` (`crates/fleet-core/src/mcp/tools/tests.rs:3352`) is currently `56_660`. Do not trust that number blindly either — read the constant before you measure; it moves whenever main lands a description diet. Trim first; raise only with the measured before/after numbers written into its doc comment, as every previous raise there does.
 - **Verify commands:** `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`, `pnpm test`, `pnpm check`. `scripts/ci-local.sh` runs all of it in CI order.
 - **Caveat:** `cargo` needs the Tauri system libs (dbus, gtk/atk, pkg-config). On a box without them the failure is in a build script — an environment gap, not your code.
 
@@ -1109,10 +1109,10 @@ cargo test -p fleet-core --lib the_served_definition_budget_stays_bounded -- --n
 Expected: FAIL, printing the actual and the budget. Take those two numbers and:
 
 1. Try trimming the tool description first. Every field doc is mandatory (`every_tool_parameter_is_documented`), so the description is the only slack.
-2. Then raise `BUDGET_BYTES` (`crates/fleet-core/src/mcp/tools/tests.rs:3291`, currently `71_658`) to the measured value plus ~100 bytes of headroom, and append a paragraph to its doc comment in the established style, e.g.:
+2. Then raise `BUDGET_BYTES` (`crates/fleet-core/src/mcp/tools/tests.rs:3352`, currently `56_660` — **re-read the constant, do not trust this plan's copy**; it moves whenever main lands a description diet) to the measured value plus ~100 bytes of headroom, and append a paragraph to its doc comment in the established style, e.g.:
 
 ```rust
-    /// Raised from 71,658 to <new> for `rewind_conversation`: one tool with a
+    /// Raised from 56,660 to <new> for `rewind_conversation`: one tool with a
     /// `mode` rather than separate fork/rewind tools, five fields whose
     /// per-field docs `every_tool_parameter_is_documented` makes mandatory.
     /// The surface before it measured <before>; trimming the description to
