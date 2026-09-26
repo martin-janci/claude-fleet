@@ -98,6 +98,12 @@ const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet admin
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
      configure them on the hub with `fleet-hub tracker add|set-credential|test`";
 
+/// Retention (work graph M12.3): the hub sweeps its own store.
+const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
+     status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
+     the fleet's administrator; set the windows with set_setting and read the status on the \
+     hub";
+
 const CATALOG_IS_A_CHECKOUT: &str =
     "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
      no tool for this; work on the catalog there";
@@ -346,6 +352,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "tracker_sync_metrics",
         Verdict::LocalOnly {
             instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    // Work graph M12.3: retention is the hub's own sweep; its status and
+    // sweep_now are `work_admin`, master-only.
+    (
+        "work_retention_status",
+        Verdict::LocalOnly {
+            instead: RETENTION_IS_ADMIN,
+        },
+    ),
+    (
+        "work_retention_sweep",
+        Verdict::LocalOnly {
+            instead: RETENTION_IS_ADMIN,
         },
     ),
     // Work graph M3.4: reading tickets and starting work route like every

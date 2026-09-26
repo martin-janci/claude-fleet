@@ -17,6 +17,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::trackers::admin::{self, TestReport, WorkAdminArgs};
 use fleet_core::service::trackers::sync::SyncMetrics;
 use fleet_core::service::trackers::tickets::{MultiStart, Ticket};
+use fleet_core::service::work::retention;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store, TrackerRow};
 use serde::{Deserialize, Serialize};
@@ -200,6 +201,32 @@ pub fn tracker_sync_metrics(
     )?;
     serde_json::from_value(v)
         .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
+}
+
+// --- retention (work graph M12.3) ---------------------------------------------
+
+/// `work_admin { action: status }`'s retention half: row counts, the dry
+/// run and the last sweep. `LocalOnly` like the rest of `work_admin`.
+#[tauri::command]
+pub async fn work_retention_status(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<retention::RetentionStatus, IpcError> {
+    backend.refuse_local_only("work_retention_status")?;
+    retention::status(&store, fleet_core::service::catalog::now_secs())
+}
+
+/// `work_admin { action: sweep_now }`: one bounded sweep now.
+#[tauri::command]
+pub async fn work_retention_sweep(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<retention::RetentionSweep, IpcError> {
+    backend.refuse_local_only("work_retention_sweep")?;
+    Ok(retention::sweep(
+        &store,
+        fleet_core::service::catalog::now_secs(),
+    ))
 }
 
 // --- reads and start (routed) -------------------------------------------------

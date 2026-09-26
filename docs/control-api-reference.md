@@ -505,7 +505,7 @@ Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `
 
 ### `work_admin`
 
-Trackers and orgs; see action. Never returns a secret.
+Trackers, orgs and retention; see action. Never returns a secret.
 
 Parameters: `action`, `auth_kind`, `auto_tidy`, `color`, `confirm_nonce`, `credential_ref`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
 
@@ -568,6 +568,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
 - `commands::trackers::tracker_sync_metrics`
+- `commands::trackers::work_retention_status`
+- `commands::trackers::work_retention_sweep`
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
 - `commands::trackers::work_lookup`

@@ -155,13 +155,15 @@ impl Store {
         // The latest keep of each session (a later, shorter keep replaces a
         // longer one), written after the row was created: `sessions.id` can
         // be reused, and a keep never outlives the session it was given to.
+        // Driven from `sessions`: each row's keep is found through the
+        // `(session_id, at)` index, never a walk of all of `session_events`.
         let kept: HashMap<i64, i64> = {
             let mut stmt = self.conn.prepare(
-                "SELECT e.session_id, CAST(e.detail AS INTEGER) FROM session_events e \
-                 JOIN sessions s ON s.id = e.session_id \
-                 WHERE e.kind = ?1 AND e.at >= s.created_at \
-                   AND e.id = (SELECT MAX(x.id) FROM session_events x \
-                               WHERE x.session_id = e.session_id AND x.kind = ?1)",
+                "SELECT s.id, CAST(e.detail AS INTEGER) FROM sessions s \
+                 JOIN session_events e ON e.id = \
+                   (SELECT MAX(x.id) FROM session_events x \
+                    WHERE x.session_id = s.id AND x.kind = ?1) \
+                 WHERE e.at >= s.created_at",
             )?;
             let it = stmt.query_map([EVENT_TIDY_KEPT], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))

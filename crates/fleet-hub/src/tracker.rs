@@ -161,6 +161,46 @@ fn status_line(m: &Value) -> String {
     )
 }
 
+/// The retention half of `status` (work graph M12.3): one line per swept
+/// table, then the last sweep. Nothing for an older hub.
+fn retention_lines(r: &Value) -> Vec<String> {
+    let Some(tables) = r["tables"].as_array() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = tables
+        .iter()
+        .map(|t| {
+            let days = t["days"].as_i64().unwrap_or_default();
+            let window = if days == 0 {
+                "kept forever".to_string()
+            } else {
+                format!(
+                    "{} would go now (older than {days} d, nothing live on them)",
+                    t["would_delete"].as_i64().unwrap_or_default()
+                )
+            };
+            format!(
+                "retention {}: {} rows, {window}",
+                t["table"].as_str().unwrap_or("?"),
+                t["rows"].as_i64().unwrap_or_default()
+            )
+        })
+        .collect();
+    let s = &r["last_sweep"];
+    out.push(if s.is_null() {
+        "retention: no sweep since the hub started keeping a record".to_string()
+    } else {
+        format!(
+            "retention: last sweep {} deleted {} journal, {} tickets, {} events",
+            fmt_time(s["at"].as_i64()),
+            s["journal"].as_u64().unwrap_or_default(),
+            s["tracker_items"].as_u64().unwrap_or_default(),
+            s["timeline_work_events"].as_u64().unwrap_or_default(),
+        )
+    });
+    out
+}
+
 /// The `work_admin` arguments for `set-credential`, the secret read from its
 /// source. `read_stdin` is injected so the test never touches a terminal.
 fn credential_args(
@@ -315,12 +355,20 @@ pub async fn run(
         }
         TrackerCmd::Status => {
             let v = call_tool(&conn, "work_admin", json!({ "action": "status" })).await?;
-            let rows = v.as_array().cloned().unwrap_or_default();
+            // `{ trackers, retention }` since M12.3; a bare array before.
+            let rows = v["trackers"]
+                .as_array()
+                .or(v.as_array())
+                .cloned()
+                .unwrap_or_default();
             if rows.is_empty() {
                 out::line("no trackers; add one with `fleet-hub tracker add <ticket-url>`");
             }
             for m in rows {
                 out::line(&status_line(&m));
+            }
+            for l in retention_lines(&v["retention"]) {
+                out::line(&l);
             }
         }
         TrackerCmd::Remove { id } => {
@@ -432,6 +480,26 @@ mod tests {
             "h"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn retention_lines_show_rows_the_dry_run_and_the_last_sweep() {
+        assert!(retention_lines(&Value::Null).is_empty(), "an older hub");
+        let lines = retention_lines(&json!({
+            "tables": [
+                {"table": "work_journal", "days": 365, "rows": 40, "would_delete": 3},
+                {"table": "session_events", "days": 0, "rows": 9, "would_delete": 0},
+            ],
+            "last_sweep": null,
+        }));
+        assert_eq!(
+            lines,
+            [
+                "retention work_journal: 40 rows, 3 would go now (older than 365 d, nothing live on them)",
+                "retention session_events: 9 rows, kept forever",
+                "retention: no sweep since the hub started keeping a record",
+            ]
+        );
     }
 
     #[test]
