@@ -658,7 +658,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
 | D15 | Handover and multi-start on the phone (M10.5)? | read-only M9 only · also the actions | Read-only only (Today + card) |
-| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | Local opt-in, as today |
+| D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Corrected 2026-09-26 (M12.6): already in CI.** `scripts/hub-e2e.sh` runs in the `hub-headless` job on every PR and push to `main`. Only its work-graph leg (hub W, M10.2) is local-only: it needs the `e2e` build (`WBIN`, `scripts/ci-local.sh --hub-e2e`). Whether CI should build that hub too is a new question, the user's |
 
 ## Risks to watch
 
@@ -762,3 +762,11 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: `main` merged into M10.4. M4.6 had landed on `main` (#273,
   OFF behind `work.classify_nudge`), so M10.4's "decided against" is
   withdrawn: D14 reads *built, off by default*.
+- 2026-09-26: M12.6 (docs only). `reviews/2026-09-26-work-graph-decisions-revisited.md`
+  revisits D3, D10, D13, D15/D20 and D17: evidence, smallest safe version,
+  risk and a recommendation each. No M10.3 acceptance run or usage record
+  exists yet, so every recommendation is "keep" pending one. D15's wording
+  no longer matches M8/M8.6 (full-token actions on the phone), and D20 is
+  the cheapest item to turn to yes. D16's row is corrected: `hub-e2e` has
+  run in CI all along, and only hub W is local. The decisions table stays
+  the user's.
