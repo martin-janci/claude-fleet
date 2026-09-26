@@ -552,6 +552,36 @@ impl Store {
         rows.collect()
     }
 
+    /// Every session named `tmux_name` (optionally on just one host), by a
+    /// direct `WHERE tmux_name=?` — used by `whoami`'s resolution
+    /// (`find_session_by_tmux_name_scoped`), which used to call
+    /// [`Self::list_all_sessions`] and filter every row in Rust. Deliberately
+    /// NOT filtered by `lost_at`: a ghosted row must still be considered (a
+    /// live match is preferred over one, but two ghosts of the same name are
+    /// still `E_AMBIGUOUS`, not silently invisible).
+    pub fn find_sessions_by_tmux_name(
+        &self,
+        tmux_name: &str,
+        host_alias: Option<&str>,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        match host_alias {
+            Some(host) => {
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2"
+                ))?;
+                let rows = stmt.query_map(rusqlite::params![tmux_name, host], map_session_row)?;
+                rows.collect()
+            }
+            None => {
+                let mut stmt = self.conn.prepare_cached(&format!(
+                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1"
+                ))?;
+                let rows = stmt.query_map(rusqlite::params![tmux_name], map_session_row)?;
+                rows.collect()
+            }
+        }
+    }
+
     pub fn list_related_sessions(
         &self,
         session_id: i64,
@@ -1463,6 +1493,50 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_session(name, "local", None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// `find_sessions_by_tmux_name` is a direct `WHERE tmux_name=?` (plus an
+    /// optional host filter) — this pins that it finds every host's row of
+    /// that name (including a lost one, which `whoami`'s ambiguity fallback
+    /// still needs to see), names none of a different name, and that the
+    /// host filter narrows to just that host's row.
+    #[test]
+    fn find_sessions_by_tmux_name_matches_every_host_or_just_one() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        s.upsert_host("beta").unwrap();
+        let a = s
+            .upsert_session("dev-a", "alpha", None, None, 0, 0, "running", None)
+            .unwrap();
+        let b = s
+            .upsert_session("dev-a", "beta", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.upsert_session("dev-other", "alpha", None, None, 0, 0, "running", None)
+            .unwrap();
+        // A lost row must still be found — `whoami`'s ambiguity fallback
+        // treats "only ghosts left" as one match, not zero.
+        s.conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=5 WHERE id=?1",
+                rusqlite::params![b],
+            )
+            .unwrap();
+
+        let mut all = s.find_sessions_by_tmux_name("dev-a", None).unwrap();
+        all.sort_by_key(|r| r.id);
+        assert_eq!(all.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
+        assert!(all.iter().any(|r| r.id == b && r.lost_at.is_some()));
+
+        let scoped = s
+            .find_sessions_by_tmux_name("dev-a", Some("alpha"))
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, a);
+
+        assert!(s
+            .find_sessions_by_tmux_name("no-such-name", None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

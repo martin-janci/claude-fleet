@@ -543,6 +543,12 @@ const MIGRATIONS: &[Migration] = &[
     // `participants(peer_link_id)` index (federation review G17):
     // `CREATE INDEX IF NOT EXISTS`, safe to re-run.
     Migration::plain(55, include_str!("../../migrations/055_peer_link_index.sql")),
+    // `sessions(worktree_id)` partial index for live rows (hub store latency,
+    // task 6): `CREATE INDEX IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        56,
+        include_str!("../../migrations/056_session_worktree_index.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2636,5 +2642,64 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 2, "the re-run touched no rows");
+    }
+
+    /// Hub store latency, task 6: `alive_sessions_for_worktree` (called once
+    /// per worktree by the old `list_worktrees` N+1, and inline by
+    /// `delete_worktree`'s occupant guard) filters
+    /// `worktree_id=? AND status='running' AND lost_at IS NULL` with no index
+    /// on `worktree_id`. Migration 056 gives that a partial index; this pins
+    /// that it exists, is partial (only live rows — the minority once a
+    /// fleet has run a while), and is a plain (not unique) index — more than
+    /// one session can point at the same worktree while races settle.
+    #[test]
+    fn migration_056_adds_a_partial_index_on_sessions_worktree_id() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let (unique, sql): (i64, Option<String>) = s
+            .conn
+            .query_row(
+                "SELECT il.\"unique\", m.sql FROM sqlite_master m \
+                   JOIN pragma_index_list(m.tbl_name) il ON il.name = m.name \
+                  WHERE m.type = 'index' AND m.name = 'idx_sessions_worktree_live'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unique, 0, "more than one session can share a worktree_id");
+        let sql = sql.unwrap_or_default();
+        assert!(sql.contains("worktree_id"), "{sql}");
+        assert!(sql.contains(" WHERE "), "partial: {sql}");
+    }
+
+    /// Migration 056 on a database that already has migration 055 and rows in
+    /// `sessions`: it must not disturb them, and running it twice
+    /// (`CREATE INDEX IF NOT EXISTS`) is a no-op.
+    #[test]
+    fn migration_056_on_a_populated_v55_database_is_a_safe_reindex() {
+        const SEED_AT: i64 = 55;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+                 INSERT INTO sessions (id, tmux_name, host_alias, created_at, last_activity_at, status)
+                   VALUES (1, 'a1', 'local', 1, 1, 'running');",
+            )
+            .unwrap();
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        // Re-running the migration script directly (as `migrate()` would on a
+        // database that already recorded 56) must not fail.
+        s.conn
+            .execute_batch(include_str!(
+                "../../migrations/056_session_worktree_index.sql"
+            ))
+            .unwrap();
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the re-run touched no rows");
     }
 }
