@@ -332,6 +332,15 @@ fn routed_read_cases() -> Vec<Case> {
 
     vec![
         (
+            "get_fleet_settings",
+            "get_settings",
+            json!({}),
+            r#"{"gc.enabled":"true"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::get_fleet_settings(b, s)).map(|_| ())
+            }),
+        ),
+        (
             "list_sessions",
             "list_sessions",
             json!({ "summary": false, "force": true, "include_lost": true }),
@@ -978,6 +987,22 @@ fn routed_mutation_cases() -> Vec<Case> {
     use fleet_core::service::worktrees::DeleteWorktreeArgs;
 
     vec![
+        (
+            "set_fleet_setting",
+            "set_setting",
+            // The value crosses as the dialog's string, never re-typed.
+            json!({ "key": "gc.bg_idle_secs", "value": "5400" }),
+            r#"{"gc.bg_idle_secs":"5400"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::set_fleet_setting(
+                    b,
+                    "gc.bg_idle_secs".into(),
+                    "5400".into(),
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "send_prompt",
             "send_prompt",

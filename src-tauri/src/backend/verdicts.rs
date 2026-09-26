@@ -101,8 +101,8 @@ const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet admin
 /// Retention (work graph M12.3): the hub sweeps its own store.
 const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
      status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
-     the fleet's administrator; set the windows with set_setting and read the status on the \
-     hub";
+     the fleet's administrator; its windows are ordinary settings, set in Limits above, and \
+     the status is read on the hub";
 
 const CATALOG_IS_A_CHECKOUT: &str =
     "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
@@ -519,18 +519,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "get_fleet_settings",
-        Verdict::LocalOnly {
-            instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; read them on the \
-                      hub with get_settings (master token)",
+        Verdict::Routed {
+            tool: "get_settings",
         },
     ),
     (
         "set_fleet_setting",
-        Verdict::LocalOnly {
-            instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; change them on \
-                      the hub with set_setting (master token)",
+        Verdict::Routed {
+            tool: "set_setting",
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),

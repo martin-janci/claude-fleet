@@ -85,7 +85,7 @@ Parameters: `host_alias`
 
 ### `get_settings`
 
-Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Not for a per-host token.
 
 ### `hide_host`
 
@@ -451,7 +451,7 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 ### `set_setting`
 
-Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings.
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Not for a per-host token. Returns the settings.
 
 Parameters: `key`, `value`
 

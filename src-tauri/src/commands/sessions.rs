@@ -292,37 +292,32 @@ pub async fn purge_project(
 // owns the key list, defaults and validation; these wrappers only adapt
 // `tauri::State`.
 //
-// Local-only in remote mode, and this is the one pair where returning the
-// local answer would be actively misleading: these settings govern the
-// reconcile tick, the GC sweeper and the playbooks, none of which this
-// process runs when a hub owns the fleet. Showing this app's values would
-// show settings that do nothing, and writing one would change nothing.
+// In remote mode these are the HUB's settings: they govern the reconcile
+// tick, the GC sweeper and the playbooks, which the hub runs and this process
+// does not, so showing or writing this app's own values would do nothing.
+// They route to the hub's `get_settings` / `set_setting` (UX-42), which a
+// paired `full` client may call and a `readonly` one may read.
 
 /// Every registered operator setting with its effective value.
 #[tauri::command]
-pub fn get_fleet_settings(
+pub async fn get_fleet_settings(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.refuse_local_only("get_fleet_settings")?;
-    let s = lock(&store)?;
-    Ok(fleet_core::service::settings::read_all(&s))
+    routed::get_fleet_settings(&backend, &store).await
 }
 
 /// Validate and persist one operator setting. `E_INVALID` for an unknown key
 /// or a value of the wrong shape. Returns the full effective map so the
 /// dialog can re-render from one source of truth.
 #[tauri::command]
-pub fn set_fleet_setting(
+pub async fn set_fleet_setting(
     key: String,
     value: String,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.refuse_local_only("set_fleet_setting")?;
-    let s = lock(&store)?;
-    fleet_core::service::settings::set(&s, &key, &value)?;
-    Ok(fleet_core::service::settings::read_all(&s))
+    routed::set_fleet_setting(&backend, key, value, &store).await
 }
 
 // ── Session timeline (Q9) ───────────────────────────────────────────────────
@@ -790,6 +785,47 @@ pub(crate) mod routed {
             None => {
                 let s = lock(store)?;
                 s.list_conversations(args.session_id, limit)
+            }
+        }
+    }
+
+    pub async fn get_fleet_settings(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("get_fleet_settings", &serde_json::json!({}))
+                    .await
+            }
+            None => {
+                let s = lock(store)?;
+                Ok(fleet_core::service::settings::read_all(&s))
+            }
+        }
+    }
+
+    pub async fn set_fleet_setting(
+        backend: &FleetBackend,
+        key: String,
+        value: String,
+        store: &Mutex<Store>,
+    ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+        match backend.hub() {
+            // The value goes as the string the dialog wrote: the tool stores
+            // a string as given, so the hub validates exactly what this app
+            // would have.
+            Some(hub) => {
+                hub.route(
+                    "set_fleet_setting",
+                    &serde_json::json!({ "key": key, "value": value }),
+                )
+                .await
+            }
+            None => {
+                let s = lock(store)?;
+                fleet_core::service::settings::set(&s, &key, &value)?;
+                Ok(fleet_core::service::settings::read_all(&s))
             }
         }
     }

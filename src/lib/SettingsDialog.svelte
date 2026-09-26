@@ -63,6 +63,7 @@
     hubBlock,
     hubStrandedToken,
     ownsTheFleet,
+    unavailableReason,
   } from './hub';
   import {
     attentionIdleMinutes,
@@ -102,6 +103,9 @@
   // client, but it owns no fleet either, and the backend refuses the same
   // panels. See `ownsTheFleet`.
   const ownsFleet = $derived(ownsTheFleet($hubStatus));
+  /** Why the fleet's settings cannot be shown: a hub is configured and this
+   *  launch cannot use it. `null` standalone and in hub mode alike. */
+  const settingsBlocked = $derived(unavailableReason($hubStatus));
   let hubUrlDraft = $state('');
   let hubCode = $state('');
   let hubAllowPlaintext = $state(false);
@@ -154,20 +158,23 @@
 
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
-    if (!ownsTheFleet($hubStatus)) {
-      // Neither of these applies to a hub client, and both are guarded on
-      // the backend. Asking anyway would put two error toasts on the screen
-      // every time Settings is opened.
-      return;
+    if (ownsTheFleet($hubStatus)) {
+      // This app's own Control API: it does not apply to a hub client, and
+      // asking anyway would put an error toast on the screen at every open.
+      const r = await mcpStatus();
+      // Optional call: Svelte nulls a `bind:this` ref on teardown, so closing
+      // Settings while mcpStatus() is in flight leaves it unset.
+      mcpSettings?.applyStatus(r);
     }
-    const r = await mcpStatus();
-    // Optional call: Svelte nulls a `bind:this` ref on teardown, so closing
-    // Settings while mcpStatus() is in flight leaves it unset — and a throw
-    // here would also skip resetProjectDrafts() below.
-    mcpSettings?.applyStatus(r);
-    const fs = await loadFleetSettings();
-    if (!fs.ok) automationError = fs.error.message;
-    resetProjectDrafts();
+    // The operator settings are the fleet's: this app's own standalone, the
+    // hub's through get_settings in hub mode (UX-42). A configured hub this
+    // launch cannot use answers nothing, and the sections say why instead.
+    if (!$hubStatus.unavailable) {
+      const fs = await loadFleetSettings();
+      if (!fs.ok) automationError = fs.error.message;
+      resetProjectDrafts();
+    }
+    if (!ownsTheFleet($hubStatus)) return;
     // Last, and only standalone: on macOS this reads the keychain, which is
     // the one call here that can block on a locked one. Nothing else on this
     // screen waits for it, and with a hub configured there is nothing to ask
@@ -585,12 +592,10 @@
       {/if}
     </section>
 
-    {#if !ownsFleet}
+    {#if settingsBlocked}
       <section class="block" data-testid="projects-remote-section">
         <div class="section-header"><h4>Projects</h4></div>
-        <p class="hook-desc" data-testid="projects-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)}
-        </p>
+        <p class="hook-desc" data-testid="projects-remote">{settingsBlocked}</p>
       </section>
     {:else}
     <section class="block" data-testid="projects-section">
@@ -775,27 +780,14 @@
 
     <WorkSettings />
 
-    {#if !ownsFleet}
+    {#if settingsBlocked}
       <section class="block" data-testid="automation-remote-section">
         <div class="section-header"><h4>Automation</h4></div>
-        <p class="hook-desc" data-testid="automation-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)}
-        </p>
+        <p class="hook-desc" data-testid="automation-remote">{settingsBlocked}</p>
       </section>
       <section class="block" data-testid="limits-remote-section">
         <div class="section-header"><h4>Limits</h4></div>
-        <p class="hook-desc" data-testid="limits-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)}
-        </p>
-      </section>
-      <section class="block" data-testid="mcp-remote-section">
-        <div class="section-header"><h4>Control API (MCP)</h4></div>
-        <p class="hook-desc" data-testid="mcp-remote">
-          {hubBlock('mcp_status', $hubStatus)}
-        </p>
-        <p class="hook-desc" data-testid="provision-remote">
-          {hubBlock('provision_hosts', $hubStatus)}
-        </p>
+        <p class="hook-desc" data-testid="limits-remote">{settingsBlocked}</p>
       </section>
     {:else}
     <section class="block" data-testid="automation-section">
@@ -1143,7 +1135,13 @@
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTimelineWorkEventsDays, 'Retention: work timeline', e)} />
         <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge and tidy events are kept; the newest of each per session stays (0 = forever)</span>
       </div>
-      <WorkRetention />
+      {#if ownsFleet}
+        <WorkRetention />
+      {:else}
+        <p class="hook-desc" data-testid="work-retention-remote">
+          {hubBlock('work_retention_status', $hubStatus)}
+        </p>
+      {/if}
       <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
       <div class="mcp-field">
         <label class="lbl" for="work-tidy-done-days">tidy: done for</label>
@@ -1243,7 +1241,19 @@
       </div>
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
+    {/if}
 
+    {#if !ownsFleet}
+      <section class="block" data-testid="mcp-remote-section">
+        <div class="section-header"><h4>Control API (MCP)</h4></div>
+        <p class="hook-desc" data-testid="mcp-remote">
+          {hubBlock('mcp_status', $hubStatus)}
+        </p>
+        <p class="hook-desc" data-testid="provision-remote">
+          {hubBlock('provision_hosts', $hubStatus)}
+        </p>
+      </section>
+    {:else}
     <!-- Provisioning mints host tokens: refresh the shared token cache the
          Hosts view reads (host_actions.ts). Module-level, so it is safe even
          when a slow multi-host provision outlives this dialog. -->

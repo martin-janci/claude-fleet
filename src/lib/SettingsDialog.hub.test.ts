@@ -251,30 +251,44 @@ describe('the panels that do not apply to a hub client', () => {
     hubStatus.set(remote);
   });
 
-  // Requirement (a): these six are called UNPROMPTED and now return
-  // E_LOCAL_ONLY, so remote mode showed errors where those panels are.
-  it('does not call the local-only commands it used to call on mount', async () => {
+  // Requirement (a): the local-only panels are not called UNPROMPTED — they
+  // would return E_LOCAL_ONLY and put errors where those panels are. The
+  // operator settings are not among them any more: they route to the hub's
+  // get_settings / set_setting (UX-42).
+  it('does not call mcp_status on mount, and reads the hub\'s settings', async () => {
     const inv = route();
     render(SettingsDialog, { props: { onClose: () => {} } });
     await screen.findByTestId('hub-section');
-    await tick();
-    await tick();
-    for (const cmd of ['mcp_status', 'get_fleet_settings']) {
-      expect(inv.mock.calls.some((c) => c[0] === cmd), cmd).toBe(false);
-    }
+    await waitFor(() =>
+      expect(inv.mock.calls.some((c) => c[0] === 'get_fleet_settings')).toBe(true),
+    );
+    expect(inv.mock.calls.some((c) => c[0] === 'mcp_status')).toBe(false);
   });
 
-  it('replaces each of them with the reason instead of an error', async () => {
-    route();
+  it('shows the hub\'s settings, and a reason where a panel stays local', async () => {
+    const inv = route({
+      get_fleet_settings: { 'gc.enabled': 'false' },
+      set_fleet_setting: { 'gc.enabled': 'true' },
+    });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    for (const testid of ['projects-remote', 'automation-remote', 'limits-remote', 'mcp-remote']) {
+    expect(await screen.findByTestId('projects-section')).toBeInTheDocument();
+    expect(screen.getByTestId('automation-section')).toBeInTheDocument();
+    expect(screen.queryByTestId('projects-remote')).toBeNull();
+    expect(screen.queryByTestId('automation-remote')).toBeNull();
+    expect(screen.queryByTestId('limits-remote')).toBeNull();
+    // This app's own Control API, and the hub's retention sweep, stay a note.
+    for (const testid of ['mcp-remote', 'work-retention-remote']) {
       const note = await screen.findByTestId(testid);
       expect(note.textContent, testid).toContain('fleet.example.com');
     }
-    // …and the controls are gone rather than present-but-broken.
-    expect(screen.queryByTestId('projects-save')).toBeNull();
-    expect(screen.queryByTestId('gc-enabled')).toBeNull();
     expect(screen.queryByTestId('mcp-enable')).toBeNull();
+    // A change goes to the hub, through the routed command.
+    await fireEvent.click(await screen.findByTestId('gc-enabled'));
+    await waitFor(() =>
+      expect(inv.mock.calls.some((c) => c[0] === 'set_fleet_setting')).toBe(true),
+    );
+    const call = inv.mock.calls.find((c) => c[0] === 'set_fleet_setting')!;
+    expect(call[1]).toEqual({ key: 'gc.enabled', value: 'true' });
   });
 
   it('still renders Diagnostics, which is about THIS process either way', async () => {

@@ -207,8 +207,8 @@ const REASONS = {
   mcp_status: 'this app runs no embedded control API while a hub owns the fleet',
   catalog_config:
     'the asset catalog is a git checkout on the machine that owns the fleet; the hub serves its asset list to any paired client (list_assets), but not the configuration and checkout this panel is built on',
-  get_fleet_settings:
-    'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; the hub’s master token reads and changes them (get_settings, set_setting)',
+  work_retention_status:
+    'the retention status and sweep are the hub’s own work_admin, which a paired client never reaches',
   list_account_usage:
     'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:
@@ -253,7 +253,7 @@ export function ownsTheFleet(status: HubStatus = get(hubStatus)): boolean {
  * configured but THIS launch could not use it, so the backend owns no fleet
  * at all and refuses every command — routed or refused — the same way.
  */
-function unavailableReason(status: HubStatus): string | null {
+export function unavailableReason(status: HubStatus): string | null {
   if (!status.unavailable) return null;
   // Not "do it on the hub": the hub is the problem, and every action is
   // refused until it is fixed.

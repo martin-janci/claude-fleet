@@ -209,20 +209,24 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // Operator settings: the values name hosts and their projects roots, and
-    // a write retunes the GC sweeper and auto-tidy for the whole fleet, so
-    // both are fleet admin. The read is `readonly: true` for the reason
-    // `list_clients` is: WHO may call it is a separate question.
+    // Operator settings (UX-42): what the desktop's Settings dialog shows
+    // and changes, so a paired `full` client — the desktop in hub mode — may
+    // change them and a `readonly` one read them. `full` is whole-fleet
+    // session control, and the GC, playbooks and limits are exactly that;
+    // every key is bounded by the settings registry, and mcp.*, hub.* and
+    // controller.* are out of its reach. A per-host token is refused inside
+    // both tools: fleet configuration is not one host's to read or change
+    // (as `work_link { trust_project }`).
     ToolPolicy {
         name: "get_settings",
-        access: Access::Master,
+        access: Access::Client,
         readonly: true,
         confirm: false,
         deadline: Deadline::Quick,
     },
     ToolPolicy {
         name: "set_setting",
-        access: Access::Master,
+        access: Access::Client,
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,

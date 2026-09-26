@@ -312,9 +312,13 @@ impl FleetTools {
 
     #[tool(description = "Operator settings (ticks, GC, playbooks, projects \
         roots, move, usage, reports, work graph), each key's effective value. \
-        Read-only but master token only (it names hosts and their paths).")]
-    pub(super) async fn get_settings(&self) -> Result<CallToolResult, McpError> {
+        Not for a per-host token.")]
+    pub(super) async fn get_settings(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("get_settings", "");
+        refuse_host_token(&caller, "get_settings")?;
         let all = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::settings::read_all(&s)
@@ -323,15 +327,17 @@ impl FleetTools {
     }
 
     #[tool(description = "Change one get_settings key, validated; E_INVALID \
-        otherwise. mcp.*, hub.* and controller.* are refused. Master token \
-        only. Returns the settings.")]
+        otherwise. mcp.*, hub.* and controller.* are refused. Not for a \
+        per-host token. Returns the settings.")]
     pub(super) async fn set_setting(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SetSettingParams>,
     ) -> Result<CallToolResult, McpError> {
         // The key only: a value is not a secret here, but the audit trail
         // keeps values out of every tool alike.
         audit("set_setting", &format!("key={}", p.key.escape_debug()));
+        refuse_host_token(&caller, "set_setting")?;
         let value = match p.value {
             serde_json::Value::String(v) => v,
             serde_json::Value::Null => return Err(mcp_err(
@@ -351,6 +357,19 @@ impl FleetTools {
     }
 
     // ---- workspace repair ----
+}
+
+/// The operator settings are fleet configuration, not one host's: a per-host
+/// token is refused them (the master and a paired client are not).
+fn refuse_host_token(caller: &Caller, tool: &str) -> Result<(), McpError> {
+    match caller.host_alias {
+        Some(_) => Err(mcp_err(
+            "E_FORBIDDEN",
+            format!("{tool} is not available to a per-host token"),
+            None,
+        )),
+        None => Ok(()),
+    }
 }
 
 /// How long a pairing code stays valid: the caller's `ttl_s` clamped to

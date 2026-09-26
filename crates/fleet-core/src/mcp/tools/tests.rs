@@ -1969,16 +1969,14 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
     // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
     // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
     // may reach must also be something a full client may reach. `list_peer_links`
-    // is the same shape for the same reason (it names other fleets), and so
-    // is `get_settings` (it names hosts and their paths).
+    // is the same shape for the same reason (it names other fleets).
     for name in guard::READONLY_TOOLS {
         assert!(
             guard::CLIENT_TOOLS.contains(name)
                 || *name == "list_clients"
-                || *name == "list_peer_links"
-                || *name == "get_settings",
+                || *name == "list_peer_links",
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients/list_peer_links/get_settings special case"
+             documented list_clients/list_peer_links special case"
         );
     }
 }
@@ -3342,6 +3340,9 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
     // description; `set_setting`'s example key now `work.recent_days`),
     // merged over M11.3: measured at 55,635 on 2026-09-26 (+20); plus 100.
+    // get_settings / set_setting open to paired clients (UX-42): "Not for a
+    // per-host token" for "master token only". Measured at 55,602 on
+    // 2026-09-26 (-33): inside the budget, not changed.
     const BUDGET_BYTES: usize = 55_735;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
@@ -7441,39 +7442,81 @@ async fn the_new_operator_gates_change_nothing_for_anyone_else() {
 
 // ---- operator settings ----
 
-/// The settings name hosts and their projects roots, and a write retunes the
-/// GC sweeper and auto-tidy for the whole fleet: only the master token may
-/// read or change them, whatever a client's or per-host token's mode.
+/// The operator settings are what the desktop's Settings dialog shows and
+/// changes (UX-42): the master and a paired `full` client may read and change
+/// them, a `readonly` client may only read them, and a peer token reaches
+/// neither. A per-host token passes the gate but is refused inside both
+/// tools (`the_settings_tools_refuse_a_per_host_token`).
 #[test]
-fn the_settings_tools_are_master_only() {
+fn the_settings_tools_are_the_masters_and_a_paired_clients() {
+    let gate = |c: &Caller, t: &str| enforce_mode(c, t).and_then(|()| enforce_admin(c, t));
     for t in ["get_settings", "set_setting"] {
-        assert!(enforce_admin(&Caller::master(), t).is_ok(), "{t}");
-        for (label, c) in every_caller_kind() {
-            if c.is_master() {
-                continue;
-            }
-            assert!(
-                enforce_mode(&c, t)
-                    .and_then(|()| enforce_admin(&c, t))
-                    .is_err(),
-                "{t}: {label}"
-            );
-        }
+        assert!(gate(&Caller::master(), t).is_ok(), "{t}");
+        assert!(
+            gate(&client_caller("desktop", TokenMode::Full), t).is_ok(),
+            "{t}"
+        );
+        assert!(
+            gate(&client_caller("hub-b", TokenMode::Peer), t).is_err(),
+            "{t}: peer"
+        );
     }
+    let kiosk = client_caller("kiosk", TokenMode::Readonly);
+    assert!(gate(&kiosk, "get_settings").is_ok());
+    assert!(gate(&kiosk, "set_setting").is_err());
     assert!(guard::is_readonly_tool("get_settings"));
     assert!(!guard::is_readonly_tool("set_setting"));
+}
+
+#[tokio::test]
+async fn the_settings_tools_refuse_a_per_host_token() {
+    let (tools, _guards, store) = client_tools();
+    for mode in [TokenMode::Full, TokenMode::Readonly] {
+        let host = host_caller("hosta", mode);
+        let err = tools
+            .get_settings(Extension(host.clone()))
+            .await
+            .expect_err("get_settings");
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        let err = tools
+            .set_setting(
+                Extension(host),
+                Parameters(SetSettingParams {
+                    key: "gc.enabled".into(),
+                    value: serde_json::json!(true),
+                }),
+            )
+            .await
+            .expect_err("set_setting");
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    }
+    assert_eq!(
+        store.lock().unwrap().get_setting("gc.enabled").unwrap(),
+        None
+    );
+    // A paired client is not bound to a host, so it gets through.
+    let phone = Extension(client_caller("desktop", TokenMode::Full));
+    assert!(tools.get_settings(phone).await.is_ok());
 }
 
 #[tokio::test]
 async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     let (tools, _guards, store) = client_tools();
     let set = |key: &str, value: serde_json::Value| {
-        tools.set_setting(Parameters(SetSettingParams {
-            key: key.into(),
-            value,
-        }))
+        tools.set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: key.into(),
+                value,
+            }),
+        )
     };
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Extension(Caller::master()))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(
         v["work.retention.journal_days"], "365",
         "the default when unset: {v}"
@@ -7515,7 +7558,12 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
             Some("[3,7]")
         );
     }
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Extension(Caller::master()))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(v["work.retention.journal_days"], "30");
 
     // Refused: a bad value, an unknown key, a derived key, keys other

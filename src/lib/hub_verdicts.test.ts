@@ -155,10 +155,12 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     'catalog_template',
     'catalog_spawn_author_session',
   ],
-  // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
-  // !ownsFleet}` swaps the whole Projects section for the remote note, and
-  // the Limits section (with WorkRetention.svelte, work graph M12.3) too.
-  gatedBySettingsDialog: ['set_fleet_setting', 'work_retention_status', 'work_retention_sweep'],
+  // Gated by SettingsDialog.svelte's `work_retention_status` gate: in hub
+  // mode the dialog shows that REASONS line instead of mounting
+  // WorkRetention.svelte (work graph M12.3), whose Sweep now button is the
+  // only caller. (The settings themselves route: get_fleet_settings /
+  // set_fleet_setting, UX-42.)
+  gatedBySettingsDialog: ['work_retention_sweep'],
   // (`pty_open` and `upload_to_session` used to be listed here, gated by
   // TerminalView's `ownsTheFleet` check. They are `same_in_both` now: both
   // are this machine's own `ssh`, addressed by the alias passed in, reading
