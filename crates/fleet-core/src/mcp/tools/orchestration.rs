@@ -635,6 +635,10 @@ impl FleetTools {
             WorkAction::Reopened => ok_json_compact(
                 &crate::service::work::tidy::reopened(&self.store, &scope).map_err(to_mcp_err)?,
             ),
+            WorkAction::LocalItems => ok_json_compact(
+                &crate::service::work::local::local_items(&self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            ),
         }
     }
 
@@ -752,6 +756,26 @@ impl FleetTools {
             return ok_json(
                 &crate::service::work::dismiss_reopened(&args, &self.store).map_err(to_mcp_err)?,
             );
+        }
+        if args.action == "name" {
+            // Work graph M11.1: name new local work on a session, or rename
+            // a local item. The host and org fences are inside, and answer
+            // another host's session as an unknown one (no existence oracle),
+            // so the session is not resolved through the host gate here.
+            use crate::service::work::local;
+            return match (args.session_id, args.item_id) {
+                (Some(_), None) => ok_json(
+                    &local::name_session_work(&args, &self.store, &scope).map_err(to_mcp_err)?,
+                ),
+                (None, Some(_)) => ok_json(
+                    &local::rename_local_item(&args, &self.store, &scope).map_err(to_mcp_err)?,
+                ),
+                _ => Err(mcp_err(
+                    "E_INVALID",
+                    "name takes exactly one of session_id (name new work) or item_id (rename)",
+                    None,
+                )),
+            };
         }
         if args.action == "tidy_apply" {
             let items = args.items.clone().unwrap_or_default();

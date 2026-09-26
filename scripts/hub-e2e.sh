@@ -305,6 +305,16 @@ pv_c=$(tool "$PA" "$PUB" "$CTOK" provision_hosts '{}')
 check "a client is refused provision_hosts even in full mode" 'echo "$pv_c" | grep -q E_FORBIDDEN' "${pv_c:0:400}"
 pr_c=$(tool "$PA" "$PUB" "$CTOK" pair_client '{"name":"a second phone"}')
 check "a client cannot pair another client" 'echo "$pr_c" | grep -q E_FORBIDDEN' "${pr_c:0:400}"
+# Operator settings: the master sets the ones with no flag; a client, even
+# full, may neither change nor read them.
+ss_m=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"work.journal_days","value":30}')
+gs_m=$(tool "$PA" "$PUB" "$TOKA" get_settings '{}')
+check "set_setting changes a setting the hub has no flag for, and get_settings reads it back" 'echo "$ss_m" | grep -q "\"isError\":false" && echo "$gs_m" | grep -qE "work\.journal_days[^0-9a-z]+30[^0-9]"' "${ss_m:0:300} / ${gs_m:0:300}"
+ss_x=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"mcp.confirm_destructive","value":false}')
+check "set_setting refuses a key another subsystem owns" 'echo "$ss_x" | grep -q E_INVALID' "${ss_x:0:400}"
+ss_c=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"gc.enabled","value":true}')
+gs_c=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
+check "a client is refused set_setting and get_settings" 'echo "$ss_c" | grep -q E_FORBIDDEN && echo "$gs_c" | grep -q E_FORBIDDEN' "${ss_c:0:300} / ${gs_c:0:300}"
 
 # --- GET /events -------------------------------------------------------------
 check "/events needs a token like /mcp" '[ "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")" = 401 ]' "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")"
@@ -950,6 +960,23 @@ else
   # carries the key, and so does the timeline's audit line of the link).
   check "Beta's stream gets the session frames, with no work in them and no work frame" 'grep -q "^event: session:updated" "$SSEB" && ! grep -q "^event: work" "$SSEB" && ! grep "^data:" "$SSEB" | grep -qE "\"work(_suggested)?\":\{|\"key\":\"E2E-|e2e-secret"' "$(grep "^event:" "$SSEB" | sort | uniq -c)"
   kill $EVM $EVB 2>/dev/null; wait $EVM $EVB 2>/dev/null; WEV_PIDS=""
+
+  # --- 8. name work with no ticket (M11.1) ---------------------------------
+  echo "-- 8. name this work"
+  nm=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"E2E local cleanup\",\"key\":\"e2e-local\"}")
+  check "work_link name links new local work to the session (its E2E-2 stays primary)" '[ "$(jt "$nm" .id)" = "${SWEB:-x}" ] && [ "$(jt "$nm" .work.key)" = E2E-2 ]' "${nm:0:600}"
+  li=$(wcall "$TOKW" work '{"action":"local_items"}')
+  LID=$(jt "$li" '.[] | select(.key == "e2e-local") | .id')
+  check "work { local_items } lists it with its one live session" '[ -n "$LID" ] && [ "$(jt "$li" ".[] | select(.id == ${LID:-0}) | .live_sessions")" = 1 ]' "${li:0:600}"
+  dup=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"dup\",\"key\":\"E2E-1\"}")
+  check "a ticket's key is not new work: E_EXISTS" 'echo "$dup" | grep -q E_EXISTS' "${dup:0:400}"
+  rn=$(wcall "$TOKW" work_link "{\"action\":\"name\",\"item_id\":${LID:-0},\"title\":\"E2E local cleanup, renamed\"}")
+  check "work_link name { item_id } renames the local item" '[ "$(jt "$rn" .title)" = "E2E local cleanup, renamed" ]' "${rn:0:400}"
+  bn=$(wcall "$HTOKB" work_link "{\"action\":\"name\",\"session_id\":${SWEB:-0},\"title\":\"beta\"}")
+  bu=$(wcall "$HTOKB" work_link '{"action":"name","session_id":987654321,"title":"beta"}')
+  check "Beta's host token cannot name work on local's session: it reads as unknown" 'echo "$bn" | grep -q E_NOTFOUND && [ "$(echo "$bn" | grep -o "session [0-9]* not found" | sed "s/[0-9]*//g")" = "$(echo "$bu" | grep -o "session [0-9]* not found" | sed "s/[0-9]*//g")" ]' "${bn:0:300} | ${bu:0:300}"
+  bli=$(wcall "$HTOKB" work '{"action":"local_items"}')
+  check "nor list local's local work" '! echo "$bli" | grep -q "E2E local cleanup"' "${bli:0:400}"
 
   # --- operator confirm (M9.7): no approver on a hub -------------------------
   echo "-- operator"

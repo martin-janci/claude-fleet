@@ -158,6 +158,10 @@ jobs:
               '',
               `Release notes: see the matching section of [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
               '',
+              // Built and signed in its own repository, under this same tag,
+              // by scripts/release-mobile.sh (docs/RELEASING.md step 6).
+              `Android app: the signed APK is on [fleet-mobile ${tag}](https://github.com/${owner}/fleet-mobile/releases/tag/${tag}).`,
+              '',
               `Verify a download against the \`SHA256SUMS\` asset attached below — it covers **every** asset on this release:`,
               '',
               '```bash',
