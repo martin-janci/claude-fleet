@@ -73,7 +73,11 @@ pub fn read_bytes_for(max_chars: usize) -> usize {
 
 /// Sentinel the read script prints (on stderr) so the caller can map a
 /// missing transcript to a code instead of parsing prose.
-const NO_TRANSCRIPT: &str = "__CF_NO_TRANSCRIPT__";
+///
+/// `pub(crate)`: `service::rewind` matches on it too (the rewind script
+/// reuses `locate_script`, which prints the same sentinel for the same
+/// reason).
+pub(crate) const NO_TRANSCRIPT: &str = "__CF_NO_TRANSCRIPT__";
 
 /// The bash script that prints the last `max_bytes` of the transcript.
 ///
