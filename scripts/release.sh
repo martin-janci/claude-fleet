@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Cut a claude-fleet release: bump versions, prefill CHANGELOG, commit, tag.
-# Usage: scripts/release.sh <X.Y.Z>        (run from a clean checkout of main)
+# Usage: scripts/release.sh <X.Y.Z[-rc.N]>  (run from a clean checkout of main)
+#        scripts/release.sh auto           (version derived from the commits)
+#        scripts/release.sh --next         (print that derived version; changes nothing)
 #        scripts/release.sh --list         (print the version carriers; changes nothing)
-# Env:   RELEASE_DRY_RUN=1  edit files only — no cargo/commit/tag (for testing)
-# Needs: bash, git, cargo, node, awk, date. See docs/RELEASING.md.
+# Env:   RELEASE_DRY_RUN=1        edit files only — no cargo/commit/tag (for testing)
+#        RELEASE_SKIP_CI_CHECK=1  tag without proving CI is green on HEAD
+# Needs: bash, git, cargo, node, awk, date, gh. See docs/RELEASING.md.
+#
+# The tag this creates is the trigger for a PUBLISHED release: pushing it runs
+# release.yml, which builds every asset, verifies the release is complete and
+# then publishes it with no further human step. Hence the CI check below —
+# there is no longer a draft standing between a bad tag and users.
 set -euo pipefail
 
 REPO_URL="https://github.com/martin-janci/claude-fleet"
@@ -28,18 +36,98 @@ if [[ ${1:-} == "--list" ]]; then
   exit 0
 fi
 
-[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z> | scripts/release.sh --list"
-NEW="$1"
-[[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "'$NEW' is not a plain semver X.Y.Z"
+[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z[-rc.N]> | auto | --next | --list"
+
+# X.Y.Z, or X.Y.Z-<pre> for a release candidate. The pre-release suffix is the
+# review channel that replaced the draft habit: `v0.3.0-rc.1` builds the same
+# eleven assets, is published like any other release, and is marked
+# `prerelease: true` by release.yml so it never becomes the download users
+# land on and never moves ghcr's `fleet-hub:latest`.
+#
+# Build metadata (`0.3.0+build.7`) is refused even though Cargo accepts it:
+# `+` is not a legal character in a Docker tag, so hub-image.yml could not
+# publish the image for such a version at all.
+check_version() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+    || die "'$1' is not X.Y.Z or X.Y.Z-rc.N ('+build' metadata is not supported: it cannot be a Docker tag)"
+}
+
+# The next version, from the Conventional Commits since the last tag — the
+# same table docs/RELEASING.md documents and the CHANGELOG grouping below
+# uses: a `!` marker or a BREAKING CHANGE footer means major, any `feat` means
+# minor, anything else is a patch. Two deliberate limits: it never invents a
+# pre-release (an -rc.N is always someone's explicit decision), and from a
+# pre-release base it finalises rather than bumps, so `auto` after
+# 0.3.0-rc.2 is 0.3.0 and not 0.3.1.
+derive_next() {
+  local base="$1" range="$2" subjects bodies level major minor patch
+  subjects="$(git log --no-merges --format='%s' "$range")"
+  [[ -n "$subjects" ]] || die "no commits in $range — nothing to release"
+  if [[ "$base" == *-* ]]; then
+    echo "${base%%-*}"
+    return 0
+  fi
+  bodies="$(git log --no-merges --format='%b' "$range")"
+  if grep -qE '^[a-z]+(\([^)]*\))?!: ' <<<"$subjects" || grep -qE '^BREAKING[ -]CHANGE' <<<"$bodies"; then
+    level=major
+  elif grep -qE '^feat(\([^)]*\))?: ' <<<"$subjects"; then
+    level=minor
+  else
+    level=patch
+  fi
+  IFS=. read -r major minor patch <<<"$base"
+  case "$level" in
+    major) echo "$((major + 1)).0.0" ;;
+    minor) echo "$major.$((minor + 1)).0" ;;
+    patch) echo "$major.$minor.$((patch + 1))" ;;
+  esac
+}
+
+NEXT_ONLY=""
+case "$1" in
+  --next) NEXT_ONLY=1 ;;
+  auto) ;;
+  *) check_version "$1"; NEW="$1" ;;
+esac
 
 cd "$(git rev-parse --show-toplevel)"
+CUR="$(node -e 'process.stdout.write(require("./package.json").version)')"
+LAST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+RANGE="${LAST_TAG:+$LAST_TAG..}HEAD"
+
+if [[ -z "${NEW:-}" ]]; then
+  NEW="$(derive_next "$CUR" "$RANGE")"
+  check_version "$NEW"
+fi
+
+# `--next` answers a question; it touches nothing, so it does not care whether
+# the tree is clean or which branch it is on.
+if [[ -n "$NEXT_ONLY" ]]; then
+  echo "$NEW"
+  exit 0
+fi
+
 BRANCH="$(git branch --show-current)"
 [[ "$BRANCH" == "main" ]] || die "must run on main (currently on '$BRANCH')"
 [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty — commit or discard first"
 git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null && die "tag v$NEW already exists"
-
-CUR="$(node -e 'process.stdout.write(require("./package.json").version)')"
 [[ "$CUR" != "$NEW" ]] || die "package.json is already at $NEW"
+
+# CI must have passed on the commit being released. Pushing the tag this
+# script creates now publishes a release without anyone looking at it, so the
+# one remaining place to catch a red tree is here, before the tag exists.
+# scripts/check-ci-green.sh defines "green" and, importantly, refuses when it
+# cannot tell — no run for this sha, a run still going, a cancelled or skipped
+# run. What it CANNOT cover: the release commit created below is by
+# construction newer than anything CI has seen; release.yml's own
+# version-consistency job is what covers that commit.
+if [[ -n "${RELEASE_SKIP_CI_CHECK:-}" ]]; then
+  echo "release.sh: RELEASE_SKIP_CI_CHECK is set — releasing $NEW without checking CI on HEAD" >&2
+else
+  scripts/check-ci-green.sh \
+    || die "CI is not green on HEAD (see above). Fix it, or set RELEASE_SKIP_CI_CHECK=1 if you know why this is safe."
+fi
+
 echo "Bumping $CUR -> $NEW"
 
 # --- 1. Version fields (first occurrence only; formatting preserved) ---------
@@ -123,8 +211,8 @@ if [[ -z "${RELEASE_DRY_RUN:-}" ]]; then
 fi
 
 # --- 3. CHANGELOG.md section, grouped by Conventional Commit type -------------
-LAST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
-RANGE="${LAST_TAG:+$LAST_TAG..}HEAD"
+# LAST_TAG / RANGE were resolved before the bump, because `auto` derives the
+# version from the very same commit range this section is built from.
 TODAY="$(date +%Y-%m-%d)"
 SECTION="$(git log --no-merges --format='%s' "$RANGE" | awk '
   {
@@ -180,3 +268,7 @@ git tag -a "v$NEW" -m "claude-fleet v$NEW"
 echo
 echo "Committed chore(release): v$NEW and created tag v$NEW. To publish:"
 echo "  git push origin main --follow-tags"
+echo
+echo "That push builds every asset and — once verify-release passes — PUBLISHES"
+echo "the release. Nothing else to press. If a leg fails, the release stays a"
+echo "draft; fix the leg and re-run the workflow from the same tag."
