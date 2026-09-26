@@ -31,6 +31,8 @@
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
   import ReplyActions from './ReplyActions.svelte';
+  import ForkSheet from './ForkSheet.svelte';
+  import { finalizeBranchSlug } from './branch-slug';
   import {
     findMatches,
     turnIndex,
@@ -1671,10 +1673,24 @@
     expanded = next;
   }
 
-  // Stub for Task 7 (the fork worktree sheet), which calls the backend
-  // itself once it exists. `_anchor` is the fork's truncation anchor:
-  // `null` keeps the whole transcript.
-  function openForkSheet(_anchor: string | null) {}
+  // The fork worktree sheet (Task 7): records the anchor and opens
+  // <ForkSheet>, which calls the backend itself. `anchor` is the fork's
+  // truncation anchor: `null` keeps the whole transcript.
+  let forkAnchor = $state<string | null>(null);
+  let forkOpen = $state(false);
+
+  function openForkSheet(anchor: string | null) {
+    forkAnchor = anchor;
+    forkOpen = true;
+  }
+
+  /** `fork-of-<branch>`, slugified for use as a new worktree's name — the
+   *  branch/worktree's name when this session has one, else its tmux name,
+   *  which is what a `main`-checkout session forks from. */
+  function suggestedForkName(s: SessionRow): string {
+    const base = s.friendly_name?.trim() || s.tmux_name;
+    return finalizeBranchSlug(`fork-of-${base}`) || 'fork';
+  }
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
@@ -2214,6 +2230,15 @@
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>
+
+{#if forkOpen}
+  <ForkSheet
+    sessionId={session.id}
+    anchor={forkAnchor}
+    suggestedName={suggestedForkName(session)}
+    onclose={() => (forkOpen = false)}
+  />
+{/if}
 
 <style>
   .composer-above {

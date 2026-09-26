@@ -155,10 +155,24 @@ pub struct RewindArgs {
     /// which is what forking the newest turn means.
     pub anchor_uuid: Option<String>,
     pub mode: RewindMode,
-    /// Fork only: `Some(name)` puts the new session in a new worktree of that
-    /// name, `None` reuses the source session's. NOT implemented yet (Task
-    /// 7): the fork arm below reuses the source's worktree unconditionally
-    /// and leaves this field unread.
+    /// Fork only: `Some(name)` would put the new session in a NEW worktree
+    /// of that name; `None` reuses the source session's, the only mode
+    /// implemented. Task 7 investigated `Some(name)` and found it not
+    /// implementable without either duplicating worktree creation outside
+    /// `new_session` or guessing a path: a not-yet-created worktree's
+    /// physical path is only known AFTER `git worktree add` runs (`pwd -P`,
+    /// inside `service::sessions::lifecycle::worktree_add_script` /
+    /// `create_worktree_local`), and that call happens exclusively inside
+    /// `new_session` — by design, per `RemoteWorktree`'s own doc: a
+    /// checkout's path is "the one the host scan RECORDED... NOT re-derived
+    /// from `name`". `rewind_script` (which writes the truncated transcript
+    /// into the NEW cwd's encoded project dir) has to run BEFORE
+    /// `new_session` creates the pane, so it cannot wait for a path only
+    /// `new_session` can produce. `Some(name)` is therefore refused with
+    /// `E_UNSUPPORTED` at the top of `rewind_conversation`, rather than
+    /// silently reusing the source worktree (a different action from the
+    /// one asked for) or writing the transcript at a guessed path (a fork
+    /// that silently starts with no history).
     pub new_worktree: Option<String>,
 }
 
@@ -207,6 +221,16 @@ pub async fn rewind_conversation(
     if let Some(a) = args.anchor_uuid.as_deref() {
         crate::validate::claude_session_id(a)
             .map_err(|_| IpcError::new(codes::E_INVALID, "anchor_uuid must be a lowercase UUID"))?;
+    }
+    // Forking into a NEW worktree is not implemented — see `RewindArgs::
+    // new_worktree`'s doc for the full reasoning. Refuse up front, before
+    // any I/O, rather than silently reusing the source worktree or writing
+    // the transcript at a guessed path.
+    if args.mode == RewindMode::Fork && args.new_worktree.is_some() {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            "forking into a new worktree isn't implemented yet; fork without a worktree name to reuse this session's worktree",
+        ));
     }
     // Snapshot under one short lock; every I/O below happens with it released.
     let (sess, claude_id, stored_transcript_path) = {
@@ -299,9 +323,12 @@ pub async fn rewind_conversation(
             .await
         }
         RewindMode::Fork => {
-            // Left for Task 7 to extend with `new_worktree`; reusing the
-            // source's worktree is the shape that needs no git.
-            let _ = &args.new_worktree;
+            // `args.new_worktree` is guaranteed `None` here (the early
+            // refusal above sends any `Some(_)` back as `E_UNSUPPORTED`),
+            // so this arm only ever reuses the source's worktree — the
+            // shape that needs no git and no cwd rewrite, since the pane
+            // starts exactly where `rewind_script` already wrote the
+            // transcript above.
             let project_id = project_id_for_fork(sess.project_id)?;
             crate::service::sessions::new_session(
                 crate::service::sessions::NewSessionArgs {
@@ -752,5 +779,88 @@ mod tests {
             codes::E_INVALID_STATE
         );
         assert_eq!(project_id_for_fork(Some(7)).unwrap(), 7);
+    }
+
+    #[test]
+    fn a_new_worktree_fork_rewrites_cwd_and_targets_the_new_project_dir() {
+        // The pane must start where the transcript says it did, or
+        // `cl --resume` will not find the conversation (see the constraint on
+        // NewSessionArgs::resume_claude_session_id). So a cross-worktree fork
+        // writes into the NEW cwd's encoded project dir with `cwd` rewritten.
+        let enc = crate::service::transcript::encode_project_dir("/src/app-fork");
+        assert_eq!(enc, "-src-app-fork");
+        let s = rewind_script(
+            None,
+            Some("/t/x.jsonl"),
+            None,
+            OLD,
+            NEW,
+            Some(A2),
+            Some(&format!("/home/u/.claude/projects/{enc}")),
+            Some(("/src/app", "/src/app-fork")),
+        );
+        assert!(
+            s.contains(&format!("projects/{enc}")),
+            "dest dir must be the new cwd's: {s}"
+        );
+        assert!(s.contains("'/src/app-fork'"));
+    }
+
+    // ── forking into a NEW worktree: refused, not implemented ──────────
+    //
+    // See `RewindArgs::new_worktree`'s doc for the full reasoning: the
+    // script test above proves `rewind_script` itself is fully capable of
+    // writing into a different cwd's project dir (Task 2/3 already shipped
+    // `dest_dir` / `cwd_rewrite`). What Task 7 could not do is find that new
+    // cwd's PHYSICAL path before `new_session` creates it — `git worktree
+    // add`'s `pwd -P` is the only thing that produces it
+    // (`service::sessions::lifecycle::worktree_add_script`), and that call
+    // is reachable only from inside `new_session`. So `rewind_conversation`
+    // refuses `mode: Fork` + `new_worktree: Some(_)` outright, rather than
+    // silently reusing the source worktree or guessing a path.
+    #[tokio::test]
+    async fn forking_into_a_new_worktree_is_refused_before_anything_runs() {
+        let (s, id) = store_with_session("running", Some("working"));
+        let err = rewind_conversation(
+            RewindArgs {
+                session_id: id,
+                anchor_uuid: Some(A2.into()),
+                mode: RewindMode::Fork,
+                new_worktree: Some("fork-of-canopus".into()),
+            },
+            &std::sync::Mutex::new(s),
+            &std::sync::Arc::new(SshClient::new()),
+            &CancellationRegistry::new(),
+        )
+        .await
+        .expect_err("new-worktree fork is not implemented");
+        assert_eq!(err.code, codes::E_UNSUPPORTED);
+        assert!(
+            err.message.contains("isn't implemented"),
+            "the refusal must say why, not just that it failed: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn forking_without_a_new_worktree_is_unaffected_by_the_refusal() {
+        // `new_worktree: None` must keep taking the existing, fully-working
+        // same-worktree path — asserted on the refusal being a DIFFERENT
+        // one (an unreachable host), never `E_UNSUPPORTED`.
+        let (s, id) = store_with_session("running", Some("idle"));
+        let err = rewind_conversation(
+            RewindArgs {
+                session_id: id,
+                anchor_uuid: Some(A2.into()),
+                mode: RewindMode::Fork,
+                new_worktree: None,
+            },
+            &std::sync::Mutex::new(s),
+            &std::sync::Arc::new(SshClient::new()),
+            &CancellationRegistry::new(),
+        )
+        .await
+        .expect_err("unreachable host");
+        assert_ne!(err.code, codes::E_UNSUPPORTED);
     }
 }
