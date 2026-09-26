@@ -6,9 +6,10 @@ use super::*;
 use crate::events::RecordingEventBus;
 use crate::net::https::{FakeTransport, Method, Response};
 use crate::service::trackers::jira::VIEW_MINE;
-use crate::service::trackers::TrackerNet;
+use crate::service::trackers::{StatusSnapshot, TrackerNet};
 use crate::store::{TrackerConfig, WorkTarget};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 const T0: i64 = 1_790_000_000;
 
@@ -99,6 +100,25 @@ impl Fx {
             .tracker_item_for_key(key)
             .unwrap()
             .unwrap_or_else(|| panic!("{key} not cached"))
+    }
+
+    fn item_opt(&self, key: &str) -> Option<crate::store::WorkItemRow> {
+        self.store
+            .lock()
+            .unwrap()
+            .tracker_item_for_key(key)
+            .unwrap()
+    }
+
+    fn watermark(&self, view_id: &str) -> Option<i64> {
+        self.store
+            .lock()
+            .unwrap()
+            .list_tracker_views(self.tracker)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.view_id == view_id)
+            .and_then(|v| v.watermark)
     }
 }
 
@@ -1006,7 +1026,10 @@ async fn a_sync_token_view_reads_changes_and_an_expired_token_lists_whole() {
 
 /// The token moves only once the items it stands for are stored: a store
 /// write that fails leaves the token where it was, so the next pass reads
-/// the same changes again instead of skipping them.
+/// the same changes again instead of skipping them. (2026-09-26: a per-item
+/// store failure like this one — bad data, not a lost transaction — no
+/// longer fails the whole pass either; it is tolerated and retried next
+/// time, which is exactly what leaves the token behind for it to happen.)
 #[tokio::test]
 async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
     let fx = Fx::new();
@@ -1044,7 +1067,10 @@ async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
     let r = sync
         .run_provider(&row, &bad, views.clone(), &fx.store, T0, &mut pass)
         .await;
-    assert!(r.is_err(), "the store refused the item");
+    assert!(
+        r.is_ok(),
+        "one bad item is tolerated, not a whole-pass failure: {r:?}"
+    );
     assert_eq!(
         mark(&fx).as_deref(),
         Some("tok-1"),
@@ -1059,4 +1085,171 @@ async fn a_sync_mark_is_written_only_after_the_items_are_stored() {
         .unwrap();
     assert_eq!(mark(&fx).as_deref(), Some("tok-2"));
     assert_eq!(pass.changed, 1);
+}
+
+// ── tracker per-item tolerance (2026-09-26): one poison item in a batch
+//    must not roll back the rest, and a lost transaction still must ──
+
+fn poison_snap(ext: &str, key: &str, updated: i64) -> WorkItemSnapshot {
+    WorkItemSnapshot {
+        external_id: ext.into(),
+        key: Some(key.into()),
+        title: format!("{key} title"),
+        status: StatusSnapshot {
+            name: "To Do".into(),
+            category: "todo".into(),
+            ..Default::default()
+        },
+        updated: Some(updated),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn store_items_tolerates_one_poison_item_mid_batch() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_mid_batch BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'poison-2' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let items = vec![
+        poison_snap("item-1", "ABC-1", 1),
+        poison_snap("poison-2", "ABC-2", 2),
+        poison_snap("item-3", "ABC-3", 3),
+    ];
+    fx.bus.take();
+    let mut seen = HashSet::new();
+    let mut pass = TrackerPass {
+        tracker_id: fx.tracker,
+        ..Default::default()
+    };
+    let failed = sync
+        .store_items(fx.tracker, items, &fx.store, &mut seen, &mut pass)
+        .unwrap();
+    assert_eq!(failed, 1, "{pass:?}");
+    assert_eq!((pass.seen, pass.changed), (2, 2), "{pass:?}");
+    assert!(
+        fx.item_opt("ABC-1").is_some(),
+        "the item before the poison one is stored"
+    );
+    assert!(
+        fx.item_opt("ABC-3").is_some(),
+        "the item after the poison one is stored"
+    );
+    assert!(
+        fx.item_opt("ABC-2").is_none(),
+        "the poisoned item must never persist"
+    );
+    assert_eq!(
+        fx.bus.names().iter().filter(|n| **n == "work:item").count(),
+        2,
+        "no event for the poison item: {:?}",
+        fx.bus.names()
+    );
+}
+
+#[tokio::test]
+async fn store_items_propagates_a_lost_outer_transaction_and_persists_nothing() {
+    let fx = Fx::new();
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER lose_tx_mid_batch BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = 'boom' \
+             BEGIN SELECT RAISE(ROLLBACK, 'lost'); END;",
+        )
+        .unwrap();
+    let sync = fx.sync(|| T0);
+    let items = vec![
+        poison_snap("item-1", "ABC-1", 1),
+        poison_snap("boom", "ABC-2", 2),
+    ];
+    let mut seen = HashSet::new();
+    let mut pass = TrackerPass {
+        tracker_id: fx.tracker,
+        ..Default::default()
+    };
+    let err = sync
+        .store_items(fx.tracker, items, &fx.store, &mut seen, &mut pass)
+        .unwrap_err();
+    assert!(
+        matches!(&err, TrackerError::Invalid(m) if m.contains("rolled back")),
+        "names the lost transaction: {err:?}"
+    );
+    assert!(
+        fx.item_opt("ABC-1").is_none(),
+        "nothing from the batch persisted, not even the earlier good item"
+    );
+}
+
+#[tokio::test]
+async fn run_pass_does_not_advance_the_watermark_when_a_view_batch_has_a_poison_item() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_10104 BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = '10104' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    let passes = sync.run_pass(&fx.store).await.unwrap();
+    let p = &passes[0];
+    assert_eq!(
+        p.error, None,
+        "a per-item failure must not fail the whole pass: {p:?}"
+    );
+    assert_eq!(p.seen, 6, "the poison item is not counted: {p:?}");
+    assert_eq!(
+        fx.watermark("mine"),
+        None,
+        "the watermark must not advance while one item of the view failed"
+    );
+    assert!(
+        fx.item_opt("ABC-103").is_some(),
+        "the good items are stored"
+    );
+    assert!(
+        fx.item_opt("ABC-104").is_none(),
+        "the poison item never persisted"
+    );
+
+    // Remove the trigger: the next pass (still a whole listing, since the
+    // watermark never advanced) stores everything and moves the watermark.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch("DROP TRIGGER poison_10104")
+        .unwrap();
+    fx.fake.clear_routes();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    let passes2 = sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(passes2[0].error, None, "{:?}", passes2[0]);
+    assert_eq!(
+        fx.watermark("mine"),
+        Some(1_789_892_130),
+        "now the watermark advances"
+    );
+    assert!(
+        fx.item_opt("ABC-104").is_some(),
+        "retried on the next pass and stored"
+    );
 }

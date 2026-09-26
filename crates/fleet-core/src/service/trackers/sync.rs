@@ -468,24 +468,33 @@ impl TrackerSync {
             pass.listed += items.len();
             let newest = items.iter().filter_map(|i| i.updated).max();
             let ids: Vec<String> = items.iter().map(|i| i.external_id.clone()).collect();
-            self.store_items(t.id, items, store, &mut seen, pass)?;
-            // The token and the watermark move only once the items they
-            // stand for are stored: a write that fails leaves them to be
-            // read again, not skipped.
+            let failed = self.store_items(t.id, items, store, &mut seen, pass)?;
+            // The token and the watermark move only once EVERY item they
+            // stand for is safely stored: a batch with a per-item failure
+            // leaves them where they are, so the next pass re-reads the
+            // poison item too (the good ones re-upsert as harmless no-ops),
+            // and this pass does not count as this view's whole listing
+            // either — a later pass must still try a full one.
             if let Ok(s) = self.lock(store) {
-                if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
-                    let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
-                }
-                if let Some(w) = newest {
-                    let _ = s.set_tracker_view_watermark(t.id, &v.view_id, w);
+                if failed == 0 {
+                    if let Some(m) = mark.filter(|m| Some(m.as_str()) != v.sync_mark.as_deref()) {
+                        let _ = s.set_tracker_view_mark(t.id, &v.view_id, Some(&m));
+                    }
+                    if let Some(w) = newest {
+                        let _ = s.set_tracker_view_watermark(t.id, &v.view_id, w);
+                    }
                 }
                 // Favourite filters and containers (Asana projects) keep
-                // their membership: nothing local can evaluate them.
+                // their membership: nothing local can evaluate them. This
+                // only touches items already committed (a poison item that
+                // never made it into `work_items` has no row to mark), so a
+                // batch failure elsewhere in the listing does not stop the
+                // good items' membership from being recorded now.
                 if v.view_id.starts_with("filter:") || v.view_id.starts_with("project:") {
                     let _ = s.set_view_members(t.id, &v.view_id, &ids, full);
                 }
             }
-            if full {
+            if full && failed == 0 {
                 if let Ok(mut m) = self.last_full.lock() {
                     m.insert((t.id, v.view_id.clone()), now);
                 }
@@ -577,7 +586,7 @@ impl TrackerSync {
         store: &Mutex<Store>,
         seen: &mut HashSet<(String, Option<i64>)>,
         pass: &mut TrackerPass,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<usize, TrackerError> {
         let mut found = Vec::new();
         for f in fetched {
             match f {
@@ -597,11 +606,25 @@ impl TrackerSync {
         self.store_items(tracker_id, found, store, seen, pass)
     }
 
-    /// One batch's items, one transaction: every upsert (and its status
-    /// journal row) commits together instead of autocommitting per item,
-    /// and an unchanged item's `fetched_at` touch is deferred to a single
+    /// One batch's items, one transaction: every upsert commits together
+    /// (an unchanged item's `fetched_at` touch is deferred to a single
     /// batched `UPDATE … WHERE id IN (…)` after the loop instead of one
-    /// `UPDATE` each.
+    /// `UPDATE` each) — but a per-item SQL failure (a constraint, a hostile
+    /// trigger) no longer aborts the whole batch: `Store::upsert_tracker_item_or_skip`
+    /// runs the upsert and its status-change journal row in their own
+    /// nested `SAVEPOINT`, rolling back only that item on a per-item
+    /// failure, `Ok(None)`. Such an item is not counted in `pass.seen` /
+    /// `pass.changed`, and is dropped from `seen` again so a later
+    /// occurrence in the same pass (a linked-item refresh after a view
+    /// listing, say) may retry it. A lost outer transaction
+    /// (`Store::ensure_in_tx`, inside `upsert_tracker_item_or_skip`) still
+    /// propagates here as `Err`: the whole batch aborts exactly as before,
+    /// nothing of it persists.
+    ///
+    /// Returns how many items in THIS batch failed, for the caller (the
+    /// view loop in `run_provider`) to gate the view's watermark / sync
+    /// mark / whole-listing bookkeeping on: those only move once every item
+    /// they stand for is safely stored.
     fn store_items(
         &self,
         tracker_id: i64,
@@ -609,37 +632,39 @@ impl TrackerSync {
         store: &Mutex<Store>,
         seen: &mut HashSet<(String, Option<i64>)>,
         pass: &mut TrackerPass,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<usize, TrackerError> {
         let s = self
             .lock(store)
             .map_err(|e| TrackerError::Invalid(e.message))?;
+        let mut failed = 0usize;
         s.atomically(|s| {
             let mut unchanged_ids = Vec::new();
             for item in items {
-                if !seen.insert((item.external_id.clone(), item.updated)) {
+                let key = (item.external_id.clone(), item.updated);
+                if !seen.insert(key.clone()) {
                     continue;
                 }
-                pass.seen += 1;
-                let key = item.key.clone();
-                let out = s.upsert_tracker_item_batched(tracker_id, &to_write(item))?;
-                if out.changed {
-                    pass.changed += 1;
-                } else {
-                    unchanged_ids.push(out.id);
-                }
-                if let Some((from, to)) = out.status_change {
-                    // Best-effort, unless the failure took the batch's
-                    // transaction with it (`Store::ensure_in_tx`).
-                    if s.journal_status_change(out.id, key.as_deref(), &from, &to)
-                        .is_err()
-                    {
-                        s.ensure_in_tx()?;
+                match s.upsert_tracker_item_or_skip(tracker_id, &to_write(item))? {
+                    Some(out) => {
+                        pass.seen += 1;
+                        if out.changed {
+                            pass.changed += 1;
+                        } else {
+                            unchanged_ids.push(out.id);
+                        }
+                    }
+                    None => {
+                        // `upsert_tracker_item_or_skip` already warned with
+                        // the tracker id, external id and the error.
+                        failed += 1;
+                        seen.remove(&key);
                     }
                 }
             }
             s.touch_tracker_items_fetched_at(&unchanged_ids)
         })
-        .map_err(|e| TrackerError::Invalid(e.message))
+        .map_err(|e| TrackerError::Invalid(e.message))?;
+        Ok(failed)
     }
 }
 

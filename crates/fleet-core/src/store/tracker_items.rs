@@ -347,6 +347,48 @@ impl Store {
         Ok(())
     }
 
+    /// One item of a tracker sync batch: [`Store::upsert_tracker_item_batched`]
+    /// and, when the status moved, its [`Store::journal_status_change`] row,
+    /// together inside one `SAVEPOINT` ([`Store::in_savepoint`]) nested in
+    /// the batch's own `Store::atomically`. A per-item SQL failure (a
+    /// constraint, a hostile trigger, in either the upsert or the journal
+    /// write after it) rolls back only this item — the upsert and the
+    /// journal row together, so a journal failure no longer leaves an
+    /// orphaned upsert — and reports `Ok(None)` for the caller to count as
+    /// failed and let a later pass retry; any `work:item` / `session:updated`
+    /// frame this item already queued while the batch's events are held
+    /// ([`StoreBus::checkpoint`] / [`StoreBus::discard_since`]) is discarded
+    /// with it, so a rolled-back item never announces anything. A lost outer
+    /// transaction ([`Store::ensure_in_tx`]) still propagates as `Err`: that
+    /// is the batch-wide case the caller must abort on, not a per-item one.
+    pub fn upsert_tracker_item_or_skip(
+        &self,
+        tracker_id: i64,
+        w: &TrackerItemWrite,
+    ) -> Result<Option<UpsertOutcome>, IpcError> {
+        let mark = self.bus.checkpoint();
+        match self.in_savepoint("sync_item", |_| -> Result<UpsertOutcome, IpcError> {
+            let out = self.upsert_tracker_item_batched(tracker_id, w)?;
+            if let Some((from, to)) = &out.status_change {
+                self.journal_status_change(out.id, w.key.as_deref(), from, to)?;
+            }
+            Ok(out)
+        }) {
+            Ok(out) => Ok(Some(out)),
+            Err(e) => {
+                self.bus.discard_since(mark);
+                self.ensure_in_tx()?;
+                tracing::warn!(
+                    tracker_id,
+                    external_id = %w.external_id,
+                    error = %e,
+                    "[work] tracker sync: item failed; rolled back, retried next pass"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     fn upsert_tracker_item_impl(
         &self,
         tracker_id: i64,
@@ -1551,5 +1593,126 @@ mod tests {
             )
             .unwrap();
         assert_eq!(body, "ABC-1: To Do → Done");
+    }
+
+    // ── tracker per-item tolerance (2026-09-26): a poison item's savepoint
+    //    must not leak a write, or an event for it, past its own rollback ──
+
+    #[test]
+    fn upsert_or_skip_rolls_back_only_the_poisoned_item_and_emits_nothing_for_it() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        s.conn_for_test()
+            .execute_batch(
+                "CREATE TEMP TRIGGER poison_insert BEFORE INSERT ON work_items \
+                 WHEN NEW.external_id = 'poison' \
+                 BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+            )
+            .unwrap();
+        let out = s
+            .upsert_tracker_item_or_skip(t, &write("poison", "ABC-9", ("To Do", "todo")))
+            .unwrap();
+        assert!(
+            out.is_none(),
+            "a per-item SQL failure is tolerated, not Err"
+        );
+        assert!(
+            bus.names().is_empty(),
+            "no event for an item whose write never persisted: {:?}",
+            bus.names()
+        );
+        assert!(
+            s.tracker_item_for_key("ABC-9").unwrap().is_none(),
+            "the poisoned item's row must not exist"
+        );
+        // The connection is left clean: a good item right after still works.
+        let good = s
+            .upsert_tracker_item_or_skip(t, &write("1", "ABC-1", ("To Do", "todo")))
+            .unwrap();
+        assert!(good.is_some());
+    }
+
+    /// The upsert and its status-change journal row share one savepoint: a
+    /// failure in the journal write, which comes AFTER the upsert already
+    /// wrote (and queued a `work:item` event while inside `atomically`'s
+    /// held scope), rolls the upsert back too — and discards the
+    /// already-queued event with it. Before this task, the journal write
+    /// was best-effort and a failure there left the upsert committed; the
+    /// brief now asks for the two to live or die together.
+    #[test]
+    fn upsert_or_skip_rolls_back_the_upsert_when_the_journal_write_after_it_fails() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        let sid = session(&s, "dev");
+        s.conn
+            .execute(
+                "UPDATE sessions SET claude_session_id = 'c-1' WHERE id = ?1",
+                [sid],
+            )
+            .unwrap();
+        let item = s
+            .upsert_tracker_item(t, &write("1", "ABC-1", ("To Do", "todo")))
+            .unwrap();
+        s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+            .unwrap();
+        bus.take();
+        s.conn_for_test()
+            .execute_batch(
+                "CREATE TEMP TRIGGER poison_journal BEFORE INSERT ON work_journal \
+                 BEGIN SELECT RAISE(ABORT, 'poison journal'); END;",
+            )
+            .unwrap();
+        // Run nested inside `atomically`, as the real batch does: the
+        // upsert's `work:item` (and `session:updated`) emit is held there,
+        // not delivered immediately, which is exactly what must be undone.
+        let out = s
+            .atomically(|s| {
+                Ok(
+                    s.upsert_tracker_item_or_skip(t, &write("1", "ABC-1", ("Done", "done")))
+                        .unwrap(),
+                )
+            })
+            .unwrap();
+        assert!(
+            out.is_none(),
+            "the item's savepoint must roll back when its journal write fails"
+        );
+        assert!(
+            bus.names().is_empty(),
+            "the upsert's own already-queued event must not survive the \
+             item's rollback: {:?}",
+            bus.names()
+        );
+        let row = s.get_work_item(item.id).unwrap().unwrap();
+        assert_eq!(
+            row.status_category, "todo",
+            "the upsert itself rolls back together with the journal write"
+        );
+    }
+
+    /// A lost OUTER transaction (SQLite rolled the whole thing back, not
+    /// just the item's savepoint) is not a per-item failure: it must
+    /// propagate as `Err`, matching `Store::ensure_in_tx`'s contract.
+    #[test]
+    fn upsert_or_skip_propagates_a_lost_outer_transaction() {
+        let (s, t, _bus) = with_tracker(&["ABC"]);
+        s.conn_for_test()
+            .execute_batch(
+                "CREATE TEMP TRIGGER lose_tx BEFORE INSERT ON work_items \
+                 WHEN NEW.external_id = 'boom' \
+                 BEGIN SELECT RAISE(ROLLBACK, 'lost'); END;",
+            )
+            .unwrap();
+        let err = s
+            .atomically(|s| {
+                s.upsert_tracker_item_or_skip(t, &write("boom", "ABC-9", ("To Do", "todo")))
+            })
+            .unwrap_err();
+        assert!(
+            err.message.contains("rolled back"),
+            "names the lost transaction: {err:?}"
+        );
+        assert!(
+            s.conn_for_test().is_autocommit(),
+            "no transaction left open"
+        );
     }
 }
