@@ -30,6 +30,7 @@
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
+  import ReplyActions from './ReplyActions.svelte';
   import {
     findMatches,
     turnIndex,
@@ -1669,6 +1670,11 @@
     else next.add(key);
     expanded = next;
   }
+
+  // Stub for Task 7 (the fork worktree sheet), which calls the backend
+  // itself once it exists. `_anchor` is the fork's truncation anchor:
+  // `null` keeps the whole transcript.
+  function openForkSheet(_anchor: string | null) {}
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
@@ -1829,7 +1835,18 @@
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
                       <Markdown source={g.text} />
-                      <span class="copy-slot text-copy"><CopyButton text={g.text} label="Copy reply" /></span>
+                      <span class="copy-slot text-copy">
+                        <ReplyActions
+                          turns={conv.turns}
+                          index={i}
+                          truncated={conv.truncated}
+                          text={g.text}
+                          sessionId={session.id}
+                          hostAlias={session.host_alias}
+                          tmuxName={session.tmux_name}
+                          onFork={(anchor) => openForkSheet(anchor)}
+                        />
+                      </span>
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a
