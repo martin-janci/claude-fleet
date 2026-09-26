@@ -197,7 +197,10 @@ check "MCP initialize over the public Host" 'echo "$init" | grep -q serverInfo' 
 list=$(rpc "$PA" "$PUB" "$TOKA" tools/list '{}')
 check "tools/list returns the fleet tools" 'echo "$list" | grep -q list_sessions' "${list:0:300}"
 h=$(tool "$PA" "$PUB" "$TOKA" fleet_health '{}')
-check "fleet_health reports the app version, not 0.1.0" 'echo "$h" | grep -qE "\\\\\"version\\\\\": ?\\\\\"0.2" ' "${h:0:300}"
+# The version this tree ships (scripts/release.sh keeps every carrier equal),
+# not a literal: a hard-coded "0.2" broke on the v0.3.0 bump.
+APPV=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../crates/fleet-hub/Cargo.toml" | head -1)
+check "fleet_health reports the app version ($APPV), not 0.1.0" '[ -n "$APPV" ] && [ "$APPV" != 0.1.0 ] && echo "$h" | grep -qF "\\\"version\\\":\\\"$APPV\\\""' "${h:0:300}"
 hosts=$(tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}')
 check "list_sessions (forced reconcile of local) succeeds" 'echo "$hosts" | grep -q "\"isError\":false"' "${hosts:0:400}"
 # The store is in WAL: while the daemon runs, every recent commit (tokens
