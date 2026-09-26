@@ -36,7 +36,7 @@ use super::{
     TrackerNet, TrackerProvider, ViewDef, WorkItemSnapshot,
 };
 use crate::ipc_error::{lock, IpcError};
-use crate::store::{Store, TrackerItemWrite, TrackerRow};
+use crate::store::{ItemUpsertOutcome, Store, TrackerItemWrite, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -82,6 +82,15 @@ pub struct TrackerPass {
     pub disabled_views: Vec<String>,
     pub error: Option<String>,
     pub skipped: bool,
+    /// Items a batch's own `Store::upsert_tracker_item_or_skip` rolled back
+    /// and tolerated (2026-09-26), accumulated across every batch in this
+    /// pass. Not `Serialize` (this struct never crosses the wire — see
+    /// `SyncMetrics` for what a caller outside this module reads); purely
+    /// for the pass-level log line and tests. `store_items` still fails the
+    /// whole pass, as before this task, when a non-empty batch has zero
+    /// successes (every item failed, a systemic error, not a poison item
+    /// among good ones) — see `store_items`'s doc comment.
+    pub failed: usize,
 }
 
 /// One tracker's last sync pass (work graph M11.4), as `work_admin {
@@ -378,6 +387,14 @@ impl TrackerSync {
         if let Ok(mut table) = self.metrics.lock() {
             table.insert(t.id, m);
         }
+        if pass.failed > 0 {
+            tracing::warn!(
+                tracker_id = t.id,
+                failed = pass.failed,
+                "tracker sync: {} item(s) failed and were skipped this pass, retried next time",
+                pass.failed
+            );
+        }
         pass
     }
 
@@ -613,13 +630,25 @@ impl TrackerSync {
     /// trigger) no longer aborts the whole batch: `Store::upsert_tracker_item_or_skip`
     /// runs the upsert and its status-change journal row in their own
     /// nested `SAVEPOINT`, rolling back only that item on a per-item
-    /// failure, `Ok(None)`. Such an item is not counted in `pass.seen` /
-    /// `pass.changed`, and is dropped from `seen` again so a later
-    /// occurrence in the same pass (a linked-item refresh after a view
-    /// listing, say) may retry it. A lost outer transaction
-    /// (`Store::ensure_in_tx`, inside `upsert_tracker_item_or_skip`) still
-    /// propagates here as `Err`: the whole batch aborts exactly as before,
-    /// nothing of it persists.
+    /// failure, [`ItemUpsertOutcome::Skipped`]. Such an item is not counted
+    /// in `pass.seen` / `pass.changed` (it is counted in `pass.failed`), and
+    /// is dropped from `seen` again so a later occurrence in the same pass
+    /// (a linked-item refresh after a view listing, say) may retry it. A
+    /// lost outer transaction (`Store::ensure_in_tx`, inside
+    /// `upsert_tracker_item_or_skip`) still propagates here as `Err`: the
+    /// whole batch aborts exactly as before, nothing of it persists.
+    ///
+    /// A non-empty batch where EVERY item failed (a systemic error — a
+    /// constraint every row violates, say — not one poison item among good
+    /// ones) also returns `Err`, carrying the last item's error message:
+    /// silently reporting `Ok` here (as a batch with only *some* failures
+    /// does) would let the tracker settle on "ok" and `set_tracker_synced`
+    /// advance in `run_provider`'s caller with nothing actually refreshed,
+    /// which is the same silent-failure trade-off this task exists to
+    /// remove for a single item, now closed for the whole-batch case too.
+    /// The batch's own transaction still commits — nothing succeeded, so it
+    /// commits nothing beyond what was already true — only `store_items`'s
+    /// return value changes.
     ///
     /// Returns how many items in THIS batch failed, for the caller (the
     /// view loop in `run_provider`) to gate the view's watermark / sync
@@ -637,6 +666,8 @@ impl TrackerSync {
             .lock(store)
             .map_err(|e| TrackerError::Invalid(e.message))?;
         let mut failed = 0usize;
+        let mut stored = 0usize;
+        let mut last_error: Option<String> = None;
         s.atomically(|s| {
             let mut unchanged_ids = Vec::new();
             for item in items {
@@ -645,7 +676,8 @@ impl TrackerSync {
                     continue;
                 }
                 match s.upsert_tracker_item_or_skip(tracker_id, &to_write(item))? {
-                    Some(out) => {
+                    ItemUpsertOutcome::Stored(out) => {
+                        stored += 1;
                         pass.seen += 1;
                         if out.changed {
                             pass.changed += 1;
@@ -653,10 +685,11 @@ impl TrackerSync {
                             unchanged_ids.push(out.id);
                         }
                     }
-                    None => {
+                    ItemUpsertOutcome::Skipped(msg) => {
                         // `upsert_tracker_item_or_skip` already warned with
                         // the tracker id, external id and the error.
                         failed += 1;
+                        last_error = Some(msg);
                         seen.remove(&key);
                     }
                 }
@@ -664,6 +697,12 @@ impl TrackerSync {
             s.touch_tracker_items_fetched_at(&unchanged_ids)
         })
         .map_err(|e| TrackerError::Invalid(e.message))?;
+        pass.failed += failed;
+        if stored == 0 && failed > 0 {
+            return Err(TrackerError::Invalid(
+                last_error.unwrap_or_else(|| "every item in the batch failed".to_string()),
+            ));
+        }
         Ok(failed)
     }
 }

@@ -64,6 +64,7 @@ pub use rows::*;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,

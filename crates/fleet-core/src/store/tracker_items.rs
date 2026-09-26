@@ -62,6 +62,20 @@ pub struct UpsertOutcome {
     pub status_change: Option<(String, String)>,
 }
 
+/// What [`Store::upsert_tracker_item_or_skip`] did for one item of a sync
+/// batch.
+#[derive(Debug)]
+pub(crate) enum ItemUpsertOutcome {
+    /// The item's upsert (and status-change journal row, if any) committed.
+    Stored(UpsertOutcome),
+    /// A per-item failure was tolerated: its `SAVEPOINT` rolled back and
+    /// nothing of it persists. Carries the failed statement's error
+    /// message, for a caller that must tell a genuine per-item failure
+    /// (some items still stored) from every item in a non-empty batch
+    /// failing (a systemic error), which it must not silently swallow.
+    Skipped(String),
+}
+
 /// `meta` JSON: the parts of a tracker item only fleet's own reads use.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ItemMeta {
@@ -354,18 +368,37 @@ impl Store {
     /// constraint, a hostile trigger, in either the upsert or the journal
     /// write after it) rolls back only this item — the upsert and the
     /// journal row together, so a journal failure no longer leaves an
-    /// orphaned upsert — and reports `Ok(None)` for the caller to count as
-    /// failed and let a later pass retry; any `work:item` / `session:updated`
-    /// frame this item already queued while the batch's events are held
-    /// ([`StoreBus::checkpoint`] / [`StoreBus::discard_since`]) is discarded
-    /// with it, so a rolled-back item never announces anything. A lost outer
-    /// transaction ([`Store::ensure_in_tx`]) still propagates as `Err`: that
-    /// is the batch-wide case the caller must abort on, not a per-item one.
-    pub fn upsert_tracker_item_or_skip(
+    /// orphaned upsert — and reports [`ItemUpsertOutcome::Skipped`] for the
+    /// caller to count as failed and let a later pass retry; any `work:item`
+    /// / `session:updated` frame this item already queued while the batch's
+    /// events are held ([`StoreBus::checkpoint`] / [`StoreBus::discard_since`])
+    /// is discarded with it, so a rolled-back item never announces anything.
+    /// A lost outer transaction ([`Store::ensure_in_tx`]) still propagates
+    /// as `Err`: that is the batch-wide case the caller must abort on, not a
+    /// per-item one.
+    ///
+    /// The journal key is the tracker's own key as it will be stored
+    /// (`w.key`, already through `key_or_drop`/the length cap in
+    /// `sync::to_write`), not necessarily the provider's raw key — an
+    /// over-long raw key that `to_write` drops journals as a bare "item"
+    /// instead, matching what the stored row actually shows.
+    ///
+    /// Must run inside [`Store::atomically`] (debug-asserted): this
+    /// method's rollback path assumes the bus is already holding events on
+    /// behalf of an enclosing `atomically`, so it has something to
+    /// [`StoreBus::discard_since`]. Called standalone (autocommit), a
+    /// savepoint failure's already-emitted event would have been delivered
+    /// immediately — nothing held to take back — so a rolled-back item
+    /// would still announce the write it just undid.
+    pub(crate) fn upsert_tracker_item_or_skip(
         &self,
         tracker_id: i64,
         w: &TrackerItemWrite,
-    ) -> Result<Option<UpsertOutcome>, IpcError> {
+    ) -> Result<ItemUpsertOutcome, IpcError> {
+        debug_assert!(
+            self.bus.is_holding(),
+            "upsert_tracker_item_or_skip must run inside Store::atomically"
+        );
         let mark = self.bus.checkpoint();
         match self.in_savepoint("sync_item", |_| -> Result<UpsertOutcome, IpcError> {
             let out = self.upsert_tracker_item_batched(tracker_id, w)?;
@@ -374,7 +407,7 @@ impl Store {
             }
             Ok(out)
         }) {
-            Ok(out) => Ok(Some(out)),
+            Ok(out) => Ok(ItemUpsertOutcome::Stored(out)),
             Err(e) => {
                 self.bus.discard_since(mark);
                 self.ensure_in_tx()?;
@@ -384,7 +417,7 @@ impl Store {
                     error = %e,
                     "[work] tracker sync: item failed; rolled back, retried next pass"
                 );
-                Ok(None)
+                Ok(ItemUpsertOutcome::Skipped(e.to_string()))
             }
         }
     }
@@ -1608,27 +1641,37 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'poison'); END;",
             )
             .unwrap();
-        let out = s
-            .upsert_tracker_item_or_skip(t, &write("poison", "ABC-9", ("To Do", "todo")))
+        // `upsert_tracker_item_or_skip` must run inside `Store::atomically`
+        // (debug-asserted): its rollback path discards events the bus is
+        // holding on the outer scope's behalf.
+        let (poisoned, good) = s
+            .atomically(|s| {
+                let poisoned = s
+                    .upsert_tracker_item_or_skip(t, &write("poison", "ABC-9", ("To Do", "todo")))
+                    .unwrap();
+                // The connection is left clean: a good item right after
+                // the poisoned one, in the same transaction, still works.
+                let good = s
+                    .upsert_tracker_item_or_skip(t, &write("1", "ABC-1", ("To Do", "todo")))
+                    .unwrap();
+                Ok((poisoned, good))
+            })
             .unwrap();
         assert!(
-            out.is_none(),
-            "a per-item SQL failure is tolerated, not Err"
+            matches!(poisoned, ItemUpsertOutcome::Skipped(ref m) if m.contains("poison")),
+            "a per-item SQL failure is tolerated, not Err: {poisoned:?}"
         );
-        assert!(
-            bus.names().is_empty(),
-            "no event for an item whose write never persisted: {:?}",
+        assert!(matches!(good, ItemUpsertOutcome::Stored(_)), "{good:?}");
+        assert_eq!(
+            bus.names(),
+            vec!["work:item"],
+            "no event for the poison item, one for the good item: {:?}",
             bus.names()
         );
         assert!(
             s.tracker_item_for_key("ABC-9").unwrap().is_none(),
             "the poisoned item's row must not exist"
         );
-        // The connection is left clean: a good item right after still works.
-        let good = s
-            .upsert_tracker_item_or_skip(t, &write("1", "ABC-1", ("To Do", "todo")))
-            .unwrap();
-        assert!(good.is_some());
     }
 
     /// The upsert and its status-change journal row share one savepoint: a
@@ -1672,8 +1715,8 @@ mod tests {
             })
             .unwrap();
         assert!(
-            out.is_none(),
-            "the item's savepoint must roll back when its journal write fails"
+            matches!(out, ItemUpsertOutcome::Skipped(_)),
+            "the item's savepoint must roll back when its journal write fails: {out:?}"
         );
         assert!(
             bus.names().is_empty(),
