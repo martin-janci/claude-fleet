@@ -555,6 +555,16 @@ Index by area (names only; see the reference for details):
   token; a read, but master token only, since it names other fleets — the
   `fleet-hub peer add|list|remove` commands drive the same links straight on
   `state.db`).
+- **Operator settings** — `get_settings` (every registered key of the
+  settings registry, `service/settings.rs`, with its effective value; a
+  read, but master token only, since the values name hosts and their
+  projects roots) and `set_setting` (change one: validated against the
+  key's shape, `E_INVALID` for an unknown or derived key or a bad value;
+  returns the whole object). They reach the same keys as the desktop's
+  Settings dialog and no others: `mcp.*`, `hub.*` and `controller.*` are
+  set by their own flags and commands. The ticks and sweeps read their
+  settings every pass, so a change takes effect on the next one. On a hub
+  this is how `reports.*` and `work.*`, which have no flag, are set.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →

@@ -1813,7 +1813,7 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1834,7 +1834,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 86);
+    assert_eq!(served, 88);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1969,14 +1969,16 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
     // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
     // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
     // may reach must also be something a full client may reach. `list_peer_links`
-    // is the same shape for the same reason (it names other fleets).
+    // is the same shape for the same reason (it names other fleets), and so
+    // is `get_settings` (it names hosts and their paths).
     for name in guard::READONLY_TOOLS {
         assert!(
             guard::CLIENT_TOOLS.contains(name)
                 || *name == "list_clients"
-                || *name == "list_peer_links",
+                || *name == "list_peer_links"
+                || *name == "get_settings",
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients/list_peer_links special case"
+             documented list_clients/list_peer_links/get_settings special case"
         );
     }
 }
@@ -3331,7 +3333,9 @@ fn the_served_definition_budget_stays_bounded() {
     // `name` and a `title` parameter, `work` gains `local_items`; no
     // description change). Merged over M11.2 / M11.4: measured at 55,030 on
     // 2026-09-25; plus 100.
-    const BUDGET_BYTES: usize = 55_130;
+    // get_settings/set_setting: +580 B (two master-only tools, M11.5's
+    // terse style). Measured at 55,610 on 2026-09-25; plus 100.
+    const BUDGET_BYTES: usize = 55_710;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7426,4 +7430,106 @@ async fn the_new_operator_gates_change_nothing_for_anyone_else() {
         .await
         .unwrap_err();
     assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
+}
+
+// ---- operator settings ----
+
+/// The settings name hosts and their projects roots, and a write retunes the
+/// GC sweeper and auto-tidy for the whole fleet: only the master token may
+/// read or change them, whatever a client's or per-host token's mode.
+#[test]
+fn the_settings_tools_are_master_only() {
+    for t in ["get_settings", "set_setting"] {
+        assert!(enforce_admin(&Caller::master(), t).is_ok(), "{t}");
+        for (label, c) in every_caller_kind() {
+            if c.is_master() {
+                continue;
+            }
+            assert!(
+                enforce_mode(&c, t)
+                    .and_then(|()| enforce_admin(&c, t))
+                    .is_err(),
+                "{t}: {label}"
+            );
+        }
+    }
+    assert!(guard::is_readonly_tool("get_settings"));
+    assert!(!guard::is_readonly_tool("set_setting"));
+}
+
+#[tokio::test]
+async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
+    let (tools, _guards, store) = client_tools();
+    let set = |key: &str, value: serde_json::Value| {
+        tools.set_setting(Parameters(SetSettingParams {
+            key: key.into(),
+            value,
+        }))
+    };
+    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    assert_eq!(v["work.journal_days"], "90", "the default when unset: {v}");
+
+    // A string, a number and a boolean are each stored as their text.
+    set("work.journal_days", serde_json::json!("30"))
+        .await
+        .expect("string");
+    let v = result_json(
+        &set("work.recent_days", serde_json::json!(7))
+            .await
+            .expect("number"),
+    );
+    assert_eq!(
+        (
+            v["work.journal_days"].as_str(),
+            v["work.recent_days"].as_str()
+        ),
+        (Some("30"), Some("7"))
+    );
+    set("gc.enabled", serde_json::json!(true))
+        .await
+        .expect("bool");
+    // An array is stored as its JSON (an id set, normalised).
+    set("work.trusted_branch_projects", serde_json::json!([7, 3, 7]))
+        .await
+        .expect("array");
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_setting("gc.enabled").unwrap().as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            s.get_setting("work.trusted_branch_projects")
+                .unwrap()
+                .as_deref(),
+            Some("[3,7]")
+        );
+    }
+    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    assert_eq!(v["work.journal_days"], "30");
+
+    // Refused: a bad value, an unknown key, a derived key, keys other
+    // subsystems own, and no value at all. None of them is written.
+    for (key, value) in [
+        ("work.journal_days", serde_json::json!("soon")),
+        ("no.such_key", serde_json::json!("1")),
+        ("projects.resolved_base", serde_json::json!("{}")),
+        ("mcp.confirm_destructive", serde_json::json!(false)),
+        ("hub.allow_plaintext", serde_json::json!(true)),
+        ("work.journal_days", serde_json::Value::Null),
+    ] {
+        let err = set(key, value.clone()).await.expect_err(key);
+        assert!(
+            err.message.starts_with("E_INVALID"),
+            "{key}={value}: {}",
+            err.message
+        );
+    }
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_setting("work.journal_days").unwrap().as_deref(),
+        Some("30")
+    );
+    assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
+    assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
 }
