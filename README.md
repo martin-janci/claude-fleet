@@ -27,8 +27,8 @@ download is always traceable to the release it came from.
 Each release attaches a `SHA256SUMS` asset covering **every** asset on that
 release — desktop bundles included. If that file is incomplete, or any asset
 the manifest declares is missing, the release run fails (`verify-release` in
-`.github/workflows/release.yml`); the draft is still published by hand, so
-treat a red release run as a reason not to trust the draft. Nothing here is
+`.github/workflows/release.yml`) and the release is never published — a
+release you can see is one that passed that check. Nothing here is
 code-signed (see below), so this checksum is the only integrity check
 available; it is worth the ten seconds.
 

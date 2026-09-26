@@ -410,9 +410,11 @@ scripts/check-release-drift.sh --verify-tags 3
 `.github/workflows/hub-image.yml` also runs on push of any `v*` tag: it
 builds and publishes the `fleet-hub` container image for `linux/amd64` and
 `linux/arm64` (independently of the desktop-bundle legs above and of the
-draft-release review step) — two native per-arch jobs pushed by digest (no
+release's own verify/publish jobs) — two native per-arch jobs pushed by digest (no
 QEMU), then a `merge` job combines whichever digests exist into the real
-tags. **arm64 is best-effort**: its leg may fail without blocking the
+tags. A pre-release tag (`v0.3.0-rc.1`) publishes `…/fleet-hub:0.3.0-rc.1`
+but deliberately does **not** move `:latest`, which `deploy/hub/docker-compose.yml`
+pins. **arm64 is best-effort**: its leg may fail without blocking the
 image — `merge` still runs (`if: !cancelled()`) and publishes an amd64-only
 manifest under the same tags, so amd64's own publication is never slowed or
 blocked by arm64, and the *run stays green* (a `continue-on-error` leg's
