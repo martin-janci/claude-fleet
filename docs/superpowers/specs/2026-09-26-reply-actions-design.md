@@ -56,35 +56,48 @@ It also comes with its label for free. `StartSource::Fork` already exists
 `start_source` unions, so a rewound or forked conversation is labelled
 correctly with **no** UI work in the Conversations list.
 
-## 3. Wire change: two anchors per turn
+## 3. Wire change: one anchor per turn
 
 `ConvTurn` carries no identity today — `transcript.rs:330` has no id, and
 mobile keys turns by list index with a comment saying exactly why that is
 safe. Anything that acts *at one reply* needs an anchor.
 
-Add two fields to `ConvTurn`:
+Add **one** field to `ConvTurn`: `prompt_uuid`, the JSONL `uuid` of the entry
+that opened the turn. `Option<String>` with `#[serde(default)]` in Rust,
+`String? = null` in Kotlin. An older hub sends nothing; a client that gets no
+anchor falls back to Copy and Quote. Same tolerance rule `items_tolerant`
+already sets for `ConvItem` (`transcript.rs:363`).
 
-| Field | Is | Used by |
-| --- | --- | --- |
-| `uuid` | the JSONL `uuid` of the turn's **last** entry | Fork here (keep through it) |
-| `prompt_uuid` | the `uuid` of the turn's **user** entry | Rewind here / Retry (keep strictly before it) |
+One field is enough because every truncation is expressible as *"keep
+strictly before some prompt"*:
 
-Both are `Option<String>` with `#[serde(default)]` in Rust and `String? =
-null` in Kotlin. An older hub sends neither; a client that gets no anchor
-hides Fork/Rewind/Retry for that turn and still shows Copy and Quote. This is
-the same tolerance rule `items_tolerant` already sets for `ConvItem`
-(`transcript.rs:363`).
+| Action at turn `i` | Anchor |
+| --- | --- |
+| Rewind here / Retry | `turns[i].prompt_uuid` |
+| Fork here | the `prompt_uuid` of the next later turn that has one; **none** ⇒ keep the whole file |
 
-`parse_conversation` (`transcript.rs:833`) already deserialises every line
-into a `serde_json::Value`, so both fields are a `v.get("uuid")` at the
-points where the parser opens a turn and where it appends to one. Verified
+Forking the last turn therefore keeps everything, which is exactly what
+"continue from this reply" means. And neither direction depends on a turn
+outside the loaded window: Rewind reads its own turn, Fork reads a *later*
+turn, and turns later than the one on screen are always loaded (the window
+grows backwards — `CONV_TURNS_STEP`, "Load older").
+
+This costs one line in the parser. `parse_conversation` (`transcript.rs:833`)
+builds a `ConvTurn` at eight sites, and **exactly one** of them sets a prompt
+(`transcript.rs:1120`); the other seven get `prompt_uuid: None`. Verified
 against a live transcript: `user` and `assistant` entries carry `uuid`,
 `parentUuid`, `sessionId` and `cwd`.
 
-Two anchors rather than one, deliberately. Rewind's anchor could be derived
-as "the previous turn's `uuid`", but that couples the action to which turns
-happen to be loaded in the window — and rewinding the oldest loaded turn
-would then have no anchor at all. Each turn carries what it needs.
+Two consequences worth stating rather than discovering:
+
+- **Turns with no prompt** — a compact boundary, a notification-only turn,
+  assistant output whose prompt is before the read tail — have no anchor, so
+  they offer no Rewind and no Retry. That is correct on its own terms: there
+  is no prompt to put back in the composer. Fork still works on them,
+  through the forward scan.
+- **Fork's forward scan can keep more than the turn on screen.** If the turns
+  after it are prompt-less, they are inside the kept range. Fork keeping
+  *more* history is safe; keeping less would silently discard work.
 
 ## 4. The engine
 
@@ -100,8 +113,8 @@ is none. `locate_script` becomes `pub(crate)`.
 After the prefix, one `awk` pass copies the head of the file into the new
 transcript:
 
-- copy every line from the start until the anchor line, **inclusive** for
-  `uuid`, **exclusive** for `prompt_uuid`;
+- copy every line from the start up to but **excluding** the line whose
+  `uuid` is the anchor; with no anchor, copy the whole file;
 - rewrite `sessionId` to the new id on every copied line;
 - rewrite `cwd` when the fork targets a different worktree (§5.2);
 - write to `$HOME/.claude/projects/<encoded new cwd>/<new-id>.jsonl`,
@@ -168,9 +181,26 @@ The row is always visible (no hover-reveal) for the reason `CopyButton`'s own
 comment gives — a control you must hover to find is not a control a keyboard
 or touch user has.
 
-Anchorless turns (old hub) show Copy and Quote only. The first turn of a
-conversation shows Copy, Quote and Fork here — not Rewind or Retry, per
-§4.3's last row.
+Which buttons a reply shows:
+
+| Turn | Copy | Quote | Fork here | Rewind here | Retry |
+| --- | --- | --- | --- | --- | --- |
+| normal, prompted | ✓ | ✓ | ✓ | ✓ | ✓ |
+| the conversation's **first** turn | ✓ | ✓ | ✓ | — | — |
+| prompt-less (compact boundary, notification-only) | ✓ | ✓ | ✓ | — | — |
+| from a hub too old to send anchors | ✓ | ✓ | — | — | — |
+
+Two gating details an implementer will otherwise get wrong:
+
+- **"First turn" means first of the conversation, not first of the window.**
+  The window is truncated by `CONV_TURNS_STEP` / "Load older", so index 0 is
+  the conversation's first turn only when `truncated` is false. Hide Rewind
+  and Retry on index 0 **only** when `!conv.truncated`; §4.3's backend
+  refusal is the real guard and stays the one source of truth.
+- **The old-hub row is gated on the hub version, not on a missing anchor.**
+  A missing anchor legitimately means "keep the whole file" for Fork on the
+  last turn, so absence cannot double as "unsupported". Use the
+  `HubContract.kt:87` version pattern, as `send_prompt { keys }` does.
 
 Desktop: a new `ReplyActions.svelte` beside `CopyButton.svelte`, dropped into
 the `.text` block at `ConversationPanel.svelte:1832`. Quote goes through the
@@ -253,8 +283,9 @@ needed.
 **Rust.** The script builder against a fixture JSONL: inclusive vs exclusive
 truncation, `sessionId` rewritten on every copied line, `cwd` rewritten only
 for a cross-worktree fork, leading metadata lines retained, the missing-anchor
-sentinel. The parser: `uuid` and `prompt_uuid` populated for a normal turn,
-`None` for a turn whose entries carry no uuid. The service: each mode's
+sentinel, and no anchor ⇒ the whole file copied. The parser: `prompt_uuid`
+populated for a prompted turn, `None` for a compact boundary and for a
+notification-only turn. The service: each mode's
 follow-up called once, and each refusal in §4.3.
 
 **Desktop.** Vitest on the action row — anchorless turns show two buttons,
