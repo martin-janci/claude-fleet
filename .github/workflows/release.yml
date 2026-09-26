@@ -519,9 +519,9 @@ jobs:
             const tag = context.ref.replace(/^refs\/tags\//, '');
             const { owner, repo } = context.repo;
             // A pre-release is decided by the tag and nothing else: `v0.3.0`
-            // is a release, `v0.3.0-rc.1` is a release candidate. Same rule
-            // scripts/release.sh, scripts/release-assets.sh and
-            // hub-image.yml's `latest` guard use.
+            // is a release, `v0.3.0-rc.1` is a release candidate — the same
+            // test create-release applies above and hub-image.yml's `latest`
+            // guard applies to the image.
             const prerelease = tag.slice(1).includes('-');
             // make_latest, stated rather than inherited. 'legacy' is
             // GitHub's own by-creation-date rule, which is right here: it
