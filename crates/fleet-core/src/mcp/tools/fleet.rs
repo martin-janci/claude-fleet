@@ -18,10 +18,17 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
     ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
-        let mut h = health::health_check(&self.store);
+        let mut h = health::health_check(self.reader());
+        // On the hub the roll-up comes from a pooled connection, which says
+        // nothing about the writer. A poisoned writer fails every write tool
+        // (E_LOCK), and `db_ready: false` is how health reports that — so
+        // check it here too, without taking the lock.
+        if self.store.is_poisoned() {
+            h.db_ready = false;
+        }
         h.set_tunnels(self.tunnels.health());
         if let Some(host) = caller.host_alias.as_deref() {
-            match self.store.lock() {
+            match self.reader().lock() {
                 Ok(s) => {
                     health::scope_usage_to_host(&mut h, &s, host);
                     // Work graph M12.4: its org's trackers, its host's backlog.
@@ -73,7 +80,7 @@ impl FleetTools {
         versions, linked account.")]
     pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
-        ok_json_compact(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
+        ok_json_compact(&hosts::list_hosts(self.reader()).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Which agent hosts (transport \"agent\") have a \

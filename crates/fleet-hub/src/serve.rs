@@ -796,6 +796,25 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Err(e) => tracing::warn!("sweep_unresolved_waits at startup failed: {e}"),
     }
 
+    // Readers off the writer: read-only connections on the same file for the
+    // token cache in `authorize` and the plain read tools. Opened here, after
+    // `resolve_with_store` has migrated the file and switched it to WAL;
+    // `None` (a filesystem that refused WAL, a file that would not open
+    // read-only) leaves every read on the writer, as before.
+    let read_pool = match fleet_core::store::ReadPool::open(
+        &r.data_dir.join("state.db"),
+        fleet_core::store::READ_POOL_SIZE,
+    ) {
+        Ok(Some(pool)) => Some(Arc::new(pool)),
+        Ok(None) => {
+            tracing::warn!("state.db is not in WAL; every read stays on the writer");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not open the read pool; every read stays on the writer");
+            None
+        }
+    };
     let (shutdown, serve_task) = mcp::start_with_listener(
         Arc::clone(&store),
         Arc::clone(&ssh),
@@ -808,6 +827,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         // One fresh subscription per `GET /events` connection, plus the
         // replay history a reconnecting client resumes from.
         Some(Arc::clone(&bus).into()),
+        read_pool,
         tls,
     )
     .await?;
@@ -1550,6 +1570,7 @@ mod tests {
             listener,
             "test-token".to_string(),
             vec![],
+            None,
             None,
             Some(tls),
         )

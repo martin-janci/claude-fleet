@@ -80,6 +80,10 @@ pub(crate) struct HostPaths {
 }
 
 impl HostPaths {
+    /// Best-effort: a failed settings or worktree read falls back to the
+    /// default root / layout / no worktrees. A caller inside
+    /// `Store::atomically` checks `Store::ensure_in_tx` right after, since
+    /// SQLite may have answered that read by rolling the transaction back.
     pub(crate) fn for_host(s: &Store, alias: &str) -> Self {
         use crate::service::projects::{layout, local_projects_root, project_base_for, LOCAL_HOST};
         let root = if alias == LOCAL_HOST {

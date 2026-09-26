@@ -53,6 +53,8 @@ mod support;
 mod tests;
 #[cfg(test)]
 mod tests_isolation;
+#[cfg(test)]
+mod tests_read_pool;
 mod views;
 
 // `rmcp::model::*` also exports a `CancelTaskParams`. Name ours explicitly:
@@ -65,11 +67,28 @@ use views::*;
 
 pub use support::tool_deadline;
 
+/// The tools that read only through [`FleetTools::reader`] — the hub's read
+/// pool — and write nothing: their per-host result gate reads there too.
+/// (`list_sessions` with `force` or `fresh_for` still writes: a forced pass,
+/// a read cursor. Its gate then reads the pool after those commits, which a
+/// new read transaction sees.)
+const POOLED_READ_TOOLS: [&str; 6] = [
+    "list_hosts",
+    "whoami",
+    "list_sessions",
+    "list_worktrees",
+    "list_projects",
+    "fleet_health",
+];
+
 /// The MCP server handler. Cloned per session by the streamable-HTTP service;
 /// every clone shares the same backend state via the `Arc`s.
 #[derive(Clone)]
 pub struct FleetTools {
     store: Arc<Mutex<Store>>,
+    /// The hub's read-only connections on the same file (see
+    /// [`FleetTools::reader`]). `None` on the desktop and in tests.
+    read_pool: Option<Arc<crate::store::ReadPool>>,
     ssh: Arc<SshClient>,
     reg: Arc<CancellationRegistry>,
     tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
@@ -254,6 +273,7 @@ impl FleetTools {
     ) -> Self {
         Self {
             store,
+            read_pool: None,
             ssh,
             reg,
             tunnels,
@@ -264,6 +284,22 @@ impl FleetTools {
             push_list_changed: false,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Read the plain listing tools through `pool` instead of the writer
+    /// (the hub). `None` leaves them on the writer.
+    pub fn with_read_pool(mut self, pool: Option<Arc<crate::store::ReadPool>>) -> Self {
+        self.read_pool = pool;
+        self
+    }
+
+    /// Where a tool reads when it has no write of its own to see: a pooled
+    /// read-only connection on the hub — never waiting on a reconcile pass
+    /// or a hook transaction holding the writer — else the writer. A tool
+    /// that writes and then reads in the same call keeps reading through
+    /// `self.store`, so it sees its own write under the same lock order.
+    pub(super) fn reader(&self) -> &Mutex<Store> {
+        crate::store::read_via(self.read_pool.as_deref(), &self.store)
     }
 
     /// This handler as mounted with `framing`: only an SSE response can carry
@@ -370,7 +406,15 @@ impl ServerHandler for FleetTools {
         // details — a per-host token never receives session rows' work of
         // another org.
         if let (Ok(result), true) = (out.as_mut(), caller.host_alias.is_some()) {
-            self.redact_work_for(&caller, result);
+            // A tool that wrote nothing has no write of its own to see, so
+            // its gate reads the pool too; every other tool's reads the
+            // writer, after its own writes.
+            let orgs = if POOLED_READ_TOOLS.contains(&tool.as_str()) {
+                self.reader()
+            } else {
+                &self.store
+            };
+            self.redact_work_via(orgs, &caller, result);
         }
         out
     }

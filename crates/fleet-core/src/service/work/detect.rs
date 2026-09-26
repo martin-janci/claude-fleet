@@ -530,7 +530,9 @@ fn prompt_candidates(
         .collect())
 }
 
-/// The trusted-projects setting as a set.
+/// The trusted-projects setting as a set. Best-effort (a failed read is the
+/// empty set): a caller inside `Store::atomically` checks
+/// `Store::ensure_in_tx` after it.
 pub fn trusted_projects(s: &Store) -> BTreeSet<i64> {
     crate::service::settings::parse_id_set(&crate::service::settings::get_string(
         s,
@@ -611,15 +613,20 @@ fn run(
             source: l.source,
         })
         .collect();
+    let trusted = st
+        .project_id
+        .is_some_and(|p| trusted_projects(s).contains(&p));
+    // `trusted_projects` swallows its settings read, and a resolve with no
+    // changes never reaches `apply_link_changes`' savepoint: a read SQLite
+    // answered by rolling the caller's transaction back stops here.
+    s.ensure_in_tx()?;
     let input = ResolveInput {
         conversation: st.claude_session_id.clone(),
         branch,
         pr,
         events,
         links,
-        trusted: st
-            .project_id
-            .is_some_and(|p| trusted_projects(s).contains(&p)),
+        trusted,
     };
     let changes = resolve(&input);
     s.apply_link_changes(
@@ -662,6 +669,8 @@ pub fn on_prompt(
                 s,
                 crate::service::settings::WORK_EVIDENCE_SNIPPETS,
             );
+            // A swallowed settings read, like `trusted_projects` in `run`.
+            s.ensure_in_tx()?;
             let now = crate::service::catalog::now_secs();
             prompt_candidates(s, &st, &tv, prompt, first_prompt, snippets, now)?
         }

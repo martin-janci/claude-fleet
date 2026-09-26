@@ -11,6 +11,13 @@ pub const AWAITING_REBIND_TTL_SECS: i64 = 300;
 /// A second compaction signal within this window is the same compaction
 /// (SessionStart(compact) and PostCompact both fire).
 const COMPACT_DEDUPE_SECS: i64 = 10;
+/// `set_context`'s no-op guard still writes (to re-stamp `context_at`) once
+/// the existing stamp is at least this old, even when tokens/window/source/
+/// model are unchanged — well inside `store/reconcile.rs`'s 120s freshness
+/// window, so an idle session's repeated same-value transcript report
+/// (`service/transcript.rs`, every 5s) never lets the stamp age out from
+/// under it. See `Store::set_context`.
+const CONTEXT_RESTAMP_MARGIN_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartSource {
@@ -130,8 +137,10 @@ impl Store {
     /// One transaction; emits `session:updated` and `session:conversations`
     /// after commit.
     ///
-    /// Opens its own transaction, so it cannot run inside
-    /// `Store::atomically` (SQLite has no nested `BEGIN`).
+    /// Runs under a SAVEPOINT (Task 3), so it works standalone (autocommit —
+    /// a SAVEPOINT opens an implicit transaction of its own) and nested
+    /// inside `Store::atomically` (`service::hooks::resolve_and_rebind` calls
+    /// it from a hook's own transaction).
     pub fn rebind_conversation(
         &self,
         session_id: i64,
@@ -166,93 +175,105 @@ impl Store {
         turn_started: bool,
     ) -> Result<Option<SessionRow>, IpcError> {
         let now = now_unix();
-        let tx = self.conn.unchecked_transaction()?;
-        let prior_id: Option<String> = tx
-            .query_row(
-                "SELECT claude_session_id FROM sessions WHERE id=?1",
-                [session_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let same = prior_id.as_deref() == Some(claude_session_id);
-        tx.execute(
-            "UPDATE conversations SET ended_at = COALESCE(ended_at, ?3), \
-                 end_reason = COALESCE(end_reason, 'replaced') \
-             WHERE session_id = ?1 AND claude_session_id != ?2 AND ended_at IS NULL",
-            rusqlite::params![session_id, claude_session_id, now],
-        )?;
-        tx.execute(
-            "INSERT INTO conversations (session_id, claude_session_id, transcript_path, \
-                 started_at, start_source, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-             ON CONFLICT(session_id, claude_session_id) DO UPDATE SET \
-                 ended_at = NULL, end_reason = NULL, \
-                 transcript_path = COALESCE(excluded.transcript_path, transcript_path), \
-                 model = COALESCE(excluded.model, model)",
-            rusqlite::params![
-                session_id,
-                claude_session_id,
-                transcript_path,
-                now,
-                source.as_str(),
-                model
-            ],
-        )?;
-        if same && !matches!(source, StartSource::Unknown | StartSource::Compact) {
-            tx.execute(
-                "UPDATE conversations SET start_source = ?3 \
-                 WHERE session_id = ?1 AND claude_session_id = ?2 AND start_source = 'unknown'",
-                rusqlite::params![session_id, claude_session_id, source.as_str()],
+        // SAVEPOINT (`Store::in_savepoint`), not a second `BEGIN`:
+        // `Store::atomically` cannot nest, and Task 3 calls this from inside
+        // one (`service::hooks::resolve_and_rebind` runs under a hook's
+        // transaction). A SAVEPOINT works both standalone (autocommit — it
+        // starts an implicit transaction) and already inside an open
+        // transaction, so this stays one commit either way instead of a
+        // separate autocommit under the store mutex.
+        self.in_savepoint("rebind_conversation", |_| -> Result<(), IpcError> {
+            let prior_id: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT claude_session_id FROM sessions WHERE id=?1",
+                    [session_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            let same = prior_id.as_deref() == Some(claude_session_id);
+            self.conn.execute(
+                "UPDATE conversations SET ended_at = COALESCE(ended_at, ?3), \
+                     end_reason = COALESCE(end_reason, 'replaced') \
+                 WHERE session_id = ?1 AND claude_session_id != ?2 AND ended_at IS NULL",
+                rusqlite::params![session_id, claude_session_id, now],
             )?;
-        }
-        let path_sql = if same {
-            "transcript_path = COALESCE(?3, transcript_path)"
-        } else {
-            "transcript_path = ?3"
-        };
-        let resets = source.resets_context() && !(same && turn_started);
-        let reset_sql = if resets && turn_started {
-            ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
-               context_at = ?5, context_stale = 0"
-        } else if resets {
-            ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
-               context_at = ?5, context_stale = 0, current_activity = NULL, last_prompt = NULL, \
-               pending_input = NULL"
-        } else if matches!(
-            source,
-            StartSource::Resume | StartSource::Unknown | StartSource::Fork
-        ) && !same
-        {
-            ", context_stale = 1"
-        } else {
-            ""
-        };
-        let sql = format!(
-            "UPDATE sessions SET claude_session_id = ?2, {path_sql}, \
-                 model = COALESCE(?4, model), awaiting_rebind_at = NULL{reset_sql} \
-             WHERE id = ?1"
-        );
-        // rusqlite rejects a bound parameter the statement does not use, and
-        // only the resetting branch references `?5`.
-        let params: [&dyn rusqlite::ToSql; 5] = [
-            &session_id,
-            &claude_session_id,
-            &transcript_path,
-            &model,
-            &now,
-        ];
-        let n_params = if resets { 5 } else { 4 };
-        tx.execute(&sql, &params[..n_params])?;
-        // Work graph M2.2: a conversation that an ENDED work link snapshotted
-        // is being resumed (from fleet's Resume, `claude --resume`, or a
-        // `/resume`) — the work follows it. Best-effort: work links never
-        // fail a rebind.
-        if !same {
-            if let Err(e) = self.carry_resumed_work(session_id, claude_session_id) {
-                tracing::warn!(session_id, error = %e.message, "[work] resume carry failed");
+            self.conn.execute(
+                "INSERT INTO conversations (session_id, claude_session_id, transcript_path, \
+                     started_at, start_source, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(session_id, claude_session_id) DO UPDATE SET \
+                     ended_at = NULL, end_reason = NULL, \
+                     transcript_path = COALESCE(excluded.transcript_path, transcript_path), \
+                     model = COALESCE(excluded.model, model)",
+                rusqlite::params![
+                    session_id,
+                    claude_session_id,
+                    transcript_path,
+                    now,
+                    source.as_str(),
+                    model
+                ],
+            )?;
+            if same && !matches!(source, StartSource::Unknown | StartSource::Compact) {
+                self.conn.execute(
+                    "UPDATE conversations SET start_source = ?3 \
+                     WHERE session_id = ?1 AND claude_session_id = ?2 AND start_source = 'unknown'",
+                    rusqlite::params![session_id, claude_session_id, source.as_str()],
+                )?;
             }
-        }
-        tx.commit()?;
+            let path_sql = if same {
+                "transcript_path = COALESCE(?3, transcript_path)"
+            } else {
+                "transcript_path = ?3"
+            };
+            let resets = source.resets_context() && !(same && turn_started);
+            let reset_sql = if resets && turn_started {
+                ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
+                   context_at = ?5, context_stale = 0"
+            } else if resets {
+                ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
+                   context_at = ?5, context_stale = 0, current_activity = NULL, last_prompt = NULL, \
+                   pending_input = NULL"
+            } else if matches!(
+                source,
+                StartSource::Resume | StartSource::Unknown | StartSource::Fork
+            ) && !same
+            {
+                ", context_stale = 1"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "UPDATE sessions SET claude_session_id = ?2, {path_sql}, \
+                     model = COALESCE(?4, model), awaiting_rebind_at = NULL{reset_sql} \
+                 WHERE id = ?1"
+            );
+            // rusqlite rejects a bound parameter the statement does not use,
+            // and only the resetting branch references `?5`.
+            let params: [&dyn rusqlite::ToSql; 5] = [
+                &session_id,
+                &claude_session_id,
+                &transcript_path,
+                &model,
+                &now,
+            ];
+            let n_params = if resets { 5 } else { 4 };
+            self.conn.execute(&sql, &params[..n_params])?;
+            // Work graph M2.2: a conversation that an ENDED work link
+            // snapshotted is being resumed (from fleet's Resume, `claude
+            // --resume`, or a `/resume`) — the work follows it. Best-effort:
+            // work links never fail a rebind, and this still runs inside the
+            // SAVEPOINT so a genuine rebind failure cannot leave a carry
+            // half-applied.
+            if !same {
+                if let Err(e) = self.carry_resumed_work(session_id, claude_session_id) {
+                    tracing::warn!(session_id, error = %e.message, "[work] resume carry failed");
+                    self.ensure_in_savepoint()?;
+                }
+            }
+            Ok(())
+        })?;
         self.bus.conversations_changed(session_id);
         Ok(self.emit_session(session_id)?)
     }
@@ -279,7 +300,8 @@ impl Store {
     /// Store a hook-validated transcript path on the session's conversation
     /// row for `claude_session_id`, so an earlier conversation can be read
     /// after the session has moved on. No event: `list_conversations` reads
-    /// it on demand.
+    /// it on demand. A repeat of the same path is a no-op write (Task 3: a
+    /// hook resending the same `transcript_path` must not cost a write).
     pub fn set_conversation_transcript_path(
         &self,
         session_id: i64,
@@ -288,7 +310,7 @@ impl Store {
     ) -> Result<(), IpcError> {
         self.conn.execute(
             "UPDATE conversations SET transcript_path = ?3 \
-             WHERE session_id = ?1 AND claude_session_id = ?2",
+             WHERE session_id = ?1 AND claude_session_id = ?2 AND transcript_path IS NOT ?3",
             rusqlite::params![session_id, claude_session_id, path],
         )?;
         Ok(())
@@ -497,7 +519,26 @@ impl Store {
     }
 
     /// Write a context size for `claude_session_id` — ignored when that is no
-    /// longer the session's current conversation. Derives `context_pct`.
+    /// longer the session's current conversation. Derives `context_pct`. A
+    /// repeat of the same tokens/window/source/model on an already-fresh
+    /// context (`context_stale = 0`) is a no-op write (Task 3: `refresh_context`
+    /// calls this on every Stop hook's follow-up, most of which report the
+    /// same size as last time) — still written when it would clear
+    /// `context_stale`, since that is a real state change.
+    ///
+    /// Also still written once `context_at` is more than
+    /// [`CONTEXT_RESTAMP_MARGIN_SECS`] old, even with unchanged values (fix
+    /// round 1, Important 1): reconcile keeps a transcript value over the
+    /// pane footer only while `context_at` is within its own freshness
+    /// window (`store/reconcile.rs`), and the Conversation panel re-sends
+    /// the SAME transcript value every 5s on an idle session
+    /// (`service/transcript.rs`). Skipping the write entirely on every
+    /// unchanged re-send would let the stamp age out from under that
+    /// window, so reconcile would flip the row to the pane value and the
+    /// next panel poll would write transcript straight back — a visible
+    /// flicker plus two `row_version` bumps and events per cycle. Only
+    /// re-stamping well before the window elapses avoids that while still
+    /// dropping the overwhelming majority of same-value re-sends.
     pub fn set_context(
         &self,
         session_id: i64,
@@ -513,7 +554,10 @@ impl Store {
             "UPDATE sessions SET context_tokens = ?3, context_window = ?4, context_pct = ?5, \
                  context_source = ?6, context_at = ?7, context_stale = 0, \
                  model = COALESCE(?8, model) \
-             WHERE id = ?1 AND claude_session_id = ?2",
+             WHERE id = ?1 AND claude_session_id = ?2 \
+               AND (context_stale = 1 OR context_tokens IS NOT ?3 OR context_window IS NOT ?4 \
+                    OR context_source IS NOT ?6 OR model IS NOT COALESCE(?8, model) \
+                    OR context_at IS NULL OR context_at < ?7 - ?9)",
             rusqlite::params![
                 session_id,
                 claude_session_id,
@@ -522,7 +566,8 @@ impl Store {
                 pct,
                 source,
                 now_unix(),
-                model
+                model,
+                CONTEXT_RESTAMP_MARGIN_SECS
             ],
         )?;
         if n == 0 {
@@ -727,6 +772,75 @@ mod tests {
             .unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.context.context_tokens, Some(0));
+    }
+
+    /// Task 3 fix round 1, Important 1: the no-op guard must not let
+    /// `context_at` age past reconcile's freshness margin. The Conversation
+    /// panel re-sends the same transcript value every 5s
+    /// (`service/transcript.rs`); reconcile keeps a transcript value over
+    /// the pane footer only while `context_at >= now - 120`
+    /// (`store/reconcile.rs`). A same-value `set_context` that skips the
+    /// write ENTIRELY would let the stamp age past that window on an idle
+    /// session, so reconcile would flip the row to the pane value — then the
+    /// next panel poll would write transcript back: a flicker plus two
+    /// `row_version` bumps + events per cycle. The fix keeps writing (only
+    /// `context_at`) once the stamp is more than 60s old, well inside the
+    /// 120s window, while still dropping same-value re-sends that arrive
+    /// sooner.
+    #[test]
+    fn set_context_restamps_before_the_freshness_margin_erodes() {
+        let (s, _) = store_with_recorder();
+        let id = session(&s);
+        s.rebind_conversation(id, A, StartSource::Fleet, None, None)
+            .unwrap();
+        let first = s
+            .set_context(id, A, 90_000, 200_000, "transcript", None)
+            .unwrap()
+            .unwrap();
+        let v1 = first.row_version;
+        let first_at = first.context.context_at.unwrap();
+
+        // An immediate same-value re-send is still a genuine no-op.
+        let noop = s
+            .set_context(id, A, 90_000, 200_000, "transcript", None)
+            .unwrap();
+        assert!(
+            noop.is_none(),
+            "an immediate repeat must still be a no-op write"
+        );
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().row_version,
+            v1,
+            "the no-op re-send must not bump row_version"
+        );
+
+        // Age the stamp past the 60s re-stamp margin (still well inside
+        // reconcile's 120s freshness window).
+        s.conn
+            .execute(
+                "UPDATE sessions SET context_at = context_at - 61 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+
+        let restamped = s
+            .set_context(id, A, 90_000, 200_000, "transcript", None)
+            .unwrap()
+            .expect(
+                "a same-value re-send after the stamp has aged past the \
+                 60s margin must still write, to re-stamp context_at before \
+                 reconcile's 120s freshness window elapses",
+            );
+        assert!(
+            restamped.context.context_at.unwrap() > first_at - 61,
+            "context_at must be re-stamped to roughly now, not left aged"
+        );
+        assert_eq!(
+            restamped.context.context_source.as_deref(),
+            Some("transcript"),
+            "the source must still read transcript after the re-stamp"
+        );
+        assert_eq!(restamped.context.context_tokens, Some(90_000));
     }
 
     #[test]

@@ -268,6 +268,65 @@ impl Store {
         rows.collect()
     }
 
+    /// `list_worktrees`'s answer built in ONE query: every LOCAL worktree row
+    /// (optionally restricted to one project, same as
+    /// [`Self::list_worktrees_for_project`]) LEFT JOINed with its alive
+    /// (`status='running' AND lost_at IS NULL` — [`Self::alive_sessions_for_worktree`]'s
+    /// own predicate) session occupants, instead of one
+    /// `list_worktrees_for_project` call per project plus one
+    /// `alive_sessions_for_worktree` call per worktree. The join condition
+    /// matches migration 059's partial index (`idx_sessions_worktree_live`).
+    ///
+    /// Ordered exactly as the old N+1 path built it — by project (owner,
+    /// repo, `list_projects`'s own order), then worktree name
+    /// (`list_worktrees_for_project`'s own order), then occupant (host_alias,
+    /// tmux_name — `alive_sessions_for_worktree`'s own order) — so
+    /// `list_worktrees`'s output is unchanged.
+    pub fn worktree_occupancy(
+        &self,
+        project_id: Option<i64>,
+    ) -> Result<Vec<crate::service::worktrees::WorktreeOccupancy>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {wcols}, s.host_alias, s.tmux_name
+               FROM worktrees w
+               JOIN projects p ON p.id = w.project_id
+          LEFT JOIN sessions s ON s.worktree_id = w.id
+                               AND s.status = 'running' AND s.lost_at IS NULL
+              WHERE w.host_alias = 'local'
+                AND (?1 IS NULL OR w.project_id = ?1)
+              ORDER BY p.owner, p.repo, w.name, s.host_alias, s.tmux_name",
+            wcols = qualified(WORKTREE_COLUMNS, "w")
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![project_id], |row| {
+            Ok((
+                worktree_from_row(row)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+        let mut out: Vec<crate::service::worktrees::WorktreeOccupancy> = Vec::new();
+        let mut last_wid: Option<i64> = None;
+        for r in rows {
+            let (w, host, tmux) = r?;
+            if last_wid != Some(w.id) {
+                last_wid = Some(w.id);
+                out.push(crate::service::worktrees::WorktreeOccupancy {
+                    worktree: w,
+                    occupants: Vec::new(),
+                });
+            }
+            if let (Some(host_alias), Some(tmux_name)) = (host, tmux) {
+                out.last_mut().unwrap().occupants.push(
+                    crate::service::worktrees::WorktreeOccupant {
+                        host_alias,
+                        tmux_name,
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
     /// Every worktree row of one host, across projects: cwd → project
     /// linking (`service::sessions::HostPaths`).
     pub fn list_worktrees_on_host(
@@ -1269,6 +1328,159 @@ mod tests {
                 .count(),
             1,
             "worktree:removed fires once for the pruned row: {evts:?}"
+        );
+    }
+
+    /// `worktree_occupancy` replaces `list_worktrees`'s old per-project +
+    /// per-worktree N+1 with one query; this pins that its output matches
+    /// what the N+1 path produced (project order, then worktree name order,
+    /// then occupant host/name order), across several projects and
+    /// worktrees, with a mix of an occupied worktree, a free worktree, and a
+    /// worktree whose only session is LOST (must not count as an occupant).
+    #[test]
+    fn worktree_occupancy_matches_the_old_n_plus_1_shape() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        s.upsert_host("beta").unwrap();
+
+        // Two projects, deliberately upserted out of (owner, repo) order, to
+        // prove the query orders by project like `list_projects` does.
+        let pid_z = s.upsert_project("z-owner", "repo", "/p/z").unwrap();
+        let pid_a = s.upsert_project("a-owner", "repo", "/p/a").unwrap();
+
+        // pid_a: two worktrees, "main" and "feat"; "feat" has two alive
+        // occupants on different hosts, "main" is free.
+        let wid_a_main = s
+            .upsert_worktree(pid_a, "main", "/p/a", Some("main"))
+            .unwrap();
+        let wid_a_feat = s
+            .upsert_worktree(pid_a, "feat", "/p/a/.worktrees/feat", Some("feat"))
+            .unwrap();
+        s.upsert_session(
+            "sess-beta",
+            "beta",
+            Some(pid_a),
+            Some(wid_a_feat),
+            0,
+            0,
+            "running",
+            None,
+        )
+        .unwrap();
+        s.upsert_session(
+            "sess-alpha",
+            "alpha",
+            Some(pid_a),
+            Some(wid_a_feat),
+            0,
+            0,
+            "running",
+            None,
+        )
+        .unwrap();
+
+        // pid_z: one worktree whose only session is LOST — must read as
+        // unoccupied, not as an occupant.
+        let wid_z = s
+            .upsert_worktree(pid_z, "gone", "/p/z/.worktrees/gone", None)
+            .unwrap();
+        let lost_id = s
+            .upsert_session(
+                "sess-lost",
+                "alpha",
+                Some(pid_z),
+                Some(wid_z),
+                0,
+                0,
+                "running",
+                None,
+            )
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE sessions SET lost_at = 999 WHERE id = ?1",
+                rusqlite::params![lost_id],
+            )
+            .unwrap();
+
+        type Occupant = (String, String);
+        type Shape = (String, i64, Vec<Occupant>);
+
+        let out = s.worktree_occupancy(None).unwrap();
+        let shape: Vec<Shape> = out
+            .iter()
+            .map(|o| {
+                (
+                    o.worktree.name.clone(),
+                    o.worktree.id,
+                    o.occupants
+                        .iter()
+                        .map(|occ| (occ.host_alias.clone(), occ.tmux_name.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                // a-owner/repo first (project order); within it, alphabetical
+                // by name ("feat" < "main"), matching
+                // `list_worktrees_for_project`'s own `ORDER BY name` — the
+                // old N+1 path never special-cased "main" first.
+                (
+                    "feat".to_string(),
+                    wid_a_feat,
+                    vec![
+                        ("alpha".to_string(), "sess-alpha".to_string()),
+                        ("beta".to_string(), "sess-beta".to_string()),
+                    ]
+                ),
+                ("main".to_string(), wid_a_main, vec![]),
+                // z-owner/repo last; its only session is lost, so no occupant
+                ("gone".to_string(), wid_z, vec![]),
+            ]
+        );
+
+        // project_id filters to just that project's worktrees, same as the
+        // old per-project loop skipping every other project.
+        let scoped = s.worktree_occupancy(Some(pid_a)).unwrap();
+        assert_eq!(scoped.len(), 2);
+        assert!(scoped.iter().all(|o| o.worktree.project_id == pid_a));
+
+        // A project id that names no project answers empty, not an error —
+        // exactly the old loop's behaviour when nothing matches.
+        assert!(s.worktree_occupancy(Some(999_999)).unwrap().is_empty());
+    }
+
+    /// Migration 056's partial index on `sessions(worktree_id)` must be the
+    /// one the planner picks for `worktree_occupancy`'s join — the whole
+    /// point of adding it. `EXPLAIN QUERY PLAN`'s `detail` column names the
+    /// index by name when it is used.
+    #[test]
+    fn worktree_occupancy_query_plan_uses_the_worktree_index() {
+        let s = Store::open_in_memory().unwrap();
+        let mut stmt = s
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT w.id FROM worktrees w
+                 JOIN projects p ON p.id = w.project_id
+            LEFT JOIN sessions s ON s.worktree_id = w.id
+                                 AND s.status = 'running' AND s.lost_at IS NULL
+                WHERE w.host_alias = 'local'
+                ORDER BY p.owner, p.repo, w.name, s.host_alias, s.tmux_name",
+            )
+            .unwrap();
+        let details: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|d| d.contains("idx_sessions_worktree_live")),
+            "expected idx_sessions_worktree_live in the plan: {details:?}"
         );
     }
 }

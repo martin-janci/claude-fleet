@@ -88,8 +88,11 @@ libc = "0.2"
 tempfile = "3"
 # `trace` only in tests: the work graph's scale tests (M12.2,
 # store/scale_fixture.rs) capture the statements a call runs and check each
-# one's query plan. The same crate and version as above; no package added.
-rusqlite = { version = "0.32", features = ["bundled", "trace"] }
+# one's query plan. `functions` only in tests: a scalar function that fails
+# with SQLITE_IOERR injects a real read-level I/O error
+# (`Store::arm_read_ioerr_for_test`). The same crate and version as above; no
+# package added.
+rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
 # `test-util` only: `#[tokio::test(start_paused = true)]`, so the listener's
 # handshake timeout can be tested without the test waiting it out in real time.
 tokio = { version = "1", features = ["full", "test-util"] }

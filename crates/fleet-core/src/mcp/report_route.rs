@@ -130,6 +130,7 @@ mod tests {
                 master: Arc::new("s3cret".to_string()),
                 store: Arc::clone(&store),
                 allowed_hosts: Arc::new(vec![]),
+                tokens: None,
             },
             pairing::PairState::new(
                 Arc::clone(&store),

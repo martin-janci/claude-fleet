@@ -935,6 +935,7 @@ mod tests {
                     keep: &[],
                     lost_ttl_cutoff: None,
                     skip_prune: false,
+                    reconciled_at: None,
                 })
                 .unwrap();
         };

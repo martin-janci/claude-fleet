@@ -23,6 +23,11 @@ use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
+/// Most ids one `UPDATE … WHERE id IN (…)` carries in
+/// [`Store::touch_tracker_items_fetched_at`], well under SQLite's default
+/// `SQLITE_LIMIT_VARIABLE_NUMBER` (32766 on the bundled build).
+const FETCHED_AT_TOUCH_CHUNK: usize = 500;
+
 /// One tracker item as a provider normalised it, ready to store.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrackerItemWrite {
@@ -295,11 +300,58 @@ impl Store {
 
     /// Insert or update one tracker item by `(tracker_id, external_id)`.
     /// Emits `work:item` (and `session:updated` for the live sessions whose
-    /// primary work it is) only when something a reader sees changed.
+    /// primary work it is) only when something a reader sees changed. An
+    /// unchanged item's `fetched_at` is touched right here.
     pub fn upsert_tracker_item(
         &self,
         tracker_id: i64,
         w: &TrackerItemWrite,
+    ) -> Result<UpsertOutcome, IpcError> {
+        self.upsert_tracker_item_impl(tracker_id, w, true)
+    }
+
+    /// Same as [`Store::upsert_tracker_item`] but for a caller batching many
+    /// items in one transaction (the tracker sync tick's `store_items`): an
+    /// unchanged item's `fetched_at` touch is NOT written here. The caller
+    /// collects `id`s of the unchanged outcomes and applies one
+    /// [`Store::touch_tracker_items_fetched_at`] after the loop instead of
+    /// one `UPDATE` per item.
+    pub fn upsert_tracker_item_batched(
+        &self,
+        tracker_id: i64,
+        w: &TrackerItemWrite,
+    ) -> Result<UpsertOutcome, IpcError> {
+        self.upsert_tracker_item_impl(tracker_id, w, false)
+    }
+
+    /// Batch-touch `fetched_at` for tracker items that were re-fetched but
+    /// did not change (paired with [`Store::upsert_tracker_item_batched`]):
+    /// one `UPDATE … WHERE id IN (…)` per chunk of at most
+    /// [`FETCHED_AT_TOUCH_CHUNK`] ids, instead of one `UPDATE` per item.
+    /// `ids` may repeat or be empty; a repeat is harmless (still one row).
+    pub fn touch_tracker_items_fetched_at(&self, ids: &[i64]) -> Result<(), IpcError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now = now_unix();
+        for chunk in ids.chunks(FETCHED_AT_TOUCH_CHUNK) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("UPDATE work_items SET fetched_at = ? WHERE id IN ({placeholders})");
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            params.push(&now);
+            for id in chunk {
+                params.push(id);
+            }
+            self.conn.execute(&sql, params.as_slice())?;
+        }
+        Ok(())
+    }
+
+    fn upsert_tracker_item_impl(
+        &self,
+        tracker_id: i64,
+        w: &TrackerItemWrite,
+        touch_unchanged: bool,
     ) -> Result<UpsertOutcome, IpcError> {
         if w.external_id.is_empty() {
             return Err(IpcError::new(
@@ -406,7 +458,7 @@ impl Store {
                             id
                         ],
                     )?;
-                } else {
+                } else if touch_unchanged {
                     self.conn.execute(
                         "UPDATE work_items SET fetched_at = ?1 WHERE id = ?2",
                         rusqlite::params![now, id],
@@ -1039,6 +1091,80 @@ mod tests {
         assert_eq!(row.status_category, "in_progress");
         assert!(row.status_changed_at.is_some());
         assert_eq!(row.source, "jira");
+    }
+
+    // ── Task 5: tracker sync batches unchanged items' `fetched_at` ──
+
+    #[test]
+    fn unchanged_items_batched_fetched_at_is_one_statement_and_leaves_rows_otherwise_identical() {
+        let (s, t, bus) = with_tracker(&["ABC"]);
+        let mut ids = Vec::new();
+        for i in 1..=3 {
+            let out = s
+                .upsert_tracker_item(
+                    t,
+                    &write(&i.to_string(), &format!("ABC-{i}"), ("To Do", "todo")),
+                )
+                .unwrap();
+            ids.push(out.id);
+        }
+        bus.take();
+        let before: Vec<_> = ids
+            .iter()
+            .map(|id| s.get_work_item(*id).unwrap().unwrap())
+            .collect();
+        let changes_before = s.conn_for_test().total_changes();
+
+        // The batched upsert variant, used by tracker sync's `store_items`,
+        // defers the fetched_at write for an unchanged item: this loop must
+        // touch the database not at all (checked with `total_changes()`
+        // rather than comparing `fetched_at` values, since the real clock's
+        // one-second resolution could hide a same-second write).
+        let mut unchanged = Vec::new();
+        for i in 1..=3 {
+            let out = s
+                .upsert_tracker_item_batched(
+                    t,
+                    &write(&i.to_string(), &format!("ABC-{i}"), ("To Do", "todo")),
+                )
+                .unwrap();
+            assert!(!out.changed, "same item, no visible change");
+            unchanged.push(out.id);
+        }
+        assert!(
+            bus.names().is_empty(),
+            "no event for an unchanged batched pass"
+        );
+        assert_eq!(
+            s.conn_for_test().total_changes(),
+            changes_before,
+            "the batched upsert alone must not write fetched_at yet"
+        );
+        for (id, row) in ids.iter().zip(&before) {
+            let still = s.get_work_item(*id).unwrap().unwrap();
+            assert_eq!(
+                &still, row,
+                "the batched upsert alone must not touch fetched_at yet"
+            );
+        }
+
+        // One batched `UPDATE … WHERE id IN (…)` covers all three rows:
+        // `Connection::changes()` reports the row count of the most
+        // recently COMPLETED statement, so a real per-item loop (three
+        // separate single-row UPDATEs) would report 1 here, not 3.
+        s.touch_tracker_items_fetched_at(&unchanged).unwrap();
+        assert_eq!(
+            s.conn_for_test().changes(),
+            3,
+            "one statement touched all three rows"
+        );
+        for (id, before_row) in ids.iter().zip(&before) {
+            let after_row = s.get_work_item(*id).unwrap().unwrap();
+            assert!(after_row.fetched_at.is_some());
+            let mut before_norm = before_row.clone();
+            before_norm.fetched_at = after_row.fetched_at;
+            assert_eq!(after_row, before_norm, "identical except fetched_at");
+        }
     }
 
     #[test]

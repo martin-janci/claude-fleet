@@ -1261,7 +1261,7 @@ fn deps_with_cadence_for_tests() -> ReconcileDeps {
         local_home: None,
         local_host: true,
         agents_every: std::time::Duration::from_secs(60),
-        last_agents: dashmap::DashMap::new(),
+        last_agents: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -2192,8 +2192,8 @@ async fn concurrent_list_sessions_share_one_reconcile_pass() {
     // say) must cause ONE fleet probe; the loser is served the stored
     // rows immediately instead of queueing a second pass.
     use std::time::Duration;
-    let store = Mutex::new(Store::open_in_memory().expect("store"));
-    let gate = ReconcileGate::new();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
     let (deps, probes) = scripted_deps(
         vec![tmux_session("s1")],
         Duration::from_millis(200),
@@ -2224,20 +2224,99 @@ async fn concurrent_list_sessions_share_one_reconcile_pass() {
     assert_eq!(rows[0].tmux_name, "s1");
 }
 
+/// Hub store latency, task 7: once a pass has completed, a listing served
+/// from the store reads through the reader it is handed (the hub's read
+/// pool) — so it answers while the writer's mutex is held by a reconcile
+/// transaction or a hook. Bounded on an OS thread: a read stuck in a std
+/// `Mutex::lock` would stall a tokio timer too.
+#[test]
+fn a_listing_served_from_the_store_reads_through_the_reader_not_the_writer() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let store = Arc::new(Mutex::new(
+        Store::open_with_bus(&path, Arc::new(crate::events::NoopEventBus)).unwrap(),
+    ));
+    let pool = Arc::new(
+        crate::store::ReadPool::open(&path, crate::store::READ_POOL_SIZE)
+            .unwrap()
+            .unwrap(),
+    );
+    let gate = Arc::new(ReconcileGate::new());
+    let (deps, _probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_millis(1),
+        Duration::from_secs(5),
+    );
+    let window = Duration::from_secs(60);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // Cold start: the inline pass writes (and reads back) through the writer.
+    let rows = rt
+        .block_on(list_sessions_with_reader(
+            &store,
+            pool.get().unwrap(),
+            &deps,
+            &gate,
+            window,
+            false,
+        ))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let writer = Arc::clone(&store);
+    let holder = std::thread::spawn(move || {
+        let _guard = writer.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = hold_rx.recv_timeout(Duration::from_secs(30));
+    });
+    held_rx.recv().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (store, pool, deps, gate) = (store.clone(), pool.clone(), deps.clone(), gate.clone());
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let rows = rt.block_on(list_sessions_with_reader(
+                &store,
+                pool.get().unwrap(),
+                &deps,
+                &gate,
+                window,
+                false,
+            ));
+            let _ = tx.send(rows.map(|r| r.len()));
+        });
+    }
+    let answered = rx.recv_timeout(Duration::from_secs(3));
+    assert!(
+        matches!(answered, Ok(Ok(1))),
+        "a fresh listing waited on the writer: {answered:?}"
+    );
+    hold_tx.send(()).unwrap();
+    holder.join().unwrap();
+}
+
 #[tokio::test]
 async fn list_sessions_within_freshness_window_causes_zero_probes() {
     // BE-2: a store that was reconciled within the interval is served as
     // is; `force` (the explicit-refresh path) still probes.
     use std::time::Duration;
-    let store = Mutex::new(Store::open_in_memory().expect("store"));
-    let gate = ReconcileGate::new();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
     let (deps, probes) = scripted_deps(
         vec![tmux_session("s1")],
         Duration::from_millis(1),
         Duration::from_secs(5),
     );
     let window = Duration::from_secs(60);
-    // First call: nothing completed yet → one pass.
+    // First call: nothing completed yet (cold start) → one pass, inline.
     list_sessions_with(&store, &deps, &gate, window, false)
         .await
         .unwrap();
@@ -2255,17 +2334,135 @@ async fn list_sessions_within_freshness_window_causes_zero_probes() {
         "fresh store ⇒ no probe"
     );
     assert_eq!(gate.passes(), 1);
-    // Explicit refresh ignores freshness.
+    // Explicit refresh ignores freshness and still runs inline.
     list_sessions_with(&store, &deps, &gate, window, true)
         .await
         .unwrap();
     assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(gate.passes(), 2);
-    // A zero-length window means "always stale".
-    list_sessions_with(&store, &deps, &gate, Duration::ZERO, false)
+    // A zero-length window means "always stale". A pass has already
+    // completed (`gate.passes() == 2` above), so this is no longer a cold
+    // start: Task 1(a) serves the current stored rows AT ONCE instead of
+    // probing inline, and catches the gate up through a detached pass.
+    let before = std::time::Instant::now();
+    let rows = list_sessions_with(&store, &deps, &gate, Duration::ZERO, false)
         .await
         .unwrap();
-    assert_eq!(gate.passes(), 3);
+    assert!(
+        before.elapsed() < Duration::from_secs(1),
+        "must return without awaiting the probe: {:?}",
+        before.elapsed()
+    );
+    assert_eq!(rows.len(), 1, "the current stored rows, served at once");
+    // The detached pass lands shortly after (ScriptedTmux's delay here is
+    // 1ms) — poll instead of asserting synchronously, since it is no longer
+    // awaited by `list_sessions_with` itself.
+    for _ in 0..200 {
+        if gate.passes() == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        gate.passes(),
+        3,
+        "the background catch-up pass completes through the same gate"
+    );
+}
+
+#[tokio::test]
+async fn stale_gate_after_a_completed_pass_returns_without_awaiting_the_probe() {
+    // Task 1(a): once a pass has completed in this process, a stale caller
+    // must not pay for a fresh probe inline — it gets the stored rows at
+    // once while a background pass (through the SAME gate, so it can never
+    // overlap one already running) catches up.
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    let gate = Arc::new(ReconcileGate::new());
+    let window = Duration::from_millis(1);
+
+    // First pass: fast, so the gate records a completed pass (cold start).
+    let (fast_deps, _fast_probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_millis(1),
+        Duration::from_secs(5),
+    );
+    list_sessions_with(&store, &fast_deps, &gate, window, false)
+        .await
+        .unwrap();
+    assert_eq!(gate.passes(), 1, "the cold-start pass completed");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!gate.is_fresh(window), "the window has now lapsed");
+
+    // Second call: every host's exec blocks far past this test's own bound.
+    // If `list_sessions_with` awaited the probe inline, this call would hang
+    // well past the `tokio::time::timeout` below.
+    let (slow_deps, probes) = scripted_deps(
+        vec![tmux_session("s1")],
+        Duration::from_secs(3600),
+        Duration::from_secs(3600),
+    );
+    let start = std::time::Instant::now();
+    let rows = tokio::time::timeout(
+        Duration::from_millis(500),
+        list_sessions_with(&store, &slow_deps, &gate, window, false),
+    )
+    .await
+    .expect("must return promptly, not await the slow probe")
+    .unwrap();
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "returned promptly: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(rows.len(), 1, "the stale but stored row is served at once");
+
+    // A pass is observed to have started through the same gate: it reached
+    // the (now hanging) host probe, and the gate's single slot stays claimed
+    // while it is in flight.
+    for _ in 0..100 {
+        if probes.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        probes.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "a background pass started and reached the host probe"
+    );
+    assert!(
+        gate.try_begin().is_none(),
+        "the gate's single slot is claimed by the in-flight background pass"
+    );
+}
+
+#[test]
+fn real_reconcile_deps_share_the_agents_cadence_across_builds() {
+    // Task 1(b): `ReconcileDeps::real` is built FRESH on every
+    // `list_sessions` / `refresh_sessions` / `reconcile_now` / single-host
+    // refresh call (see each entry point in reconcile.rs). Without a
+    // process-wide `last_agents` map, `agents_due` would find no record of a
+    // prior ask on every single one of those builds, so `AGENTS_CADENCE`
+    // (once a minute) would never actually apply in production — `claude
+    // agents --json` would run on every host on every pass.
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    // A distinctive alias: this test shares the process-wide map with
+    // whatever else in this binary builds `ReconcileDeps::real`.
+    let alias = "task1b-cadence-test-host";
+    let deps1 = ReconcileDeps::real(&ssh, true);
+    let now = std::time::Instant::now();
+    assert!(
+        agents_due(&deps1, alias, now),
+        "first ask for this alias is always due"
+    );
+    // A second, freshly built `real` deps — exactly what every entry point
+    // constructs — must still see the ask `deps1` just recorded.
+    let deps2 = ReconcileDeps::real(&ssh, true);
+    assert!(
+        !agents_due(&deps2, alias, now),
+        "a freshly built ReconcileDeps::real must honour the cadence just recorded, \
+         not start a fresh map"
+    );
 }
 
 #[tokio::test]
@@ -5664,6 +5861,433 @@ fn scrollback_lines_are_clamped() {
     assert_eq!(clamp_scrollback(None), None);
 }
 
+// ── Task 4: one transaction per host, no unconditional writes ──
+
+/// A reconcile probe of `vps` that saw `live`, with the given identity,
+/// agents and PR results.
+fn vps_probe(
+    s: &Store,
+    live: Vec<crate::tmux::TmuxSession>,
+    identity: Option<crate::tmux::HostIdentity>,
+    agents: Vec<crate::claude_agents::ClaudeAgentRow>,
+    pr_info: PrInfoMap,
+) -> HostProbe {
+    let host = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "vps")
+        .unwrap();
+    HostProbe {
+        host,
+        result: Ok(live),
+        agent_rows: Some(agents),
+        agent_mtimes: Some(std::collections::HashMap::new()),
+        intel: PaneIntelMap::new(),
+        account: None,
+        pr_info,
+        identity,
+        started_at: now_unix(),
+    }
+}
+
+fn row_version_of(s: &Store, name: &str) -> i64 {
+    s.get_session(name, "vps").unwrap().unwrap().row_version
+}
+
+/// A pass whose probe equals the stored identity must not write the
+/// `hosts` identity columns at all — an UPDATE that sets the same values is
+/// still a write under the store lock every pass.
+#[test]
+fn an_unchanged_identity_is_not_written_again() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    s.set_host_identity("vps", Some("boot-a"), Some(7)).unwrap();
+    // Count every UPDATE that names an identity column, whatever it sets.
+    s.conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TABLE identity_writes (n INTEGER);
+             CREATE TEMP TRIGGER count_identity_writes
+             AFTER UPDATE OF boot_id, tmux_server_pid ON main.hosts
+             BEGIN INSERT INTO identity_writes VALUES (1); END;",
+        )
+        .unwrap();
+    let writes = |s: &Store| -> i64 {
+        s.conn_for_test()
+            .query_row("SELECT COUNT(*) FROM temp.identity_writes", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let same = crate::tmux::HostIdentity {
+        boot_id: Some("boot-a".into()),
+        tmux_server_pid: Some(7),
+    };
+    let projects = s.list_projects().unwrap();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        Some(same),
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(
+        writes(&s),
+        0,
+        "a probe that saw the stored identity must not write it again"
+    );
+    // A changed identity is still written (and the counter does see writes).
+    s.set_host_identity("vps", Some("boot-a"), Some(8)).unwrap();
+    assert_eq!(writes(&s), 1, "a changed identity is written");
+    assert_eq!(s.get_host_identity("vps").unwrap().tmux_server_pid, Some(8));
+}
+
+/// Requirement 3 (ruling: fold `last_reconciled_at` into the upsert): a pass
+/// that observes exactly what the store holds bumps each live row's
+/// `row_version` once — the upsert's physical UPDATE — not a second time
+/// for a separate freshness stamp. The stamp itself still moves.
+#[test]
+fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let live = || vec![tmux_session("dev-a"), tmux_session("dev-b")];
+    let probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    // Backdate the freshness stamp so the next pass provably re-stamps it.
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET last_reconciled_at = 1 WHERE host_alias = 'vps'",
+            [],
+        )
+        .unwrap();
+    let before = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    let probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    assert_eq!(
+        [after[0] - before[0], after[1] - before[1]],
+        [1, 1],
+        "an unchanged pass bumps each row_version exactly once"
+    );
+    let stamp: i64 = s
+        .conn_for_test()
+        .query_row(
+            "SELECT MIN(last_reconciled_at) FROM sessions WHERE host_alias = 'vps'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        stamp >= probe.started_at,
+        "the pass still stamps last_reconciled_at ({stamp} < {})",
+        probe.started_at
+    );
+}
+
+/// Requirement 1: everything one host's reconcile writes commits in ONE
+/// transaction. An error after the upsert (injected once every write of the
+/// branch has run) must roll back that host's PR signals, its timeline
+/// events, its conversation rebind and its bg rows too — and announce none
+/// of them.
+#[test]
+fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    // Pass 1: the session exists, no status, no PR, no agents.
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let id = s.get_session("dev-a", "vps").unwrap().unwrap().id;
+    let events_before = s.list_session_events(id, 100).unwrap().len();
+    let before = s.get_session("dev-a", "vps").unwrap().unwrap();
+    bus.take();
+
+    // Pass 2 changes the status (agent by name), binds a conversation,
+    // stores PR signals and surfaces a bg agent — then fails late.
+    let mut pr_info = PrInfoMap::new();
+    pr_info.insert(
+        "dev-a".into(),
+        crate::service::outcome::PrInfo {
+            pr_url: Some("https://github.com/o/r/pull/1".into()),
+            ci_status: Some("passing".into()),
+            signals: Some(crate::service::work::detect::PrSignals {
+                head: Some("feat/x".into()),
+                ..Default::default()
+            }),
+        },
+    );
+    let agents = vec![
+        agent("sid-a", Some("dev-a"), Some("/tmp")),
+        agent("bg-1", None, Some("/elsewhere")),
+    ];
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        agents.clone(),
+        pr_info.clone(),
+    );
+    FAIL_HOST_WRITE_AFTER_WRITES.with(|f| *f.borrow_mut() = Some("vps".into()));
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    FAIL_HOST_WRITE_AFTER_WRITES.with(|f| *f.borrow_mut() = None);
+    assert!(res.is_err(), "the injected fault fails the host write");
+
+    let signals: Option<String> = s
+        .conn_for_test()
+        .query_row("SELECT pr_signals FROM sessions WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(signals, None, "PR signals roll back with the host write");
+    let after = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert!(
+        after.eq_ignoring_row_version(&before),
+        "the row itself rolls back: {before:?} -> {after:?}"
+    );
+    assert_eq!(
+        s.list_session_events(id, 100).unwrap().len(),
+        events_before,
+        "timeline events roll back with the host write"
+    );
+    assert!(
+        s.get_session("bg:bg-1", "vps").unwrap().is_none(),
+        "the bg row rolls back with the host write"
+    );
+    let announced = bus.take();
+    assert!(
+        announced.is_empty(),
+        "a rolled-back host write announces nothing; got {announced:?}"
+    );
+
+    // Positive control: the same pass without the fault lands all of it.
+    let probe = vps_probe(&s, vec![tmux_session("dev-a")], None, agents, pr_info);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let signals: Option<String> = s
+        .conn_for_test()
+        .query_row("SELECT pr_signals FROM sessions WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(signals.is_some(), "without the fault the PR signals land");
+    assert!(s.get_session("bg:bg-1", "vps").unwrap().is_some());
+    assert!(s.list_session_events(id, 100).unwrap().len() > events_before);
+}
+
+/// I1: the boot-identity write is best-effort. When SQLite answers it by
+/// rolling the host's WHOLE transaction back (`RAISE(ROLLBACK)` standing in
+/// for SQLITE_FULL / IOERR), the session upsert after it must not commit on
+/// its own in autocommit: the host write fails and nothing is announced.
+#[test]
+fn a_host_write_whose_transaction_is_lost_writes_no_tail() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    s.conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER lose_host_tx BEFORE UPDATE OF boot_id ON hosts \
+             BEGIN SELECT RAISE(ROLLBACK, 'injected whole-transaction rollback'); END;",
+        )
+        .unwrap();
+    bus.take();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("boot-1".into()),
+            ..Default::default()
+        }),
+        vec![],
+        PrInfoMap::new(),
+    );
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    assert!(
+        s.get_session("dev-a", "vps").unwrap().is_none(),
+        "the session upsert after the lost transaction must not autocommit"
+    );
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
+/// Residual I1: a best-effort READ that SQLite answers by rolling the
+/// host's whole transaction back (a real `SQLITE_IOERR` on the lost-TTL
+/// setting) must not let the session burst after it commit on its own: its
+/// SAVEPOINT would otherwise start a fresh transaction and its RELEASE
+/// commit the upsert in autocommit.
+#[test]
+fn a_host_write_lost_at_a_swallowed_read_writes_no_burst() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    s.set_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS, "86400")
+        .unwrap();
+    s.arm_read_ioerr_for_test("settings", "key = 'sessions.lost_ttl_secs'");
+    bus.take();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    assert!(
+        s.get_session("dev-a", "vps").unwrap().is_none(),
+        "the session burst after the lost transaction must not autocommit"
+    );
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
+/// Residual I1: `HostPaths::for_host` swallows its worktree read. When
+/// SQLite answers that read by rolling the host's transaction back, the
+/// PLAIN writes after it (the account relink, no savepoint) must not commit
+/// one by one.
+#[test]
+fn a_host_write_lost_at_the_host_paths_read_writes_no_account() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let pid = s.upsert_project("o", "r", "/home/u/r").unwrap();
+    s.upsert_worktree_on("vps", pid, "wt", "/home/u/r-wt", None)
+        .unwrap();
+    let projects = s.list_projects().unwrap();
+    s.arm_read_ioerr_for_test("worktrees", "host_alias = 'vps'");
+    bus.take();
+    let mut probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    probe.account = Some(oauth_account("acct-1", "a@example.com"));
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    assert!(
+        s.list_accounts().unwrap().is_empty(),
+        "the account relink after the lost transaction must not autocommit"
+    );
+    assert!(s.get_session("dev-a", "vps").unwrap().is_none());
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
+/// Residual I1, round 2: work detection's `trusted_projects` swallows its
+/// settings read, and a resolve with nothing to change never reaches a
+/// savepoint. When SQLite answers that read by rolling the host's
+/// transaction back, the next session's PR-signal UPDATE (a plain write)
+/// must not commit on its own.
+#[test]
+fn a_host_write_lost_at_the_trusted_projects_read_writes_no_pr_signals() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    s.upsert_project("o", "r", "/srv/o/r").unwrap();
+    let projects = s.list_projects().unwrap();
+    s.set_setting(crate::service::settings::WORK_TRUSTED_BRANCH_PROJECTS, "[]")
+        .unwrap();
+    // Both sessions sit in the project, so whichever the PR loop resolves
+    // first loses the transaction and the other's UPDATE is the tail.
+    let in_project = |name: &str| crate::tmux::TmuxSession {
+        path: PathBuf::from("/home/u/projects/github.com/o/r"),
+        ..tmux_session(name)
+    };
+    let live = vec![in_project("dev-a"), in_project("dev-b")];
+    let probe = vps_probe(&s, live.clone(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert!(
+        s.get_session("dev-a", "vps")
+            .unwrap()
+            .unwrap()
+            .project_id
+            .is_some(),
+        "the session resolves to the project, so detection reads the trust set"
+    );
+    s.arm_read_ioerr_for_test("settings", "key = 'work.trusted_branch_projects'");
+    bus.take();
+    let mut pr_info = PrInfoMap::new();
+    for name in ["dev-a", "dev-b"] {
+        pr_info.insert(
+            name.into(),
+            crate::service::outcome::PrInfo {
+                pr_url: Some(format!("https://github.com/o/r/pull/{name}")),
+                ci_status: None,
+                signals: Some(crate::service::work::detect::PrSignals {
+                    head: Some("feat/x".into()),
+                    ..Default::default()
+                }),
+            },
+        );
+    }
+    let probe = vps_probe(&s, live, None, vec![], pr_info);
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    let stored: i64 = s
+        .conn_for_test()
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE pr_signals IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored, 0,
+        "a PR-signal write after the lost transaction must not autocommit"
+    );
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
+/// M1: `whoami`'s E_AMBIGUOUS candidates come in `list_all_sessions` order
+/// (most recent activity first), as they did before the direct lookup.
+#[test]
+fn find_session_by_tmux_name_candidates_follow_list_all_sessions_order() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("alpha").unwrap();
+    s.upsert_host("beta").unwrap();
+    let older = s
+        .upsert_session("dev-x", "alpha", None, None, 0, 10, "running", None)
+        .unwrap();
+    let newer = s
+        .upsert_session("dev-x", "beta", None, None, 0, 20, "running", None)
+        .unwrap();
+    let err = find_session_by_tmux_name(&s, "dev-x").unwrap_err();
+    assert_eq!(err.code, "E_AMBIGUOUS");
+    let ids: Vec<i64> = err.details.unwrap()["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["session_id"].as_i64().unwrap())
+        .collect();
+    let listed: Vec<i64> = s
+        .list_all_sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.tmux_name == "dev-x")
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(listed, vec![newer, older], "list_all_sessions order");
+    assert_eq!(ids, listed, "candidates keep list_all_sessions order");
+}
+
 #[tokio::test]
 async fn list_and_refresh_never_probe_a_resume_transcript() {
     // Work graph M11.2: the transcript probe belongs to resume planning
@@ -5673,7 +6297,7 @@ async fn list_and_refresh_never_probe_a_resume_transcript() {
     use crate::ssh_fake::FakeSsh;
     use crate::store::WorkTarget;
     use std::time::Duration;
-    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
     {
         let s = store.lock().unwrap();
         s.upsert_host("h").unwrap();
@@ -5704,8 +6328,9 @@ async fn list_and_refresh_never_probe_a_resume_transcript() {
         },
         Duration::from_secs(5),
     );
-    let gate = ReconcileGate::new();
-    // The list path (stale, so it reconciles), then the forced refresh.
+    let gate = Arc::new(ReconcileGate::new());
+    // The list path (a cold start, so it reconciles inline), then the
+    // forced refresh.
     list_sessions_with(&store, &deps, &gate, Duration::ZERO, false)
         .await
         .unwrap();

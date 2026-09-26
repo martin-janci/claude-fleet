@@ -510,6 +510,10 @@ impl Store {
         Ok(row.unwrap_or_default())
     }
 
+    /// Store a host's observed boot identity. Writes only when a value
+    /// differs from the stored one: reconcile calls this on every pass of
+    /// every reachable host, and the identity almost never moves, so an
+    /// unconditional UPDATE was a write under the store lock for nothing.
     pub fn set_host_identity(
         &self,
         alias: &str,
@@ -517,7 +521,8 @@ impl Store {
         tmux_server_pid: Option<i64>,
     ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE hosts SET boot_id = ?1, tmux_server_pid = ?2 WHERE alias = ?3",
+            "UPDATE hosts SET boot_id = ?1, tmux_server_pid = ?2 WHERE alias = ?3 \
+             AND (boot_id IS NOT ?1 OR tmux_server_pid IS NOT ?2)",
             rusqlite::params![boot_id, tmux_server_pid, alias],
         )?;
         Ok(())
