@@ -111,14 +111,14 @@ impl Store {
         announce: Announce,
     ) -> Result<(), crate::ipc_error::IpcError> {
         let at = now_unix();
-        // SAVEPOINT, not a second `BEGIN`: `Store::atomically` cannot nest,
-        // and Task 3 calls `insert_session_event` from inside one. A
-        // SAVEPOINT works both standalone (autocommit — it starts an
-        // implicit transaction) and already inside an open transaction, so
-        // this is the INSERT and the (conditional) prune as one commit
-        // instead of two separate autocommits under the store mutex.
-        self.conn.execute_batch("SAVEPOINT insert_session_event")?;
-        let outcome: rusqlite::Result<i64> = (|| {
+        // SAVEPOINT (`Store::in_savepoint`), not a second `BEGIN`:
+        // `Store::atomically` cannot nest, and Task 3 calls
+        // `insert_session_event` from inside one. A SAVEPOINT works both
+        // standalone (autocommit — it starts an implicit transaction) and
+        // already inside an open transaction, so this is the INSERT and the
+        // (conditional) prune as one commit instead of two separate
+        // autocommits under the store mutex.
+        let id = self.in_savepoint("insert_session_event", |_| -> rusqlite::Result<i64> {
             self.conn.execute(
                 "INSERT INTO session_events (session_id, at, kind, detail, claude_session_id) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -144,23 +144,7 @@ impl Store {
                 )?;
             }
             Ok(id)
-        })();
-        let id = match outcome {
-            Ok(id) => {
-                self.conn.execute_batch("RELEASE insert_session_event")?;
-                id
-            }
-            Err(e) => {
-                // Best-effort: undo just this SAVEPOINT's work and surface
-                // the original error. If the ROLLBACK/RELEASE itself fails
-                // there is nothing more to do from here — the caller's `?`
-                // below already carries the real error.
-                let _ = self.conn.execute_batch(
-                    "ROLLBACK TO insert_session_event; RELEASE insert_session_event",
-                );
-                return Err(e.into());
-            }
-        };
+        })?;
         if announce == Announce::Yes {
             self.bus.session_event_added(&SessionEvent {
                 id,

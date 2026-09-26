@@ -628,7 +628,13 @@ impl TrackerSync {
                     unchanged_ids.push(out.id);
                 }
                 if let Some((from, to)) = out.status_change {
-                    let _ = s.journal_status_change(out.id, key.as_deref(), &from, &to);
+                    // Best-effort, unless the failure took the batch's
+                    // transaction with it (`Store::ensure_in_tx`).
+                    if s.journal_status_change(out.id, key.as_deref(), &from, &to)
+                        .is_err()
+                    {
+                        s.ensure_in_tx()?;
+                    }
                 }
             }
             s.touch_tracker_items_fetched_at(&unchanged_ids)

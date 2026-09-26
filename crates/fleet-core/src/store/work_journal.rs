@@ -163,13 +163,12 @@ impl Store {
             return Ok(None);
         }
         let now = now_unix();
-        // SAVEPOINT, not a second `BEGIN`: `Store::atomically` cannot nest,
-        // and Task 3 calls this (via `journal_for_session`, from the Stop
-        // hook) from inside one. A SAVEPOINT works both standalone
-        // (autocommit — it starts an implicit transaction) and already
-        // inside an open transaction.
-        self.conn.execute_batch("SAVEPOINT append_journal")?;
-        let outcome: Result<Option<i64>, IpcError> = (|| {
+        // SAVEPOINT (`Store::in_savepoint`), not a second `BEGIN`:
+        // `Store::atomically` cannot nest, and Task 3 calls this (via
+        // `journal_for_session`, from the Stop hook) from inside one. A
+        // SAVEPOINT works both standalone (autocommit — it starts an
+        // implicit transaction) and already inside an open transaction.
+        self.in_savepoint("append_journal", |_| -> Result<Option<i64>, IpcError> {
             if cap_kind(kind).is_some() {
                 let last: Option<String> = self
                     .conn
@@ -218,20 +217,7 @@ impl Store {
                 )?;
             }
             Ok(Some(id))
-        })();
-        match &outcome {
-            Ok(_) => {
-                self.conn.execute_batch("RELEASE append_journal")?;
-            }
-            Err(_) => {
-                // Best-effort: undo just this SAVEPOINT's work; the `?`
-                // below still surfaces the real error.
-                let _ = self
-                    .conn
-                    .execute_batch("ROLLBACK TO append_journal; RELEASE append_journal");
-            }
-        }
-        outcome
+        })
     }
 
     /// Journal a harvested row for the session `session_id` is running

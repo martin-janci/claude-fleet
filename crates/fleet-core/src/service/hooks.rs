@@ -100,16 +100,27 @@ fn payload_transcript_path<'p>(
 
 /// Store the hook's transcript path when it validates: on the row (while the
 /// id is still its current conversation) and on that conversation's row.
+/// Best-effort; `Err` only when a failure took the hook's transaction with
+/// it ([`Store::ensure_in_tx`]).
 fn remember_transcript_path(
     s: &Store,
     row_id: i64,
     payload: &HookPayload,
     claude_session_id: &str,
-) {
+) -> Result<(), IpcError> {
     if let Some(p) = payload_transcript_path(payload, claude_session_id) {
-        let _ = s.set_transcript_path_for_row(row_id, claude_session_id, p);
-        let _ = s.set_conversation_transcript_path(row_id, claude_session_id, p);
+        if s.set_transcript_path_for_row(row_id, claude_session_id, p)
+            .is_err()
+        {
+            s.ensure_in_tx()?;
+        }
+        if s.set_conversation_transcript_path(row_id, claude_session_id, p)
+            .is_err()
+        {
+            s.ensure_in_tx()?;
+        }
     }
+    Ok(())
 }
 
 /// A short identifier-like value from a hook body (`reason`, `trigger`,
@@ -783,7 +794,7 @@ fn resolve_and_rebind(
         Some(id),
         "conversation_started",
         Some(source.as_str()),
-    );
+    )?;
     Ok(Some((rebound, Binding::Rebound)))
 }
 
@@ -827,7 +838,7 @@ fn apply_session_start_hook(
                     Some(id),
                     "compact_done",
                     compact_trigger(payload),
-                );
+                )?;
             }
             return Ok(());
         }
@@ -854,12 +865,13 @@ fn apply_session_start_hook(
                 Some(id),
                 "conversation_started",
                 Some(source.as_str()),
-            );
+            )?;
         }
         // A new conversation is a window boundary (M4.3): event suggestions
         // of the last one decay unless seen again.
         if let Err(e) = crate::service::work::detect::resolve_session(s, row.id) {
             tracing::debug!(error = %e.message, "[work] boundary resolve failed");
+            s.ensure_in_tx()?;
         }
         Ok(())
     })
@@ -895,7 +907,7 @@ fn apply_pre_compact_hook(
             payload.session_id.as_deref(),
             "compact_started",
             compact_trigger(payload),
-        );
+        )?;
         Ok(())
     })
 }
@@ -932,7 +944,7 @@ fn apply_post_compact_hook(
                 Some(id),
                 "compact_done",
                 compact_trigger(payload),
-            );
+            )?;
         }
         Ok(Some(row.id))
     })?;
@@ -986,7 +998,7 @@ fn apply_stop_hook(
                 return Ok(None);
             }
             let in_flight = before.safe_kill_state.as_deref() == Some("requested");
-            remember_transcript_path(s, before.id, payload, &session_id);
+            remember_transcript_path(s, before.id, payload, &session_id)?;
             let after = s.record_stop_hook_for_row(before.id)?;
             // An agent-written handover's marker block (M9.3) is kept once,
             // as the note: never in the turn's detail or its progress row.
@@ -1006,12 +1018,13 @@ fn apply_stop_hook(
                 Some(&session_id),
                 "turn_done",
                 detail.as_deref(),
-            );
+            )?;
             // Work memory (M2.1): the same detail, kept past the session.
             if let Some(d) = detail.as_deref() {
                 if let Err(e) = s.journal_for_session(before.id, &session_id, "progress", "hook", d)
                 {
                     tracing::debug!(error = %e.message, "[journal] progress not stored");
+                    s.ensure_in_tx()?;
                 }
             }
             // An agent-written handover asked for (work graph M9.3): settled
@@ -1023,6 +1036,7 @@ fn apply_stop_hook(
                 payload.last_assistant_message.as_deref(),
             ) {
                 tracing::debug!(error = %e.message, "[work] handover not settled");
+                s.ensure_in_tx()?;
             }
             let has_open_tasks = s
                 .open_tasks_for_worker(before.id)
@@ -1085,7 +1099,7 @@ fn apply_prompt_submit_hook(
         };
         match binding {
             Binding::Stale => return Ok(()),
-            Binding::Current => remember_transcript_path(s, row.id, payload, session_id),
+            Binding::Current => remember_transcript_path(s, row.id, payload, session_id)?,
             Binding::Rebound => {}
         }
         // Fleet's own prompts (a peer's wake nudge, the safe-kill
@@ -1106,6 +1120,7 @@ fn apply_prompt_submit_hook(
             // Best-effort: a detection failure never fails the hook.
             if let Err(e) = crate::service::work::detect::on_prompt(s, row.id, p, first) {
                 tracing::debug!(error = %e.message, "[work] prompt detection failed");
+                s.ensure_in_tx()?;
             }
         }
         Ok(())
@@ -1148,10 +1163,10 @@ fn apply_session_end_hook(
                 Some(session_id),
                 "conversation_ended",
                 Some(reason),
-            );
+            )?;
             return Ok(());
         }
-        remember_transcript_path(s, row.id, payload, session_id);
+        remember_transcript_path(s, row.id, payload, session_id)?;
         if matches!(reason, "clear" | "resume") {
             s.mark_awaiting_rebind(row.id)?;
             best_effort_event_for(
@@ -1160,9 +1175,9 @@ fn apply_session_end_hook(
                 Some(session_id),
                 "conversation_ended",
                 Some(reason),
-            );
+            )?;
         } else if let Some(row) = s.record_session_end_hook_for_row(row.id)? {
-            best_effort_event_for(s, row.id, Some(session_id), "session_end", Some(reason));
+            best_effort_event_for(s, row.id, Some(session_id), "session_end", Some(reason))?;
         }
         Ok(())
     })
@@ -1195,14 +1210,14 @@ fn apply_stop_failure_hook(
             if binding != Binding::Current {
                 return Ok(None);
             }
-            remember_transcript_path(s, row.id, payload, session_id);
+            remember_transcript_path(s, row.id, payload, session_id)?;
             if let Some(row) = s.record_stop_failure_hook_for_row(row.id)? {
                 let error = payload.error.as_deref().unwrap_or("unknown");
                 let detail = match payload.error_details.as_deref() {
                     Some(d) if !d.trim().is_empty() => format!("{error}: {}", d.trim()),
                     _ => error.to_string(),
                 };
-                best_effort_event_for(s, row.id, Some(session_id), "stop_failure", Some(&detail));
+                best_effort_event_for(s, row.id, Some(session_id), "stop_failure", Some(&detail))?;
             }
             Ok(Some(row.id))
         })?
@@ -1259,26 +1274,30 @@ fn apply_notification_hook(
         else {
             return Ok(());
         };
-        remember_transcript_path(s, row.id, payload, session_id);
+        remember_transcript_path(s, row.id, payload, session_id)?;
         if let Some(row) = s.record_notification_hook_for_row(row.id, status, stuck)? {
-            best_effort_event_for(s, row.id, Some(session_id), "notification", Some(kind));
+            best_effort_event_for(s, row.id, Some(session_id), "notification", Some(kind))?;
         }
         Ok(())
     })
 }
 
-/// Timeline writes never fail the hook that produced them. Hook events carry
-/// the conversation they belong to.
+/// Timeline writes never fail the hook that produced them — unless the
+/// failure took the hook's transaction with it ([`Store::ensure_in_tx`]):
+/// the writes after it would then commit one by one. Hook events carry the
+/// conversation they belong to.
 fn best_effort_event_for(
     s: &Store,
     session_id: i64,
     claude_id: Option<&str>,
     kind: &str,
     detail: Option<&str>,
-) {
+) -> Result<(), IpcError> {
     if let Err(e) = s.insert_session_event_for(session_id, claude_id, kind, detail) {
         tracing::warn!(session_id, kind, error = %e, "[hook] session_event insert failed");
+        s.ensure_in_tx()?;
     }
+    Ok(())
 }
 
 /// Validate a `worktree_path` from a hook body before it becomes a row:
@@ -2484,6 +2503,53 @@ mod tests {
         );
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.turn_seq, 0, "the failed write itself must not apply");
+    }
+
+    /// I1: SQLite answered a best-effort write (the `turn_done` timeline
+    /// row) by rolling the WHOLE transaction back — `RAISE(ROLLBACK)` stands
+    /// in for SQLITE_FULL / IOERR. The hook swallows that error, but the
+    /// writes after it (the progress journal row) must not then commit on
+    /// their own in autocommit: the hook fails and nothing is announced.
+    #[test]
+    fn stop_hook_lost_transaction_writes_no_tail_and_announces_nothing() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let store = Arc::new(Mutex::new(
+            Store::open_with_bus_in_memory(bus.clone()).unwrap(),
+        ));
+        let id = hooked(&store);
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch(
+                "CREATE TEMP TRIGGER lose_stop_tx BEFORE INSERT ON session_events \
+                 WHEN NEW.kind = 'turn_done' \
+                 BEGIN SELECT RAISE(ROLLBACK, 'injected whole-transaction rollback'); END;",
+            )
+            .unwrap();
+        bus.take();
+        let mut p = make_payload("Stop", "uuid-1");
+        p.last_assistant_message = Some("step one done".into());
+
+        let result = apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None));
+
+        let s = store.lock().unwrap();
+        let progress: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM work_journal WHERE kind = 'progress'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            progress, 0,
+            "a write after the lost transaction must not autocommit"
+        );
+        assert!(result.is_err(), "the lost transaction fails the hook");
+        assert!(s.conn_ref().is_autocommit(), "no transaction is left open");
+        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().turn_seq, 0);
+        assert!(bus.take().is_empty(), "nothing rolled back is announced");
     }
 
     #[test]

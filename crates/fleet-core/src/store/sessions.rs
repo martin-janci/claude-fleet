@@ -558,7 +558,9 @@ impl Store {
     /// [`Self::list_all_sessions`] and filter every row in Rust. Deliberately
     /// NOT filtered by `lost_at`: a ghosted row must still be considered (a
     /// live match is preferred over one, but two ghosts of the same name are
-    /// still `E_AMBIGUOUS`, not silently invisible).
+    /// still `E_AMBIGUOUS`, not silently invisible). Ordered like
+    /// [`Self::list_all_sessions`] (`last_activity_at DESC`), so the
+    /// ambiguity's candidates list is the one the old path produced.
     pub fn find_sessions_by_tmux_name(
         &self,
         tmux_name: &str,
@@ -567,14 +569,16 @@ impl Store {
         match host_alias {
             Some(host) => {
                 let mut stmt = self.conn.prepare_cached(&format!(
-                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2"
+                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2 \
+                     ORDER BY last_activity_at DESC"
                 ))?;
                 let rows = stmt.query_map(rusqlite::params![tmux_name, host], map_session_row)?;
                 rows.collect()
             }
             None => {
                 let mut stmt = self.conn.prepare_cached(&format!(
-                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1"
+                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 \
+                     ORDER BY last_activity_at DESC"
                 ))?;
                 let rows = stmt.query_map(rusqlite::params![tmux_name], map_session_row)?;
                 rows.collect()

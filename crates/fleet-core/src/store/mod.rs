@@ -5,7 +5,7 @@
 #[cfg(test)]
 use crate::events::NoopEventBus;
 use crate::events::{EventBus, RowChange};
-use rusqlite::{Connection, OptionalExtension, Result};
+use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
 mod catalog;
@@ -155,6 +155,15 @@ impl StoreBus {
         }
         *held = Some(Vec::new());
         true
+    }
+
+    /// Whether emits are being held — i.e. a [`Store::atomically`]
+    /// transaction is running.
+    fn is_holding(&self) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
     }
 
     /// Stop holding; the held events, in emit order.
@@ -469,9 +478,18 @@ impl Store {
     /// standalone — the savepoint is then the transaction and its RELEASE
     /// commits — and nested inside [`Store::atomically`] or another
     /// savepoint, where it never issues a second `BEGIN`. A write helper that
-    /// reconcile runs inside its per-host transaction uses this instead of
-    /// `unchecked_transaction()`, which cannot nest. `name` must be a plain
-    /// SQL identifier (it is spliced into the statement).
+    /// may run inside a caller's transaction uses this instead of
+    /// `unchecked_transaction()`, which cannot nest, and instead of a
+    /// hand-written `SAVEPOINT` block. `name` must be a plain SQL identifier
+    /// (it is spliced into the statement).
+    ///
+    /// Standalone, no failure leaves a transaction open: a RELEASE (= the
+    /// COMMIT) that SQLite refuses without rolling back (`SQLITE_BUSY`, a
+    /// deferred foreign key) is undone, and when the undo's own `ROLLBACK
+    /// TO` fails too, whatever is still open is rolled back — otherwise every
+    /// later autocommit write on the writer would join a transaction nobody
+    /// commits. Nested, a failure only ever rolls back to the savepoint; the
+    /// caller's transaction is the caller's.
     pub(super) fn in_savepoint<R, E>(
         &self,
         name: &'static str,
@@ -480,17 +498,21 @@ impl Store {
     where
         E: From<rusqlite::Error>,
     {
+        let was_autocommit = self.conn.is_autocommit();
         self.conn.execute_batch(&format!("SAVEPOINT {name}"))?;
         let undo = |conn: &Connection| {
             // Best-effort: the caller already carries the real error.
             let _ = conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+            if was_autocommit && !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
         };
         match f(&self.conn) {
             Ok(r) => match self.conn.execute_batch(&format!("RELEASE {name}")) {
                 Ok(()) => Ok(r),
                 Err(e) => {
                     // A RELEASE that fails would otherwise leave the
-                    // savepoint open on the connection.
+                    // savepoint (standalone: the transaction) open.
                     undo(&self.conn);
                     Err(e.into())
                 }
@@ -518,7 +540,20 @@ impl Store {
 
     /// Run `f` against this store inside one SQLite transaction: commit when
     /// `f` returns `Ok`, roll back (drop the transaction) when it returns
-    /// `Err`. Unlike [`Store::with_transaction`] the closure receives the
+    /// `Err`. The transaction is `BEGIN IMMEDIATE`: callers read then write,
+    /// and a DEFERRED one would turn another connection's commit in between
+    /// (a `fleet-hub` CLI) into `SQLITE_BUSY_SNAPSHOT`, which no busy wait
+    /// retries. IMMEDIATE takes the write lock up front and waits the busy
+    /// timeout for it instead; WAL readers (the hub's read pool) never block
+    /// it.
+    ///
+    /// SQLite answers some errors (`SQLITE_FULL`, `IOERR`, `NOMEM`, a
+    /// trigger's `RAISE(ROLLBACK)`) by rolling the WHOLE transaction back.
+    /// If `f` swallowed such an error, every later statement would commit on
+    /// its own; so a best-effort arm inside `f` calls
+    /// [`Store::ensure_in_tx`] before going on, and an `f` that still returns
+    /// `Ok` over a lost transaction is an `Err` here, its held events
+    /// dropped. Unlike [`Store::with_transaction`] the closure receives the
     /// `&Store` itself, so it can compose the ordinary `&self` write helpers
     /// (`insert_message`, `insert_session_event`, …) atomically without
     /// `_in_tx` twins. Must not be nested, and `f` must not call a helper
@@ -537,9 +572,10 @@ impl Store {
                 self.0.release();
             }
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let unhold = self.bus.hold().then(|| Unhold(&self.bus));
         let result = f(self).and_then(|r| {
+            self.ensure_in_tx()?;
             tx.commit()?;
             Ok(r)
         });
@@ -552,6 +588,23 @@ impl Store {
             }
         }
         result
+    }
+
+    /// Inside [`Store::atomically`]: `Err` once SQLite has rolled the
+    /// transaction back under it (the connection is back in autocommit), so
+    /// a best-effort arm that just swallowed an error stops the closure
+    /// instead of letting the writes after it commit one by one. Outside
+    /// `atomically` there is no transaction to lose and it is always `Ok`,
+    /// so a helper shared by both paths may call it unconditionally.
+    pub fn ensure_in_tx(&self) -> Result<(), crate::ipc_error::IpcError> {
+        if self.bus.is_holding() && self.conn.is_autocommit() {
+            return Err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_SQLITE,
+                "the transaction was rolled back by SQLite before it could commit; \
+                 none of its writes were kept",
+            ));
+        }
+        Ok(())
     }
 
     /// Frames this store has handed to its event bus since it was opened
@@ -719,5 +772,219 @@ mod tests {
             ro.get_controller().unwrap(),
             Some(("mac".to_string(), "dev-fleet".to_string()))
         );
+    }
+
+    // ── I2: a SAVEPOINT that cannot finish never strands a transaction ──
+
+    fn setting(s: &Store, key: &str) -> Option<String> {
+        s.get_setting(key).unwrap()
+    }
+
+    /// A top-level savepoint's RELEASE is the COMMIT. When it is refused
+    /// (here: a deferred FK violation, which SQLite does NOT roll back) the
+    /// helper must still leave the connection in autocommit with nothing of
+    /// the body written.
+    #[test]
+    fn in_savepoint_top_level_release_failure_leaves_autocommit() {
+        let s = Store::open_in_memory().unwrap();
+        test_support::arm_commit_failure(&s, "INSERT ON settings");
+        let r: rusqlite::Result<()> = s.in_savepoint("sp_release", |c| {
+            c.execute("INSERT INTO settings (key, value) VALUES ('k', 'v')", [])?;
+            Ok(())
+        });
+        assert!(r.is_err(), "the refused RELEASE surfaces");
+        assert!(s.conn.is_autocommit(), "no transaction is left open");
+        s.conn
+            .execute_batch("DROP TRIGGER temp.arm_commit_failure")
+            .unwrap();
+        assert_eq!(setting(&s, "k"), None, "the body's write is gone");
+    }
+
+    /// When the undo's own `ROLLBACK TO` fails (the savepoint is gone) at top
+    /// level, whatever transaction is open is rolled back rather than left
+    /// open for the next autocommit write to join.
+    #[test]
+    fn in_savepoint_top_level_rollback_to_failure_leaves_autocommit() {
+        let s = Store::open_in_memory().unwrap();
+        let r: rusqlite::Result<()> = s.in_savepoint("sp_gone", |c| {
+            c.execute_batch(
+                "RELEASE sp_gone; BEGIN; \
+                 INSERT INTO settings (key, value) VALUES ('k', 'v');",
+            )?;
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        });
+        assert!(r.is_err());
+        assert!(
+            s.conn.is_autocommit(),
+            "a failed ROLLBACK TO must not leave a transaction open"
+        );
+        assert_eq!(setting(&s, "k"), None);
+    }
+
+    /// Nested inside `atomically`, a failing savepoint rolls back only to
+    /// itself: the outer transaction's writes before and after it commit.
+    #[test]
+    fn in_savepoint_nested_failure_rolls_back_only_the_savepoint() {
+        let s = Store::open_in_memory().unwrap();
+        s.atomically(|s| {
+            s.set_setting("before", "1")?;
+            let r: rusqlite::Result<()> = s.in_savepoint("sp_inner", |c| {
+                c.execute(
+                    "INSERT INTO settings (key, value) VALUES ('inner', '1')",
+                    [],
+                )?;
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            });
+            assert!(r.is_err());
+            assert!(!s.conn.is_autocommit(), "the outer transaction survives");
+            s.set_setting("after", "1")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(setting(&s, "before").as_deref(), Some("1"));
+        assert_eq!(setting(&s, "inner"), None);
+        assert_eq!(setting(&s, "after").as_deref(), Some("1"));
+    }
+
+    /// The four store helpers that used to hand-write their SAVEPOINT
+    /// (`insert_session_event`, `rebind_conversation`, `append_journal`,
+    /// `apply_link_changes`): called standalone, a refused RELEASE must leave
+    /// the writer in autocommit and none of their writes behind.
+    #[test]
+    fn savepoint_helpers_never_strand_a_transaction_on_a_refused_release() {
+        use crate::service::work::resolve::LinkChange;
+        let fresh = || {
+            let s = Store::open_in_memory().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            (s, id)
+        };
+        let settle = |s: &Store, what: &str| {
+            assert!(
+                s.conn.is_autocommit(),
+                "{what}: the refused RELEASE left a transaction open"
+            );
+            s.conn
+                .execute_batch("DROP TRIGGER temp.arm_commit_failure")
+                .unwrap();
+        };
+        let count =
+            |s: &Store, sql: &str| -> i64 { s.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+
+        let (s, id) = fresh();
+        test_support::arm_commit_failure(&s, "INSERT ON session_events");
+        assert!(s.insert_session_event(id, "prompt_sent", None).is_err());
+        settle(&s, "insert_session_event");
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM session_events"), 0);
+
+        let (s, id) = fresh();
+        test_support::arm_commit_failure(&s, "INSERT ON conversations");
+        assert!(s
+            .rebind_conversation(id, "c-1", StartSource::Startup, None, None)
+            .is_err());
+        settle(&s, "rebind_conversation");
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM conversations"), 0);
+
+        let (s, id) = fresh();
+        test_support::arm_commit_failure(&s, "INSERT ON work_journal");
+        assert!(s
+            .journal_for_session(id, "c-1", "progress", "hook", "step one")
+            .is_err());
+        settle(&s, "append_journal");
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM work_journal"), 0);
+
+        let (s, id) = fresh();
+        let v0 = count(&s, "SELECT row_version FROM sessions");
+        test_support::arm_commit_failure(&s, "UPDATE ON sessions");
+        assert!(s
+            .apply_link_changes(id, 0, None, &[LinkChange::Withdraw { link_id: 999 }])
+            .is_err());
+        settle(&s, "apply_link_changes");
+        assert_eq!(count(&s, "SELECT row_version FROM sessions"), v0);
+    }
+
+    // ── I1: a transaction SQLite rolled back never half-commits ──
+
+    /// A closure that swallowed the error of a statement SQLite answered by
+    /// rolling the whole transaction back (a trigger's `RAISE(ROLLBACK)`
+    /// stands in for SQLITE_FULL / IOERR / NOMEM) must not come back `Ok`.
+    #[test]
+    fn atomically_reports_a_transaction_lost_mid_closure() {
+        let s = Store::open_in_memory().unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER lose_tx BEFORE INSERT ON settings \
+                 WHEN NEW.key = 'boom' BEGIN SELECT RAISE(ROLLBACK, 'lost'); END;",
+            )
+            .unwrap();
+        let err = s
+            .atomically(|s| {
+                s.set_setting("a", "1")?;
+                // Best-effort write whose error is swallowed.
+                let _ = s.set_setting("boom", "1");
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            err.message.contains("rolled back"),
+            "names the lost transaction: {err:?}"
+        );
+        assert!(s.conn.is_autocommit());
+        assert_eq!(setting(&s, "a"), None);
+    }
+
+    /// `ensure_in_tx` is how a best-effort arm inside `atomically` notices
+    /// the transaction is gone; outside `atomically` it has nothing to guard.
+    #[test]
+    fn ensure_in_tx_fails_only_inside_a_lost_atomically() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(
+            s.ensure_in_tx().is_ok(),
+            "outside atomically: nothing to lose"
+        );
+        s.atomically(|s| {
+            assert!(s.ensure_in_tx().is_ok(), "a live transaction");
+            Ok(())
+        })
+        .unwrap();
+        let r = s.atomically(|s| {
+            s.conn.execute_batch("ROLLBACK")?;
+            s.ensure_in_tx()?;
+            s.set_setting("tail", "1")?;
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert_eq!(setting(&s, "tail"), None, "the tail write never ran");
+    }
+
+    // ── M3: the write lock is taken at BEGIN ──
+
+    /// `atomically` reads, then writes. Under a DEFERRED transaction another
+    /// connection (a `fleet-hub` CLI) committing in between turns the write
+    /// into SQLITE_BUSY_SNAPSHOT with no busy wait; IMMEDIATE takes the
+    /// write lock up front, so the other writer waits instead.
+    #[test]
+    fn atomically_holds_the_write_lock_from_begin() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let s = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        let other = rusqlite::Connection::open(&db).unwrap();
+        other.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let mut other_write = None;
+        s.atomically(|s| {
+            let _ = s.get_setting("k")?;
+            other_write =
+                Some(other.execute("INSERT INTO settings (key, value) VALUES ('cli', '1')", []));
+            s.set_setting("k", "1")?;
+            Ok(())
+        })
+        .expect("the read-then-write transaction commits");
+        assert!(
+            other_write.unwrap().is_err(),
+            "the other connection could not write while atomically held the lock"
+        );
+        assert_eq!(setting(&s, "k").as_deref(), Some("1"));
     }
 }

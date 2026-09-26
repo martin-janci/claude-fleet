@@ -201,8 +201,9 @@ impl Store {
             let Some(i) = item else { return Ok(false) };
             Ok(matches!((self.item_org(i)?, session_org), (Some(a), Some(b)) if a != b))
         };
-        self.conn.execute_batch("SAVEPOINT apply_link_changes")?;
-        let outcome: Result<(), IpcError> = (|| {
+        // `Store::in_savepoint`: one commit standalone, a nested savepoint
+        // inside a hook's or reconcile's transaction.
+        self.in_savepoint("apply_link_changes", |_| -> Result<(), IpcError> {
             let mut created: Vec<(String, i64)> = Vec::new();
             for c in changes {
                 match c {
@@ -375,18 +376,7 @@ impl Store {
                 rusqlite::params![session_id],
             )?;
             Ok(())
-        })();
-        match outcome {
-            Ok(()) => {
-                self.conn.execute_batch("RELEASE apply_link_changes")?;
-            }
-            Err(e) => {
-                let _ = self
-                    .conn
-                    .execute_batch("ROLLBACK TO apply_link_changes; RELEASE apply_link_changes");
-                return Err(e);
-            }
-        }
+        })?;
         self.emit_session(session_id)?;
         Ok(true)
     }

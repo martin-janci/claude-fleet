@@ -175,15 +175,14 @@ impl Store {
         turn_started: bool,
     ) -> Result<Option<SessionRow>, IpcError> {
         let now = now_unix();
-        // SAVEPOINT, not a second `BEGIN`: `Store::atomically` cannot nest,
-        // and Task 3 calls this from inside one
-        // (`service::hooks::resolve_and_rebind` runs under a hook's
+        // SAVEPOINT (`Store::in_savepoint`), not a second `BEGIN`:
+        // `Store::atomically` cannot nest, and Task 3 calls this from inside
+        // one (`service::hooks::resolve_and_rebind` runs under a hook's
         // transaction). A SAVEPOINT works both standalone (autocommit — it
         // starts an implicit transaction) and already inside an open
         // transaction, so this stays one commit either way instead of a
         // separate autocommit under the store mutex.
-        self.conn.execute_batch("SAVEPOINT rebind_conversation")?;
-        let outcome: Result<(), IpcError> = (|| {
+        self.in_savepoint("rebind_conversation", |_| -> Result<(), IpcError> {
             let prior_id: Option<String> = self
                 .conn
                 .query_row(
@@ -270,23 +269,11 @@ impl Store {
             if !same {
                 if let Err(e) = self.carry_resumed_work(session_id, claude_session_id) {
                     tracing::warn!(session_id, error = %e.message, "[work] resume carry failed");
+                    self.ensure_in_tx()?;
                 }
             }
             Ok(())
-        })();
-        match outcome {
-            Ok(()) => {
-                self.conn.execute_batch("RELEASE rebind_conversation")?;
-            }
-            Err(e) => {
-                // Best-effort: undo just this SAVEPOINT's work and surface
-                // the original error.
-                let _ = self
-                    .conn
-                    .execute_batch("ROLLBACK TO rebind_conversation; RELEASE rebind_conversation");
-                return Err(e);
-            }
-        }
+        })?;
         self.bus.conversations_changed(session_id);
         Ok(self.emit_session(session_id)?)
     }

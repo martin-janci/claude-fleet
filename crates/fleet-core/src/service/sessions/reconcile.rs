@@ -530,21 +530,22 @@ struct Prior {
 /// conversation of a row that `claude agents` moved onto another id (no
 /// hooks, or an old CLI), or first showed carrying one (a new row, or one
 /// whose id was NULL). Opened as `unknown`; the upsert already cleared the
-/// stale transcript path. Best-effort: a failure is logged, never fatal.
+/// stale transcript path. Best-effort: a failure is logged, never fatal —
+/// unless it took the host's transaction with it ([`Store::ensure_in_tx`]).
 fn open_reconciled_conversation(
     s: &Store,
     host_alias: &str,
     row: &SessionRow,
     old_claude_id: Option<&str>,
-) {
+) -> Result<(), IpcError> {
     let Some(new_id) = row.claude_session_id.as_deref() else {
-        return;
+        return Ok(());
     };
     // The upsert is the one guard for "never bind one id to two rows" and
     // for "never undo a newer hook rebind": it refuses such an id, so the
     // stored id only differs from the prior one when this pass may own it.
     if old_claude_id == Some(new_id) {
-        return;
+        return Ok(());
     }
     match s.rebind_conversation(row.id, new_id, StartSource::Unknown, None, None) {
         Ok(_) => {
@@ -556,11 +557,16 @@ fn open_reconciled_conversation(
             ) {
                 tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
                     "[reconcile] session_event insert failed");
+                s.ensure_in_tx()?;
             }
         }
-        Err(e) => tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
-            "[reconcile] conversation rebind failed"),
+        Err(e) => {
+            tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
+                "[reconcile] conversation rebind failed");
+            s.ensure_in_tx()?;
+        }
     }
+    Ok(())
 }
 
 /// Apply one host's probe result to the store. Extracted from the reconcile
@@ -638,6 +644,7 @@ fn write_reachable_host(
                     error = %e.message,
                     "[reconcile] host account sync failed; keeping the stored link"
                 );
+                s.ensure_in_tx()?;
                 host.account_uuid.clone()
             }
         };
@@ -715,12 +722,15 @@ fn write_reachable_host(
                     claude_session_id: p.claude_session_id,
                 }),
             )),
-            Err(e) => tracing::warn!(
-                host = %host.alias,
-                session = %sess.name,
-                error = %e,
-                "[reconcile] prior row read failed"
-            ),
+            Err(e) => {
+                tracing::warn!(
+                    host = %host.alias,
+                    session = %sess.name,
+                    error = %e,
+                    "[reconcile] prior row read failed"
+                );
+                s.ensure_in_tx()?;
+            }
         }
         sessions.push(ReconcileSession {
             tmux_name: &sess.name,
@@ -797,6 +807,7 @@ fn write_reachable_host(
                             error = %e,
                             "[reconcile] lost event insert failed"
                         );
+                        s.ensure_in_tx()?;
                     }
                 }
             }
@@ -807,6 +818,7 @@ fn write_reachable_host(
                     error = %e,
                     "[reconcile] mark lost failed"
                 );
+                s.ensure_in_tx()?;
             }
         }
     }
@@ -834,6 +846,7 @@ fn write_reachable_host(
                     error = %e,
                     "[reconcile] identity write failed"
                 );
+                s.ensure_in_tx()?;
             }
         }
     }
@@ -880,10 +893,14 @@ fn write_reachable_host(
             Ok(Some(sid)) => {
                 if let Err(e) = crate::service::work::detect::resolve_session(s, sid) {
                     tracing::debug!(error = %e.message, "[work] PR resolve failed");
+                    s.ensure_in_tx()?;
                 }
             }
             Ok(None) => {}
-            Err(e) => tracing::debug!(error = %e.message, "[work] PR signals not stored"),
+            Err(e) => {
+                tracing::debug!(error = %e.message, "[work] PR signals not stored");
+                s.ensure_in_tx()?;
+            }
         }
     }
     // Task G: the upsert has run (inside this host's transaction, so these
@@ -892,15 +909,20 @@ fn write_reachable_host(
     // Append-only and best-effort — a failed insert is logged and
     // skipped, never blocking reconcile.
     for (tmux_name, prior) in &priors {
-        let Ok(Some(row)) = s.get_session(tmux_name, &host.alias) else {
-            continue;
+        let row = match s.get_session(tmux_name, &host.alias) {
+            Ok(Some(row)) => row,
+            Ok(None) => continue,
+            Err(_) => {
+                s.ensure_in_tx()?;
+                continue;
+            }
         };
         open_reconciled_conversation(
             s,
             &host.alias,
             &row,
             prior.as_ref().and_then(|p| p.claude_session_id.as_deref()),
-        );
+        )?;
         let Some(prior) = prior else {
             continue;
         };
@@ -921,6 +943,7 @@ fn write_reachable_host(
                     error = %e,
                     "[reconcile] session_event insert failed"
                 );
+                s.ensure_in_tx()?;
             }
         }
     }
@@ -1129,6 +1152,7 @@ pub(super) fn reconcile_agent_rows(
                 error = %e,
                 "[reconcile] reading dismissed agents failed"
             );
+            s.ensure_in_tx()?;
             Default::default()
         }
     };
@@ -1151,6 +1175,7 @@ pub(super) fn reconcile_agent_rows(
                             error = %e,
                             "[reconcile] clearing agent dismissal failed"
                         );
+                        s.ensure_in_tx()?;
                     }
                 }
                 // Still dismissed. Not in `keep`, so a leftover row (if any)
@@ -1194,6 +1219,7 @@ pub(super) fn reconcile_agent_rows(
                 error = %e,
                 "[reconcile] bg upsert failed"
             );
+            s.ensure_in_tx()?;
         }
     }
     // Same TTL cutoff as the tmux-keyed prune in `reconcile_write_one_host`
@@ -1209,6 +1235,7 @@ pub(super) fn reconcile_agent_rows(
     let lost_ttl_cutoff = read_lost_ttl_cutoff(lost_ttl_raw, now);
     if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, lost_ttl_cutoff) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
+        s.ensure_in_tx()?;
     }
     Ok(())
 }
@@ -1503,11 +1530,13 @@ pub(crate) async fn reconcile_sessions_with(
     // 3. Apply writes, taking the store lock ONCE PER HOST rather than once
     //    for the whole loop (BE-12): a command or the PTY poller waiting on
     //    the store only ever queues behind one host's transaction. Each
-    //    host's write-burst goes through `Store::apply_host_reconcile`, which
-    //    wraps update_host_probe + upserts + touches + ghosting in ONE
-    //    transaction (one fsync) and emits events only AFTER it commits — so
-    //    a mid-burst error rolls everything back and emits nothing for that
-    //    host.
+    //    host's whole write — account link, mass-loss marks, boot identity,
+    //    the `apply_host_reconcile_in_tx` burst (host probe, upserts, touches,
+    //    ghosting), PR signals, timeline events, conversation rebinds and bg
+    //    rows — runs in `reconcile_write_one_host` under ONE
+    //    `Store::atomically` transaction (one commit), whose events are held
+    //    until it commits — so a mid-write error rolls the host back as a
+    //    whole and emits nothing for it.
     //
     //    The project list is identical for every host — fetch it once here
     //    rather than re-querying inside `find_project_id_for_path` per session.

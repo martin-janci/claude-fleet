@@ -6083,6 +6083,76 @@ fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
     assert!(s.list_session_events(id, 100).unwrap().len() > events_before);
 }
 
+/// I1: the boot-identity write is best-effort. When SQLite answers it by
+/// rolling the host's WHOLE transaction back (`RAISE(ROLLBACK)` standing in
+/// for SQLITE_FULL / IOERR), the session upsert after it must not commit on
+/// its own in autocommit: the host write fails and nothing is announced.
+#[test]
+fn a_host_write_whose_transaction_is_lost_writes_no_tail() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let mut s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    s.conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER lose_host_tx BEFORE UPDATE OF boot_id ON hosts \
+             BEGIN SELECT RAISE(ROLLBACK, 'injected whole-transaction rollback'); END;",
+        )
+        .unwrap();
+    bus.take();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a")],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("boot-1".into()),
+            ..Default::default()
+        }),
+        vec![],
+        PrInfoMap::new(),
+    );
+    let res = reconcile_write_one_host(&mut s, &probe, &projects);
+    assert!(
+        s.get_session("dev-a", "vps").unwrap().is_none(),
+        "the session upsert after the lost transaction must not autocommit"
+    );
+    assert!(res.is_err(), "the lost transaction fails the host write");
+    assert!(s.conn_for_test().is_autocommit());
+    let announced = bus.take();
+    assert!(announced.is_empty(), "announced {announced:?}");
+}
+
+/// M1: `whoami`'s E_AMBIGUOUS candidates come in `list_all_sessions` order
+/// (most recent activity first), as they did before the direct lookup.
+#[test]
+fn find_session_by_tmux_name_candidates_follow_list_all_sessions_order() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("alpha").unwrap();
+    s.upsert_host("beta").unwrap();
+    let older = s
+        .upsert_session("dev-x", "alpha", None, None, 0, 10, "running", None)
+        .unwrap();
+    let newer = s
+        .upsert_session("dev-x", "beta", None, None, 0, 20, "running", None)
+        .unwrap();
+    let err = find_session_by_tmux_name(&s, "dev-x").unwrap_err();
+    assert_eq!(err.code, "E_AMBIGUOUS");
+    let ids: Vec<i64> = err.details.unwrap()["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["session_id"].as_i64().unwrap())
+        .collect();
+    let listed: Vec<i64> = s
+        .list_all_sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.tmux_name == "dev-x")
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(listed, vec![newer, older], "list_all_sessions order");
+    assert_eq!(ids, listed, "candidates keep list_all_sessions order");
+}
+
 #[tokio::test]
 async fn list_and_refresh_never_probe_a_resume_transcript() {
     // Work graph M11.2: the transcript probe belongs to resume planning
