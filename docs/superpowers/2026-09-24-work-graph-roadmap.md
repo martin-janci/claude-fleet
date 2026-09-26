@@ -661,6 +661,21 @@ explained.
   decisions table is otherwise unchanged: the user updates it, and each
   "yes" becomes its own milestone (M13+).
 
+### M13: the decided-against list, built
+
+Plan: `plans/2026-09-26-work-graph-m13-decided-yes.md`. The user said yes to
+D3, D10, D13 and D20 on 2026-09-26; each is built in the smallest safe form
+the M12.6 review describes.
+
+- **M13.1** summaries of dead sessions, on demand (D10).
+- **M13.2** write-back: a PR remote link on Jira, opt-in per tracker, through
+  an outbox (D3, migration 061).
+- **M13.3** webhook nudges on a public hub: HMAC-verified, the payload never
+  trusted, polling unchanged (D13).
+- **M13.4** naming work on the phone, in fleet-mobile (D20).
+
+Status: planned.
+
 ## Critical path and parallelism
 
 ```
@@ -681,18 +696,19 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 |---|---|---|---|
 | D1 | Provider order after Jira | GitHub → Asana → Linear, or Asana first (Company B is real work) | GitHub first (no credentials, a quick check of the abstraction), then Asana immediately |
 | D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org |
-| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-25: none.** M9.5 stays planned, not built |
+| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-26: yes, PR remote link only** (Jira Cloud / DC, opt-in per tracker): M13.2. Transition and worklog stay out (D26) |
 | D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub |
 | D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95 |
 | D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only |
 | D9 | May fleet spend a turn of a session's model to write its handover (M9.3)? | on demand · also at safe kill · never | **Decided 2026-09-25: on demand only** (a button; never at safe kill) |
-| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-25: off.** M9.4 stays planned, not built |
+| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-26: yes, on demand only** (a *Summarise* button; `work.summary_model`, default `haiku`, D24): M13.1 |
 | D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before** |
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always** |
-| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-26: yes, a nudge only** (HMAC per tracker; GitHub, Jira Cloud, Linear, D25; polling stays): M13.3 |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25, #273)**: `work.classify_nudge` |
 | D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens; Today and the card are read-only, M10.5) | desktop only · also on the phone | Desktop only; decide after M10.3 |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done: hub-e2e already runs in CI** (`hub-headless` job, `.github/workflows/ci.yml`, every PR and `main` push). The M10.2 work-graph leg needs an `e2e`-feature hub and is skipped there; `ci-local.sh --hub-e2e` runs it |
+| D20 | Name or rename local work on the phone? (M11 plan) | no · yes (full token) | **Decided 2026-09-26: yes**, fleet-mobile only, no hub change: M13.4 |
 
 ## Risks to watch
 
@@ -815,3 +831,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
   a handover* is already on the phone (M8.6.3, full token), and Today and
   the ticket card stay read-only (M10.5). Only multi-start is still open;
   the default stays desktop only until M10.3.
+- 2026-09-26: the user said yes to D3, D10, D13 and D20. Their rows record
+  the decision, and M13 is added with its plan
+  (`plans/2026-09-26-work-graph-m13-decided-yes.md`). D15 (multi-start on
+  the phone) and D17 (`acli`) are unchanged.
