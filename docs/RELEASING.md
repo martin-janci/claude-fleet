@@ -17,6 +17,7 @@ Two files decide what a release *is*, and neither has a second copy anywhere:
 | file | decides |
 |------|---------|
 | `scripts/release.sh --list` | the six version carriers a bump writes (see [What the script touches](#what-the-script-touches)) |
+| `scripts/release.sh --list-image-pin` | the one file whose version lives in a Docker tag: `deploy/hub/docker-compose.yml` |
 | `scripts/release-assets.sh` | the build legs and the exact asset filenames the release must carry |
 
 `scripts/check-version-consistency.sh` reads the first and is run by both
@@ -175,7 +176,7 @@ The jobs, in order:
 
 | job | what it does | may it fail without failing the run? |
 |-----|--------------|--------------------------------------|
-| `version-consistency` | `scripts/check-version-consistency.sh --expect-tag` — the six carriers, the four `Cargo.lock` entries and this tag must all agree | **no** — everything else `needs:` it |
+| `version-consistency` | `scripts/check-version-consistency.sh --expect-tag` — the six carriers, the four `Cargo.lock` entries, the hub image pin and this tag must all agree | **no** — everything else `needs:` it |
 | `plan` | turns `scripts/release-assets.sh` into the two build matrices | **no** |
 | `create-release` | creates (or reuses) the one release, as a draft, with this version's CHANGELOG section as its notes and the build commit recorded | **no** |
 | `build` | three `tauri-action` legs; then renames the macOS updater bundle to carry the version | **no** |
@@ -325,10 +326,12 @@ tag and nothing else:
 
 - the GitHub release is marked **`prerelease: true`**, so it never becomes
   the "Latest" release a user lands on;
-- ghcr's `fleet-hub:latest` is **not** moved (`hub-image.yml`), so hub
-  operators pinning `latest` in `deploy/hub/docker-compose.yml` never get a
-  release candidate by surprise. The `ghcr.io/martin-janci/fleet-hub:0.3.0-rc.1`
-  tag is published as usual, for anyone who wants to test it.
+- ghcr's `fleet-hub:latest` is **not** moved (`hub-image.yml`), and the pin
+  in `deploy/hub/docker-compose.yml` is **not** bumped (`release.sh`), so no
+  hub operator gets a release candidate by surprise — whether they run the
+  shipped pin or `latest`. The `ghcr.io/martin-janci/fleet-hub:0.3.0-rc.1` tag
+  is published as usual, for anyone who wants to test it; the finalising
+  `0.3.0` release is what moves the pin.
 
 ```bash
 scripts/release.sh 0.3.0-rc.1
@@ -412,9 +415,19 @@ builds and publishes the `fleet-hub` container image for `linux/amd64` and
 `linux/arm64` (independently of the desktop-bundle legs above and of the
 release's own verify/publish jobs) — two native per-arch jobs pushed by digest (no
 QEMU), then a `merge` job combines whichever digests exist into the real
-tags. A pre-release tag (`v0.3.0-rc.1`) publishes `…/fleet-hub:0.3.0-rc.1`
-but deliberately does **not** move `:latest`, which `deploy/hub/docker-compose.yml`
-pins. **arm64 is best-effort**: its leg may fail without blocking the
+tags, and a `record-digest` job writes the resulting manifest digest onto the
+GitHub Release for the tag. A pre-release tag (`v0.3.0-rc.1`) publishes
+`…/fleet-hub:0.3.0-rc.1` but deliberately does **not** move `:latest`.
+
+Every job here is gated on `github.ref_type == 'tag'` **and** on the same
+`check-version-consistency.sh --expect-tag` gate release.yml runs, so no image
+is published from a ref that is not a released tag, or from a tree whose
+version disagrees with the tag. `workflow_dispatch` is still the re-run path
+for a failed image build, but it must be dispatched at the tag:
+
+```bash
+gh workflow run hub-image.yml --ref v0.3.0
+``` **arm64 is best-effort**: its leg may fail without blocking the
 image — `merge` still runs (`if: !cancelled()`) and publishes an amd64-only
 manifest under the same tags, so amd64's own publication is never slowed or
 blocked by arm64, and the *run stays green* (a `continue-on-error` leg's
@@ -462,6 +475,7 @@ https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
 | `crates/fleet-hub/Cargo.toml` | `version =` under `[package]` |
 | `crates/fleet-proto/Cargo.toml` | `version =` under `[package]` |
 | `crates/fleet-agent/Cargo.toml` | `version =` under `[package]` |
+| `deploy/hub/docker-compose.yml` | the `image: ghcr.io/…/fleet-hub:<tag>` pin — the tag carries **no `v`** (`v0.3.0` → `0.3.0`). Skipped on a pre-release: `main` is where operators curl this file from, so the pin stays on the last stable release until the finalising tag moves it |
 | `Cargo.lock` | via `cargo update` scoped to every crate bumped above (`claude-fleet`, `fleet-hub`, `fleet-proto`, `fleet-agent` — derived from `VERSION_FILES`, not hard-coded); no dependency changes |
 | `CHANGELOG.md` | new `## [X.Y.Z] - YYYY-MM-DD` section under the header, bullets from `git log <last-tag>..HEAD` grouped `feat` → Added, `fix` → Fixed, `docs` → Documentation, everything else → Changed; plus a `[X.Y.Z]: …/releases/tag/vX.Y.Z` link reference at the bottom |
 
@@ -485,7 +499,8 @@ that belongs in the script, not in a `~/.gitconfig`.
 After a real run, before pushing:
 
 ```bash
-git show --stat HEAD                                       # exactly 8 files: 6 carriers, Cargo.lock, CHANGELOG.md
+git show --stat HEAD                                       # 9 files: 6 carriers, the hub compose pin, Cargo.lock, CHANGELOG.md
+                                                           # (8 on a pre-release — the compose pin does not move)
 scripts/check-version-consistency.sh --expect-tag v0.3.0   # the same gate release.yml runs first
 git tag -n1 v0.3.0
 ```
@@ -493,7 +508,7 @@ git tag -n1 v0.3.0
 That check is the one both `ci.yml` and `release.yml` run: it reads the
 carrier list from `scripts/release.sh --list`, takes `package.json` as the
 source of truth, and refuses any disagreement between the six carriers, the
-four `Cargo.lock` member entries and the tag name. Running it here means a
+four `Cargo.lock` member entries, the hub image pin and the tag name. Running it here means a
 mismatch costs a local re-run instead of a bad tag.
 
 If something is wrong: `git tag -d v0.3.0 && git reset --hard HEAD~1`, fix,
