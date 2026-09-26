@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|sweep_now
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,10 +170,13 @@ pub enum AdminAction {
     Test,
     Remove,
     /// Work graph M11.4: the sync's per-tracker counters for its last pass
-    /// (in memory, reset on restart).
+    /// (in memory, reset on restart). On the MCP surface M12.3 adds the
+    /// retention status beside them (`service::work::retention::status`).
     Status,
     /// Work graph M5: org administration (`service::orgs::admin`).
     Org(crate::service::orgs::OrgAction),
+    /// Work graph M12.3: one retention sweep now.
+    SweepNow,
 }
 
 impl AdminAction {
@@ -196,6 +199,7 @@ impl AdminAction {
         "assign_host",
         "unassign_host",
         "assign_tracker",
+        "sweep_now",
     ];
 
     /// Actions that destroy something and pass the confirmation gate.
@@ -220,6 +224,7 @@ impl AdminAction {
             "test" => AdminAction::Test,
             "remove" | "remove_tracker" => AdminAction::Remove,
             "status" | "sync_status" => AdminAction::Status,
+            "sweep_now" => AdminAction::SweepNow,
             other => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -538,6 +543,11 @@ pub fn admin_sync(
         AdminAction::Test => Err(IpcError::new(
             codes::E_INTERNAL,
             "test is asynchronous; use test_tracker",
+        )),
+        // One short lock per batch, never this whole function's.
+        AdminAction::SweepNow => Err(IpcError::new(
+            codes::E_INTERNAL,
+            "retention runs outside the admin lock; use service::work::retention",
         )),
         AdminAction::Org(o) => crate::service::orgs::admin(o, args, &s),
     }

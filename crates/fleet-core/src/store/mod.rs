@@ -38,6 +38,7 @@ mod work;
 mod work_detect;
 mod work_journal;
 mod work_local;
+mod work_retention;
 mod work_tidy;
 
 pub use clients::{
@@ -78,6 +79,7 @@ pub use work_journal::{
     JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
+pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_tidy::ReopenedWork;
 
 /// One number per `Store` ever built in this process, never reused — see

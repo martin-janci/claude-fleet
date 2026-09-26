@@ -1,5 +1,6 @@
 <script lang="ts">
   import WorkSettings from './WorkSettings.svelte';
+  import WorkRetention from './WorkRetention.svelte';
   import { onMount, tick } from 'svelte';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
@@ -1065,16 +1066,6 @@
         <span class="hook-desc" id="reports-max-age-desc">hours an error/warn report is kept before the age sweep deletes it (0 = never)</span>
       </div>
       <div class="mcp-field">
-        <label class="lbl" for="work-journal-days">work memory</label>
-        <input class="port" id="work-journal-days" type="number" min="0" max="3650" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workJournalDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-journal-days-desc"
-          data-testid="work-journal-days"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workJournalDays, 'Work memory', e)} />
-        <span class="hook-desc" id="work-journal-days-desc">days the resume journal of unlinked conversations is kept (0 = forever; linked work is always kept)</span>
-      </div>
-      <div class="mcp-field">
         <label class="lbl" for="work-recent-days">recent work</label>
         <input class="port" id="work-recent-days" type="number" min="1" max="365" step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.workRecentDays)}
@@ -1121,6 +1112,38 @@
           onchange={() => toggleSetting(SETTING_KEYS.workClassifyNudge)} />
         After three prompts with no ticket, ask Claude once which of your few open tickets it is on (only ever a suggestion)
       </label>
+      <h5 class="sub" data-testid="work-retention">Retention</h5>
+      <div class="mcp-field">
+        <label class="lbl" for="work-retention-journal-days">journal</label>
+        <input class="port" id="work-retention-journal-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionJournalDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-retention-journal-days-desc"
+          data-testid="work-retention-journal-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionJournalDays, 'Retention: journal', e)} />
+        <span class="hook-desc" id="work-retention-journal-days-desc">days a work journal row is kept once its conversation ended and its work is done or unlinked (0 = forever)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-retention-tracker-items-days">done tickets</label>
+        <input class="port" id="work-retention-tracker-items-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionTrackerItemsDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-retention-tracker-items-days-desc"
+          data-testid="work-retention-tracker-items-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTrackerItemsDays, 'Retention: done tickets', e)} />
+        <span class="hook-desc" id="work-retention-tracker-items-days-desc">days a done ticket no session links to is kept in the cache (0 = forever)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-retention-timeline-days">work timeline</label>
+        <input class="port" id="work-retention-timeline-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionTimelineWorkEventsDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-retention-timeline-days-desc"
+          data-testid="work-retention-timeline-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTimelineWorkEventsDays, 'Retention: work timeline', e)} />
+        <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge and tidy events are kept; the newest of each per session stays (0 = forever)</span>
+      </div>
+      <WorkRetention />
       <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
       <div class="mcp-field">
         <label class="lbl" for="work-tidy-done-days">tidy: done for</label>

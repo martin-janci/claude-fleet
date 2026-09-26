@@ -3339,7 +3339,10 @@ fn the_served_definition_budget_stays_bounded() {
     // terse style). Measured at 55,610 on 2026-09-25; plus 100.
     // M11.3 merged over get_settings/set_setting: `keep` on `tidy_apply`'s
     // item action. Measured at 55,615 on 2026-09-26 (+5); plus 100.
-    const BUDGET_BYTES: usize = 55_715;
+    // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
+    // description; `set_setting`'s example key now `work.recent_days`),
+    // merged over M11.3: measured at 55,635 on 2026-09-26 (+20); plus 100.
+    const BUDGET_BYTES: usize = 55_735;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7471,10 +7474,13 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
         }))
     };
     let v = result_json(&tools.get_settings().await.expect("get_settings"));
-    assert_eq!(v["work.journal_days"], "90", "the default when unset: {v}");
+    assert_eq!(
+        v["work.retention.journal_days"], "365",
+        "the default when unset: {v}"
+    );
 
     // A string, a number and a boolean are each stored as their text.
-    set("work.journal_days", serde_json::json!("30"))
+    set("work.retention.journal_days", serde_json::json!("30"))
         .await
         .expect("string");
     let v = result_json(
@@ -7484,7 +7490,7 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     );
     assert_eq!(
         (
-            v["work.journal_days"].as_str(),
+            v["work.retention.journal_days"].as_str(),
             v["work.recent_days"].as_str()
         ),
         (Some("30"), Some("7"))
@@ -7510,17 +7516,23 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
         );
     }
     let v = result_json(&tools.get_settings().await.expect("get_settings"));
-    assert_eq!(v["work.journal_days"], "30");
+    assert_eq!(v["work.retention.journal_days"], "30");
 
     // Refused: a bad value, an unknown key, a derived key, keys other
     // subsystems own, and no value at all. None of them is written.
     for (key, value) in [
-        ("work.journal_days", serde_json::json!("soon")),
+        ("work.retention.journal_days", serde_json::json!("soon")),
         ("no.such_key", serde_json::json!("1")),
         ("projects.resolved_base", serde_json::json!("{}")),
         ("mcp.confirm_destructive", serde_json::json!(false)),
         ("hub.allow_plaintext", serde_json::json!(true)),
-        ("work.journal_days", serde_json::Value::Null),
+        ("work.retention.journal_days", serde_json::Value::Null),
+        // M2's superseded window, and the retention sweep's own record.
+        ("work.journal_days", serde_json::json!("30")),
+        (
+            "internal.work_retention_last_sweep",
+            serde_json::json!("{}"),
+        ),
     ] {
         let err = set(key, value.clone()).await.expect_err(key);
         assert!(
@@ -7531,7 +7543,9 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     }
     let s = store.lock().unwrap();
     assert_eq!(
-        s.get_setting("work.journal_days").unwrap().as_deref(),
+        s.get_setting("work.retention.journal_days")
+            .unwrap()
+            .as_deref(),
         Some("30")
     );
     assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);

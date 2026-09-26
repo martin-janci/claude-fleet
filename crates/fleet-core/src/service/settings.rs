@@ -161,10 +161,19 @@ pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
 /// Rows older than this are swept on the tick; `0` disables the age sweep.
 pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
 
-/// Work memory retention (work graph M2): journal rows older than this many
-/// days are swept, except those of a conversation a confirmed work link
-/// references. `0` keeps everything.
-pub const WORK_JOURNAL_DAYS: &str = "work.journal_days";
+/// Retention (work graph M12.3, `store::work_retention`): days a work
+/// journal row is kept once nothing live points at it. `0` keeps forever.
+pub const WORK_RETENTION_JOURNAL_DAYS: &str = "work.retention.journal_days";
+/// Retention: days a DONE tracker item no link names is kept. `0` forever.
+pub const WORK_RETENTION_TRACKER_ITEMS_DAYS: &str = "work.retention.tracker_items_days";
+/// Retention: days a work-graph timeline event (handover, nudge, tidy) is
+/// kept; the newest of each kind per session always stays. `0` forever.
+pub const WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS: &str =
+    "work.retention.timeline_work_events_days";
+/// M2's journal window, superseded by [`WORK_RETENTION_JOURNAL_DAYS`] and no
+/// longer writable. While the new key is unset, a stored `0` still keeps
+/// forever and a longer window still stands (`service::work::retention`).
+pub const LEGACY_WORK_JOURNAL_DAYS: &str = "work.journal_days";
 /// How far back (days) the sidebar looks for work that has only ended
 /// sessions, so reopened work has a group to show in.
 pub const WORK_RECENT_DAYS: &str = "work.recent_days";
@@ -372,8 +381,18 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Secs,
     },
     Spec {
-        key: WORK_JOURNAL_DAYS,
-        default: "90",
+        key: WORK_RETENTION_JOURNAL_DAYS,
+        default: "365",
+        kind: Kind::Int { min: 0, max: 3650 },
+    },
+    Spec {
+        key: WORK_RETENTION_TRACKER_ITEMS_DAYS,
+        default: "180",
+        kind: Kind::Int { min: 0, max: 3650 },
+    },
+    Spec {
+        key: WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
+        default: "180",
         kind: Kind::Int { min: 0, max: 3650 },
     },
     Spec {
@@ -749,6 +768,33 @@ mod tests {
                 spec.key
             );
         }
+    }
+
+    #[test]
+    fn retention_windows_default_to_d21_and_zero_keeps_forever() {
+        for (key, default) in [
+            (WORK_RETENTION_JOURNAL_DAYS, "365"),
+            (WORK_RETENTION_TRACKER_ITEMS_DAYS, "180"),
+            (WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS, "180"),
+        ] {
+            assert_eq!(resolve(key, None), default, "{key}");
+            for ok in ["0", "1", "3650"] {
+                assert!(validate(key, ok).is_ok(), "{key}={ok}");
+            }
+            for bad in ["3651", "-1", "1.5", "forever", ""] {
+                assert_eq!(
+                    validate(key, bad).unwrap_err().code,
+                    codes::E_INVALID,
+                    "{key}={bad}"
+                );
+            }
+        }
+        // M2's key is superseded: no longer writable through the registry.
+        assert!(spec(LEGACY_WORK_JOURNAL_DAYS).is_none());
+        assert_eq!(
+            validate(LEGACY_WORK_JOURNAL_DAYS, "90").unwrap_err().code,
+            codes::E_INVALID
+        );
     }
 
     #[test]

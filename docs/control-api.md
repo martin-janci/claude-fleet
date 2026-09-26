@@ -444,6 +444,11 @@ Index by area (names only; see the reference for details):
   owner?, repo?, path_prefix?, host_alias? }`, `remove_rule { rule_id }`,
   `assign_host` / `unassign_host { host_alias, org_id }` and `assign_tracker
   { tracker_id, org_id? }` — master only, so a host can never move itself.
+  Retention (M12.3): `work_admin { action: "status" }` answers `{ trackers,
+  retention }`. `trackers` is M11.4's sync metrics. `retention` gives each
+  swept table's rows, its window and a dry-run `would_delete`, plus the
+  last sweep. `sweep_now` runs one bounded sweep; the GC tick is the only
+  other trigger (`docs/hub.md`, *Work retention*).
   Rows gain `org_id` (session, host, tracker, link, `work` summaries). For a
   **per-host token** the host's org is a boundary on everything above: it
   reads links, tickets, trackers, context and briefs only inside its org or

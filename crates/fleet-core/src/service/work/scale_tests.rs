@@ -489,3 +489,45 @@ fn scale_plans_pin_the_m12_fixes() {
         "{plan:?}"
     );
 }
+
+/// Work graph M12.3: retention at scale, on its own copy of the fixture
+/// (the sweep deletes, and the shared one is read-only). Two years on, so
+/// most of the fixture is past its window. The number that matters is one
+/// batch's time: that is how long the sweep holds the store lock.
+#[test]
+fn scale_retention_status_and_sweep_batches() {
+    use crate::service::work::retention::{self, RetentionDays, RETENTION_BATCH};
+    use crate::store::RetentionTable;
+    let f = scale_fixture::build(SEED, crate::service::catalog::now_secs());
+    let store = Mutex::new(f.store);
+    let now = f.now + 2 * 365 * 86_400;
+    let (_, p95) = measure("retention status (counts + dry run)", || {
+        retention::status(&store, now).unwrap()
+    });
+    budget("retention status", p95, 3_000.0);
+    let dry = retention::status(&store, now).unwrap();
+    let days = RetentionDays::from_store(&lock(&store).unwrap());
+    let mut slowest = 0.0_f64;
+    for (t, row) in RetentionTable::ALL.iter().zip(&dry.tables) {
+        let mut deleted = 0_i64;
+        loop {
+            let s = lock(&store).unwrap();
+            let start = Instant::now();
+            let n = s
+                .retention_delete_batch(*t, now, days.of(*t), RETENTION_BATCH)
+                .unwrap();
+            slowest = slowest.max(start.elapsed().as_secs_f64() * 1_000.0);
+            deleted += n as i64;
+            if n < RETENTION_BATCH {
+                break;
+            }
+        }
+        println!(
+            "[m12.3 scale] {}: {} rows, {} swept",
+            row.table, row.rows, deleted
+        );
+        assert_eq!(deleted, row.would_delete, "{}: dry run = sweep", row.table);
+    }
+    println!("[m12.3 scale] slowest batch (lock held): {slowest:.1} ms");
+    budget("retention batch", slowest, 1_000.0);
+}

@@ -853,7 +853,7 @@ pub struct SetClientTrustParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SetSettingParams {
-    /// e.g. "work.journal_days".
+    /// e.g. "work.recent_days".
     pub key: String,
     /// An object or array is stored as its JSON.
     pub value: serde_json::Value,

@@ -319,6 +319,8 @@ pub fn run() {
             commands::trackers::test_tracker,
             commands::trackers::remove_tracker,
             commands::trackers::tracker_sync_metrics,
+            commands::trackers::work_retention_status,
+            commands::trackers::work_retention_sweep,
             commands::trackers::list_trackers,
             commands::trackers::work_tickets,
             commands::trackers::work_lookup,
