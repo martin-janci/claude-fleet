@@ -13,6 +13,8 @@ pub mod nudge;
 pub mod recognize;
 pub mod resolve;
 pub mod resume;
+#[cfg(test)]
+mod scale_tests;
 pub mod tidy;
 pub mod today;
 
