@@ -627,6 +627,35 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - M10.0 (the plan) is committed; M10.1–M10.3, M10.5 and M10.6 are not
   started.
 
+### M12: ship and operate
+
+Plan: `plans/2026-09-25-work-graph-m12-ship-and-operate.md`. (M11, the long
+tail, has its own plan: `plans/2026-09-25-work-graph-m11-long-tail.md`.)
+
+- **M12.1** upgrade path proven on a generated pre-work-graph database.
+- **M12.2** scale budgets and the indexes they needed (migration 058).
+- **M12.3** retention: the `work.retention.*` windows and `work_admin
+  { status | sweep_now }`.
+- **M12.4** trackers in `fleet_health` and the "Reconnect …" Attention item.
+- **M12.5** the user guide, `docs/work-graph.md`.
+- **M12.6** the decided-against list revisited (docs only).
+
+**Value:** the work graph can be shipped, upgraded into, run for months and
+explained.
+
+**Status (2026-09-26):**
+- M12.1, M12.2 and M12.3 are landed (see the plan's *Revisions*).
+- M12.4 is landed (#303).
+- **M12.5 done** on `claude/cloud-fleet-work-graph-m12-guide`:
+  `docs/work-graph.md` covers the whole feature and lists every `work.*`
+  setting with its default. `service::settings`'s
+  `work_settings_are_in_the_user_guide` fails when a registered `work.*`
+  setting is missing from that table, carries another default, or the
+  table names one that is not registered. Getting started, troubleshooting,
+  concepts and both READMEs link to it. Its fleet-health section was
+  rewritten from M12.4's code once #303 merged.
+- M12.6 is not started.
+
 ## Critical path and parallelism
 
 ```
@@ -762,3 +791,10 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
 - 2026-09-25: `main` merged into M10.4. M4.6 had landed on `main` (#273,
   OFF behind `work.classify_nudge`), so M10.4's "decided against" is
   withdrawn: D14 reads *built, off by default*.
+- 2026-09-26: M12 added to the milestones (it was planned without a
+  section here). **M12.5 done**: the user guide `docs/work-graph.md`, with a
+  docs check (`work_settings_are_in_the_user_guide`) that fails CI when a
+  `work.*` setting is missing from its table. Revise the guide with any
+  milestone that changes what a user sees.
+- 2026-09-26: M12.4 merged (#303); the guide's *Trackers in fleet health*
+  section now describes the code as landed, and its verify marker is gone.

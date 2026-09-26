@@ -107,6 +107,10 @@ The finish line. Click the row to open the new-session picker, choose a host and
 
 The dialog offers a generated name ("blue sirius") so you never have to invent one — press **🎲** or **Ctrl/⌘+R** to roll another, type over it to use your own, and **Enter** to create. The name becomes the session label, the branch/worktree slug (`blue-sirius`) and the tail of the tmux name (`dev-<owner>-<repo>--blue-sirius`); leave the tmux name empty and fleet picks one. The dialog remembers the host, worktree and type you last used per project.
 
+### Connect a tracker (optional)
+
+Sessions already group by the ticket keys in their branch names (sidebar **View ▾ → Work**) with nothing set up. To see ticket titles and statuses, list *My work* in ⌘K and start a session from a ticket, connect your tracker in **Settings → Work → Connect a tracker**: paste any ticket or issue URL, give the credential it asks for (a Jira API token with your Atlassian email, an Asana or Linear token; GitHub needs none, only a host where `gh` is logged in) and press **Test**. On a hub, use `fleet-hub tracker add <ticket-url>` and `fleet-hub tracker set-credential <id> < token.txt` on the hub machine. Trackers are read-only and never block anything. See the [work guide](work-graph.md#trackers).
+
 ---
 
 ## Feature hints
@@ -130,6 +134,7 @@ Once you have at least one session running:
 - **Send a prompt** — type in the prompt bar to send text to the active session. To send the same prompt to several sessions at once, use the broadcast feature.
 - **Background sessions (⚡)** — sessions marked with ⚡ run without an attached terminal. They continue working while you watch other sessions.
 - **Files, diffs, commit graph, branches** — the sidebar panels give you a read-only view of the repository state on the host where the session is running.
+- **Work** — group the sidebar by ticket (**View ▾ → Work**), start work from a ticket in ⌘K, see the day in **Today** (⌘⇧T / Ctrl+Shift+T) and confirm clean-ups in **Tidy up**. See the [work guide](work-graph.md).
 - **Filter** — use the host picker and recency filter in the sidebar to narrow the session list when you manage many machines.
 
 For a deeper explanation of how hosts, sessions, projects, and the event bus fit together, see [concepts.md](concepts.md). If something is not working as expected, see [troubleshooting.md](troubleshooting.md).
