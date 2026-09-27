@@ -43,8 +43,8 @@ fn worktrees_has_host_alias(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 065: `usage_daily` already has its
-/// `backfill` column. 065 rebuilds the table, and running it again would
+/// `already_applied` guard of migration 066: `usage_daily` already has its
+/// `backfill` column. 066 rebuilds the table, and running it again would
 /// collapse backfill rows into live ones, so on such a table a re-run only
 /// records the version. See [`Migration`].
 fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
@@ -112,6 +112,18 @@ fn client_tokens_has_trusted_at(conn: &Connection) -> rusqlite::Result<bool> {
 fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'row_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 065: `sessions` already has its
+/// `stale_working_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
+/// again. See [`Migration`].
+fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'stale_working_at'",
         [],
         |r| r.get(0),
     )?;
@@ -621,11 +633,19 @@ const MIGRATIONS: &[Migration] = &[
         64,
         include_str!("../../migrations/064_drop_tracker_webhooks.sql"),
     ),
+    // Lifecycle F2: `sessions.stale_working_at` (one ADD COLUMN, its own
+    // guard) and 063's `sessions_row_version_bump` rebuilt to watch it —
+    // it is a `SessionRow` field, so a change to it must bump `row_version`.
+    Migration {
+        version: 65,
+        sql: include_str!("../../migrations/065_stale_working.sql"),
+        already_applied: Some(sessions_has_stale_working_at),
+    },
     // usage_daily keyed by (day, host_alias, backfill): a table rebuild, so
     // guarded — re-running the INSERT…SELECT would collapse backfill rows.
     Migration {
-        version: 65,
-        sql: include_str!("../../migrations/065_usage_daily_backfill.sql"),
+        version: 66,
+        sql: include_str!("../../migrations/066_usage_daily_backfill.sql"),
         already_applied: Some(usage_daily_has_backfill),
     },
 ];
@@ -3160,7 +3180,54 @@ mod tests {
     }
 
     #[test]
-    fn migration_065_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
+    fn migration_065_adds_stale_working_at_and_is_safe_to_rerun() {
+        let s = store_at_version(64);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('a', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(sessions_has_stale_working_at(&s.conn).unwrap());
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE stale_working_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "an existing row starts unstamped");
+        // The rebuilt trigger watches the new column: stamping it is a
+        // client-visible change, so `row_version` moves once.
+        let v = || -> i64 {
+            s.conn
+                .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+                .unwrap()
+        };
+        let v0 = v();
+        s.conn
+            .execute("UPDATE sessions SET stale_working_at = 5", [])
+            .unwrap();
+        assert_eq!(v(), v0 + 1, "a stale_working_at change bumps row_version");
+        s.conn
+            .execute("UPDATE sessions SET stale_working_at = 5", [])
+            .unwrap();
+        assert_eq!(v(), v0 + 1, "a same-value write does not");
+        // Rolling the recorded version back re-runs 065 (the idiom of the
+        // 024–026 tests): the guard skips the ADD COLUMN.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 65;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_066_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
         const SEED_AT: i64 = 63;
         let s = store_at_version(SEED_AT);
         s.conn

@@ -1,4 +1,4 @@
--- 065: usage_daily keyed by (day, host_alias, backfill). A first read of an
+-- 066: usage_daily keyed by (day, host_alias, backfill). A first read of an
 -- existing transcript books that transcript's whole history in one pass;
 -- those rows are `backfill = 1` and reported apart (perf-logs §6a). Existing
 -- rows become live (backfill = 0) rows. Guarded by `usage_daily_has_backfill`
@@ -44,4 +44,4 @@ INSERT INTO usage_daily
     FROM usage_daily_rebuild;
 DROP TABLE usage_daily_rebuild;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (65);
+INSERT OR IGNORE INTO schema_version (version) VALUES (66);

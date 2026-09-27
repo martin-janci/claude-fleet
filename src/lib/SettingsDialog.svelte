@@ -856,6 +856,16 @@
           onchange={() => toggleSetting(SETTING_KEYS.playbookOomRecreate)} />
         Recreate sessions that ran out of memory (at most once per hour)
       </label>
+      <div class="mcp-field">
+        <label class="lbl" for="playbook-oom-max-attempts">oom budget</label>
+        <input class="port" id="playbook-oom-max-attempts" type="number" min="0" max="20" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.playbookOomMaxAttempts)}
+          disabled={automationBusy}
+          aria-describedby="playbook-oom-max-attempts-desc"
+          data-testid="playbook-oom-max-attempts"
+          onchange={(e) => onSecsChange(SETTING_KEYS.playbookOomMaxAttempts, e)} />
+        <span class="hook-desc" id="playbook-oom-max-attempts-desc">recreates one session may get per 24 h (0 = never); a session that is working, or finished a turn after the flag, is never recreated</span>
+      </div>
       <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
 
       <label class="toggle gc-toggle">
@@ -893,6 +903,15 @@
           data-testid="gc-work-hours"
           onchange={(e) => onHoursChange(SETTING_KEYS.gcWorkIdleSecs, e)} />
         <span class="hook-desc">hours idle before a work session is removed — dirty worktrees go through safe-remove (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">outside fleet</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcExternalLostTtlSecs))}
+          disabled={automationBusy}
+          data-testid="gc-external-lost-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcExternalLostTtlSecs, e)} />
+        <span class="hook-desc">hours a lost session from outside fleet is kept before it is removed — it can never be resumed, this only rides out a restart (0 = next pass)</span>
       </div>
       <div class="mcp-field">
         <span class="lbl">sweep</span>
@@ -938,6 +957,15 @@
           data-testid="reconcile-secs"
           onchange={(e) => onSecsChange(SETTING_KEYS.reconcileIntervalSecs, e)} />
         <span class="hook-desc">seconds between reconcile passes (0 disables; restart to apply)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">stale working</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileStaleWorkingSecs)}
+          disabled={automationBusy}
+          data-testid="reconcile-stale-working-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingSecs, e)} />
+        <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth or pane output before it reads idle (0 = never)</span>
       </div>
       {#if automationError}<p class="err">{automationError}</p>{/if}
     </section>
@@ -985,6 +1013,16 @@
           data-testid="restore-stagger-ms"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.restoreStaggerMs, 'Delay between restores (ms)', e)} />
         <span class="hook-desc" id="restore-stagger-ms-desc">Pause between starting each resumed session</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="limit-context-red-pct">context red</label>
+        <input class="port" id="limit-context-red-pct" type="number" min="1" max="100" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthContextRedPct)}
+          disabled={limitsBusy}
+          aria-describedby="limit-context-red-pct-desc"
+          data-testid="health-context-red-pct"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthContextRedPct, 'Context red threshold (%)', e)} />
+        <span class="hook-desc" id="limit-context-red-pct-desc">percent of the context window at which a session needs you (the chip turns red here, amber 15 points below)</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>

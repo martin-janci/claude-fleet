@@ -167,6 +167,7 @@
     "Health": [
       "by_status",
       "context_red",
+      "context_red_pct",
       "db_ready",
       "ghosts",
       "hosts_reachable",
@@ -348,6 +349,7 @@
       "safe_kill_nonce",
       "safe_kill_requested_at",
       "safe_kill_state",
+      "stale_working_at",
       "started_at",
       "status",
       "stuck_kind",

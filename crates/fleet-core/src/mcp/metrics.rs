@@ -158,9 +158,13 @@ impl HubGauges {
         let r = stats.reconcile();
         let (sessions_by_status, hosts_reachable) = match store.lock() {
             Ok(s) => {
+                // The same threshold `fleet_health` uses, so the gauges and
+                // the roll-up count the same red sessions.
+                let red = crate::service::health::context_red_pct(&s);
                 let summary = crate::service::health::summarize(
                     &s.list_all_sessions().unwrap_or_default(),
                     &s.list_hosts().unwrap_or_default(),
+                    red,
                 );
                 (summary.by_status, summary.hosts_reachable)
             }

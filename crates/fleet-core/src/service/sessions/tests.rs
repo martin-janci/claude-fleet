@@ -62,6 +62,42 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
     assert_eq!(status_candidate(true, None, None), None);
 }
 
+/// F2: the cached `claude agents` status reports a session with live
+/// subagents as `working` — the very signal that kept two rows `working`
+/// for 40 h. Once the tick has demoted a row, only the pane's own spinner
+/// may lift the demotion.
+#[test]
+fn a_stale_working_demotion_is_not_undone_by_the_cached_agents_status() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let agents_working = Some(ClaudeStatus::Working);
+    assert_eq!(
+        stale_working_veto(false, agents_working, None),
+        agents_working
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, None),
+        None,
+        "keeps the stored idle"
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Idle)),
+        None
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Working)),
+        Some(ClaudeStatus::Working),
+        "the pane's spinner is real"
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Blocked)),
+        Some(ClaudeStatus::Blocked)
+    );
+    assert_eq!(
+        stale_working_veto(true, Some(ClaudeStatus::Idle), None),
+        Some(ClaudeStatus::Idle)
+    );
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),
@@ -215,6 +251,7 @@ fn row(
         ci_status: None,
         turn_seq: 0,
         last_stop_at: None,
+        stale_working_at: None,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
