@@ -43,8 +43,8 @@ fn worktrees_has_host_alias(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 064: `usage_daily` already has its
-/// `backfill` column. 064 rebuilds the table, and running it again would
+/// `already_applied` guard of migration 065: `usage_daily` already has its
+/// `backfill` column. 065 rebuilds the table, and running it again would
 /// collapse backfill rows into live ones, so on such a table a re-run only
 /// records the version. See [`Migration`].
 fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
@@ -601,7 +601,9 @@ const MIGRATIONS: &[Migration] = &[
     // indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(61, include_str!("../../migrations/061_tracker_writes.sql")),
     // Work graph M13.4f: a tracker's webhook secret. A new table,
-    // `IF NOT EXISTS`, safe to re-run.
+    // `IF NOT EXISTS`, safe to re-run. The feature was removed again (D13
+    // stays no); the entry stays so a database that ran it is not refused
+    // as newer, and 064 drops the table.
     Migration::plain(
         62,
         include_str!("../../migrations/062_tracker_webhooks.sql"),
@@ -613,11 +615,17 @@ const MIGRATIONS: &[Migration] = &[
         63,
         include_str!("../../migrations/063_row_version_on_visible_change.sql"),
     ),
+    // Drops 062's `tracker_webhooks`: nothing reads it since the webhook
+    // nudges were removed, and a secret no code can rotate must not stay.
+    Migration::plain(
+        64,
+        include_str!("../../migrations/064_drop_tracker_webhooks.sql"),
+    ),
     // usage_daily keyed by (day, host_alias, backfill): a table rebuild, so
     // guarded — re-running the INSERT…SELECT would collapse backfill rows.
     Migration {
-        version: 64,
-        sql: include_str!("../../migrations/064_usage_daily_backfill.sql"),
+        version: 65,
+        sql: include_str!("../../migrations/065_usage_daily_backfill.sql"),
         already_applied: Some(usage_daily_has_backfill),
     },
 ];
@@ -3152,7 +3160,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_064_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
+    fn migration_065_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
         const SEED_AT: i64 = 63;
         let s = store_at_version(SEED_AT);
         s.conn

@@ -326,11 +326,23 @@ LINK="[$NEW]: $REPO_URL/releases/tag/v$NEW"
 # through the environment. Two statements, not `awk ... && mv`: under
 # `set -e` a failure before the last `&&` is ignored, which would commit and
 # tag a release with no CHANGELOG entry.
+#
+# An `## [Unreleased]` section (Keep a Changelog), written by hand while the
+# work landed, becomes this release's section: its header is replaced by the
+# version's, its text is kept, and the generated bullets follow it, so the
+# polish step starts from the notes rather than from raw commit subjects.
 SECTION="$SECTION" awk -v header="## [$NEW] - $TODAY" -v link="$LINK" '
-  !ins && /^## \[/ { print header; print ""; print ENVIRON["SECTION"]; ins = 1 }
-  !lnk && /^\[[^]]+\]: /  { print link; lnk = 1 }
+  !ins && !unrel && /^## \[Unreleased\]/ { print header; unrel = 1; next }
+  unrel && /^## \[/ { print ENVIRON["SECTION"]; unrel = 0; ins = 1 }
+  !ins && !unrel && /^## \[/ { print header; print ""; print ENVIRON["SECTION"]; ins = 1 }
+  !lnk && /^\[[^]]+\]: /  {
+    if (unrel) { print ENVIRON["SECTION"]; unrel = 0; ins = 1 }
+    print link; lnk = 1
+  }
+  /^\[Unreleased\]: / { next }
   { print }
   END {
+    if (unrel) { print ENVIRON["SECTION"]; ins = 1 }
     if (!ins) { print ""; print header; print ""; print ENVIRON["SECTION"] }
     if (!lnk) { print link }
   }' CHANGELOG.md > CHANGELOG.md.tmp

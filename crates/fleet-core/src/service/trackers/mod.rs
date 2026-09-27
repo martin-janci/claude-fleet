@@ -25,7 +25,6 @@ mod tests_e2e_override;
 #[path = "tests_isolation_providers.rs"]
 mod tests_isolation_providers;
 pub mod tickets;
-pub mod webhook;
 pub mod write_back;
 
 use crate::net::https::{DirectTransport, HostPolicy, HttpTransport};

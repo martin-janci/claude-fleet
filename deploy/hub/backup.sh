@@ -26,17 +26,29 @@ case "$KEEP" in ''|*[!0-9]*) echo "backup: KEEP must be a number, got '$KEEP'" >
 case "$PREFIX" in *[!A-Za-z0-9._-]*|'') echo "backup: PREFIX must be [A-Za-z0-9._-]+, got '$PREFIX'" >&2; exit 2;; esac
 
 mkdir -p "$OUT_DIR"
-OUT="$OUT_DIR/$PREFIX-$(date -u +%Y%m%d-%H%M%S).db"
-if ! "$SQLITE" "$DB" ".backup '$OUT'"; then
-  echo "backup: .backup of $DB failed; removing $OUT" >&2
-  rm -f -- "$OUT"
+# The final name is never one that already exists (two runs in the same
+# second — upgrade.sh right after a manual run — get `-1`, `-2`, …), and the
+# copy is written to a `.part` file first, so a failed or corrupt copy is
+# removed without ever touching an earlier good backup of the same second.
+STAMP="$(date -u +%Y%m%d-%H%M%S)"
+OUT="$OUT_DIR/$PREFIX-$STAMP.db"
+n=0
+while [ -e "$OUT" ]; do
+  n=$((n + 1))
+  OUT="$OUT_DIR/$PREFIX-$STAMP-$n.db"
+done
+PART="$OUT.part"
+if ! "$SQLITE" "$DB" ".backup '$PART'"; then
+  echo "backup: .backup of $DB failed; removing $PART" >&2
+  rm -f -- "$PART"
   exit 1
 fi
-if ! "$SQLITE" "$OUT" 'PRAGMA integrity_check' | grep -qx ok; then
-  echo "backup: integrity_check failed on $OUT; removed" >&2
-  rm -f -- "$OUT"
+if ! "$SQLITE" "$PART" 'PRAGMA integrity_check' | grep -qx ok; then
+  echo "backup: integrity_check failed on $PART; removed" >&2
+  rm -f -- "$PART"
   exit 1
 fi
+mv -- "$PART" "$OUT"
 # Retention: the newest $KEEP files of this prefix stay. The names carry no
 # whitespace (this script wrote them), so word-splitting `ls -1t` is safe.
 n=0

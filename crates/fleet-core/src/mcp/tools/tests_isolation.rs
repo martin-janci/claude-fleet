@@ -1480,6 +1480,46 @@ async fn run_matrix(isolate: bool) {
         .await;
     }
 
+    // ── write-back (M13.4e, D3): only the master turns it on ────────────
+    // No tool triggers a write (the PR probe does); the one switch is this
+    // setting, and every other caller is refused before anything changes.
+    m.row(
+        "work_admin",
+        "update",
+        |fx, _| {
+            json!({
+                "action": "update",
+                "tracker_id": fx.tracker_a,
+                "settings": { "write_back": { "pr_remote_link": true } },
+            })
+        },
+        |fx, who, a| match who {
+            Who::Master => {
+                is_ok(who, a, "the master turns write-back on");
+                let on =
+                    fx.t.store
+                        .lock()
+                        .unwrap()
+                        .get_tracker(fx.tracker_a)
+                        .unwrap()
+                        .unwrap()
+                        .settings
+                        .write_back
+                        .pr_remote_link;
+                assert!(on, "the setting was stored");
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "write-back is the master's switch"),
+        },
+    )
+    .await;
+    // Back off, so no later row runs with a write-back tracker.
+    {
+        let s = fx.t.store.lock().unwrap();
+        let mut t = s.get_tracker(fx.tracker_a).unwrap().unwrap();
+        t.settings.write_back.pr_remote_link = false;
+        s.set_tracker_settings(fx.tracker_a, &t.settings).unwrap();
+    }
+
     // ── sessions (D7) ───────────────────────────────────────────────────
     // The rows below check what a host reads of another org's work ON A
     // SESSION ROW, so s_x (A's session carrying B's ticket) and s_b must

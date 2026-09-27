@@ -770,9 +770,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             "confirmation requested but this hub has no approver; disable mcp.confirm_destructive"
         );
     }))
-    .without_approver()
-    // Work graph M13.4f: a hub takes tracker webhook nudges.
-    .with_tracker_hooks();
+    .without_approver();
 
     warn_if_confirm_destructive(&store);
 

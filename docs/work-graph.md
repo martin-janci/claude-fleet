@@ -184,8 +184,7 @@ Trackers give you:
 
 Fleet writes one thing back, and only where you turn it on (decision D3):
 a session's pull request as a link on its Jira ticket (see *Write-back*
-below). On a hub with a public URL, a tracker can also nudge fleet with a
-webhook (D13, *Webhook nudges* below); polling stays either way.
+below). It has no inbound webhook (D13).
 
 ### Connecting one
 
@@ -276,38 +275,6 @@ once in a browser), `rate_limited` and `unreachable` (both retry on their
 own). See [troubleshooting.md](troubleshooting.md#work-and-trackers) when a
 sync fails.
 
-### Webhook nudges (a public hub; off by default)
-
-Polling is the source of truth. On a hub with a public URL, Jira Cloud,
-GitHub and Linear (D28) can also call the hub when an issue changes, so it
-shows up in seconds instead of at the next pass:
-
-```sh
-fleet-hub tracker webhook 1            # prints the URL and a new secret, once
-fleet-hub tracker webhook 1 --rotate   # a new secret; the old one stops at once
-fleet-hub tracker webhook 1 --off
-```
-
-Register the URL (`https://<public-url>/hooks/tracker/<id>`) and the secret
-on the tracker, for issue events. A delivery only **nudges**:
-
-- it must carry the provider's HMAC-SHA256 signature made with that secret
-  (GitHub `X-Hub-Signature-256`, Jira `X-Hub-Signature`, Linear
-  `Linear-Signature` within a minute of its timestamp); anything else is
-  refused (401) and counted;
-- fleet reads only the issue's key from it, and only refreshes an issue it
-  already has for that tracker, from the tracker's own API. A delivery can
-  never add, change or reach anything else;
-- deliveries for one issue within 5 seconds make one refresh, and the route
-  is rate-limited and takes at most 64 KiB;
-- without a public URL or a secret, the route is not there (404). The
-  desktop never serves it.
-
-`fleet_health` shows, per tracker, `webhook_enabled`,
-`webhook_last_delivery_at` and `webhook_rejected` (the footer says "N
-webhooks refused" — a wrong secret on the tracker's side, or someone
-knocking).
-
 ## Starting work
 
 - **From ⌘K:** type a key or paste a ticket URL, or pick a ticket from
@@ -328,14 +295,18 @@ dialog. The brief is editable before you start.
 
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
-one.
+one. While another device is still starting or resuming the same key (a
+multi-repo start holds it until its last repository), a second start or
+resume is refused: "ABC-123 is being started or resumed already; wait for
+that session, then jump to it".
 
 **Multi-start.** For work that spans repositories, the dialog's **Also
 start in** list (the projects the key ran in before) starts one sibling
 session per project, up to 8, all on the same branch name, each linked
 `started` and each brief naming its siblings (`work_link start {
 project_ids }`). A repository where the key already runs is skipped, not
-refused. Multi-start is a desktop feature (decision D15).
+refused. Multi-start is also on the phone, with a full token (decision D15;
+fleet-mobile #50).
 
 > **[Screenshot placeholder]** The New session dialog on a ticket, with
 > Brief Claude and Also start in.
@@ -493,6 +464,9 @@ it. `0` keeps a table forever.
   kept ticket.
 - `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
   timeline events. The newest of each kind per session stays.
+- The write-back outbox (see *Write-back*) follows the journal's window:
+  a PR link that was sent, or given up on, goes once it is older than
+  `work.retention.journal_days`; one still waiting is never swept.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
 Settings → Limits → Retention (standalone desktop) shows the row counts, a
@@ -649,8 +623,11 @@ token:
 - with a **full** token, **Name this work…** for a session with no work,
   and **Rename** for local work (D20; fleet-mobile M13.4a).
 
-What stays on the desktop: multi-start (D15), tracker and org
-administration, and retention. A **readonly** token
+- with a **full** token, **multi-start**: several repositories at once,
+  behind a confirm sheet; a cross-org start is refused in words (D15;
+  fleet-mobile M13.4d).
+
+What stays on the desktop: tracker and org administration, and retention. A **readonly** token
 is served `work` but not `work_link`, so it only reads. No client token ever
 reaches `work_admin`. Which of these screens your phone shows depends on its
 fleet-mobile release; the hub gates each action by the token, not by the

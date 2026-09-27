@@ -758,37 +758,47 @@ pub fn resume_session_args(
     })
 }
 
-/// Keys with a resume between its re-checked guards and its link, per
+/// Keys with a resume (or a `start`, work graph M14) between its re-checked
+/// guards and its link, per
 /// store (`Store::instance_id` tells one fleet's registry from another's,
 /// which only matters to tests — and, unlike the store's address, is never
 /// reused by a store built where a dropped one was): a second resume of one
 /// of them meanwhile is refused with `E_EXISTS` (the store lock is not held
 /// across the spawn, so the guards alone would let two callers spawn two
-/// sessions on one conversation).
+/// sessions on one conversation). A start claims the same keys, so a start
+/// and a resume of one key, or two starts from two devices, never spawn two
+/// sessions for it.
 static IN_FLIGHT: Mutex<std::collections::BTreeSet<(u64, String)>> =
     Mutex::new(std::collections::BTreeSet::new());
 
-/// One key's claim; released on drop, whatever the resume's outcome.
+/// One key's claim; released on drop, whatever the resume's (or start's)
+/// outcome: success, an error, a `?`, a cancelled future or a panic.
 #[derive(Debug)]
-struct InFlight(u64, String);
+pub(crate) struct InFlight(u64, String);
 
 fn store_key(store: &Store) -> u64 {
     store.instance_id()
 }
 
 impl InFlight {
-    fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
+    /// Claim `key` in its one spelling (a start's `abc-1` and a resume's
+    /// `ABC-1` are one key), or `E_EXISTS` while another holds it.
+    pub(crate) fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
+        let key = crate::store::normalize_work_ref(key)?;
         let mut set = IN_FLIGHT
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "the resume registry is poisoned"))?;
         let id = store_key(store);
-        if !set.insert((id, key.to_string())) {
+        if !set.insert((id, key.clone())) {
             return Err(IpcError::new(
                 codes::E_EXISTS,
-                format!("{key} is being resumed already; wait for that session, then jump to it"),
+                format!(
+                    "{key} is being started or resumed already; wait for that session, then \
+                     jump to it"
+                ),
             ));
         }
-        Ok(InFlight(id, key.to_string()))
+        Ok(InFlight(id, key))
     }
 }
 
@@ -954,10 +964,11 @@ where
     let orphaned = |e: IpcError| orphaned(e, &row);
     let handover = {
         let s = lock(store).map_err(orphaned)?;
-        // The claim above fences other resumes, not a `start` of the same
-        // key (the phone's Start while the desktop's Resume spawns), which
-        // may have linked its session meanwhile. Re-check under the guard
-        // that writes the link, so the key never ends with two.
+        // The claim above fences other resumes and starts, not a person's
+        // own link of the key (or a start that claimed and linked before
+        // this plan's guards), which may have landed meanwhile. Re-check
+        // under the guard that writes the link, so the key never ends with
+        // two.
         let now = plan_resume(
             &s,
             &plan.key,
@@ -1791,7 +1802,11 @@ mod tests {
         };
         let (first, err) = tokio::join!(first, second);
         assert_eq!(err.code, codes::E_EXISTS, "{}", err.message);
-        assert!(err.message.contains("being resumed"), "{}", err.message);
+        assert!(
+            err.message.contains("started or resumed"),
+            "{}",
+            err.message
+        );
         let (row, _) = first.expect("the first resume completes");
         assert_eq!(row.tmux_name, "dev-new");
         // Afterwards the key is live: a resume is blocked by the plan (Jump),
@@ -1806,9 +1821,67 @@ mod tests {
         assert!(!IN_FLIGHT.lock().unwrap().iter().any(|(id, _)| *id == key));
     }
 
-    /// A START of the same key (the phone's Start while the desktop's Resume
-    /// is spawning) takes no resume claim, so it can link its session while
-    /// the resume is mid-spawn. The resume must re-check at its link, or the
+    /// A start of a key while a resume of it is mid-spawn (the phone's
+    /// Start while the desktop's Resume spawns) is refused by the shared
+    /// claim before it spawns: one session for the key, not a race lost at
+    /// the link.
+    #[tokio::test]
+    async fn a_start_while_a_resume_of_the_key_is_in_flight_is_refused() {
+        let (st, pid) = fixture();
+        let ssh = Arc::new(SshClient::new());
+        let args = ResumeArgs {
+            key: "abc-1".into(),
+            mode: "fresh".into(),
+            ..Default::default()
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (at_spawn_tx, at_spawn) = tokio::sync::oneshot::channel::<()>();
+        let st1 = Arc::clone(&st);
+        let resume = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+            at_spawn_tx.send(()).unwrap();
+            rx.await.unwrap();
+            let s = st1.lock().unwrap();
+            let id = s
+                .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        });
+        let plan = crate::service::trackers::tickets::StartPlan {
+            key: "ABC-1".into(),
+            title: String::new(),
+            item_id: None,
+            project_id: pid,
+            host_alias: "h".into(),
+            branch: "abc-1".into(),
+            worktree_id: None,
+            name: "ABC-1".into(),
+            per_project: false,
+        };
+        let start = async {
+            at_spawn.await.unwrap();
+            let e = crate::service::trackers::tickets::start_with(
+                &st,
+                &plan,
+                None,
+                &OrgScope::All,
+                |_| async { panic!("the start never spawns") },
+            )
+            .await
+            .unwrap_err();
+            tx.send(()).unwrap();
+            e
+        };
+        let (resumed, e) = tokio::join!(resume, start);
+        assert_eq!(e.code, codes::E_EXISTS, "{}", e.message);
+        assert!(e.message.contains("started or resumed"), "{}", e.message);
+        let (row, _) = resumed.expect("the resume completes");
+        assert_eq!(row.tmux_name, "dev-new");
+    }
+
+    /// A link of the same key that lands while the resume is mid-spawn (a
+    /// start claims the key since M14, but a person's own link does not, and
+    /// neither did a start before it). The resume must re-check at its link,
+    /// or the
     /// key ends with two live confirmed sessions — and the one it made must
     /// be named, not left running unlinked and unreported.
     #[tokio::test]
