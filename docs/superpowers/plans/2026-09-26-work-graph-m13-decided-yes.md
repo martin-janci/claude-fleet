@@ -323,3 +323,15 @@ M13.4 ── independent (fleet-mobile repository)
   - hub-e2e: a signed delivery refreshes E2E-3 from the fake Jira without a
     sync pass; a forged one is 401, an unknown tracker 404, and
     `fleet_health` reports it.
+- 2026-09-27: **M13.4a built** in fleet-mobile, branch
+  `claude/work-graph-m13-4a-name-work` (61b09a7). No hub change.
+  - *Name this work…* is in the session menu when the session has no
+    confirmed work; *Rename* is in the work sheet when the work is local
+    (an item with no tracker status and no URL, the desktop's test).
+  - Both are gated on a write token and the hub listing `work_link` `name`.
+  - The title is checked on the phone in the hub's terms. `E_EXISTS` with
+    `tracker: true` says to use *Set work…*.
+  - The phone's list of local items (`work { local_items }`) is not shown:
+    rename is offered where the work already is, the session's sheet.
+  - `:shared:jvmTest` passes 1,006 / 1,006. The Android emulator and iOS
+    jobs run only in fleet-mobile's CI.

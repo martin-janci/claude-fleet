@@ -599,8 +599,11 @@ token:
   *Send*;
 - org labels and an org filter.
 
-What stays on the desktop: multi-start (D15), naming or renaming local work
-(D20), tracker and org administration, and retention. A **readonly** token
+- with a **full** token, **Name this work…** for a session with no work,
+  and **Rename** for local work (D20; fleet-mobile M13.4a).
+
+What stays on the desktop: multi-start (D15), tracker and org
+administration, and retention. A **readonly** token
 is served `work` but not `work_link`, so it only reads. No client token ever
 reaches `work_admin`. Which of these screens your phone shows depends on its
 fleet-mobile release; the hub gates each action by the token, not by the

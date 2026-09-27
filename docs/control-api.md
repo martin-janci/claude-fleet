@@ -584,8 +584,8 @@ Index by area (names only; see the reference for details):
   its own host's sessions inside its org — any other session answers as an
   unknown one — and sees (lists, renames) a local item only through a live
   link on its host's sessions or a past one whose session ran there, inside
-  its org; the count is of its host's sessions. The phone does not name
-  work (D20).
+  its org; the count is of its host's sessions. The phone names and
+  renames work with a full token (D20, fleet-mobile M13.4a).
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
