@@ -718,8 +718,11 @@ impl Store {
         }
         let tx = self.conn.unchecked_transaction()?;
         {
-            // A no-op UPDATE: migration 042's trigger bumps `row_version`.
-            let mut bump = tx.prepare("UPDATE sessions SET status = status WHERE id = ?1")?;
+            // An explicit bump: the org is computed, not a `sessions` column,
+            // so no column changes — and since migration 063 a same-value
+            // UPDATE no longer moves `row_version` on its own.
+            let mut bump =
+                tx.prepare("UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1")?;
             for id in &moved {
                 bump.execute(rusqlite::params![id])?;
             }

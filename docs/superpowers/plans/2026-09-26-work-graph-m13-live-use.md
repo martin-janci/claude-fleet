@@ -220,6 +220,6 @@ M13.5   last
   planned them before this plan reached `main`; its defaults are D27–D30 in
   the roadmap. **M13.4c (D10) is built** on `claude/cloud-fleet-work-graph-m13`.
 - 2026-09-27: **M13.4f removed.** The owner keeps D13 at no; the webhook
-  build that reached `main` with #327 is reverted (062 kept, 063 drops the
+  build that reached `main` with #327 is reverted (062 kept, 064 drops the
   table). M13.4c and M13.4e stay; they are reviewed against this plan and
   the M12.6 smallest safe versions.

@@ -665,7 +665,9 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - **M10.3** the written acceptance: #313 (below).
 - **M10.4** as above: #278.
 - **M10.5** Today, *Share standup* and the ticket card on the phone:
-  martin-janci/fleet-mobile#36.
+  martin-janci/fleet-mobile#36; the card on the session's work sheet with
+  *Copy* (never *Send*), and the org colour bar on rows:
+  martin-janci/fleet-mobile#48.
 - **M10.6** replay-ring pressure measured
   (`reviews/2026-09-25-replay-ring-pressure.md`), `session:updated` for a
   tracker item only when the row shows the change: #280. The first-sync
@@ -821,7 +823,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-26: yes, on demand only** (*Summarise* on a past-work row; `work.summary_model`, default `haiku`, D27; never automatic, D30): M13.4c, **built** |
 | D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before.** Built (M9.6, #268) |
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always.** Built (M9.7, #268) |
-| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **No.** Recorded yes on 2026-09-26 and built as M13.4f (reached `main` with #327); **the owner reversed it on 2026-09-27 → no** (the M12.6 recommendation), and M13.4f was removed. Migration 062 stays in the chain, 063 drops its table |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **No.** Recorded yes on 2026-09-26 and built as M13.4f (reached `main` with #327); **the owner reversed it on 2026-09-27 → no** (the M12.6 recommendation), and M13.4f was removed. Migration 062 stays in the chain, 064 drops its table (063 is another change, #333) |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25)**: `work.classify_nudge`. Opened as #273 (closed unmerged); the commit reached `main` with #270 |
 | D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | Desktop only. **Waits on the user** after M10.3 (M13.4d) |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done.** hub-e2e runs in CI's `hub-headless` job (`.github/workflows/ci.yml`, every PR and `main` push). Since #314 the job also builds an `e2e`-feature hub into `target/e2e` and passes it as `WBIN`, so the M10.2 work-graph leg runs on every PR; with `CI=true` a missing `WBIN` fails instead of skipping (`scripts/hub-e2e.sh`) |
@@ -985,7 +987,11 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   hold the defaults for their details. M13.4c (D10) is built; M13.4e (D3)
   is next. D13 had no slot in M13.4 ("M13 does not reopen it"), so it gets
   **M13.4f**. D5 and D15 are unchanged.
+- 2026-09-27: M10.5 finished in fleet-mobile (martin-janci/fleet-mobile#48):
+  the ticket card on the session's work sheet (`work card`, read-only, any
+  token), *Copy* on every card, and the org colour bar on session rows
+  when two or more orgs show. No hub change, no contract bump.
 - 2026-09-27: **D13 back to no.** The owner reversed the yes; M13.4f
   (webhook nudges), which reached `main` with #327, is removed. Migration 062
   stays in the chain so a database that ran it is not refused as newer, and
-  063 drops its `tracker_webhooks` table. D28 is moot.
+  064 drops its `tracker_webhooks` table. D28 is moot.

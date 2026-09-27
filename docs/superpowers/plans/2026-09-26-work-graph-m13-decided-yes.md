@@ -309,6 +309,22 @@ M13.4 ── independent (fleet-mobile repository)
     rename is offered where the work already is, the session's sheet.
   - `:shared:jvmTest` passes 1,006 / 1,006. The Android emulator and iOS
     jobs run only in fleet-mobile's CI.
+- 2026-09-27: **M13.4c review fixes.**
+  - The fork ran with `--settings '{"hooks":{}}'`, which does **not** turn
+    fleet's hooks off: Claude Code keeps the user-level hooks
+    (`~/.claude/settings.json`) under an empty `hooks` object. Checked with
+    Claude Code 2.1.283 in an isolated HOME: SessionStart and
+    UserPromptSubmit hooks fired with `{}` and with `{"hooks":{}}`, and did
+    not fire with `{"disableAllHooks":true}`. So every summary reported its
+    fork to fleet as a new conversation and prompt. It now passes
+    `{"disableAllHooks":true}`, and the flag test refuses the empty object.
+  - A test pins the operator's `summarize`: it gets a confirm nonce, runs once
+    approved, is `E_FORBIDDEN` once denied, and is refused outright on a hub
+    with no approver. A phone's own request is not gated. Removing the gate
+    fails it.
+  - Recorded deviation: the run's timeout is 170 s on the host (`timeout`)
+    and 180 s for the SSH call, not the plan's 120 s. A cold `--resume` of a
+    long transcript needs the margin; the cap on the output is unchanged.
 - 2026-09-27: **M13.4f removed.** Its build (webhook nudges, D13) reached
   `main` with #327, but the owner keeps D13 at *no* (the M12.6
   recommendation), so the commit is reverted. Migration 062

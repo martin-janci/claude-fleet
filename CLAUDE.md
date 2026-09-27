@@ -240,7 +240,7 @@ and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
 too. Write-back (D3), dead-session summaries (D10) and webhooks (D13) were
 decided against; the user said yes to D3, D10 and D20 on 2026-09-27, as
 M13.4e, M13.4c and M13.4a of M13. D13 stays no: its build (M13.4f) reached
-`main` and was removed again (migration 062 stays, 063 drops its table;
+`main` and was removed again (migration 062 stays, 064 drops its table;
 build notes:
 `docs/superpowers/plans/2026-09-26-work-graph-m13-decided-yes.md`).
 M13.4c (D10) is built on `claude/cloud-fleet-work-graph-m13`:
