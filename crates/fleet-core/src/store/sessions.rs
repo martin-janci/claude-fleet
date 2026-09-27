@@ -3432,6 +3432,31 @@ mod tests {
         assert!(s.prompt_ack_state(999_999).unwrap().is_none());
     }
 
+    /// The composer's delivery receipt reads the counter off the row the
+    /// hook emits: "Claude is on it" is the count moving past the one the
+    /// send started from, so the emitted row must carry the new count.
+    #[test]
+    fn prompt_submit_seq_rides_the_emitted_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().prompt_submit_seq,
+            0
+        );
+        let emitted = s
+            .record_prompt_submit_hook_for_row(id)
+            .unwrap()
+            .expect("the hook emits the row");
+        assert_eq!(emitted.prompt_submit_seq, 1);
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().prompt_submit_seq,
+            1
+        );
+    }
+
     #[test]
     fn set_started_at_emits_session_updated() {
         let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());

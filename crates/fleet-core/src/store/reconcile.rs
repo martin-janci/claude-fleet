@@ -873,6 +873,7 @@ mod tests {
         SessionRow {
             id: 1,
             row_version: 0,
+            prompt_submit_seq: 0,
             tmux_name: "work-a".into(),
             host_alias: "alpha".into(),
             project_id: None,

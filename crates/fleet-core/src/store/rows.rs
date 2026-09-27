@@ -220,6 +220,13 @@ pub struct SessionRow {
     /// it. `#[serde(default)]`: a hub older than the column sends none.
     #[serde(default)]
     pub row_version: i64,
+    /// How many UserPromptSubmit hooks this row has recorded (migration
+    /// 042). A composer reads it as a delivery receipt: the count moving
+    /// past the one its send started from is Claude taking the prompt.
+    /// `#[serde(default)]`: a hub older than this field sends none, and a
+    /// client must then treat 0 as "no receipts", not "never submitted".
+    #[serde(default)]
+    pub prompt_submit_seq: i64,
     /// Token usage + estimated cost (migration 025), flattened onto the
     /// wire as the `usage_*` fields.
     #[serde(flatten)]
@@ -359,7 +366,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id"
+    " AS org_id, prompt_submit_seq"
 );
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
@@ -450,6 +457,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         work_rejected: decode_tags(row.get(55)?),
         work_suggested: decode_work(row.get(56)?),
         org_id: row.get(57)?,
+        prompt_submit_seq: row.get(58)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
