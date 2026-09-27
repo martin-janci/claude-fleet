@@ -75,6 +75,23 @@ pub(super) fn read_lost_ttl_cutoff(raw: Option<String>, now: i64) -> Option<i64>
     }
 }
 
+/// Resolve the external-ghost grace from the raw `gc.external_lost_ttl_secs`
+/// value, like [`read_lost_ttl_cutoff`]: `<= 0` disables the grace (`None`,
+/// reaped on the next pass); otherwise the cutoff is `now - grace`.
+pub(super) fn read_external_grace_cutoff(raw: Option<String>, now: i64) -> Option<i64> {
+    let grace = crate::service::settings::resolve(
+        crate::service::settings::GC_EXTERNAL_LOST_TTL_SECS,
+        raw.as_deref(),
+    )
+    .parse::<i64>()
+    .unwrap_or(3600);
+    if grace <= 0 {
+        None
+    } else {
+        Some(now - grace)
+    }
+}
+
 /// Why every session on a reachable host should be treated as lost this
 /// pass, or `None` for a normal pass. Each comparison needs BOTH sides
 /// known, so a first probe after upgrade or a failed identity read never
@@ -1283,9 +1300,20 @@ pub(super) fn reconcile_agent_rows(
         .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
         .ok()
         .flatten();
+    let grace_raw = s
+        .get_setting(crate::service::settings::GC_EXTERNAL_LOST_TTL_SECS)
+        .ok()
+        .flatten();
     s.ensure_in_tx()?;
     let lost_ttl_cutoff = read_lost_ttl_cutoff(lost_ttl_raw, now);
-    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, lost_ttl_cutoff) {
+    let external_grace_cutoff = read_external_grace_cutoff(grace_raw, now);
+    if let Err(e) = s.ghost_and_clean_bg_sessions(
+        host_alias,
+        &keep,
+        now,
+        lost_ttl_cutoff,
+        external_grace_cutoff,
+    ) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
         s.ensure_in_tx()?;
     }

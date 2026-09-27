@@ -905,6 +905,15 @@
         <span class="hook-desc">hours idle before a work session is removed — dirty worktrees go through safe-remove (0 = never)</span>
       </div>
       <div class="mcp-field">
+        <span class="lbl">outside fleet</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcExternalLostTtlSecs))}
+          disabled={automationBusy}
+          data-testid="gc-external-lost-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcExternalLostTtlSecs, e)} />
+        <span class="hook-desc">hours a lost session from outside fleet is kept before it is removed — it can never be resumed, this only rides out a restart (0 = next pass)</span>
+      </div>
+      <div class="mcp-field">
         <span class="lbl">sweep</span>
         <input class="port" type="number" min="0"
           value={settingSecs($fleetSettings, SETTING_KEYS.gcSweepIntervalSecs)}

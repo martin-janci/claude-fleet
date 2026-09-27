@@ -296,12 +296,14 @@ impl Store {
         // The post-write stuck_kind, spelled out once and reused: SQLite's
         // upsert SET clauses see the OLD row (unqualified) and the candidate
         // (`excluded`), never each other's results.
-        const NEW_STUCK: &str = "CASE WHEN ?16 THEN excluded.stuck_kind \
+        const NEW_STUCK: &str = "CASE WHEN kind = 'shell' THEN NULL \
+                                 WHEN ?16 THEN excluded.stuck_kind \
                                  ELSE COALESCE(excluded.stuck_kind, stuck_kind) END";
         // The post-write pending_input: the same intel_observed gate as
         // stuck_kind — authoritative (and a NULL clears a stale dialog) when
         // the pane was captured this pass, preserved when it was not.
-        const NEW_PENDING: &str = "CASE WHEN ?16 THEN excluded.pending_input \
+        const NEW_PENDING: &str = "CASE WHEN kind = 'shell' THEN NULL \
+                                   WHEN ?16 THEN excluded.pending_input \
                                    ELSE COALESCE(excluded.pending_input, pending_input) END";
         // The post-write claude_status. A Stop hook that landed at or after
         // this pass's probe STARTED (`last_stop_at >= ?20`) is fresher than
@@ -312,7 +314,10 @@ impl Store {
         // UserPromptSubmit → working). The guard only covers passes that were
         // already in flight when the hook landed; a pass that starts later
         // observes the pane afresh and wins, as it should.
-        const NEW_STATUS: &str = "CASE WHEN ?20 > 0 AND last_hook_at IS NOT NULL \
+        // A `shell` row (kind set by `new_shell_session`) has no Claude in
+        // it: its bare `❯` is the shell's prompt, never an idle REPL (F8).
+        const NEW_STATUS: &str = "CASE WHEN kind = 'shell' THEN NULL \
+                                       WHEN ?20 > 0 AND last_hook_at IS NOT NULL \
                                             AND last_hook_at >= ?20 \
                                        THEN claude_status \
                                        ELSE COALESCE(excluded.claude_status, claude_status) END";
@@ -549,6 +554,9 @@ impl Store {
     ///
     /// Phase 1: rows not in `keep_names` that are currently live (`status !=
     /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
+    /// Loss also clears `claude_status`, `stuck_kind`/`stuck_since`,
+    /// `current_activity` and `pending_input`: a ghost has no pane to vouch
+    /// for them (F4).
     /// Phase 2: rows that were already ghost BEFORE this pass and are still
     /// not in `keep_names` are hard-deleted, together with their
     /// `session_events` timeline and the messages addressed to them (neither
@@ -591,6 +599,7 @@ impl Store {
         kind_filter: &str,
         cutoff: Option<i64>,
         lost_ttl_cutoff: Option<i64>,
+        external_grace_cutoff: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         let not_in = if keep_names.is_empty() {
@@ -602,38 +611,41 @@ impl Store {
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
         let pre_ghost_ids: Vec<i64> = {
-            // `exempt` is textually BEFORE `not_in` so its explicit `?2`
-            // claims that slot before `not_in`'s bare `?`s are numbered by
-            // SQLite (which continues from the highest placeholder used so
-            // far in the text) — the keep names then land at ?3.. . When
-            // `lost_ttl_cutoff` is `None`, `exempt` is empty and `?2` never
-            // appears, so `not_in`'s bare `?`s fall back to ?2.. exactly as
-            // before this feature existed.
+            // Placeholders are numbered as `head` grows, so `exempt` never
+            // has to know whether its neighbour is present; the keep names'
+            // bare `?`s continue from the highest number used.
+            let mut head: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
+            let mut exempt = String::new();
             // `COALESCE(..., 0)`: `lost_reason` is NULL on every row ghosted
-            // before migration 036 introduced the column. SQL's
-            // three-valued logic would otherwise make `lost_reason IN (...)`
-            // evaluate to NULL, the inner AND chain NULL, and `NOT NULL`
-            // NULL again — which `WHERE` treats as "leave this row out of
-            // the reaped set", wrongly exempting it. Coalescing the inner
-            // expression to `0` (false) before negating makes a NULL
-            // `lost_reason` explicitly NOT exempt, preserving today's
-            // one-cycle reap for every pre-migration row after an upgrade.
-            let exempt = if lost_ttl_cutoff.is_some() {
-                " AND NOT COALESCE((claude_session_id IS NOT NULL \
-                                    AND kind != 'external' \
-                                    AND lost_reason IN ('host_reboot','tmux_server_gone') \
-                                    AND lost_at >= ?2), 0)"
-            } else {
-                ""
-            };
+            // before migration 036 introduced the column. SQL's three-valued
+            // logic would otherwise make `lost_reason IN (...)` NULL, the
+            // inner AND chain NULL, and `NOT NULL` NULL again — which `WHERE`
+            // treats as "leave this row out of the reaped set", wrongly
+            // exempting it.
+            if let Some(c) = &lost_ttl_cutoff {
+                head.push(c);
+                exempt.push_str(&format!(
+                    " AND NOT COALESCE((claude_session_id IS NOT NULL \
+                                        AND kind != 'external' \
+                                        AND lost_reason IN ('host_reboot','tmux_server_gone') \
+                                        AND lost_at >= ?{}), 0)",
+                    head.len()
+                ));
+            }
+            // An `external` row is never resumable, so the TTL above never
+            // covers it; `gc.external_lost_ttl_secs` keeps it just long
+            // enough for the desktop that owns it to restart (F6).
+            if let Some(g) = &external_grace_cutoff {
+                head.push(g);
+                exempt.push_str(&format!(
+                    " AND NOT COALESCE((kind = 'external' AND lost_at >= ?{}), 0)",
+                    head.len()
+                ));
+            }
             let sql = format!(
                 "SELECT id FROM sessions
                  WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{exempt}{not_in}"
             );
-            let head: Vec<&dyn rusqlite::ToSql> = match &lost_ttl_cutoff {
-                Some(c) => vec![&host_alias, c],
-                None => vec![&host_alias],
-            };
             let params = params_then(&head, keep_names);
             tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
@@ -649,7 +661,9 @@ impl Store {
                 ""
             };
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing'
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing',
+                     claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
+                     current_activity=NULL, pending_input=NULL
                  WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
                  RETURNING id"
             );
@@ -800,6 +814,8 @@ impl Store {
                         KIND_TMUX,
                         Some(ghost_cutoff(spec.probe_started_at)),
                         spec.lost_ttl_cutoff,
+                        // A tmux row is never `external`.
+                        None,
                         &mut out,
                     )?;
                 }
@@ -1909,6 +1925,74 @@ mod tests {
         // A fresh row inserted already idle is stamped on insert.
         let r = reconcile_one(&mut s, "b", Some("stopped"), None, None);
         assert!(r.idle_since.is_some());
+    }
+
+    /// The routine Phase 1 ghosting clears the same fields
+    /// `mark_host_sessions_lost` does (F4).
+    #[test]
+    fn phase_one_ghosting_clears_the_pane_derived_fields() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("press_enter"), None);
+        assert_eq!(r.claude_status.as_deref(), Some("blocked"));
+        s.apply_host_reconcile(HostReconcile {
+            alias: "local",
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            last_pinged_at: 2,
+            probe_started_at: 0,
+            sessions: &[],
+            keep: &[],
+            lost_ttl_cutoff: None,
+            skip_prune: false,
+            reconciled_at: None,
+        })
+        .unwrap();
+        let g = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(g.status, "ghost");
+        assert_eq!(g.claude_status, None);
+        assert_eq!(g.stuck_kind, None);
+        assert_eq!(g.stuck_since, None);
+        assert_eq!(g.pending_input, None);
+    }
+
+    /// F8: `noble-virgo-term` (kind `shell`) read as `idle` because the
+    /// pane heuristic took a bare `❯` for the REPL's prompt. A shell has no
+    /// Claude status to derive.
+    #[test]
+    fn a_shell_row_never_gets_a_pane_derived_claude_status() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session(
+                "noble-virgo-term",
+                "local",
+                None,
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        s.conn
+            .execute("UPDATE sessions SET kind = 'shell' WHERE id = ?1", [id])
+            .unwrap();
+        let r = reconcile_one(
+            &mut s,
+            "noble-virgo-term",
+            Some("idle"),
+            Some("press_enter"),
+            None,
+        );
+        assert_eq!(r.kind, "shell");
+        assert_eq!(
+            r.claude_status, None,
+            "a bare ❯ is a shell prompt, not an idle REPL"
+        );
+        assert_eq!(r.stuck_kind, None);
+        assert_eq!(r.pending_input, None);
     }
 
     #[test]

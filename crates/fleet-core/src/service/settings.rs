@@ -84,6 +84,10 @@ pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
 pub const GC_WORK_IDLE_SECS: &str = "gc.work_idle_secs";
 pub const GC_SWEEP_INTERVAL_SECS: &str = "gc.sweep_interval_secs";
+/// How long a lost `external` row (a Claude fleet only observes, never
+/// resumable) is kept before Phase 2 deletes it — long enough for the
+/// desktop that owns it to restart, no longer. `0` reaps it on the next pass.
+pub const GC_EXTERNAL_LOST_TTL_SECS: &str = "gc.external_lost_ttl_secs";
 /// Opt-in reconcile-tick repair: re-adds deleted worktrees without anyone
 /// opening them. Dropping a stale entry first (tick or click) always needs
 /// the vanished-directory guard, including the parent fingerprint match.
@@ -293,6 +297,11 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: GC_SWEEP_INTERVAL_SECS,
         default: "300",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: GC_EXTERNAL_LOST_TTL_SECS,
+        default: "3600",
         kind: Kind::Secs,
     },
     Spec {

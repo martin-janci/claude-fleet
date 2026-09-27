@@ -218,6 +218,7 @@ impl Store {
         keep_names: &[String],
         now: i64,
         lost_ttl_cutoff: Option<i64>,
+        external_grace_cutoff: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
         let changes = self.in_savepoint("ghost_and_clean_bg_sessions", |tx| {
             let mut changes: Vec<RowChange> = Vec::new();
@@ -229,6 +230,7 @@ impl Store {
                 KIND_PANE_LESS,
                 None,
                 lost_ttl_cutoff,
+                external_grace_cutoff,
                 &mut changes,
             )?;
             Ok::<_, rusqlite::Error>(changes)
@@ -243,7 +245,9 @@ impl Store {
 
     /// One-shot: mark every non-ghost row of `host_alias` NOT in `keep_names`
     /// as lost, recording WHY (`reason`, one of `host_reboot` /
-    /// `tmux_server_gone` / `missing`). Called by the reboot/vanished-tmux
+    /// `tmux_server_gone` / `missing`). Loss also clears `claude_status`,
+    /// `stuck_kind`/`stuck_since`, `current_activity` and `pending_input`: a
+    /// ghost has no pane to vouch for them (F4). Called by the reboot/vanished-tmux
     /// detector (Task 6) instead of waiting out the normal one-cycle ghost
     /// grace, so the resume path can tell a reboot apart from a routine probe
     /// miss.
@@ -336,7 +340,9 @@ impl Store {
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2,
+                     claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
+                     current_activity=NULL, pending_input=NULL
                  WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
                    AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
                  RETURNING id"
@@ -408,7 +414,9 @@ impl Store {
         now: i64,
     ) -> Result<Option<SessionRow>, rusqlite::Error> {
         let changed = self.conn.execute(
-            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed'
+            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed',
+                 claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
+                 current_activity=NULL, pending_input=NULL
              WHERE id=?2 AND status!='ghost'",
             rusqlite::params![now, id],
         )?;
@@ -1839,15 +1847,72 @@ mod tests {
         let s = store();
         s.upsert_bg_session("local", "bg:e1", None, "e1", Some("idle"), 1, "external", 1)
             .unwrap();
-        s.ghost_and_clean_bg_sessions("local", &[], 10, None)
+        s.ghost_and_clean_bg_sessions("local", &[], 10, None, None)
             .unwrap();
         assert_eq!(
             s.get_session("bg:e1", "local").unwrap().unwrap().status,
             "ghost"
         );
-        s.ghost_and_clean_bg_sessions("local", &[], 20, None)
+        s.ghost_and_clean_bg_sessions("local", &[], 20, None, None)
             .unwrap();
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
+    }
+
+    /// F4: `local` ghosts said `working` a day after loss and a `mac` ghost
+    /// said `blocked` — a dialog nobody can answer. Loss keeps identity
+    /// (`claude_session_id`, names, project) and drops what only a live pane
+    /// can vouch for.
+    #[test]
+    fn mark_host_sessions_lost_clears_the_fields_only_a_live_pane_can_vouch_for() {
+        let mut s = store();
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("press_enter"), None);
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET current_activity = 'waiting for permission: rm -rf' WHERE id = ?1",
+                [r.id],
+            )
+            .unwrap();
+        s.mark_host_sessions_lost("local", "host_reboot", &[], 500, 0)
+            .unwrap();
+        let g = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(g.status, "ghost");
+        assert_eq!(
+            g.claude_status, None,
+            "nobody can answer a dead pane's dialog"
+        );
+        assert_eq!(g.stuck_kind, None);
+        assert_eq!(g.stuck_since, None);
+        assert_eq!(g.current_activity, None);
+        assert_eq!(g.pending_input, None);
+        assert_eq!(
+            crate::service::attention::needs_attention(&g).map(|a| a.reason),
+            Some(crate::service::attention::Reason::Lifecycle)
+        );
+    }
+
+    /// F6: an `external` row (a Code-tab / terminal Claude fleet only
+    /// observes) can never be resumed, so the 14 d TTL bought nothing — but a
+    /// desktop merely restarting must not lose its rows either. One hour.
+    #[test]
+    fn a_lost_external_row_is_kept_for_the_grace_then_reaped() {
+        let s = store();
+        s.upsert_host("h").unwrap();
+        s.upsert_bg_session("h", "bg:e1", None, "e1", Some("idle"), 1, "external", 1)
+            .unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        // Inside the grace (lost at 500, grace cutoff 400): kept, though it
+        // was already ghost before this pass.
+        s.ghost_and_clean_bg_sessions("h", &[], 600, None, Some(400))
+            .unwrap();
+        assert!(
+            s.get_session("bg:e1", "h").unwrap().is_some(),
+            "a desktop restart must not reap its rows"
+        );
+        // Past it (cutoff 700 > lost_at 500): gone.
+        s.ghost_and_clean_bg_sessions("h", &[], 4200, None, Some(700))
+            .unwrap();
+        assert!(s.get_session("bg:e1", "h").unwrap().is_none());
     }
 
     #[test]
@@ -1869,7 +1934,7 @@ mod tests {
         assert_eq!(lost.marked.len(), 2);
 
         let cutoff = Some(100); // lost_at 500 is well inside the TTL
-        s.ghost_and_clean_bg_sessions("h", &[], 600, cutoff)
+        s.ghost_and_clean_bg_sessions("h", &[], 600, cutoff, None)
             .unwrap();
         assert!(
             s.get_session("bg:e1", "h").unwrap().is_none(),
@@ -2270,7 +2335,7 @@ mod tests {
 
         // Pass 1: agent vanished → row is ghosted (soft), not deleted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 200, None, None)
             .unwrap();
         let row = store.get_session_by_id(id).unwrap().expect("still present");
         assert_eq!(row.status, "ghost");
@@ -2279,7 +2344,7 @@ mod tests {
 
         // Pass 2: still vanished → hard-deleted, events reaped, kill emitted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 300, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 300, None, None)
             .unwrap();
         assert!(store.get_session_by_id(id).unwrap().is_none());
         let orphans: i64 = store
@@ -2322,10 +2387,10 @@ mod tests {
 
         let keep = vec!["bg:live".to_string()];
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 200, None)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 200, None, None)
             .unwrap();
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 300, None)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 300, None, None)
             .unwrap();
 
         let rows = store.list_sessions_for_host("alpha").unwrap();
@@ -2355,7 +2420,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None, None)
             .unwrap();
         assert_eq!(s.get_session_by_id(id).unwrap().unwrap().status, "ghost");
 
@@ -2387,7 +2452,7 @@ mod tests {
         let id = s
             .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], lost_at, None)
+        s.ghost_and_clean_bg_sessions("alpha", &[], lost_at, None, None)
             .unwrap();
         assert_eq!(
             s.get_session_by_id(id).unwrap().unwrap().status,
@@ -2517,7 +2582,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None, None)
             .unwrap();
         assert_eq!(
             lost_reason_of(&s, id),
@@ -2584,14 +2649,14 @@ mod tests {
         let participant = store.participant_for_session(bg).unwrap().unwrap().id;
         // Two passes without the agent: ghost, then hard-delete.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 10, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 10, None, None)
             .unwrap();
         assert!(
             store.get_session_by_id(bg).unwrap().is_some(),
             "ghosted first"
         );
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 20, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 20, None, None)
             .unwrap();
         assert!(store.get_session_by_id(bg).unwrap().is_none());
         assert!(

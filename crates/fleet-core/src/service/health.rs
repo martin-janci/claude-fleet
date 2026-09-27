@@ -387,7 +387,10 @@ const CONTEXT_RED_THRESHOLD: f64 = 85.0;
 /// `kind='external'` rows (interactive Claude sessions running outside fleet,
 /// which fleet only observes) are left out of every session count — they are
 /// not fleet work and must not raise its blocked / stuck roll-ups. Usage
-/// still sums every row: it is real spend on that host.
+/// still sums every row: it is real spend on that host. `kind='shell'` rows
+/// (a plain shell in tmux) are left out the same way: they have no Claude
+/// status, and a pane heuristic that reads their prompt as `idle` would
+/// count them (F8).
 pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
     let mut summary = FleetSummary {
         hosts_total: hosts.len() as u32,
@@ -400,7 +403,10 @@ pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
         }
     }
 
-    for s in sessions.iter().filter(|s| s.kind != "external") {
+    for s in sessions
+        .iter()
+        .filter(|s| s.kind != "external" && s.kind != "shell")
+    {
         summary.sessions_total += 1;
         let status = s.claude_status.as_deref().unwrap_or("unknown");
         *summary.by_status.entry(status.to_string()).or_insert(0) += 1;
@@ -584,6 +590,22 @@ mod tests {
             transport: "ssh".to_string(),
             org_id: None,
         }
+    }
+
+    /// F8: two `-term` shells were `by_status.unknown = 2`, a third said
+    /// `idle`. A shell is not a Claude session; it leaves every roll-up.
+    #[test]
+    fn summarize_skips_shell_rows() {
+        let mut sh = session(Some("idle"), Some(99.0), Some("press_enter"));
+        sh.kind = "shell".to_string();
+        let mut sh2 = session(None, None, None);
+        sh2.kind = "shell".to_string();
+        let s = summarize(&[sh, sh2, session(Some("working"), None, None)], &[]);
+        assert_eq!(s.sessions_total, 1);
+        assert_eq!(s.by_status.get("unknown"), None);
+        assert_eq!(s.by_status.get("idle"), None);
+        assert_eq!(s.context_red, 0);
+        assert_eq!(s.stuck, 0);
     }
 
     #[test]
