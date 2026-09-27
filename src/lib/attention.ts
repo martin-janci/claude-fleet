@@ -72,13 +72,25 @@ export const STUCK_COLOR = '#e64a4a';
 
 export type ContextLevel = 'ok' | 'warn' | 'crit';
 
-export const CONTEXT_WARN_PCT = 70;
-export const CONTEXT_CRIT_PCT = 90;
+/** The hub's one context threshold (`health.context_red_pct`, sent as
+ *  `fleet_health.context_red_pct`). 85 until the first health read; a hub
+ *  too old to send it (0 / undefined) leaves it alone. */
+let contextRedPct = 85;
+/** `warn` starts this many points below `crit`. */
+const CONTEXT_WARN_MARGIN = 15;
+
+export function setContextRedPct(pct: number | undefined): void {
+  if (typeof pct === 'number' && Number.isFinite(pct) && pct > 0 && pct <= 100) contextRedPct = pct;
+}
+
+export function contextRedThreshold(): number {
+  return contextRedPct;
+}
 
 export function contextLevel(pct: number | null): ContextLevel | null {
   if (pct === null || !Number.isFinite(pct)) return null;
-  if (pct >= CONTEXT_CRIT_PCT) return 'crit';
-  if (pct >= CONTEXT_WARN_PCT) return 'warn';
+  if (pct >= contextRedPct) return 'crit';
+  if (pct >= contextRedPct - CONTEXT_WARN_MARGIN) return 'warn';
   return 'ok';
 }
 
