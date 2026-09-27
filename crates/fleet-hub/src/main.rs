@@ -2,6 +2,7 @@
 
 mod census;
 mod config;
+mod decide;
 mod demo;
 mod org;
 mod out;
@@ -130,6 +131,16 @@ enum Cmd {
     Census {
         #[command(subcommand)]
         cmd: census::CensusCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// The decision model (Jev evaluation, experimental, off by default):
+    /// set or clear its API key, and read what it was asked. `status` and
+    /// `runs` read the database only; the key is never printed or an
+    /// argument. See docs/decisions.md.
+    Decide {
+        #[command(subcommand)]
+        cmd: decide::DecideCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -294,6 +305,7 @@ async fn main() -> ExitCode {
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
+        Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env),
         Cmd::Reports {
             limit,
             since,
