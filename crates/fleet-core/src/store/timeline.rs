@@ -9,6 +9,10 @@ enum Announce {
     No,
 }
 
+/// A `stuck` event that repeats one written within this window is the same
+/// episode re-detected (the `oom` playbook's spacing is the same hour).
+const STUCK_EVENT_WINDOW_SECS: i64 = 3600;
+
 impl Store {
     /// Append one row to the per-session event timeline (migration 013). The
     /// timeline is append-only; callers must treat a write failure as
@@ -45,7 +49,9 @@ impl Store {
     /// - GC sweeper (`service::gc`): `gc_killed`, `gc_failed`.
     /// - tidy-up (`service::work::tidy`): `gc_tidied`, and `tidy_kept` (detail
     ///   is the unix second a person's keep holds until, work graph M11.3).
-    /// - hooks (`service::hooks`): `notification`.
+    /// - hooks (`service::hooks` via the `record_*_hook_for_row` writers):
+    ///   `notification`, `status_change`, `stop_failure`.
+    /// - the tick (`Store::age_out_stale_working`): `stale_working`.
     /// - playbooks (`Store::record_playbook_applied` et al.): `playbook_applied`.
     /// - MCP call audit (`mcp::tools::support`): `mcp_call`.
     pub fn insert_session_event(
@@ -102,6 +108,26 @@ impl Store {
         count_after_insert > SESSION_EVENTS_CAP
     }
 
+    /// The newest `kind` event's detail for the session — `None` when there
+    /// is none (at/after `since`, when given).
+    fn last_event_detail(
+        &self,
+        session_id: i64,
+        kind: &str,
+        since: Option<i64>,
+    ) -> rusqlite::Result<Option<Option<String>>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT detail FROM session_events \
+                 WHERE session_id = ?1 AND kind = ?2 AND at >= COALESCE(?3, 0) \
+                 ORDER BY at DESC, id DESC LIMIT 1",
+                rusqlite::params![session_id, kind, since],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     fn write_session_event(
         &self,
         session_id: i64,
@@ -111,6 +137,21 @@ impl Store {
         announce: Announce,
     ) -> Result<(), crate::ipc_error::IpcError> {
         let at = now_unix();
+        // Timeline hygiene (F10): a `status_change` that repeats the newest
+        // one is no transition — reconcile and the hooks both write status
+        // now, and `claude agents` re-reports the same value every minute;
+        // a `stuck` that repeats within the hour is the same episode
+        // re-detected (F1). Everything else is written as before.
+        let repeat = match kind {
+            "status_change" => self.last_event_detail(session_id, kind, None)?,
+            "stuck" => {
+                self.last_event_detail(session_id, kind, Some(at - STUCK_EVENT_WINDOW_SECS))?
+            }
+            _ => None,
+        };
+        if repeat.is_some_and(|d| d.as_deref() == detail) {
+            return Ok(());
+        }
         // SAVEPOINT (`Store::in_savepoint`), not a second `BEGIN`:
         // `Store::atomically` cannot nest, and Task 3 calls
         // `insert_session_event` from inside one. A SAVEPOINT works both
@@ -1170,5 +1211,62 @@ mod tests {
             Some(g2),
             "a compaction does"
         );
+    }
+
+    /// F10: 2674 of 2948 events were `status_change`, hundreds of them
+    /// `busy → busy` — reconcile and the hooks both write status, and
+    /// `claude agents` re-reports the same value every minute.
+    #[test]
+    fn a_status_change_that_repeats_the_newest_one_is_not_written() {
+        let s = Store::open_in_memory().expect("open");
+        s.insert_session_event(7, "status_change", Some("working"))
+            .unwrap();
+        s.insert_session_event(7, "status_change", Some("working"))
+            .unwrap();
+        s.insert_session_event(7, "status_change", Some("idle"))
+            .unwrap();
+        s.insert_session_event(7, "status_change", Some("working"))
+            .unwrap();
+        let details: Vec<Option<String>> = s
+            .list_session_events(7, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.detail)
+            .collect();
+        assert_eq!(
+            details,
+            vec![
+                Some("working".into()),
+                Some("idle".into()),
+                Some("working".into())
+            ],
+            "newest first; the repeat was dropped, the return was kept"
+        );
+        // Other kinds are never deduplicated.
+        s.insert_session_event(7, "prompt_sent", Some("x")).unwrap();
+        s.insert_session_event(7, "prompt_sent", Some("x")).unwrap();
+        assert_eq!(s.list_session_events(7, 10).unwrap().len(), 5);
+    }
+
+    /// F1: `stuck oom` was written on every detection, 8 rows in 83 min.
+    #[test]
+    fn a_stuck_event_repeats_only_after_its_window() {
+        let s = Store::open_in_memory().expect("open");
+        s.insert_session_event(7, "stuck", Some("oom")).unwrap();
+        s.insert_session_event(7, "stuck", Some("oom")).unwrap();
+        assert_eq!(s.list_session_events(7, 10).unwrap().len(), 1);
+        // Age it past the window: the next detection is a new episode.
+        s.conn
+            .execute(
+                "UPDATE session_events SET at = at - 3601 WHERE session_id = 7",
+                [],
+            )
+            .unwrap();
+        s.insert_session_event(7, "stuck", Some("oom")).unwrap();
+        assert_eq!(s.list_session_events(7, 10).unwrap().len(), 2);
+        // A different kind is always news.
+        s.insert_session_event(7, "stuck", Some("press_enter"))
+            .unwrap();
+        assert_eq!(s.list_session_events(7, 10).unwrap().len(), 3);
     }
 }

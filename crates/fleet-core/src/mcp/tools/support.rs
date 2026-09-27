@@ -978,10 +978,29 @@ pub(super) struct SessionWithController {
 }
 
 impl SessionWithController {
+    /// [`Self::with_threshold`] at the default threshold, for tests that
+    /// have no store; production callers hold the store and pass its value.
+    #[cfg(test)]
     pub(super) fn new(is_controller: bool, row: crate::store::SessionRow) -> Self {
+        Self::with_threshold(
+            is_controller,
+            row,
+            crate::service::attention::DEFAULT_CONTEXT_RED_PCT,
+        )
+    }
+
+    /// [`Self::new`] at the store's `health.context_red_pct`
+    /// (`service::health::context_red_pct`), which every caller holding the
+    /// store should pass so `context_full` and `fleet_health.context_red`
+    /// agree.
+    pub(super) fn with_threshold(
+        is_controller: bool,
+        row: crate::store::SessionRow,
+        context_red_pct: f64,
+    ) -> Self {
         Self {
             is_controller,
-            needs_attention: crate::service::attention::needs_attention(&row),
+            needs_attention: crate::service::attention::needs_attention_with(&row, context_red_pct),
             row,
         }
     }

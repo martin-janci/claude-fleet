@@ -44,8 +44,19 @@ pub enum Reason {
     /// Wedged in a way the REPL will not leave on its own — an auth menu, a
     /// reconnect, an OOM. `stuck_kind` says which.
     Stuck,
-    /// Claude reported a failed turn.
+    /// The last turn ended in an API error (a `StopFailure`: rate limit,
+    /// auth, …); the `stop_failure` timeline entry says which. Re-prompt.
+    StopFailed,
+    /// Claude reported a failed turn (`claude agents`, a pane-less agent).
     Failed,
+    /// The context window is at or past `health.context_red_pct`: compact
+    /// or hand over before the next turn does it for you.
+    ContextFull,
+    /// The tick demoted a `working` row nothing had moved for
+    /// `reconcile.stale_working_secs`: look at what it was doing.
+    StaleWorking,
+    /// Idle with a PR whose checks are failing.
+    CiFailing,
     /// The session's lifecycle is broken: a safe kill that failed or is still
     /// pending, a ghost row, or a row the fleet has lost track of.
     Lifecycle,
@@ -57,11 +68,20 @@ impl Reason {
         match self {
             Reason::Waiting => "waiting",
             Reason::Stuck => "stuck",
+            Reason::StopFailed => "stop_failed",
             Reason::Failed => "failed",
+            Reason::ContextFull => "context_full",
+            Reason::StaleWorking => "stale_working",
+            Reason::CiFailing => "ci_failing",
             Reason::Lifecycle => "lifecycle",
         }
     }
 }
+
+/// The one context threshold, when no store is at hand to read
+/// `health.context_red_pct`: `fleet_health.context_red`, `context_full`
+/// here and the desktop's chip all count from the same number.
+pub const DEFAULT_CONTEXT_RED_PCT: f64 = 85.0;
 
 /// A session that needs a person, and since when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -73,25 +93,46 @@ pub struct Attention {
     pub since: i64,
 }
 
+/// [`needs_attention_with`] at [`DEFAULT_CONTEXT_RED_PCT`]. Callers with a
+/// store read the setting (`service::health::context_red_pct`) instead.
+pub fn needs_attention(row: &SessionRow) -> Option<Attention> {
+    needs_attention_with(row, DEFAULT_CONTEXT_RED_PCT)
+}
+
 /// Whether this row needs a person, and why.
 ///
 /// The order of the checks *is* the precedence: a session that is both
 /// blocked and ghosted is reported as blocked, because that is the one a
-/// person can do something about right now.
+/// person can do something about right now — and every reason a person can
+/// act on comes before `Lifecycle`, which nobody can act on from a phone.
 ///
 /// An `external` session — a Claude running outside fleet entirely — never
 /// qualifies, whatever its fields say: it is read-only here, so reporting it
-/// as needing a person offers an action that does not exist.
-pub fn needs_attention(row: &SessionRow) -> Option<Attention> {
-    if row.kind == "external" {
+/// as needing a person offers an action that does not exist. Nor does a
+/// `shell`: there is no Claude in it.
+pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<Attention> {
+    if row.kind == "external" || row.kind == "shell" {
         return None;
     }
+    let failed = row.claude_status.as_deref() == Some("failed");
+    let idle = matches!(
+        row.claude_status.as_deref(),
+        Some("idle") | Some("completed") | Some("stopped")
+    );
     let reason = if row.claude_status.as_deref() == Some("blocked") {
         Reason::Waiting
     } else if row.stuck_kind.is_some() {
         Reason::Stuck
-    } else if row.claude_status.as_deref() == Some("failed") {
+    } else if failed && !crate::store::has_no_pane(&row.kind) {
+        Reason::StopFailed
+    } else if failed {
         Reason::Failed
+    } else if row.context_pct.is_some_and(|p| p >= context_red_pct) {
+        Reason::ContextFull
+    } else if row.stale_working_at.is_some() {
+        Reason::StaleWorking
+    } else if idle && row.ci_status.as_deref() == Some("failing") {
+        Reason::CiFailing
     } else if is_lifecycle_broken(row) {
         Reason::Lifecycle
     } else {
@@ -114,6 +155,10 @@ fn is_lifecycle_broken(row: &SessionRow) -> bool {
 fn since_for(row: &SessionRow, reason: Reason) -> i64 {
     match reason {
         Reason::Stuck => row.stuck_since.unwrap_or(row.last_activity_at),
+        Reason::StopFailed => row.last_stop_at.unwrap_or(row.last_activity_at),
+        Reason::ContextFull => row.context.context_at.unwrap_or(row.last_activity_at),
+        Reason::StaleWorking => row.stale_working_at.unwrap_or(row.last_activity_at),
+        Reason::CiFailing => row.idle_since.unwrap_or(row.last_activity_at),
         Reason::Lifecycle => row
             .lost_at
             .or(row.safe_kill_requested_at)
@@ -167,6 +212,7 @@ mod tests {
             ci_status: None,
             turn_seq: 0,
             last_stop_at: None,
+            stale_working_at: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -206,9 +252,11 @@ mod tests {
         r.stuck_kind = Some("oom".into());
         assert_eq!(needs_attention(&r).unwrap().reason, Reason::Stuck);
 
+        // A tmux row's failed turn is a StopFailure (re-prompt); `Failed`
+        // is the pane-less agent's verdict (see the F7 test below).
         let mut r = row();
         r.claude_status = Some("failed".into());
-        assert_eq!(needs_attention(&r).unwrap().reason, Reason::Failed);
+        assert_eq!(needs_attention(&r).unwrap().reason, Reason::StopFailed);
 
         for broken in [
             |r: &mut SessionRow| r.safe_kill_state = Some("failed".into()),
@@ -257,6 +305,83 @@ mod tests {
         assert_eq!(needs_attention(&r).unwrap().since, 150);
     }
 
+    /// F7: the model flagged three ghosts a person can do nothing about and
+    /// missed five context-red rows, two stale `working` rows, a 429 and
+    /// four idle sessions with failing CI.
+    #[test]
+    fn a_failed_turn_a_full_context_a_stale_row_and_failing_ci_each_qualify() {
+        let mut r = row();
+        r.claude_status = Some("failed".into());
+        assert_eq!(needs_attention(&r).unwrap().reason, Reason::StopFailed);
+        let mut r = row();
+        r.kind = "bg".into();
+        r.claude_status = Some("failed".into());
+        assert_eq!(
+            needs_attention(&r).unwrap().reason,
+            Reason::Failed,
+            "a bg agent's exit is `claude agents`' verdict"
+        );
+
+        let mut r = row();
+        r.context_pct = Some(85.0);
+        assert_eq!(needs_attention(&r).unwrap().reason, Reason::ContextFull);
+        assert_eq!(
+            needs_attention_with(&r, 90.0),
+            None,
+            "the threshold is the hub's setting"
+        );
+
+        let mut r = row();
+        r.claude_status = Some("idle".into());
+        r.stale_working_at = Some(50);
+        assert_eq!(
+            needs_attention(&r).unwrap(),
+            Attention {
+                reason: Reason::StaleWorking,
+                since: 50
+            }
+        );
+
+        let mut r = row();
+        r.claude_status = Some("idle".into());
+        r.ci_status = Some("failing".into());
+        assert_eq!(needs_attention(&r).unwrap().reason, Reason::CiFailing);
+        let mut r = row();
+        r.ci_status = Some("failing".into());
+        assert_eq!(
+            needs_attention(&r),
+            None,
+            "a working session may be fixing its CI"
+        );
+
+        let mut r = row();
+        r.kind = "shell".into();
+        r.context_pct = Some(99.0);
+        assert_eq!(needs_attention(&r), None, "a shell has no Claude in it");
+    }
+
+    /// Every reason a person can act on outranks a broken lifecycle.
+    #[test]
+    fn every_actionable_reason_outranks_lifecycle() {
+        for set in [
+            (|r: &mut SessionRow| r.context_pct = Some(99.0)) as fn(&mut SessionRow),
+            |r: &mut SessionRow| {
+                r.claude_status = Some("idle".into());
+                r.stale_working_at = Some(1);
+            },
+            |r: &mut SessionRow| {
+                r.claude_status = Some("idle".into());
+                r.ci_status = Some("failing".into());
+            },
+            |r: &mut SessionRow| r.claude_status = Some("failed".into()),
+        ] {
+            let mut r = row();
+            set(&mut r);
+            r.safe_kill_state = Some("failed".into());
+            assert_ne!(needs_attention(&r).unwrap().reason, Reason::Lifecycle);
+        }
+    }
+
     /// The wire spellings are the desktop's bucket names; a rename on one
     /// side without the other would split the two classifiers silently.
     #[test]
@@ -265,7 +390,11 @@ mod tests {
         for r in [
             Reason::Waiting,
             Reason::Stuck,
+            Reason::StopFailed,
             Reason::Failed,
+            Reason::ContextFull,
+            Reason::StaleWorking,
+            Reason::CiFailing,
             Reason::Lifecycle,
         ] {
             assert!(

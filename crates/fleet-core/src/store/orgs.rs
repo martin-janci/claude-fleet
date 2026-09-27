@@ -88,7 +88,7 @@ pub struct OrgRow {
     /// `work.auto_tidy`. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tidy: Option<bool>,
-    /// D31 (work graph M14.1b, migration 066): the org's bound paired
+    /// D31 (work graph M14.1b, migration 067): the org's bound paired
     /// clients also see unassigned work and sessions (the default), as a
     /// host does; off, only rows assigned to the org. Absent from an older
     /// hub, which has no bound client.
@@ -408,7 +408,7 @@ impl Store {
 
     /// Set D31 for an org (work graph M14.1b): whether its bound paired
     /// clients also see unassigned work and sessions. A change bumps the
-    /// auth epoch (migration 066's trigger).
+    /// auth epoch (migration 067's trigger).
     pub fn set_org_bound_sees_unassigned(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
         let n = self.conn.execute(
             "UPDATE orgs SET bound_sees_unassigned = ?2 WHERE id = ?1",

@@ -802,7 +802,7 @@ impl Store {
         }
     }
 
-    /// A link's current `version` (migration 065), `None` when it is gone.
+    /// A link's current `version` (migration 066), `None` when it is gone.
     pub fn work_link_version(&self, link_id: i64) -> Result<Option<i64>, IpcError> {
         Ok(self
             .conn

@@ -1,4 +1,4 @@
-//! Work view storage (work graph M14.1b / M14.1c, migration 065): what the
+//! Work view storage (work graph M14.1b / M14.1c, migration 066): what the
 //! Work view reads in one pass (every item, every link with its live
 //! session), and the three things a person keeps there — placements,
 //! placement rules and saved views — each with a `version` a write must name
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// One work item as the Work view reads it: the row, its meta (assignee,
 /// description), the tracker's containers (project / team keys, Asana
-/// project gids) and a local item's own org (065).
+/// project gids) and a local item's own org (066).
 #[derive(Debug, Clone)]
 pub struct ViewItem {
     pub item: WorkItemRow,
@@ -28,7 +28,7 @@ pub struct ViewItem {
 
 /// One link as the Work view reads it: the row (its `org_id` still the
 /// snapshot's org, `snap_org_id`, as `map_link` leaves it), the live session
-/// its participant is on, and the 065 columns.
+/// its participant is on, and the 066 columns.
 #[derive(Debug, Clone)]
 pub struct ViewLink {
     pub link: WorkLinkRow,
