@@ -340,7 +340,10 @@ pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work"];
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
 /// what they asked for.
 pub(crate) fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> Option<Vec<String>> {
-    if caller.host_alias.is_none() {
+    // A client bound to an org (work graph M14) is fenced like a host: a
+    // `work` frame names tickets of every org and carries no session to
+    // fence it by; it reads its work through `work { … }`.
+    if !caller.is_scoped() {
         return kinds;
     }
     let all = kinds.unwrap_or_else(|| {
@@ -378,7 +381,13 @@ pub(crate) fn fence_frame(
     let p = &msg.payload;
     let host = p.get("host_alias").and_then(serde_json::Value::as_str);
     let org = p.get("org_id").and_then(serde_json::Value::as_i64);
-    let isolating = matches!(scope, crate::service::orgs::OrgScope::Host { isolated, .. } if !isolated.is_empty());
+    // A bound client's session fence is always on (M14); a host's only
+    // while some org isolates its sessions (D7).
+    let isolating = match scope {
+        crate::service::orgs::OrgScope::Host { isolated, .. } => !isolated.is_empty(),
+        crate::service::orgs::OrgScope::Org { .. } => true,
+        crate::service::orgs::OrgScope::All => false,
+    };
     match (
         host,
         p.get("session_id").and_then(serde_json::Value::as_i64),
@@ -457,7 +466,7 @@ struct StreamState {
     /// The paired client behind this stream, and the store to re-read it in:
     /// `None` for the master token and for a per-host token, which are not
     /// revocable this way.
-    client: Option<(Arc<Mutex<Store>>, i64)>,
+    client: Option<(Arc<Mutex<Store>>, i64, Option<i64>)>,
     /// Fires on the keep-alive beat; each tick re-checks [`StreamState::client`].
     heartbeat: tokio::time::Interval,
     /// The caller's org scope (work graph M5), applied to every frame.
@@ -478,13 +487,15 @@ struct StreamState {
 /// lock, a failed read — ends the stream: a client that reconnects loses
 /// nothing but a round trip, while a revoked one kept on the feed is the
 /// failure this check exists to prevent.
-fn client_is_live(store: &Mutex<Store>, id: i64) -> bool {
+fn client_is_live(store: &Mutex<Store>, id: i64, org: Option<i64>) -> bool {
     let Ok(s) = store.lock() else {
         tracing::warn!("[events] store lock poisoned; ending the stream");
         return false;
     };
-    match s.client_token_is_live(id) {
-        Ok(live) => live,
+    // Still paired AND still bound to the org the stream was fenced for
+    // (work graph M14): a re-bound client reconnects under its new scope.
+    match s.client_token_org(id) {
+        Ok(live) => live == Some(org),
         Err(e) => {
             tracing::warn!(error = %e.message, "[events] could not re-check the client; ending the stream");
             false
@@ -585,16 +596,17 @@ pub(super) async fn handle_events(
                 .into_response()
         }
     };
+    // A host token and a bound client (M14) both keep a store to fence by:
+    // a `session:*` frame that names its session only by id is looked up.
     let rescope = caller
-        .host_alias
-        .is_some()
+        .is_scoped()
         .then(|| (Arc::clone(&source.store), caller.clone()));
     // A paired client's authorization was checked once, at connect; the
     // stream then outlives it, so it re-checks the row on every beat.
     let client = caller
         .client
         .as_ref()
-        .map(|c| (Arc::clone(&source.store), c.id));
+        .map(|c| (Arc::clone(&source.store), c.id, c.org_id));
     // Subscribe BEFORE the first frame goes out: a change emitted between the
     // client's request and its first read must still reach it.
     let rx = (source.subscribe)();
@@ -731,8 +743,8 @@ pub(super) async fn handle_events(
                             }
                             // One beat: is the paired client still paired?
                             _ = st.heartbeat.tick() => {
-                                if let Some((store, id)) = &client {
-                                    if !client_is_live(store, *id) {
+                                if let Some((store, id, org)) = &client {
+                                    if !client_is_live(store, *id, *org) {
                                         tracing::info!(
                                             caller = %label,
                                             "[events] stream closed: the client was revoked"
@@ -1014,6 +1026,7 @@ mod tests {
                 id: 1,
                 name: "hub-b".into(),
                 trusted: false,
+                org_id: None,
             }),
             mode: TokenMode::Peer,
         };

@@ -15,6 +15,7 @@ check the whole feature on your own installation, walk through the manual
 acceptance run, [work-graph-acceptance.md](work-graph-acceptance.md).
 
 - [What "work" is](#what-work-is)
+- [The Work view (reads)](#the-work-view-reads)
 - [Linking and detection](#linking-and-detection)
 - [Trackers](#trackers)
 - [Starting work](#starting-work)
@@ -62,6 +63,43 @@ in work mode *any / with session / past only*.
 
 > **[Screenshot placeholder]** The sidebar grouped by work, with a Done
 > section open and the ⚑ work filter chips showing.
+
+## The Work view (reads)
+
+The hub answers the other way into the work graph — organisation → group →
+task → *every* session of the task (primary, secondary, suggested and past),
+including tasks with no session at all — as reads of the `work` tool
+(work graph M14.1b; the desktop and phone views and the edits come later):
+
+- `work { action: tree, filters?, cursor?, limit?, per_task? }`: a page of
+  tasks with their sessions, the section headers (`groups`, each with its
+  count under the filters), and the orgs and trackers the caller sees.
+  Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
+  `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
+  `suggested`), `review`, `query`, `group`. Pages are a keyset: pass
+  `next_cursor` back with the same filters (other filters refuse it). No
+  task is repeated across pages while the fleet changes; a task that moved
+  meanwhile may be skipped until the next full read.
+- `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
+  with every session and why it is linked, its tracker description, the
+  last known outcome, its placement and the rules that match it.
+- `work { action: session_tasks, session_id }`: every link of one session
+  (active, suggested, rejected, ended), each with its task.
+- `work { action: review, cursor?, limit? }`: suggestions and conflicts
+  (a cross-org link, an unavailable ticket, a session with no primary).
+- `work { action: rules }`, `work { action: rule_preview, rule }`: the
+  placement rules, and what a drafted rule would move before it is saved.
+- `work { action: views }`: saved filters (a device bound to an org lists
+  its org's only).
+- `work { action: org_impact, task_id, org_id }`: what moving a local task
+  to another org would change (the master and unbound devices only).
+
+Every read is fenced by the caller's organisation boundary, like every
+other work read: a per-host token and a device bound to an org see only
+what their org may, and a task outside it answers exactly as one that does
+not exist. Each task says where its org and group come from (`org_source`:
+tracker, item, sessions, none; `group.source`: manual, rule, tracker,
+repo, key, none).
 
 ## Linking and detection
 
@@ -501,6 +539,16 @@ move offers **Move anyway**). Detection never guesses across orgs.
 `isolate_sessions` (per org, off) also hides that org's sessions from other
 orgs' hosts.
 
+A paired device can be **bound to one organisation** (`fleet-hub pair --org
+<id>` or `fleet-hub client bind <name> <id>`): it then reads only that
+org's work and sessions — and unassigned ones while the org's
+`bound_sees_unassigned` is on (the default, D31; see *Settings*). Another
+org's session is hidden from it whatever `isolate_sessions` says. A session
+that has tasks of two orgs (a link someone forced across) shows each side
+only its own: the other org's task, its title, evidence, conversation and
+summary never reach a device bound to the first org, and a device bound to
+the other org sees the task without the first org's session.
+
 Orgs are managed in Settings → Work → Organisations on a standalone
 desktop (read-only on a paired desktop), or with `fleet-hub org …` on a
 hub. **Assign every host of a company before
@@ -676,5 +724,11 @@ table.
 | `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | retention of done tickets no link names |
 | `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | retention of handover, nudge and tidy timeline events |
 
-Per-org overrides: `auto_tidy` (`on` / `off` / `inherit`) and
-`isolate_sessions`, set on the org, not here.
+Per-org settings, set on the org (Settings → Work → Organisations, or
+`work_admin { action: "update_org", org_id, … }` on a hub), not here:
+
+| Org setting | Default | Range | What it does |
+|---|---|---|---|
+| `auto_tidy` | `inherit` | `on` / `off` / `inherit` | overrides `work.auto_tidy` for the org's sessions |
+| `isolate_sessions` | `false` | on / off | also hides the org's sessions from other orgs' hosts (D7) |
+| `bound_sees_unassigned` | `true` | on / off | devices bound to the org (`fleet-hub pair --org`) also see unassigned work and sessions, as a host does; off, only the org's own (D31) |

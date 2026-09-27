@@ -218,6 +218,9 @@ pub fn reopened(
     let mut rows = lock(store)?.reopened_work()?;
     if let Some(h) = scope.host() {
         rows.retain(|r| r.last_host.as_deref() == Some(h) && scope.sees_org(r.org_id));
+    } else if !scope.is_all() {
+        // A bound client (M14): work of its orgs.
+        rows.retain(|r| scope.sees_org(r.org_id));
     }
     Ok(rows)
 }
