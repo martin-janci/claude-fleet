@@ -969,7 +969,8 @@ fn options_are_bounded() {
     .unwrap();
     assert_eq!(o.providers, vec![Provider::Bm25, Provider::Jev]);
     assert_eq!(Provider::parse("jev"), Some(Provider::Jev));
-    assert_eq!(Provider::parse("haiku"), None);
+    assert_eq!(Provider::parse("haiku"), Some(Provider::Haiku));
+    assert_eq!(Provider::parse("sonnet"), None);
 }
 
 // --- card J1's acceptance, calibration and the choice+noul shape -----------------
@@ -1266,4 +1267,353 @@ async fn choice_then_noul_asks_twice_and_thresholds_the_noul_on_dev() {
     assert!(x
         .values()
         .any(|o| o.calls == 1 && o.reason.as_deref() == Some("max_calls")));
+}
+
+// --- claude -p haiku (D33) --------------------------------------------------------
+
+use crate::service::decide::canonical_json;
+use crate::service::decide::haiku::testing::{state_of, ScriptedSsh};
+use crate::service::decide::haiku::{prompt_for, Haiku, HaikuConfig};
+
+/// The leakage test's world: keys, links, titles, branches and a started
+/// link's slug in the prompts.
+fn leaky_world() -> W {
+    let mut w = world();
+    let specs: [(&str, &str, &str, &str, Option<&str>); 4] = [
+        (
+            "PAY-1",
+            "Login redirect loops",
+            "Fix PAY-1: Login redirect loops asap",
+            "manual",
+            None,
+        ),
+        (
+            "PAY-2",
+            "Billing export",
+            "pay-2 billing export again, https://x.io/PAY-2",
+            "manual",
+            Some("feat/pay-2-billing-export"),
+        ),
+        (
+            "PAY-3",
+            "Opraviť prihlásenie",
+            "oprav prihlasenie cez SSO, vetva pay-3-oprav-prihl-senie",
+            "started",
+            Some("pay-3-oprav-prihl-senie"),
+        ),
+        (
+            "PAY-4",
+            "Dark mode settings",
+            "dark modes for SETTINGS please (PAY-4)",
+            "started",
+            Some("pay-4-dark-mode-settings"),
+        ),
+    ];
+    for (i, (key, title, prompt, source, branch)) in specs.iter().enumerate() {
+        let item = w.item(key, title, *NOW - 30 * DAY);
+        w.case_on(
+            "h1",
+            prompt,
+            item,
+            source,
+            *NOW - (10 - i as i64) * DAY,
+            *branch,
+        );
+    }
+    w
+}
+
+/// Answers each prompt with its case's truth (or `none`) at 0.8, except
+/// the prompts in `odd`: `bad` answers an option never offered, anything
+/// else answers without a confidence.
+fn haiku_for(loaded: &Loaded, odd: HashMap<String, &'static str>) -> ScriptedSsh {
+    let truth: HashMap<String, (String, Option<&'static str>)> = loaded
+        .cases
+        .iter()
+        .map(|c| {
+            (
+                prompt_for(&jev_request(c)).unwrap().0,
+                (
+                    c.truth.clone().unwrap_or_else(|| NONE_OPTION.into()),
+                    odd.get(&c.id).copied(),
+                ),
+            )
+        })
+        .collect();
+    ScriptedSsh::new(move |prompt| {
+        let (t, odd) = truth.get(prompt).cloned().expect("a known prompt");
+        match odd {
+            Some("bad") => "{\"choice\": \"i999999\", \"confidence\": 0.9}".into(),
+            Some(_) => format!("{{\"choice\": \"{t}\"}}"),
+            None => format!("{{\"choice\": \"{t}\", \"confidence\": 0.8}}"),
+        }
+    })
+}
+
+#[tokio::test]
+async fn haiku_is_asked_jevs_choice_on_the_named_host_and_nothing_leaks() {
+    let w = leaky_world();
+    let o = opts(Split::All, vec![Provider::Bm25, Provider::Haiku]);
+    let loaded = load(&w.s, &Words, &o, None).unwrap();
+    assert_eq!(loaded.cases.len(), 8, "4 cases and their none-cases");
+    // One truth case answers an option never offered; one none-case
+    // answers without a confidence.
+    let bad_id = loaded
+        .cases
+        .iter()
+        .find(|c| c.truth.is_some())
+        .unwrap()
+        .id
+        .clone();
+    let quiet_id = loaded
+        .cases
+        .iter()
+        .find(|c| c.truth.is_none())
+        .unwrap()
+        .id
+        .clone();
+    let odd: HashMap<String, &'static str> = [(bad_id.clone(), "bad"), (quiet_id, "no_conf")]
+        .into_iter()
+        .collect();
+    let ssh = haiku_for(&loaded, odd);
+    let h = Haiku {
+        exec: &ssh,
+        cfg: HaikuConfig::new("bench-host", Some("haiku"), Some(60)).unwrap(),
+    };
+    let outs = run_providers_with(&loaded, &o, None, Some(&h)).await;
+    assert_eq!(ssh.calls(), loaded.cases.len());
+    assert!(ssh.hosts.lock().unwrap().iter().all(|x| x == "bench-host"));
+
+    // What reached the host is Jev's Choice rendered, and the leakage guard
+    // holds on it: no truth key anywhere, no title, branch or slug word in
+    // the state.
+    let prompts = ssh.prompts.lock().unwrap().clone();
+    for (c, p) in loaded.cases.iter().zip(&prompts) {
+        assert_eq!(p, &prompt_for(&jev_request(c)).unwrap().0);
+        let lower = p.to_lowercase();
+        let state = canonical_json(&state_of(p).unwrap()).to_lowercase();
+        let g = &c.guard;
+        if let Some(k) = &g.key {
+            assert!(!lower.contains(&k.to_lowercase()), "{}: key in {p}", c.id);
+        }
+        if let Some(t) = &g.title {
+            assert!(
+                !state.contains(&t.to_lowercase()),
+                "{}: title in {state}",
+                c.id
+            );
+        }
+        if let Some(b) = &g.branch {
+            assert!(
+                !lower.contains(&b.to_lowercase()),
+                "{}: branch in {p}",
+                c.id
+            );
+        }
+        if let Some(slug) = &g.slug {
+            assert!(!lower.contains(slug.as_str()), "{}: slug in {p}", c.id);
+            let stems: std::collections::HashSet<String> = slug
+                .split('-')
+                .filter(|w| w.len() >= 3)
+                .map(super::bm25::stem)
+                .collect();
+            for word in state.split(|ch: char| !ch.is_alphanumeric()) {
+                assert!(
+                    word.is_empty() || !stems.contains(&super::bm25::stem(word)),
+                    "{}: slug word {word:?} in {state}",
+                    c.id
+                );
+            }
+        }
+        // The options are the case's candidates and `none`, nothing more.
+        for cand in &c.candidates {
+            assert!(p.contains(&format!("- {}: ", cand.id)), "{p}");
+        }
+        assert_eq!(p.matches("\n- ").count(), c.candidates.len() + 1, "{p}");
+    }
+
+    let ho = &outs[&Provider::Haiku];
+    let bad = &ho[&bad_id];
+    assert!(bad.usable() && bad.invalid && bad.pick.is_none());
+    for c in &loaded.cases {
+        let x = &ho[&c.id];
+        assert!(x.usable(), "{x:?}");
+        if c.id != bad_id {
+            assert_eq!(x.pick, c.truth, "{}", c.id);
+        }
+    }
+    assert_eq!(
+        ho.values()
+            .filter(|x| x.choice_confidence.is_none())
+            .count(),
+        2
+    );
+
+    let r = report(&loaded, &o, &outs);
+    let a = &r.datasets[0];
+    let hm = a.providers.iter().find(|p| p.provider == "haiku").unwrap();
+    assert_eq!(hm.calls.0, 8);
+    assert_eq!(hm.invalid.0, 1);
+    assert_eq!(hm.input_tokens, 800);
+    assert_eq!(hm.cost_microusd, 4000);
+    // Calibration: the six answers with a confidence.
+    assert_eq!(hm.calibration.as_ref().unwrap().n.0, 6);
+    // No jev: no acceptance; haiku is compared with bm25 like any provider.
+    assert!(a.acceptance.is_empty() && a.vs_haiku.is_none());
+    assert!(a.diffs.iter().any(|d| d.a == "bm25" && d.b == "haiku"));
+    let text = format!(
+        "{}\n{}",
+        serde_json::to_string(&r).unwrap(),
+        r.lines().join("\n")
+    );
+    for leak in [
+        "PAY-",
+        "Login redirect",
+        "Billing export",
+        "prihl",
+        "Dark mode",
+    ] {
+        assert!(!text.contains(leak), "{leak} in the report");
+    }
+
+    // The call cap, and nothing without a transport.
+    let capped = BenchOptions {
+        max_calls: 3,
+        ..o.clone()
+    };
+    let before = ssh.calls();
+    let outs = run_providers_with(&loaded, &capped, None, Some(&h)).await;
+    assert_eq!(ssh.calls() - before, 3);
+    assert_eq!(
+        outs[&Provider::Haiku]
+            .values()
+            .filter(|x| x.reason.as_deref() == Some("max_calls"))
+            .count(),
+        loaded.cases.len() - 3
+    );
+    let outs = run_providers(&loaded, &o, None).await;
+    assert!(outs[&Provider::Haiku]
+        .values()
+        .all(|x| x.reason.as_deref() == Some("no_backend")));
+}
+
+/// Haiku outcomes for [`judged_world`]: every truth case answered `i1`
+/// except where `wrong(i)`, every none-case `none`; 2 s a call.
+fn haiku_outcomes(n: usize, wrong: impl Fn(usize) -> bool) -> HashMap<String, Outcome> {
+    let mut m = HashMap::new();
+    for i in 0..n {
+        let out = |pick: Option<&str>| Outcome {
+            ran: true,
+            pick: pick.map(String::from),
+            score: Some(0.9),
+            choice_confidence: Some(0.9),
+            calls: 1,
+            latency_ms: Some(2000),
+            ..Default::default()
+        };
+        m.insert(
+            format!("a{i}"),
+            out(Some(if wrong(i) { "i2" } else { "i1" })),
+        );
+        m.insert(format!("a{i}n"), out(None));
+    }
+    m
+}
+
+#[test]
+fn j1s_haiku_line_is_judged_at_haikus_coverage_when_both_ran() {
+    let o = opts(
+        Split::Test,
+        vec![Provider::Bm25, Provider::Jev, Provider::Haiku],
+    );
+    let line = |haiku: HashMap<String, Outcome>| {
+        let (loaded, mut outs) = judged_world();
+        for x in outs.get_mut(&Provider::Jev).unwrap().values_mut() {
+            x.latency_ms = Some(100);
+        }
+        outs.insert(Provider::Haiku, haiku);
+        let r = report(&loaded, &o, &outs);
+        let a = r.datasets[0].clone();
+        let c = a
+            .acceptance
+            .iter()
+            .find(|c| c.criterion.starts_with("not worse than claude -p haiku"))
+            .unwrap()
+            .clone();
+        (r, a, c)
+    };
+    // Jev is 0.8 on test (every truth case answered); haiku 0.82: 2
+    // points worse is within 3.
+    let (r, a, c) = line(haiku_outcomes(2500, |i| i % 50 < 9));
+    assert_eq!(r.thresholds.haiku_dev_coverage, Some(1.0));
+    assert_eq!(r.thresholds.jev_at_haiku_coverage, Some(0.6));
+    let e = a.vs_haiku.as_ref().unwrap();
+    assert_eq!(e.cases.0, 1000);
+    assert_eq!((e.jev_accuracy, e.jev_coverage), (Some(0.8), Some(1.0)));
+    assert_eq!(
+        (e.haiku_accuracy, e.haiku_coverage),
+        (Some(0.82), Some(1.0))
+    );
+    assert_eq!(e.gap, Some(-0.02));
+    assert_eq!(
+        (e.jev_latency_p50_ms, e.haiku_latency_p50_ms),
+        (Some(100), Some(2000))
+    );
+    assert_eq!(c.verdict, Verdict::Pass, "{}", c.measured);
+    assert!(c.measured.contains("1000 paired cases"), "{}", c.measured);
+    let lines = r.lines().join("\n");
+    assert!(lines.contains("at haiku's coverage"), "{lines}");
+    assert!(lines.contains("jev at haiku's dev coverage"), "{lines}");
+    let hm = a.providers.iter().find(|p| p.provider == "haiku").unwrap();
+    assert!(hm.calibration.is_some());
+    assert!(a
+        .breakdown
+        .iter()
+        .flat_map(|c| &c.providers)
+        .any(|m| m.provider == "haiku" && m.calibration.is_some()));
+
+    // Haiku 0.9: jev is 10 points worse.
+    let (_, _, c) = line(haiku_outcomes(2500, |i| i % 10 == 0));
+    assert_eq!(c.verdict, Verdict::Fail, "{}", c.measured);
+
+    // Haiku with no dev answers: no jev threshold at its coverage.
+    let mut test_only = haiku_outcomes(2500, |_| false);
+    test_only.retain(|k, _| {
+        let i: usize = k
+            .trim_start_matches('a')
+            .trim_end_matches('n')
+            .parse()
+            .unwrap();
+        i >= 2500 * DEV_SHARE_PCT / 100
+    });
+    let (_, _, c) = line(test_only);
+    assert_eq!(c.verdict, Verdict::NotJudged);
+    assert!(c.measured.contains("--split all"), "{}", c.measured);
+
+    // Under 200 paired cases: not judged.
+    let (mut loaded, mut outs) = judged_world();
+    loaded.cases.truncate(300);
+    outs.insert(Provider::Haiku, haiku_outcomes(2500, |i| i % 10 == 0));
+    let r = report(&loaded, &o, &outs);
+    let c = r.datasets[0]
+        .acceptance
+        .iter()
+        .find(|c| c.criterion.starts_with("not worse than claude -p haiku"))
+        .unwrap();
+    assert_eq!(c.verdict, Verdict::NotJudged, "{}", c.measured);
+
+    // Haiku not run: not judged, and says how to run it.
+    let (loaded, outs) = judged_world();
+    let r = report(
+        &loaded,
+        &opts(Split::Test, vec![Provider::Bm25, Provider::Jev]),
+        &outs,
+    );
+    let c = r.datasets[0]
+        .acceptance
+        .iter()
+        .find(|c| c.criterion.starts_with("not worse than claude -p haiku"))
+        .unwrap();
+    assert_eq!(c.verdict, Verdict::NotJudged);
+    assert!(c.measured.contains("--haiku-host"), "{}", c.measured);
 }
