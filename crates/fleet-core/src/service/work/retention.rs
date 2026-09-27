@@ -311,7 +311,12 @@ mod tests {
                 .iter()
                 .map(|t| t.table.as_str())
                 .collect::<Vec<_>>(),
-            ["work_journal", "work_items", "session_events"]
+            [
+                "work_journal",
+                "work_items",
+                "session_events",
+                "tracker_write_outbox"
+            ]
         );
         assert_eq!(s.tick_cap, RETENTION_TICK_CAP);
         // The record is not a setting anyone can write.
