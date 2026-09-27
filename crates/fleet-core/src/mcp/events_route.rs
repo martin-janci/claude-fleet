@@ -410,7 +410,7 @@ pub(crate) fn fence_frame(
     Some(v)
 }
 
-fn matches(kinds: Option<&Vec<String>>, msg: &EventMessage) -> bool {
+pub(crate) fn matches(kinds: Option<&Vec<String>>, msg: &EventMessage) -> bool {
     match kinds {
         None => true,
         Some(ks) => ks.iter().any(|k| k == msg.kind()),

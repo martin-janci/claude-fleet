@@ -93,6 +93,24 @@ pub enum RowChange {
     TrackerUpdated(crate::store::TrackerRow),
     /// A tracker was removed.
     TrackerRemoved(i64),
+    /// The Work view's structure changed (work graph M14): a placement, a
+    /// placement rule, a saved view, or a local item's org. Ids only — a
+    /// client re-reads what it shows. Kind `work`, so never sent to a
+    /// host-bound or org-bound stream.
+    WorkChanged(WorkChanged),
+}
+
+/// The payload of `work:changed`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct WorkChanged {
+    /// placement | rule | view | org
+    pub what: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -261,6 +279,7 @@ impl RowChange {
             RowChange::WorkItemUpdated(_) => "work:item",
             RowChange::TrackerUpdated(_) => "work:tracker",
             RowChange::TrackerRemoved(_) => "work:tracker_removed",
+            RowChange::WorkChanged(_) => "work:changed",
         }
     }
 
@@ -309,6 +328,7 @@ impl RowChange {
             RowChange::WorkItemUpdated(r) => to_value(r),
             RowChange::TrackerUpdated(r) => to_value(r),
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
+            RowChange::WorkChanged(w) => to_value(w),
         }
     }
 }
@@ -482,7 +502,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 23] = [
+pub const EVENT_NAMES: [&str; 24] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -506,6 +526,7 @@ pub const EVENT_NAMES: [&str; 23] = [
     "work:item",
     "work:tracker",
     "work:tracker_removed",
+    "work:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
@@ -785,6 +806,13 @@ impl EventBus for RecordingEventBus {
             RowChange::WorkItemUpdated(r) => r.id.to_string(),
             RowChange::TrackerUpdated(r) => format!("{}:{}", r.id, r.state),
             RowChange::TrackerRemoved(id) => id.to_string(),
+            RowChange::WorkChanged(w) => format!(
+                "{}:{}:{:?}:{:?}",
+                w.what,
+                w.task_id.as_deref().unwrap_or_default(),
+                w.rule_id,
+                w.view_id
+            ),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -978,6 +1006,7 @@ mod tests {
                 RowChange::WorkItemUpdated(_) => pinned_name!("work:item"),
                 RowChange::TrackerUpdated(_) => pinned_name!("work:tracker"),
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
+                RowChange::WorkChanged(_) => pinned_name!("work:changed"),
             }
         }
         // And for every variant a test can build without a full store row,
