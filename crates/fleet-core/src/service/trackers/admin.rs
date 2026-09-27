@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|sweep_now
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|sweep_now|usage
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,6 +82,9 @@ pub struct WorkAdminArgs {
     /// on|off|inherit
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tidy: Option<String>,
+    /// usage window, 1-365 (30)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<i64>,
 }
 
 impl fmt::Debug for WorkAdminArgs {
@@ -110,6 +113,7 @@ impl fmt::Debug for WorkAdminArgs {
             .field("host_alias", &self.host_alias)
             .field("rule_id", &self.rule_id)
             .field("auto_tidy", &self.auto_tidy)
+            .field("days", &self.days)
             .finish()
     }
 }
@@ -121,7 +125,7 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?} auto_tidy={:?}",
+             isolate_sessions={:?} auto_tidy={:?} days={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -147,6 +151,7 @@ impl WorkAdminArgs {
             self.path_prefix,
             self.isolate_sessions,
             self.auto_tidy,
+            self.days,
         )
     }
 
@@ -177,6 +182,9 @@ pub enum AdminAction {
     Org(crate::service::orgs::OrgAction),
     /// Work graph M12.3: one retention sweep now.
     SweepNow,
+    /// Work graph M13.2: counts of how the work graph is used over `days`
+    /// (`service::work::usage`). Read-only.
+    Usage,
 }
 
 impl AdminAction {
@@ -200,6 +208,7 @@ impl AdminAction {
         "unassign_host",
         "assign_tracker",
         "sweep_now",
+        "usage",
     ];
 
     /// Actions that destroy something and pass the confirmation gate.
@@ -225,6 +234,7 @@ impl AdminAction {
             "remove" | "remove_tracker" => AdminAction::Remove,
             "status" | "sync_status" => AdminAction::Status,
             "sweep_now" => AdminAction::SweepNow,
+            "usage" => AdminAction::Usage,
             other => {
                 return Err(IpcError::new(
                     codes::E_INVALID,
@@ -539,6 +549,15 @@ pub fn admin_sync(
             let ids: Vec<i64> = s.list_trackers()?.iter().map(|t| t.id).collect();
             drop(s);
             json(&super::sync::metrics_for(&ids))
+        }
+        AdminAction::Usage => {
+            let days = crate::service::work::usage::parse_days(args.days)?;
+            json(&crate::service::work::usage::usage(
+                &s,
+                days,
+                crate::service::catalog::now_secs(),
+                &super::sync::metrics_for,
+            )?)
         }
         AdminAction::Test => Err(IpcError::new(
             codes::E_INTERNAL,

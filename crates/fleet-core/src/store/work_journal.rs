@@ -33,6 +33,12 @@ pub const JOURNAL_KINDS: &[&str] = &[
     "reopened",
     // Tidy-up acted on the session (work graph M7): archive, kill, safe kill.
     "tidy",
+    // A Claude-written summary of a dead session's conversation, on demand
+    // (work graph M13.4c, D10): one per conversation, from `agent`.
+    "summary",
+    // Fleet wrote to the item's tracker (work graph M13.4e, D3): the PR as
+    // a remote link, on the session's conversation.
+    "write_back",
 ];
 
 /// `source` values.
@@ -221,6 +227,34 @@ impl Store {
                 )?;
             }
             Ok(Some(id))
+        })
+    }
+
+    /// Store `claude_session_id`'s summary (work graph M13.4c): a `summary`
+    /// row from `agent`, replacing any earlier one of that conversation, so
+    /// there is at most one per conversation. `body` is already redacted and
+    /// capped by the caller; `append_journal` caps it again. Returns the new
+    /// row's id.
+    pub fn replace_summary(
+        &self,
+        claude_session_id: &str,
+        body: &str,
+        meta: Option<&str>,
+    ) -> Result<i64, IpcError> {
+        self.in_savepoint("replace_summary", |conn| -> Result<i64, IpcError> {
+            conn.execute(
+                "DELETE FROM work_journal WHERE claude_session_id = ?1 AND kind = 'summary'",
+                [claude_session_id],
+            )?;
+            self.append_journal(
+                Some(claude_session_id),
+                None,
+                "summary",
+                "agent",
+                Some(body),
+                meta,
+            )?
+            .ok_or_else(|| IpcError::new(codes::E_INVALID, "an empty summary is not stored"))
         })
     }
 

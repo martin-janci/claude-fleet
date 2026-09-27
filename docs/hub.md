@@ -919,6 +919,7 @@ fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
 fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
 fleet-hub tracker list
 fleet-hub tracker status          # each tracker's last sync pass, and retention
+fleet-hub work usage --days 30    # how the work graph is used, counts only
 fleet-hub tracker remove 1        # its items stay, marked unavailable
 ```
 
@@ -1885,7 +1886,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 182 commands, 78 route to a hub tool, 1 routes except for one argument shape, 82 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 184 commands, 79 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1972,6 +1973,7 @@ Of the 182 commands, 78 route to a hub tool, 1 routes except for one argument sh
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `work_retention_status` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
 | `work_retention_sweep` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
+| `work_usage` | the work graph's usage counts are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; read them on the hub with fleet-hub work usage |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew

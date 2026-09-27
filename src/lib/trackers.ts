@@ -52,6 +52,8 @@ export interface TrackerSettings {
   /** GitHub Enterprise Server (work graph M11.4): the instance `gh
    *  --hostname` is pointed at, `host[:port]`. Absent: github.com. */
   hostname?: string | null;
+  /** Jira (work graph M13.4e, D3): what fleet may write. Absent: nothing. */
+  write_back?: { pr_remote_link?: boolean };
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */
@@ -245,6 +247,12 @@ export interface SyncMetrics {
   frames_emitted?: number;
   /** Redacted, one line, capped. */
   last_error?: string | null;
+  /** Items the last pass could not store and skipped (work graph M13.1). */
+  items_failed?: number;
+  /** Passes in a row that skipped items. */
+  consecutive_partial?: number;
+  /** Why the last skipped item failed; sanitised like `last_error`. */
+  last_item_error?: string | null;
 }
 
 /** The sync's counters per tracker. Admin (`work_admin { status }`):
@@ -627,18 +635,25 @@ export function trackerStale(t: TrackerRow, nowSec: number, intervalSecs: number
 }
 
 /** One line for a tracker's last sync pass ("last pass 1.2 s · 40 listed ·
- *  3 changed · 12 frames"), or null when no pass has run since the syncing
- *  process started. */
+ *  3 changed · 12 frames", then "· 2 skipped (3 passes in a row)" when it
+ *  skipped items), or null when no pass has run since the syncing process
+ *  started. */
 export function describeSyncMetrics(m: SyncMetrics | null | undefined): string | null {
   if (!m || m.last_pass_at == null) return null;
   const ms = m.duration_ms ?? 0;
   const took = ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
-  return [
+  const parts = [
     `last pass ${took}`,
     `${m.items_listed ?? 0} listed`,
     `${m.items_changed ?? 0} changed`,
     `${m.frames_emitted ?? 0} frames`,
-  ].join(' · ');
+  ];
+  const skipped = m.items_failed ?? 0;
+  if (skipped > 0) {
+    const row = m.consecutive_partial ?? 0;
+    parts.push(`${skipped} skipped (${row} ${row === 1 ? 'pass' : 'passes'} in a row)`);
+  }
+  return parts.join(' · ');
 }
 
 /** "synced 4 min ago" / "never synced". */

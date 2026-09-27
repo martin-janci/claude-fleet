@@ -929,11 +929,16 @@ async fn consecutive_failures_count_up_and_a_pass_that_ends_ok_resets_them() {
         let m = sync.metrics(&[fx.tracker]).remove(0);
         assert_eq!(m.consecutive_failures, n, "{m:?}");
         assert!(m.last_error.is_some());
+        assert_eq!(
+            (m.passes_total, m.passes_failed_total),
+            (u64::from(n), u64::from(n))
+        );
     }
     fx.fake
         .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
     sync.run_pass(&fx.store).await.unwrap();
     let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!((m.passes_total, m.passes_failed_total), (4, 3), "{m:?}");
     assert_eq!(
         (m.consecutive_failures, m.last_error.as_deref()),
         (0, None),
@@ -1263,6 +1268,101 @@ async fn run_pass_does_not_advance_the_watermark_when_a_view_batch_has_a_poison_
         fx.item_opt("ABC-104").is_some(),
         "retried on the next pass and stored"
     );
+}
+
+/// Work graph M13.1 / D25: a pass that skips an item records it in the
+/// metrics (and in `fleet_health`: degraded, then failing after N passes in
+/// a row, never a credential reason); a clean pass zeroes it again.
+#[tokio::test]
+async fn skipped_items_fill_the_metrics_walk_health_to_failing_and_a_clean_pass_resets_them() {
+    use crate::service::health::{
+        trackers_from_store, TRACKER_FAILING_AFTER, TRACKER_REASON_ITEMS_SKIPPED,
+    };
+    use crate::service::orgs::OrgScope;
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch(
+            "CREATE TEMP TRIGGER poison_10104 BEFORE INSERT ON work_items \
+             WHEN NEW.external_id = '10104' \
+             BEGIN SELECT RAISE(ABORT, 'poison'); END;",
+        )
+        .unwrap();
+    let health = |sync: &TrackerSync| {
+        let s = fx.store.lock().unwrap();
+        trackers_from_store(&s, &OrgScope::All, &|ids| sync.metrics(ids), T0)
+            .trackers
+            .remove(0)
+    };
+    for n in 1..=TRACKER_FAILING_AFTER {
+        fx.fake.clear_routes();
+        fx.fake
+            .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+            .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+        let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+        assert_eq!((p.error.as_deref(), p.failed), (None, 1), "{p:?}");
+        let m = sync.metrics(&[fx.tracker]).remove(0);
+        assert_eq!((m.items_failed, m.consecutive_partial), (1, n), "{m:?}");
+        assert_eq!((m.consecutive_failures, m.last_error.as_deref()), (0, None));
+        assert!(
+            m.last_item_error
+                .as_deref()
+                .is_some_and(|e| e.contains("poison")),
+            "{m:?}"
+        );
+        let h = health(&sync);
+        let want = if n >= TRACKER_FAILING_AFTER {
+            "failing"
+        } else {
+            "degraded"
+        };
+        assert_eq!(h.health, want, "pass {n}: {h:?}");
+        assert_eq!(
+            h.reason, TRACKER_REASON_ITEMS_SKIPPED,
+            "not a credential problem"
+        );
+        assert_eq!(h.state, "ok");
+        assert!(h
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("poison")));
+    }
+
+    // The item stores again: a clean pass zeroes both counts, health is ok.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute_batch("DROP TRIGGER poison_10104")
+        .unwrap();
+    fx.fake.clear_routes();
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"))
+        .once(Method::Post, "/search/jql", ok("search_mine_p2.json"));
+    sync.run_pass(&fx.store).await.unwrap();
+    let m = sync.metrics(&[fx.tracker]).remove(0);
+    assert_eq!(
+        (
+            m.items_failed,
+            m.consecutive_partial,
+            m.last_item_error.as_deref()
+        ),
+        (0, 0, None),
+        "{m:?}"
+    );
+    // M13.2's running totals keep what the last-pass fields let go.
+    let n = u64::from(TRACKER_FAILING_AFTER);
+    assert_eq!(
+        (m.passes_total, m.passes_failed_total, m.items_failed_total),
+        (n + 1, 0, n),
+        "{m:?}"
+    );
+    let h = health(&sync);
+    assert_eq!((h.health.as_str(), h.reason.as_str()), ("ok", ""));
+    assert_eq!(h.last_error, None);
 }
 
 // ── fix round 1 (2026-09-26 review): a systemic, every-item failure must
@@ -1712,4 +1812,98 @@ async fn a_poison_view_does_not_stall_the_rest_of_the_pass() {
     let b = after.iter().find(|v| v.view_id == "b").unwrap();
     assert_eq!(a.watermark, None, "view A's watermark must not advance");
     assert_eq!(b.watermark, Some(2), "view B's watermark advances normally");
+}
+
+/// Work graph M13.4e: a tracker's queued PR remote link goes out at the
+/// end of a good pass, once, and only after the tracker opted in.
+#[tokio::test]
+async fn an_opted_in_tracker_drains_its_write_outbox_once_after_a_good_pass() {
+    let fx = Fx::new();
+    // Just past the queued write's `next_at`.
+    let sync = fx.sync(|| crate::store::now_unix() + 60);
+    let wid = queue_pr_link(&fx);
+    let empty = || Ok(Response::json(200, &json!({"issues": [], "isLast": true})));
+    fx.fake.always(Method::Post, "/search/jql", empty()).always(
+        Method::Post,
+        "/remotelink",
+        Ok(Response::new(201, r#"{"id":1}"#)),
+    );
+    // Off by default: the pass sends nothing and the write waits.
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.fake.count("/remotelink"), 0);
+    assert_eq!(write_state(&fx, wid), "pending");
+    opt_in(&fx);
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.fake.count("/issue/ABC-1/remotelink"), 1);
+    assert_eq!(write_state(&fx, wid), "done");
+    // Done: the next pass sends nothing.
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.fake.count("/remotelink"), 1, "idempotent");
+}
+
+/// Work graph M13.4e: a read pass that failed (here, a refused credential)
+/// sends no write.
+#[tokio::test]
+async fn a_failed_read_pass_sends_no_write() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| crate::store::now_unix() + 60);
+    let wid = queue_pr_link(&fx);
+    opt_in(&fx);
+    // The credential is refused: the read pass fails.
+    fx.fake
+        .always(Method::Post, "/search/jql", Ok(Response::new(401, "")))
+        .always(
+            Method::Post,
+            "/remotelink",
+            Ok(Response::new(201, r#"{"id":1}"#)),
+        );
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert!(p.error.is_some(), "{p:?}");
+    assert_eq!(fx.fake.count("/remotelink"), 0);
+    assert_eq!(write_state(&fx, wid), "pending");
+}
+
+fn queue_pr_link(fx: &Fx) -> i64 {
+    let s = fx.store.lock().unwrap();
+    assert!(s
+        .enqueue_tracker_write(&crate::store::NewTrackerWrite {
+            tracker_id: fx.tracker,
+            item_key: "ABC-1",
+            op: crate::store::WRITE_OP_PR_REMOTE_LINK,
+            url: "https://github.com/acme/api/pull/7",
+            title: "PR: acme/api#7",
+            link_id: None,
+            claude_session_id: None,
+            session_org_id: None,
+        })
+        .unwrap());
+    s.conn_ref()
+        .query_row("SELECT MAX(id) FROM tracker_writes", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn opt_in(fx: &Fx) {
+    fx.store
+        .lock()
+        .unwrap()
+        .set_tracker_settings(
+            fx.tracker,
+            &crate::store::TrackerSettings {
+                write_back: crate::store::WriteBack {
+                    pr_remote_link: true,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+fn write_state(fx: &Fx, id: i64) -> String {
+    fx.store
+        .lock()
+        .unwrap()
+        .tracker_write(id)
+        .unwrap()
+        .unwrap()
+        .state
 }

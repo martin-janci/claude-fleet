@@ -151,8 +151,20 @@ fn status_line(m: &Value) -> String {
         .as_str()
         .map(|e| format!("  — {e}"))
         .unwrap_or_default();
+    // Work graph M13.1: items the pass could not store (an older hub: none).
+    let skipped = match m["items_failed"].as_u64().unwrap_or_default() {
+        0 => String::new(),
+        n => {
+            let row = m["consecutive_partial"].as_u64().unwrap_or_default();
+            let why = m["last_item_error"]
+                .as_str()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default();
+            format!("  skipped {n} ({row} pass(es) in a row){why}")
+        }
+    };
     format!(
-        "{id:>4}  last pass {}  {} ms  listed {}  changed {}  frames {}{err}",
+        "{id:>4}  last pass {}  {} ms  listed {}  changed {}  frames {}{skipped}{err}",
         fmt_time(m["last_pass_at"].as_i64()),
         m["duration_ms"].as_u64().unwrap_or_default(),
         m["items_listed"].as_u64().unwrap_or_default(),
@@ -190,8 +202,12 @@ fn retention_lines(r: &Value) -> Vec<String> {
     out.push(if s.is_null() {
         "retention: no sweep since the hub started keeping a record".to_string()
     } else {
+        let outbox = match s["tracker_writes"].as_u64().unwrap_or_default() {
+            0 => String::new(),
+            n => format!(", {n} PR links"),
+        };
         format!(
-            "retention: last sweep {} deleted {} journal, {} tickets, {} events",
+            "retention: last sweep {} deleted {} journal, {} tickets, {} events{outbox}",
             fmt_time(s["at"].as_i64()),
             s["journal"].as_u64().unwrap_or_default(),
             s["tracker_items"].as_u64().unwrap_or_default(),
@@ -516,6 +532,17 @@ mod tests {
         assert!(
             line.ends_with("— the tracker could not be reached"),
             "{line}"
+        );
+        assert!(!line.contains("skipped"), "{line}");
+        let partial = status_line(&json!({
+            "tracker_id": 5, "last_pass_at": 1_790_000_000, "duration_ms": 9,
+            "items_listed": 7, "items_changed": 0, "frames_emitted": 0,
+            "items_failed": 2, "consecutive_partial": 3,
+            "last_item_error": "UNIQUE constraint failed"
+        }));
+        assert!(
+            partial.ends_with("skipped 2 (3 pass(es) in a row): UNIQUE constraint failed"),
+            "{partial}"
         );
         let none = status_line(&json!({"tracker_id": 4, "last_pass_at": null}));
         assert!(none.contains("no pass since the hub started"), "{none}");

@@ -177,6 +177,9 @@ const REASONS = {
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
   tracker_sync_metrics:
     'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
+  // Work graph M13.2: `work_admin { usage }` is master-only on the hub.
+  work_usage:
+    'the work graph’s usage counts are the hub’s administration, and a client is never the fleet’s administrator — use `fleet-hub work usage`',
   // Organisations (work graph M5): the per-host tokens' boundary is set on
   // the hub only; `work_admin` is master-only.
   add_org:
@@ -318,6 +321,7 @@ export const ROUTED_ACTIONS = [
   'start_work',
   'start_work_multi',
   'request_work_handover',
+  'summarize_past_work',
   'tidy_apply',
   'archive_session_work',
   'unarchive_session_work',

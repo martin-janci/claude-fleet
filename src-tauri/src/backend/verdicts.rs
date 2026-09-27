@@ -104,6 +104,10 @@ const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its s
      the fleet's administrator; set the windows with set_setting and read the status on the \
      hub";
 
+const USAGE_IS_ADMIN: &str = "the work graph's usage counts are the hub's work_admin, \
+     master-only, and a paired client is never the fleet's administrator; read them on the hub \
+     with fleet-hub work usage";
+
 const CATALOG_IS_A_CHECKOUT: &str =
     "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
      no tool for this; work on the catalog there";
@@ -306,6 +310,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "request_work_handover",
         Verdict::Routed { tool: "work_link" },
     ),
+    // Work graph M13.4c: a Claude-written summary of past work (on demand,
+    // D10). Routed: the run happens on the session's own host, which the
+    // hub reaches.
+    ("summarize_past_work", Verdict::Routed { tool: "work_link" }),
     // Work graph M9.6: one ticket, one sibling session per repository.
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
     // Work graph M11.1: "Name this work…" — local work items, listed from
@@ -366,6 +374,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "work_retention_sweep",
         Verdict::LocalOnly {
             instead: RETENTION_IS_ADMIN,
+        },
+    ),
+    // Work graph M13.2: `work_admin { action: usage }`, master-only.
+    (
+        "work_usage",
+        Verdict::LocalOnly {
+            instead: USAGE_IS_ADMIN,
         },
     ),
     // Work graph M3.4: reading tickets and starting work route like every

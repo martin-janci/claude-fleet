@@ -1374,6 +1374,39 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Work graph M13.4c: a summary of B's past work (s-b-old on h-b). Its
+    // conversation id here is not a UUID, so a caller that passes every
+    // fence stops at that check, before anything runs on a host.
+    let past_b: i64 = {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .query_row(
+                "SELECT id FROM work_links WHERE snap_tmux = 's-b-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    m.row(
+        "work_link",
+        "summarize",
+        move |_, _| json!({ "action": "summarize", "key": "BB-3", "link_id": past_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone => {
+                    is_code(who, a, "E_FORBIDDEN", "summarise B's past work")
+                }
+                _ => {
+                    is_code(who, a, "E_INVALID", "past every fence");
+                    assert!(text(a).contains("claude session id"), "{who:?}: {a:?}");
+                }
+            }
+        },
+    )
+    .await;
     for args in [
         json!({ "action": "start", "key": "BB-2", "project_id": 1, "host_alias": "h-a" }),
         json!({ "action": "start", "url": "https://bravo.atlassian.net/browse/BB-2",
@@ -1434,7 +1467,10 @@ async fn run_matrix(isolate: bool) {
             move |_, _| json!({ "action": name }),
             move |_, who, a| match who {
                 Who::Master => {
-                    if matches!(name, "list" | "list_orgs" | "status" | "sweep_now") {
+                    if matches!(
+                        name,
+                        "list" | "list_orgs" | "status" | "sweep_now" | "usage"
+                    ) {
                         is_ok(who, a, name);
                     }
                 }
@@ -1442,6 +1478,46 @@ async fn run_matrix(isolate: bool) {
             },
         )
         .await;
+    }
+
+    // ── write-back (M13.4e, D3): only the master turns it on ────────────
+    // No tool triggers a write (the PR probe does); the one switch is this
+    // setting, and every other caller is refused before anything changes.
+    m.row(
+        "work_admin",
+        "update",
+        |fx, _| {
+            json!({
+                "action": "update",
+                "tracker_id": fx.tracker_a,
+                "settings": { "write_back": { "pr_remote_link": true } },
+            })
+        },
+        |fx, who, a| match who {
+            Who::Master => {
+                is_ok(who, a, "the master turns write-back on");
+                let on =
+                    fx.t.store
+                        .lock()
+                        .unwrap()
+                        .get_tracker(fx.tracker_a)
+                        .unwrap()
+                        .unwrap()
+                        .settings
+                        .write_back
+                        .pr_remote_link;
+                assert!(on, "the setting was stored");
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "write-back is the master's switch"),
+        },
+    )
+    .await;
+    // Back off, so no later row runs with a write-back tracker.
+    {
+        let s = fx.t.store.lock().unwrap();
+        let mut t = s.get_tracker(fx.tracker_a).unwrap().unwrap();
+        t.settings.write_back.pr_remote_link = false;
+        s.set_tracker_settings(fx.tracker_a, &t.settings).unwrap();
     }
 
     // ── sessions (D7) ───────────────────────────────────────────────────
@@ -2246,6 +2322,66 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
             };
             assert!(!text(&a).contains(other), "{who:?}: {}", text(&a));
         }
+    }
+}
+
+/// Work graph M13.1: a tracker skipping items reads through the same org
+/// fence — a per-host token sees only its own org's trackers, their counts
+/// and the skipped item's reason, never another org's; and the reason is
+/// `items_skipped` for every caller, never a credential one.
+#[test]
+fn a_skipping_trackers_health_is_fenced_by_org_too() {
+    use crate::service::health::{trackers_from_store, TRACKER_REASON_ITEMS_SKIPPED};
+    use crate::service::trackers::sync::SyncMetrics;
+    let fx = fixture(false);
+    let (ta, tb) = (fx.tracker_a, fx.tracker_b);
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.set_tracker_state(ta, "ok", None).unwrap();
+        s.set_tracker_state(tb, "ok", None).unwrap();
+    }
+    let metrics = move |ids: &[i64]| -> Vec<SyncMetrics> {
+        ids.iter()
+            .map(|&id| SyncMetrics {
+                tracker_id: id,
+                last_pass_at: Some(1),
+                items_failed: 1,
+                consecutive_partial: 1,
+                last_item_error: Some(
+                    if id == ta {
+                        "SECRET-A poison"
+                    } else {
+                        "SECRET-B poison"
+                    }
+                    .into(),
+                ),
+                ..Default::default()
+            })
+            .collect()
+    };
+    for who in EVERYONE {
+        let s = fx.t.store.lock().unwrap();
+        // The scope `fleet_health` fences a caller's roll-up by.
+        let scope = who.caller().org_scope(&s).unwrap();
+        let h = trackers_from_store(&s, &scope, &metrics, 1);
+        let body = serde_json::to_string(&h).unwrap();
+        for m in who.forbidden_markers() {
+            assert!(!body.contains(m), "{who:?} read {m}: {body}");
+        }
+        let want = match who {
+            Who::HostA => vec![ta],
+            Who::HostB => vec![tb],
+            Who::HostNone => vec![],
+            _ => vec![ta, tb],
+        };
+        let got: Vec<i64> = h.trackers.iter().map(|t| t.tracker_id).collect();
+        assert_eq!(got, want, "{who:?}");
+        for t in &h.trackers {
+            assert_eq!(t.health, "degraded", "{who:?}");
+            assert_eq!(t.reason, TRACKER_REASON_ITEMS_SKIPPED, "{who:?}");
+            assert_eq!((t.items_failed, t.consecutive_partial), (1, 1));
+        }
+        assert_eq!(h.degraded as usize, want.len(), "{who:?}");
     }
 }
 

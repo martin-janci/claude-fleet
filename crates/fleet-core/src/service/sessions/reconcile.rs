@@ -882,7 +882,7 @@ fn write_reachable_host(
         // current and the UI can dim rows whose host has gone quiet. It is
         // also the BE-3 ghost guard's evidence (`probe_started_at` above).
         // Carried by the upsert itself (Task 4), not a second UPDATE after
-        // it, so an unchanged pass bumps each row's `row_version` once.
+        // it; an unchanged pass bumps no `row_version` (migration 063).
         reconciled_at: Some(now),
     })?;
     // Work detection (M4.2): the PR probe's signals, written outside
@@ -901,6 +901,14 @@ fn write_reachable_host(
                 if let Err(e) = crate::service::work::detect::resolve_session(s, sid) {
                     tracing::debug!(error = %e.message, "[work] PR resolve failed");
                     s.ensure_in_tx()?;
+                }
+                // Write-back (M13.4e): after the links settled, queue the
+                // PR's remote link where an admin allows it. Idempotent.
+                if let Some(url) = info.pr_url.as_deref() {
+                    if let Err(e) = crate::service::trackers::write_back::on_pr(s, sid, url) {
+                        tracing::debug!(error = %e.message, "[work] PR write-back not queued");
+                        s.ensure_in_tx()?;
+                    }
                 }
             }
             Ok(None) => {}
@@ -1088,6 +1096,25 @@ pub(super) fn agent_row_name(session_id: &str) -> String {
     format!("bg:{session_id}")
 }
 
+/// The label an `external` row takes from its agent's `name`: trimmed and
+/// capped to the 80 characters `validate::friendly_name` allows. `None` for a
+/// missing or blank name, and for one carrying a control character (the CLI
+/// output is not ours; `set_friendly_name` refuses those too), so such a pass
+/// keeps the row's current label.
+pub(super) fn agent_display_name(raw: Option<&str>) -> Option<String> {
+    let name = raw?.trim();
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return None;
+    }
+    Some(
+        name.chars()
+            .take(80)
+            .collect::<String>()
+            .trim_end()
+            .to_string(),
+    )
+}
+
 /// The row names [`reconcile_agent_rows`] keys this probe's live pane-less
 /// agents under: every [`unmatched_bg_agents`] entry with a session id.
 /// Dismissed agents are included — their row was deleted on dismissal, so
@@ -1228,12 +1255,28 @@ pub(super) fn reconcile_agent_rows(
                 "[reconcile] bg upsert failed"
             );
             s.ensure_in_tx()?;
+            continue;
+        }
+        // Without it an external row reads as its `bg:<uuid>` sentinel.
+        if kind == "external" {
+            if let Some(name) = agent_display_name(agent.name.as_deref()) {
+                if let Err(e) = s.set_external_agent_name(host_alias, &tmux_name, &name) {
+                    tracing::warn!(
+                        host = %host_alias,
+                        claude_session_id = %session_id,
+                        error = %e,
+                        "[reconcile] external agent label failed"
+                    );
+                    s.ensure_in_tx()?;
+                }
+            }
         }
     }
     // Same TTL cutoff as the tmux-keyed prune in `reconcile_write_one_host`
     // (a `host_reboot` verdict marks bg rows lost too — only
     // `tmux_server_gone` is tmux-only — so a resumable bg row deserves the
-    // same exemption). Read fresh here rather than threaded through as a
+    // same exemption; an `external` row never gets it, see
+    // `Store::ghost_and_clean`). Read fresh here rather than threaded through as a
     // parameter so this function's signature (and its many direct callers
     // in tests) is unchanged.
     let lost_ttl_raw = s

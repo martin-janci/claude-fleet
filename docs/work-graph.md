@@ -25,6 +25,7 @@ acceptance run, [work-graph-acceptance.md](work-graph-acceptance.md).
 - [Retention](#retention)
 - [Organisations and isolation](#organisations-and-isolation)
 - [Trackers in fleet health](#trackers-in-fleet-health)
+- [Usage summary](#usage-summary)
 - [The phone](#the-phone)
 - [The operator and confirmations](#the-operator-and-confirmations)
 - [Settings](#settings)
@@ -181,8 +182,9 @@ Trackers give you:
 - ticket cards with acceptance criteria;
 - the "done" signal that tidy-up uses.
 
-Fleet writes nothing back to a tracker (decision D3) and has no inbound
-webhook (D13).
+Fleet writes one thing back, and only where you turn it on (decision D3):
+a session's pull request as a link on its Jira ticket (see *Write-back*
+below). It has no inbound webhook (D13).
 
 ### Connecting one
 
@@ -201,6 +203,7 @@ fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123
 fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
 fleet-hub tracker test 1      # account, key prefixes, sprints, views
 fleet-hub tracker status      # last sync pass per tracker, and retention
+fleet-hub work usage          # how the work graph is used, as counts
 ```
 
 A token is read from stdin, from `--from-env NAME`, or stored as a
@@ -226,6 +229,38 @@ A tracker only one machine can reach (a VPN) is read with `curl` on that
 host: `--via-host <host>`, the token piped on stdin. A key prefix that two
 trackers both claim (`ENG` in Jira and Linear) is never bound automatically.
 The full details are in [hub.md → Trackers](hub.md#trackers).
+
+### Write-back: the PR link (Jira, off by default)
+
+For a Jira tracker (Cloud or Data Center), Settings → Work has **Add a
+session's pull request to its ticket as a link**. With it on, when the PR
+probe sees a pull request on a session, fleet adds that PR to the linked
+ticket once, as a Jira remote link titled `PR: owner/repo#n`. Nothing else
+is ever written: no transition, no worklog, no comment (D29), and nothing a
+transcript or a tracker wrote.
+
+- **Only work a person linked.** The link must be confirmed and made by
+  hand or by *Start* (`manual` / `started`). A detection guess or an agent's
+  suggestion never writes.
+- **Only your own org's tracker.** A session in one org never writes to
+  another org's tracker, even a link made with `force_cross_org`; the org is
+  checked again just before sending.
+- **Once per PR.** The link's global id is the PR's URL, so Jira updates
+  the same link rather than adding a second one, and fleet queues each PR
+  once.
+- **Through the sync.** Writes wait in an outbox and go out with the next
+  sync pass, on the tracker's own credential. A rate limit waits (without
+  counting as a failure); other failures retry with backoff, and after five
+  tries, or at once for a refusal (403, 404), fleet gives up. Given-up
+  writes show in `fleet_health` as `write_failures` and in the footer as
+  "N writes not sent"; they never make the tracker `degraded`.
+- **The token needs write permission** (to edit issues). A read-only token
+  is enough for everything else; with one, the writes are refused and given
+  up.
+
+Turning it off stops sending at once; writes already queued wait, and go
+out if you turn it on again. Settled writes are dropped after the journal's
+retention window (`work.retention.journal_days`).
 
 ### Sync
 
@@ -322,6 +357,20 @@ There are two kinds:
   `handover_requested`, then `handover_written`, `handover_missing` or
   `handover_send_failed`. Fleet never spends a turn on this by itself, not
   even at safe kill (decision D9).
+- **A summary of a past session, on demand.** A session that has ended
+  cannot write its own hand-off, so each past-work row in the sidebar has
+  **Summarise**. It runs one print-mode fork of that session's last
+  conversation on the session's own host, under its own Claude account,
+  with the model `work.summary_model` names (`haiku` by default). The fork
+  has no tools and no MCP servers, fleet's hooks are off for it, and it
+  leaves no transcript behind; the original conversation is not touched.
+  Claude's answer is shown below the row and kept in the journal (redacted,
+  at most 4,000 characters, one per conversation: asking again replaces
+  it), and the next resume brief shows it inside the untrusted fence, after
+  a live session's own hand-off. It needs the transcript and the directory
+  the conversation ran in to still be on the host; otherwise it says so and
+  runs nothing. Only one summary runs per host at a time. It is never
+  automatic (decisions D10, D30).
 
 ## Today and standup
 
@@ -411,6 +460,9 @@ it. `0` keeps a table forever.
   kept ticket.
 - `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
   timeline events. The newest of each kind per session stays.
+- The write-back outbox (see *Write-back*) follows the journal's window:
+  a PR link that was sent, or given up on, goes once it is older than
+  `work.retention.journal_days`; one still waiting is never swept.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
 Settings → Limits → Retention (standalone desktop) shows the row counts, a
@@ -461,9 +513,19 @@ state and the store. It never calls a tracker or a host. For each tracker:
   them. Three failed passes in a row are `failing` too. A transient state
   (`rate_limited`, `unreachable`) with fewer failures is `degraded`: the sync
   retries it by itself.
-- `state`, `consecutive_failures`, `last_error` (redacted, one line, at most
-  300 characters, fenced as untrusted), `last_success_at`, `last_pass_at`,
-  and its org.
+- A pass that **skipped items** it could not store (the rest of the pass
+  still synced) is `degraded`; three such passes in a row are `failing`,
+  because the same item is stuck (decision D25). A clean pass is `ok`
+  again.
+- `reason`, why it is not `ok`: `credential` (auth_failed, captcha,
+  unconfigured), `sync_failed` (passes fail, or rate limited / unreachable)
+  or `items_skipped`; empty while `ok`.
+- `state`, `consecutive_failures`, `items_failed` (items the last pass
+  skipped), `consecutive_partial` (passes in a row that skipped some),
+  `last_error` (redacted, one line, at most 300 characters, fenced as
+  untrusted; for skipped items, why the last one failed), `last_success_at`,
+  `last_pass_at`, its org, and `write_failures` (PR links fleet gave up
+  sending, *Write-back*; never part of `health`).
 
 Fleet-wide it also counts `failing`, `degraded`, and the **detection
 backlog**: link suggestions on live sessions that have waited more than 7
@@ -480,6 +542,11 @@ On the desktop:
   **⚠ Reconnect Jira (acme) →**, which opens Settings scrolled to Work.
   Hover it for the error, the failure count and the org. A degraded tracker
   raises none.
+- A tracker failing because it keeps **skipping items** raises
+  **⚠ Sync skipping items — Jira (acme) →** instead: reconnecting would not
+  help. It also opens Settings → Work, where the tracker's last pass reads
+  `… · 2 skipped (3 passes in a row)` with the reason. See
+  [troubleshooting.md → Sync skips items](troubleshooting.md#sync-skips-items).
 - The roll-up is read at startup and every 60 seconds. On a paired desktop
   it is the hub's `fleet_health`.
 
@@ -490,6 +557,51 @@ status` and Settings → Work. See
 
 > **[Screenshot placeholder]** The attention strip with a Reconnect item,
 > and the footer's trackers line.
+
+## Usage summary
+
+`work_admin { action: usage, days? }` (on a hub, `fleet-hub work usage
+[--days N] [--json]`; on a standalone desktop, Settings → Work → *Usage*)
+counts how the work graph is actually used over the last `days` (default
+30, 1 to 365). It is read-only and master-only (a per-host or client token
+is refused, and a paired desktop shows no Usage section). It records
+nothing, sends nothing anywhere, and holds counts and ids only: never a
+title, key, path or error text.
+
+| Group | What it counts |
+|---|---|
+| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, …); a suggestion a person decided reads `manual` |
+| detection | suggestions made, confirmed by a person, promoted by detection itself, rejected, expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
+| handover | handovers requested and written, turns that ended without one, requests that could not be sent |
+| resume | resumes, with and without a brief |
+| journal | briefs queued and delivered, compaction summaries harvested |
+| tidy | sessions tidied from Tidy-up, *Keep* answers, auto-tidies per reason |
+| trackers | per tracker id: passes, failed passes and items skipped since the syncing process started (not windowed, reset on restart) |
+
+Some things are not stored anywhere, so the answer lists them under
+`unrecorded` instead of guessing: suggestions *shown*, handovers refused as
+busy, `last` vs fresh resumes, the transcript probe's outcomes, Tidy-up's
+suggestions per reason before anything is applied, and multi-start runs.
+Suggestions that detection withdrew or let decay leave no row, so
+`suggested` is a floor. The counts are bounded by retention and by the
+timeline's cap per session (500 events).
+
+Paste it into an acceptance run's record: that gives the decisions real
+numbers.
+
+```
+$ fleet-hub work usage --days 30
+work graph usage, last 30 d
+links: 41 made (branch 12, manual 20, resumed 3, started 6)
+detection: 18 suggested, 9 confirmed by a person, 4 promoted, 3 rejected, 1 expired; median decision 12 min; 2 nudges
+handover: 5 requested, 4 written, 1 missing, 0 send failed
+resume: 3 (2 with a brief, 1 without)
+journal: 8 briefs queued, 7 delivered; 11 compaction summaries
+tidy: 6 applied, 2 kept, 0 auto-tidied (none)
+tracker 1: 288 passes, 3 failed, 0 items skipped (since the sync started)
+not recorded: suggestions shown (only made, confirmed, rejected and expired are stored)
+…
+```
 
 ## The phone
 
@@ -502,10 +614,13 @@ token:
 - **Today** with *Copy standup*, and the ticket card with its acceptance
   criteria, **read-only** (decision D15): the card offers *Copy*, never
   *Send*;
-- org labels and an org filter.
+- org labels, an org filter and each row's org colour bar.
 
-What stays on the desktop: multi-start (D15), naming or renaming local work
-(D20), tracker and org administration, and retention. A **readonly** token
+- with a **full** token, **Name this work…** for a session with no work,
+  and **Rename** for local work (D20; fleet-mobile M13.4a).
+
+What stays on the desktop: multi-start (D15), tracker and org
+administration, and retention. A **readonly** token
 is served `work` but not `work_link`, so it only reads. No client token ever
 reaches `work_admin`. Which of these screens your phone shows depends on its
 fleet-mobile release; the hub gates each action by the token, not by the
@@ -544,6 +659,7 @@ table.
 | `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
 | `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |
 | `work.classify_nudge` | `false` | on / off | one note per conversation asking Claude to name its work after three unlinked turns |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | the model a dead session's on-demand *Summarise* runs on, on the session's own host and account |
 | `work.tidy_done_days` | `2` | 1–365 days | how long a linked ticket must be done before tidy-up suggests its session |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | how long a session must be idle before any tidy reason suggests it |
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | idle and unprompted days before a session with no work is suggested (`idle_unlinked`) |

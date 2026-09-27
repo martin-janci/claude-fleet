@@ -7,6 +7,23 @@ use super::{CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS, MAX_RETRY_AFT
 use crate::net::https::Response;
 use serde_json::Value;
 
+/// The remote link's global id for a PR (work graph M13.4e): Jira upserts
+/// a remote link by it, so writing the same PR twice changes nothing.
+pub fn pr_global_id(url: &str) -> String {
+    format!("fleet:pr:{url}")
+}
+
+/// The body of `POST …/issue/{key}/remotelink` for a PR. Only fleet's own
+/// words and the PR's URL: nothing from a transcript or a tracker.
+pub fn pr_remote_link_body(url: &str, title: &str) -> Value {
+    serde_json::json!({
+        "globalId": pr_global_id(url),
+        "application": { "type": "claude-fleet", "name": "claude-fleet" },
+        "relationship": "pull request",
+        "object": { "url": url, "title": title },
+    })
+}
+
 /// The sprint field's `schema.custom`.
 pub const SPRINT_FIELD_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
 /// The Epic Link field's `schema.custom` (Data Center; Cloud uses `parent`).

@@ -59,6 +59,13 @@ beforeEach(() => {
 });
 
 describe('Settings → Work, standalone', () => {
+  it('shows the Usage section, which reads the counts on mount (M13.2)', async () => {
+    const inv = route([]);
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('work-usage')).toBeInTheDocument());
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'work_usage')).toBe(true));
+  });
+
   it('lists trackers with a state badge, a hint and Test / Remove', async () => {
     route([row(), row({ id: 5, name: 'other', site_url: 'https://other.atlassian.net', state: 'auth_failed' })]);
     render(WorkSettings, { props: { now: () => 1000 + 240 } });
@@ -110,12 +117,13 @@ describe('Settings → Work, standalone', () => {
     await fireEvent.click(screen.getByTestId('connect-submit'));
     await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
     // The Organisations section (work graph M5) reads its own lists on mount,
-    // and the sync metrics (M11.4) are read on mount and after a test.
+    // the sync metrics (M11.4) are read on mount and after a test, and the
+    // Usage section (M13.2) reads its counts on mount.
     const cmds = inv.mock.calls
       .map((c) => c[0])
       .filter(
         (c) =>
-          !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(
+          !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics', 'work_usage'].includes(
             c as string,
           ),
       );
@@ -143,7 +151,7 @@ describe('Settings → Work, standalone', () => {
     expect(
       inv.mock.calls
         .map((c) => c[0])
-        .filter((c) => !['list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(c as string)),
+        .filter((c) => !['list_orgs', 'org_suggestions', 'tracker_sync_metrics', 'work_usage'].includes(c as string)),
     ).toEqual(['list_trackers']);
   });
 
@@ -204,6 +212,24 @@ describe('Settings → Work, paired with a hub', () => {
     const note = screen.getByTestId('work-remote').textContent ?? '';
     expect(note).toContain('fleet-hub tracker add');
     expect(note).toContain('Do it on the hub (https://fleet.example.com)');
+  });
+
+  it('shows no Usage section and never asks for usage (M13.2: work_admin is the hub master’s)', async () => {
+    hubStatus.set(remote);
+    const inv = route([row()]);
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    expect(screen.queryByTestId('work-usage')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'work_usage')).toBe(false);
+  });
+
+  it('offers no PR write-back toggle, even on a Jira tracker that has it on (M13.4e)', async () => {
+    hubStatus.set(remote);
+    const inv = route([row({ settings: { write_back: { pr_remote_link: true } } })]);
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    expect(screen.queryByTestId('tracker-write-back-pr')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'update_tracker')).toBe(false);
   });
 });
 
@@ -271,7 +297,7 @@ describe('Settings → Work, other providers (work graph M6)', () => {
     await waitFor(() => expect(screen.queryByTestId('connect-form')).toBeNull());
     const cmds = inv.mock.calls
       .map((c) => c[0])
-      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics'].includes(c as string));
+      .filter((c) => !['list_trackers', 'list_orgs', 'org_suggestions', 'tracker_sync_metrics', 'work_usage'].includes(c as string));
     // No second row; the settings reach the existing one before the credential.
     expect(cmds).toEqual(['update_tracker', 'set_tracker_credential', 'test_tracker']);
     const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
@@ -282,6 +308,39 @@ describe('Settings → Work, other providers (work graph M6)', () => {
     });
     const cred = inv.mock.calls.find((c) => c[0] === 'set_tracker_credential')!;
     expect((cred[1] as { args: Record<string, unknown> }).args).toMatchObject({ tracker_id: 9, secret: TOKEN });
+  });
+
+  it('turns a Jira tracker’s PR write-back on without touching its other settings (M13.4e)', async () => {
+    const dc = row({
+      id: 9,
+      provider: 'jira_dc',
+      name: 'corp',
+      site_url: 'https://jira.corp.example',
+      state: 'ok',
+      has_credential: true,
+      settings: { extra_ca: 'PEM' },
+    });
+    const inv = route([dc], {
+      update_tracker: { ...dc, settings: { extra_ca: 'PEM', write_back: { pr_remote_link: true } } },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    const box = screen.getByTestId('tracker-write-back-pr') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await fireEvent.click(box);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_tracker')).toBe(true));
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toEqual({
+      tracker_id: 9,
+      settings: { extra_ca: 'PEM', write_back: { pr_remote_link: true } },
+    });
+  });
+
+  it('offers PR write-back only for Jira trackers', async () => {
+    route([row({ id: 3, provider: 'github', name: 'gh', site_url: 'https://github.com', state: 'ok' })], {});
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    expect(screen.queryByTestId('tracker-write-back-pr')).toBeNull();
   });
 
   it('re-connecting an existing GitHub site with another gh host updates its transport', async () => {
@@ -483,6 +542,27 @@ describe('Settings → Work, GitHub Enterprise Server and sync metrics (work gra
       'last pass 1.2 s · 40 listed · 3 changed · 12 frames',
     );
     expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(true);
+  });
+
+  it('shows the items a pass skipped and why (M13.1)', async () => {
+    route([ghe()], {
+      tracker_sync_metrics: [
+        {
+          tracker_id: 9,
+          last_pass_at: 1000,
+          duration_ms: 80,
+          items_failed: 1,
+          consecutive_partial: 2,
+          last_item_error: 'UNIQUE constraint failed',
+          last_error: null,
+        },
+      ],
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('tracker-metrics-skipped')).toBeInTheDocument());
+    expect(screen.getByTestId('tracker-metrics').textContent).toContain('1 skipped (2 passes in a row)');
+    expect(screen.getByTestId('tracker-metrics-skipped').textContent).toContain('UNIQUE constraint failed');
+    expect(screen.queryByTestId('tracker-metrics-error')).toBeNull();
   });
 
   it('shows a failed pass’s error, and asks for no metrics on a paired desktop', async () => {

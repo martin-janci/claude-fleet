@@ -30,6 +30,9 @@
 //! changed, the event frames the store emitted under the pass's own locks,
 //! and the error it ended with ([`SyncMetrics`]). In memory only — reset on
 //! restart — and read by the master's `work_admin { action: status }`.
+//! Work graph M13.1 adds the items a pass skipped (one item's store failed;
+//! it is retried next pass) and how many passes in a row skipped some, so
+//! `fleet_health` can say "sync skipping items" instead of staying `ok`.
 
 use super::{
     list_all, needs_credential, provider_for, Fetched, Incremental, ItemRef, TrackerError,
@@ -131,6 +134,33 @@ pub struct SyncMetrics {
     /// memory like the rest, so a restart starts it again from `0`.
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Items the last pass could not store and skipped (work graph M13.1,
+    /// from `TrackerPass.failed`): each is retried next pass, and the pass
+    /// itself may still have ended ok. `0` after a pass with none.
+    #[serde(default)]
+    pub items_failed: u64,
+    /// Passes in a row with `items_failed > 0`; `0` after a pass that
+    /// skipped nothing (a pass that ended in an error before storing
+    /// anything counts as skipping nothing). The same item stuck for
+    /// [`TRACKER_FAILING_AFTER`](crate::service::health::TRACKER_FAILING_AFTER)
+    /// passes reads `failing` in `fleet_health` (decision D25).
+    #[serde(default)]
+    pub consecutive_partial: u32,
+    /// Why the last skipped item failed, sanitised like `last_error`; `None`
+    /// when the last pass skipped nothing. It names no item — the pass's
+    /// `warn` log line names the view.
+    #[serde(default)]
+    pub last_item_error: Option<String>,
+    /// Passes that ran since the process started (work graph M13.2's
+    /// `work_admin { usage }`); a skipped tracker's pass does not count.
+    #[serde(default)]
+    pub passes_total: u64,
+    /// Of those, the passes that ended in an error.
+    #[serde(default)]
+    pub passes_failed_total: u64,
+    /// Items skipped over all those passes.
+    #[serde(default)]
+    pub items_failed_total: u64,
 }
 
 /// Longest `SyncMetrics.last_error`.
@@ -372,19 +402,35 @@ impl TrackerSync {
                 outcome.get_or_insert_with(|| e.explain());
             }
         }
+        let prev = self
+            .metrics
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&t.id).cloned())
+            .unwrap_or_default();
         let consecutive_failures = match outcome {
             None => 0,
-            Some(_) => self
-                .metrics
-                .lock()
-                .ok()
-                .and_then(|m| m.get(&t.id).map(|p| p.consecutive_failures))
-                .unwrap_or(0)
-                .saturating_add(1),
+            Some(_) => prev.consecutive_failures.saturating_add(1),
+        };
+        // Work graph M13.1: a pass that skipped items, ok or not.
+        let consecutive_partial = if pass.failed == 0 {
+            0
+        } else {
+            prev.consecutive_partial.saturating_add(1)
         };
         let m = SyncMetrics {
             tracker_id: t.id,
             consecutive_failures,
+            items_failed: pass.failed as u64,
+            consecutive_partial,
+            last_item_error: (pass.failed > 0)
+                .then(|| pass.last_item_error.as_deref().map(metric_error))
+                .flatten(),
+            passes_total: prev.passes_total.saturating_add(1),
+            passes_failed_total: prev
+                .passes_failed_total
+                .saturating_add(u64::from(outcome.is_some())),
+            items_failed_total: prev.items_failed_total.saturating_add(pass.failed as u64),
             last_pass_at: Some(now),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             items_listed: pass.listed as u64,
@@ -428,8 +474,19 @@ impl TrackerSync {
             return Err(TrackerError::Unconfigured);
         }
         let provider = provider_for(t, cred, &self.net)?;
-        self.run_provider(t, provider.as_ref(), views, store, now, pass)
-            .await
+        let read = self
+            .run_provider(t, provider.as_ref(), views, store, now, pass)
+            .await;
+        // Write-back (M13.4e): after a pass that worked, with the same
+        // provider and credential. Its failures are per write, never the
+        // pass's.
+        if read.is_ok() && provider.caps().write {
+            let r = super::write_back::drain(t, provider.as_ref(), store, now).await;
+            if r != super::write_back::DrainReport::default() {
+                tracing::debug!(tracker = t.id, ?r, "[write-back] drained");
+            }
+        }
+        read
     }
 
     /// The pass proper, over the provider `run_tracker` built (tests hand
@@ -507,6 +564,11 @@ impl TrackerSync {
             let newest = items.iter().filter_map(|i| i.updated).max();
             let ids: Vec<String> = items.iter().map(|i| i.external_id.clone()).collect();
             let failed = self.store_items(t.id, items, store, &mut seen, pass)?;
+            if failed > 0 {
+                // Which view to look in (M13.1): the store's own line names
+                // the item, this one the listing it came from.
+                tracing::warn!(tracker_id = t.id, view = %v.view_id, failed, "[work] tracker sync: view skipped item(s); its watermark waits");
+            }
             // The token and the watermark move only once EVERY item they
             // stand for is safely stored: a batch with a per-item failure
             // leaves them where they are, so the next pass re-reads the

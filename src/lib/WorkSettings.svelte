@@ -41,6 +41,7 @@
   } from './trackers';
   import { hosts } from './hosts';
   import { hubStatus, hubBlock, ownsTheFleet } from './hub';
+  import WorkUsage from './WorkUsage.svelte';
   import { pushError, push } from './toasts';
   import OrgSettings from './OrgSettings.svelte';
 
@@ -215,6 +216,20 @@
     await loadTrackers();
   }
 
+  // --- Write-back (work graph M13.4e, D3): the PR remote link, per Jira
+  // tracker, off by default. The rest of the settings are kept as they are.
+  async function setWriteBack(t: TrackerRow, on: boolean) {
+    const u = await updateTracker(t.id, {
+      settings: { ...(t.settings ?? {}), write_back: { pr_remote_link: on } },
+    });
+    if (!u.ok) {
+      pushError(u.error, 'Saving write-back failed');
+      await loadTrackers();
+      return;
+    }
+    await loadTrackers();
+  }
+
   // --- Asana: which sections mean what (asked inline, not as a setup step).
   let sectionEdits = $state<Record<number, Record<string, string>>>({});
   function sectionValue(t: TrackerRow, section: string, fallback: string): string {
@@ -289,6 +304,12 @@
           <li class="hint" data-testid="tracker-metrics">
             {pass}{#if metrics[t.id]?.last_error}<span class="err" data-testid="tracker-metrics-error">
                 · {metrics[t.id].last_error}</span
+              >{/if}{#if (metrics[t.id]?.items_failed ?? 0) > 0 && metrics[t.id]?.last_item_error}<span
+                class="err"
+                data-testid="tracker-metrics-skipped"
+                title="The sync skips an item it cannot store and retries it every pass; the hub's log names the view."
+              >
+                · skipped: {metrics[t.id].last_item_error}</span
               >{/if}
           </li>
         {/if}
@@ -302,6 +323,19 @@
           <li class="hint">Log in to {t.site_url} in a browser once, then Test.</li>
         {:else if t.state === 'unreachable' && t.last_error}
           <li class="hint" data-testid="tracker-unreachable">{t.last_error}</li>
+        {/if}
+        {#if (t.provider === 'jira' || t.provider === 'jira_dc') && owns}
+          <li class="hint" data-testid="tracker-write-back">
+            <label class="toggle">
+              <input
+                type="checkbox"
+                data-testid="tracker-write-back-pr"
+                checked={t.settings?.write_back?.pr_remote_link === true}
+                onchange={(e) => void setWriteBack(t, (e.currentTarget as HTMLInputElement).checked)} />
+              Add a session's pull request to its ticket as a link (only for work you linked or
+              started; the token needs permission to edit issues)
+            </label>
+          </li>
         {/if}
         {#if t.provider === 'asana' && owns && sectionMapRows(t).length > 0 && !t.settings?.section_map_confirmed}
           <li class="sections" data-testid="asana-sections">
@@ -447,6 +481,7 @@
   {/if}
 
   <OrgSettings />
+  {#if owns}<WorkUsage />{/if}
 </section>
 
 <style>

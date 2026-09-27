@@ -191,7 +191,9 @@
     ],
     "Health.trackers.trackers": [
       "consecutive_failures",
+      "consecutive_partial",
       "health",
+      "items_failed",
       "last_error",
       "last_pass_at",
       "last_success_at",
@@ -199,8 +201,10 @@
       "org_id",
       "org_name",
       "provider",
+      "reason",
       "state",
-      "tracker_id"
+      "tracker_id",
+      "write_failures"
     ],
     "HostRow": [
       "account_uuid",
@@ -321,6 +325,7 @@
       "pending_input",
       "pr_url",
       "project_id",
+      "prompt_submit_seq",
       "reviews_session_id",
       "row_version",
       "safe_kill_detail",

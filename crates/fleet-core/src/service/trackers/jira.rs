@@ -31,7 +31,7 @@ pub use super::jira_common::{
 use super::jira_common::{check, current_sprint, is_key, key_in_path};
 use super::{
     map_transport, CallKind as Call, Caps, Fetched, Incremental, ItemRef, Page, RefCtx,
-    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
+    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp,
     NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
@@ -320,8 +320,24 @@ impl TrackerProvider for JiraCloud {
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
         }
+    }
+
+    async fn write(&self, op: &WriteOp) -> Result<(), TrackerError> {
+        let WriteOp::PrRemoteLink { key, url, title } = op;
+        if !super::jira_common::is_key(key) {
+            return Err(TrackerError::Invalid(format!("{key:?} is not a Jira key")));
+        }
+        let cred = self.cred.as_ref().ok_or(TrackerError::Unconfigured)?;
+        let req = Request::post_json(
+            self.url(&format!("/rest/api/3/issue/{key}/remotelink")),
+            &super::jira_common::pr_remote_link_body(url, title),
+        )
+        .header("Authorization", cred.authorization().expose());
+        let resp = self.transport.send(req).await.map_err(map_transport)?;
+        // 200 (updated) or 201 (created); the body is not needed.
+        check(&resp, Call::Other)
     }
 
     async fn probe(&self) -> Result<TrackerInfo, TrackerError> {

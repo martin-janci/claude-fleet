@@ -60,7 +60,8 @@ pub struct Spec {
 // ── keys ──
 pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
 /// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
-/// `tmux_server_gone`, with a `claude_session_id`) is kept before Phase 2
+/// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
+/// is kept before Phase 2
 /// hard-deletes it, counted from `lost_at` (when it was lost) — not extra
 /// time added on top of the usual one-cycle grace. Default 14 days. Wired
 /// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
@@ -200,6 +201,12 @@ pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
 /// (`work_link { source: agent_inferred }` — only ever a suggestion). Off by
 /// default: it spends context on a guess. Read on every prompt.
 pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
+/// The model a dead session's on-demand summary runs on (work graph M13.4c,
+/// decisions D10 / D27), on the session's own host and account. A choice of
+/// Claude Code's model aliases, never free text: it ends up in a command.
+pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
+/// The aliases [`WORK_SUMMARY_MODEL`] accepts.
+pub const SUMMARY_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -424,6 +431,11 @@ pub const SPECS: &[Spec] = &[
         key: WORK_CLASSIFY_NUDGE,
         default: "false",
         kind: Kind::Bool,
+    },
+    Spec {
+        key: WORK_SUMMARY_MODEL,
+        default: "haiku",
+        kind: Kind::Choice(SUMMARY_MODELS),
     },
     Spec {
         key: WORK_TIDY_DONE_DAYS,

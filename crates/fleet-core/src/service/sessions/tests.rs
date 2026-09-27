@@ -179,6 +179,7 @@ fn row(
     SessionRow {
         id,
         row_version: 0,
+        prompt_submit_seq: 0,
         tmux_name: tmux.into(),
         host_alias: host.into(),
         project_id,
@@ -741,6 +742,72 @@ fn interactive_agents_land_as_external_and_background_as_bg() {
         .expect("background agent row");
     assert_eq!(bg.kind, "bg");
     assert_eq!(bg.claude_status.as_deref(), Some("working"));
+}
+
+fn interactive(session_id: &str, name: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
+    crate::claude_agents::ClaudeAgentRow {
+        kind: crate::claude_agents::AgentKind::Interactive,
+        ..agent(session_id, name, None)
+    }
+}
+
+fn friendly_of(s: &Store, session_id: &str) -> Option<String> {
+    s.get_session(&format!("bg:{session_id}"), "local")
+        .unwrap()
+        .expect("agent row")
+        .friendly_name
+}
+
+#[test]
+fn an_external_row_is_labelled_with_the_name_claude_shows() {
+    let s = local_store();
+    let pass = |agents: &[crate::claude_agents::ClaudeAgentRow], t: i64| {
+        reconcile_agent_rows(&s, "local", &[], &[], agents, Some(&no_mtimes()), t, t).unwrap()
+    };
+    pass(&[interactive("ext-1", Some("  Release cut "))], 100);
+    assert_eq!(friendly_of(&s, "ext-1").as_deref(), Some("Release cut"));
+
+    // Claude Desktop retitles a session: the label follows.
+    pass(&[interactive("ext-1", Some("Release cut v0.3"))], 101);
+    assert_eq!(
+        friendly_of(&s, "ext-1").as_deref(),
+        Some("Release cut v0.3")
+    );
+
+    // A pass without a name (or a blank / control-char one) keeps the label.
+    pass(&[interactive("ext-1", None)], 102);
+    pass(&[interactive("ext-1", Some("   "))], 103);
+    pass(&[interactive("ext-1", Some("bad\u{1b}[2Jname"))], 104);
+    assert_eq!(
+        friendly_of(&s, "ext-1").as_deref(),
+        Some("Release cut v0.3")
+    );
+
+    // Capped to what `validate::friendly_name` accepts.
+    pass(&[interactive("ext-2", Some(&"x".repeat(200)))], 105);
+    assert_eq!(
+        friendly_of(&s, "ext-2").map(|n| n.chars().count()),
+        Some(80)
+    );
+}
+
+#[test]
+fn a_bg_row_is_not_labelled_from_the_agent_name() {
+    // fleet labels its own bg agents from the launch prompt; the `--name`
+    // it passed must not beat that label to the row.
+    let s = local_store();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &[agent("bg-1", Some("review-pr-42"), None)],
+        Some(&no_mtimes()),
+        100,
+        100,
+    )
+    .unwrap();
+    assert_eq!(friendly_of(&s, "bg-1"), None);
 }
 
 #[test]
@@ -5944,12 +6011,14 @@ fn an_unchanged_identity_is_not_written_again() {
     assert_eq!(s.get_host_identity("vps").unwrap().tmux_server_pid, Some(8));
 }
 
-/// Requirement 3 (ruling: fold `last_reconciled_at` into the upsert): a pass
-/// that observes exactly what the store holds bumps each live row's
-/// `row_version` once — the upsert's physical UPDATE — not a second time
-/// for a separate freshness stamp. The stamp itself still moves.
+/// A pass that observes exactly what the store holds leaves every live
+/// row's `row_version` where it was (migration 063: the counter moves only
+/// on a client-visible change), so a `fresh_for` snapshot of full rows can
+/// answer `unchanged` across an idle tick. The freshness stamp
+/// `last_reconciled_at` — not a `SessionRow` field, and the ghost guards'
+/// evidence — still moves every pass.
 #[test]
-fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
+fn an_unchanged_pass_leaves_each_row_version_alone() {
     let mut s = Store::open_in_memory().unwrap();
     s.upsert_host("vps").unwrap();
     let projects = s.list_projects().unwrap();
@@ -5969,8 +6038,8 @@ fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
     let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
     assert_eq!(
         [after[0] - before[0], after[1] - before[1]],
-        [1, 1],
-        "an unchanged pass bumps each row_version exactly once"
+        [0, 0],
+        "an unchanged pass must not bump any row_version"
     );
     let stamp: i64 = s
         .conn_for_test()
@@ -5984,6 +6053,49 @@ fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
         stamp >= probe.started_at,
         "the pass still stamps last_reconciled_at ({stamp} < {})",
         probe.started_at
+    );
+}
+
+/// The other half: a pass that changes a field a client sees (here
+/// `last_activity_at`, from tmux's `session_activity`) bumps that row's
+/// `row_version` exactly once — one physical UPDATE — and leaves the
+/// unchanged row beside it alone.
+#[test]
+fn a_pass_that_changes_a_visible_field_bumps_that_row_version_once() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a"), tmux_session("dev-b")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let before = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    let mut active = tmux_session("dev-a");
+    active.last_activity = 50;
+    let probe = vps_probe(
+        &s,
+        vec![active, tmux_session("dev-b")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    assert_eq!(
+        [after[0] - before[0], after[1] - before[1]],
+        [1, 0],
+        "only the row whose last_activity_at moved bumps, and by one"
+    );
+    assert_eq!(
+        s.get_session("dev-a", "vps")
+            .unwrap()
+            .unwrap()
+            .last_activity_at,
+        50
     );
 }
 

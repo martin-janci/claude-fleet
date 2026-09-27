@@ -81,7 +81,8 @@
     "update_org",
     "update_tracker",
     "work_retention_status",
-    "work_retention_sweep"
+    "work_retention_sweep",
+    "work_usage"
   ],
   "routed": [
     "archive_session_work",
@@ -150,6 +151,7 @@
     "spawn_review",
     "start_work",
     "start_work_multi",
+    "summarize_past_work",
     "tidy_apply",
     "unarchive_session_work",
     "unlink_session_work",

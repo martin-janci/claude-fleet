@@ -428,7 +428,13 @@ Index by area (names only; see the reference for details):
   (`owner/repo` list narrowing the owner scope), Asana `section_map`
   (section → `todo` | `in_progress` | `done`) and `section_map_confirmed`,
   Jira Data Center `extra_ca` (PEM) and `allow_private_network` (the site may
-  resolve to a loopback / link-local address, refused otherwise). Keys are
+  resolve to a loopback / link-local address, refused otherwise), and for
+  Jira (Cloud and Data Center) `write_back: { pr_remote_link }` (work graph
+  M13.4e, D3: off by default; with it on, a PR seen on a session a person
+  linked to one of the tracker's items is added to that item once as a
+  remote link, `globalId` `fleet:pr:<url>`, through an outbox drained by the
+  sync pass; `fleet_health.trackers[].write_failures` counts the writes
+  given up). `update` replaces the whole `settings` object. Keys are
   the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
   (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
   by URL); `lookup` and `start` take any of them, or the item's URL.
@@ -533,6 +539,23 @@ Index by area (names only; see the reference for details):
   stuck, without work, when a request is already pending (30 min), and for
   the operator's own session. Timeline: `handover_requested`,
   `handover_written`, `handover_missing`, `handover_send_failed`.
+  `work_link { action: "summarize", key, link_id }` (M13.4c, on demand only)
+  is the dead-session counterpart: a Claude-written summary of past work
+  `link_id` (an ended link of `key`, from `work { links }` or the resume
+  plan). One `claude -p --resume <id> --fork-session
+  --no-session-persistence --tools '' --strict-mcp-config` run on the
+  session's own host, in the directory its transcript recorded, with the
+  model `work.summary_model` names and fleet's hooks off. The answer is
+  redacted, capped at 4,000 characters, stored as that conversation's one
+  journal `summary` (asking again replaces it) and returned fenced as
+  untrusted in `summary`; the resume brief shows it after the agent
+  handover. `E_NO_TRANSCRIPT` when the transcript is gone or was purged,
+  `E_NOTFOUND` when its directory is gone, `E_CLAUDE_CLI` when `claude` is
+  missing or fails, `E_TIMEOUT` past 170 s, `E_EXISTS` while another
+  summary runs on that host, and `E_INVALID` when a live session still
+  holds the conversation (ask it for a `handover`). A per-host token may
+  summarise only its own host's past work in its org; the operator's
+  request waits for confirmation, and is refused on a hub.
   `work_link { action: "start", …, project_ids: [..] }` (M9.6) starts one
   ticket in several repositories at once — up to 8 — one sibling session
   per project, all on the same branch name (`slug(key + title)`, or the
@@ -561,8 +584,8 @@ Index by area (names only; see the reference for details):
   its own host's sessions inside its org — any other session answers as an
   unknown one — and sees (lists, renames) a local item only through a live
   link on its host's sessions or a past one whose session ran there, inside
-  its org; the count is of its host's sessions. The phone does not name
-  work (D20).
+  its org; the count is of its host's sessions. The phone names and
+  renames work with a full token (D20, fleet-mobile M13.4a).
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
