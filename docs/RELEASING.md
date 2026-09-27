@@ -60,7 +60,10 @@ generated from it.
    or if [CI is not green on `HEAD`](#the-ci-gate). When it pauses, open
    `CHANGELOG.md`, polish the generated section (the bullets are raw commit
    subjects), save, and press Enter — **that text becomes the release notes
-   verbatim**, so it is worth the minute.
+   verbatim**, so it is worth the minute. Notes written ahead of time under
+   an `## [Unreleased]` heading are not lost: the script gives that section
+   the version's header, keeps its text, and adds the generated bullets
+   after it (without one, it inserts a fresh section as before).
 
 4. Push the release commit and tag:
 

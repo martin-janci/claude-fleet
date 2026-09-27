@@ -773,21 +773,38 @@ Plan: `plans/2026-09-26-work-graph-m13-live-use.md`.
 **Value:** the roadmap matches `main`, partial sync failures are visible,
 and every open decision gets an answer backed by usage.
 
-**Status (2026-09-27, M14.0, verified at `main` `f10d0b92`):**
-- **On `main`:** M13.0; **M13.1** (partial sync failures, D25) #320;
-  **M13.2** (`work_admin { usage }`, D24) #323 / #324; **M13.4c** (D10)
-  and **M13.4e** (D3), built in #327 and fixed in #331 (M13.4c) and #332
-  (M13.4e), with their missing tests ported in #334.
-- **On fleet-mobile `main`:** **M13.4a** (D20, naming local work)
-  martin-janci/fleet-mobile#51 and **M13.4d** (D15, multi-start on the
-  phone) martin-janci/fleet-mobile#50.
-- **Removed:** M13.4f (webhook nudges, D13) reached `main` with #327 and was
-  removed in #330; D13 stays no.
-- **Open, waiting on the owner:** **M13.3** (triage of the owner's M10.3
-  run; no result in `docs/work-graph-acceptance.md` is filled yet),
-  **M13.4b** (D5: off until the remote SessionStart numbers are in) and
-  **M13.5** (the close-out). M14 does not absorb them (M14 plan, design
-  decision 7).
+**Status (2026-09-27): M13 is closed; the work graph is operating (D26).**
+- **M13.0** the truth pass: #319.
+- **M13.1** partial sync failures visible ("Sync skipping items", D25):
+  #320 / #324.
+- **M13.2** `work_admin { usage }` (D24): #323 / #324.
+- **M13.4** on the owner's yes (2026-09-27):
+  - **M13.4a** (D20): naming and renaming local work on the phone,
+    martin-janci/fleet-mobile#51;
+  - **M13.4c** (D10): summaries of dead sessions, on demand, #327, with
+    the no-hooks fix #331;
+  - **M13.4d** (D15): multi-start on the phone, martin-janci/fleet-mobile#50;
+  - **M13.4e** (D3): the PR remote link to Jira, #327, with #332 and #334;
+  - **M13.4f** (D13): built with #327 and removed by #330 (D13 stays no;
+    migration 064 drops its table).
+- **M13.5** close-out: this revision, and the next release's
+  `[Unreleased]` notes in `CHANGELOG.md`.
+
+### Operating (after M13)
+
+The work graph has no more milestones (D26), except M14, the Work view,
+by the owner's choice (D36). New work arrives as an issue,
+or as a small plan in `plans/` against `docs/work-graph.md`, and every change
+a user sees updates the guide in the same PR. Two items carry over from M13
+as open work, not as a milestone:
+
+- **The owner's acceptance run** (`docs/work-graph-acceptance.md`, M10.3).
+  Its triage is what M13.3 described: a blocker gets a PR with a regression
+  test, a major is fixed or ticketed, minor and docs findings go into one
+  PR, and the decisions table takes the run's evidence.
+- **D5**, the SessionStart context: it stays off until the remote numbers
+  from `scripts/measure-session-start.sh` are in; a yes is then M13.4b's
+  one-line default flip plus the guide's settings table.
 
 ### M14: the Work view
 
@@ -812,8 +829,10 @@ and rebased on `main`; it does not redesign it.
 - **M14.5** acceptance (Part R), the user guide, close-out.
 
 **Status (2026-09-27): planned; M14.0 done.** D31–D36 are answered (the
-table below). By D36, M14 is the last work-graph milestone; D26 applies
-after it.
+table below). M14 is the one milestone after M13's close-out, by the
+owner's choice (D36); D26's "operating" applies again once it is done. The
+two open items carried from M13 (the acceptance run, D5) stay where
+*Operating* puts them; M14 neither absorbs nor blocks them.
 
 ## Critical path and parallelism
 
@@ -833,8 +852,8 @@ M4, M5, M6, M7, M8 ─> M9 ─> M10 ─┬─> M11 ─┐
   sync metrics.
 - In M13, M13.0–M13.2 do not wait on anything; M13.3 waits on the owner's
   M10.3 run, and each M13.4 item on its decision's "yes".
-- M14 follows M13's builds but not its open items: M13.3, M13.4b and M13.5
-  do not block it. Its order is in the M14 plan (M14.1a first).
+- M14 follows M13's close-out; the two items M13 left open (the acceptance
+  run, D5) do not block it. Its order is in the M14 plan (M14.1a first).
 
 - M3 can start its transport spike and fixtures in parallel with M2.
 - M5's security boundary must land **before** a second org's tracker is
@@ -873,7 +892,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D23 | Per-org retention override (needs a migration)? (M12 plan) | now · later | **Later:** settings only (M12.3, #299); no migration |
 | D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2, **built** (#323 / #324) |
 | D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1, **built** (#320) |
-| D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | Yes (default); M13.5 |
+| D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | **Yes: operating since 2026-09-27** (M13.5). Issues and small plans, no milestones, except M14 (D36) |
 | D27 | Which model summarises a dead session, on whose quota? (M13.4c) | a small model · the session's configured model | `haiku` (`work.summary_model`: haiku / sonnet / opus), on the session's own host and account |
 | D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | **Moot**: D13 is no, and M13.4f was removed |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
@@ -1043,11 +1062,18 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   martin-janci/fleet-mobile#50). D5 stays off until the remote
   SessionStart numbers are in. M13.3 still waits on the run. D13 is set
   back to no with M13.4f's removal (#330).
+- 2026-09-27: **M13.5, close-out.** M13's status lists what landed and
+  where; the work graph is *operating* (D26), with the owner's acceptance
+  run and D5 carried as open work. `CHANGELOG.md` has an `[Unreleased]`
+  section naming what M13 changed for users, and `scripts/release.sh` now
+  turns that section into the release's own instead of stacking the
+  release above it.
 - 2026-09-27: **M14.0** (docs only; facts from `main` `f10d0b92` and its
   merge history). M14 (the Work view) added, with its plan and the design
   spec brought to `main`; D31–D36 added with the owner's answers. The M13
   status block corrected: M13.1 (#320) and M13.2 (#323 / #324) are on
   `main`, M13.4c / M13.4e with their fixes (#331, #332) and tests (#334),
-  M13.4a / M13.4d on fleet-mobile (#51, #50), M13.4f removed (#330); M13.3,
-  M13.4b and M13.5 are open. The M9 "not built" line no longer says D3 none
+  M13.4a / M13.4d on fleet-mobile (#51, #50), M13.4f removed (#330). (Merged
+  with M13.5's close-out, #337, whose M13 status block is kept: M13 is
+  closed, and the acceptance run and D5 are open work.) The M9 "not built" line no longer says D3 none
   and D10 off. D15, D20, D24 and D25 name their PRs.

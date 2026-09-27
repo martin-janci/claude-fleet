@@ -274,14 +274,16 @@ windows (`store/work_retention.rs`), trackers in `fleet_health` with a
 Reconnect Attention item, and the review of the decided-against list
 (`reviews/2026-09-26-work-graph-decisions-revisited.md`).
 M13 (live use, `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`)
-is mostly on `main`: M13.1 (partial sync failures, #320), M13.2
-(`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above; M13.4a (D20)
-and M13.4d (D15, multi-start) are on fleet-mobile (#51, #50). Open, waiting
-on the owner: M13.3 (the acceptance run's triage), M13.4b (D5) and M13.5
-(close-out). Open decisions are the roadmap's table, and a decision-gated
+is closed (M13.5, #337): M13.1 (partial sync failures, #320), M13.2
+(`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above are on
+`main`; M13.4a (D20) and M13.4d (D15, multi-start) are on fleet-mobile
+(#51, #50). The work graph is *operating* (D26): new work is issues and
+small plans. Two items stay open, waiting on the owner: the acceptance run
+and its triage (M13.3), and D5 (M13.4b). Open decisions are the roadmap's table, and a decision-gated
 feature starts only on the user's "yes".
 Work graph M14 (the Work view: org → group → task → every session, and a
-phone paired to one org) is planned, M14.0 done: plan
+phone paired to one org) is the one milestone after it (D36), planned,
+M14.0 done: plan
 `docs/superpowers/plans/2026-09-27-work-graph-m14-work-view.md`, design
 `docs/superpowers/specs/2026-09-27-work-view-design.md`.
 
