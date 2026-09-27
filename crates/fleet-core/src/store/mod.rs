@@ -8,6 +8,7 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+mod bench_work_link;
 mod catalog;
 mod clients;
 mod conversations;
@@ -46,6 +47,9 @@ mod work_retention;
 mod work_tidy;
 mod work_usage;
 
+pub use bench_work_link::{
+    BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow, BENCH_PERSON_SOURCES,
+};
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };

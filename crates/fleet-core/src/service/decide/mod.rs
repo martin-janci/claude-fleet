@@ -33,6 +33,8 @@
 //! No `.await` holds the store lock: the gate and the record each take it
 //! briefly; the call runs without it.
 
+#[cfg(feature = "nl-detect")]
+pub mod bench;
 pub mod jev;
 pub mod status_map;
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! `fleet-hub` — claude-fleet without the desktop app. See `docs/hub.md`.
 
+mod bench;
 mod census;
 mod config;
 mod decide;
@@ -305,7 +306,7 @@ async fn main() -> ExitCode {
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
-        Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env),
+        Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,

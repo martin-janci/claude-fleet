@@ -57,6 +57,13 @@ pub enum DecideCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Offline benchmarks of a use case (Jev evaluation phase 0): read-only
+    /// and offline unless `--provider jev` is given. See docs/decisions.md
+    /// → "Benchmarking work_link".
+    Bench {
+        #[command(subcommand)]
+        cmd: crate::bench::BenchCmd,
+    },
     /// The most recent decision runs, newest first: ids, words and numbers
     /// only.
     Runs {
@@ -192,12 +199,13 @@ fn run_line(r: &DecisionRunRow) -> String {
     )
 }
 
-pub fn run(
+pub async fn run(
     cmd: DecideCmd,
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
     match cmd {
+        DecideCmd::Bench { cmd } => return crate::bench::run(cmd, opts, env).await,
         DecideCmd::SetKey {
             from_env,
             reference,
@@ -415,8 +423,8 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn runs_takes_a_known_feature_and_a_bounded_limit() {
+    #[tokio::test]
+    async fn runs_takes_a_known_feature_and_a_bounded_limit() {
         assert!(matches!(
             parse(&["runs", "--feature", "work_link", "--limit", "5", "--json"]).unwrap(),
             DecideCmd::Runs {
@@ -427,11 +435,17 @@ mod tests {
         ));
         let opts = HubOptions::default();
         let env = HashMap::new();
-        let e = run(parse(&["runs", "--feature", "nope"]).unwrap(), &opts, &env).unwrap_err();
+        let e = run(parse(&["runs", "--feature", "nope"]).unwrap(), &opts, &env)
+            .await
+            .unwrap_err();
         assert!(e.contains("work_link"), "{e}");
-        let e = run(parse(&["runs", "--limit", "0"]).unwrap(), &opts, &env).unwrap_err();
+        let e = run(parse(&["runs", "--limit", "0"]).unwrap(), &opts, &env)
+            .await
+            .unwrap_err();
         assert!(e.contains("--limit"), "{e}");
-        let e = run(parse(&["status", "--days", "0"]).unwrap(), &opts, &env).unwrap_err();
+        let e = run(parse(&["status", "--days", "0"]).unwrap(), &opts, &env)
+            .await
+            .unwrap_err();
         assert!(e.contains("--days"), "{e}");
     }
 

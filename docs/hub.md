@@ -1282,6 +1282,27 @@ names `proposals` shows come from the trackers' stored config, never from
 the record. `tracker section-map` is a `work_admin update` over loopback
 (master token) that confirms the section map with your entries on top.
 
+The offline `work_link` benchmark (test map card J1, phase 0) measures a
+provider against the links people confirmed, before anything is turned on:
+
+```bash
+fleet-hub decide bench work-link                       # test split, none + bm25, read-only, offline
+fleet-hub decide bench work-link --split all --json
+fleet-hub decide bench work-link --export-unlinked 150 --out h.jsonl   # D39: a person labels it
+fleet-hub decide bench work-link --labels h.jsonl      # adds the labels as dataset H
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev --max-calls 200
+```
+
+Without `--provider jev` it opens the database read-only and sends
+nothing. With it, each case goes through the envelope's gate (so only
+orgs that consented, with the flag on and `decide.jev.work_link` at
+`shadow` or `assist`) and every call is recorded in `decision_runs`
+(subject `bench`), which is why that run opens the database for writing.
+It prints counts, rates, thresholds, latency and cost — never a prompt or a
+title; `--export-unlinked` writes the one file that holds text (`0600`,
+never over an existing file). What it measures and approximates:
+[`decisions.md`](decisions.md) → *Benchmarking work_link*.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
