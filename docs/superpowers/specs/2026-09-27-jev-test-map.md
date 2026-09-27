@@ -108,7 +108,9 @@ runs. Changing one after seeing results needs a new decision row.
   wrong".
 - **Abstention quality:** on cases whose truth is "none of these",
   abstentions ÷ cases.
-- **Calibration per cell:** ECE (10 bins) and Brier score. TypeSafe's own
+- **Calibration per cell:** ECE (10 equal-width bins) and Brier score of
+  the stated confidence against whether the answer was right **[built:
+  `bench::ece`, `bench::brier`, both benches]**. TypeSafe's own
   advice: thresholds do not carry across question types, and here also not
   across languages.
 - **Latency:** p50 and p95 measured on the hub, including the network.
@@ -138,7 +140,7 @@ runs. Changing one after seeing results needs a new decision row.
 | Acceptance (assist) | on the hand set: `done` precision ≥ 0.97; accuracy on answered ≥ 0.90 at coverage ≥ 0.60 of rule-abstained sections; beats haiku or ties it at < 1/10 of its latency |
 | Auto | never automatic: a proposal is applied only when a person confirms it (`work_admin update settings.section_map`) |
 | Rollback | set the mode to `off`; confirmed maps stay (they are the person's) |
-| Components | **[built]** the `service/decide` envelope; the probe keeps `config.unmapped_sections` and `config.project_sections` (`service/trackers/asana.rs`); the adapter `service/decide/status_map.rs` — `propose_for_tracker` (question `status_map.v1`, subject `tracker_section <tracker>:<HMAC section id>`, ≤ 40 asks a run, no re-ask within 14 days on the same fingerprint / version / mode / model), `StatusMapTrigger` after a clean sync pass (`spawn_tracker_sync`, at most daily per tracker, off the sync's path), `record_followups` in `work_admin update`; `fleet-hub decide proposals` (read-only) and `fleet-hub tracker section-map` to apply; the section map UI that exists. Tests: `service/decide/status_map_tests.rs` |
+| Components | **[built]** the `service/decide` envelope; the probe keeps `config.unmapped_sections` and `config.project_sections` (`service/trackers/asana.rs`); the adapter `service/decide/status_map.rs` — `propose_for_tracker` (question `status_map.v1`, subject `tracker_section <tracker>:<HMAC section id>`, ≤ 40 asks a run, no re-ask within 14 days on the same fingerprint / version / mode / model), `StatusMapTrigger` after a clean sync pass (`spawn_tracker_sync`, at most daily per tracker, off the sync's path), `record_followups` in `work_admin update`; `fleet-hub decide proposals` (read-only) and `fleet-hub tracker section-map` to apply; the section map UI that exists. Tests: `service/decide/status_map_tests.rs`. The phase-0 benchmark **[built]**: `fleet-core::service::decide::bench::status_map` — labeled sections (`--labels FILE`, or the synthetic fixture `service/testdata/decide/status_map_sections.jsonl`: 391 sections on 91 boards, en / sk / cs / de / mixed, 60 marked ambiguous, LLM-written per D43 and **not yet spot-checked by the owner**), normalised like the probe and asked with the adapter's own `status_map::question_for`; providers `none`, `todo`, `rule` (`infer_section`) and `jev` through `decide()` (`status_map.bench.v1`, subject `bench`, the adapter's floor; a fixture row has no org → `decide.jev.unassigned`); accuracy on answered, coverage, coverage where the rule abstains, `done` precision (applied and strict), confusion matrix, ECE / Brier, bootstrap CIs, by language and ambiguous / clear, and the acceptance above as PASS / FAIL / NOT JUDGED (`bench::Verdict`); `fleet-hub decide bench status-map`. Tests: `service/decide/bench/status_map_tests.rs` (the rule's numbers on the fixture are pinned). The haiku baseline (D33) **[proposed]** |
 | Kill | a `done` precision under 0.95 on any 100 consecutive proposals |
 
 ### J1 — choosing a work item for a session no rule linked (`work_link`)
@@ -158,7 +160,7 @@ runs. Changing one after seeing results needs a new decision row.
 | Acceptance (assist) | accuracy on answered ≥ 0.90 at coverage ≥ 0.40; ≥ 10 points above BM25 at equal coverage; not worse than haiku by more than 3 points; abstention quality ≥ 0.85; a language cell more than 10 points below English at equal coverage falls back |
 | Auto (pre-selection only) | accuracy on answered ≥ 0.97 at coverage ≥ 0.25, correction rate ≤ 3% over 200 assisted suggestions in that cell |
 | Rollback | mode `off`; suggestions made by it decay like any R6 suggestion |
-| Components | envelope; `work_link` adapter (after detection, off the hook path) **[proposed]**; the offline benchmark **[built]**: `fleet-core::service::decide::bench::work_link` (dataset A from `store::bench_work_link` — person-decided `manual`/`started` links; none-cases; the leakage guard `redact_prompt`; candidate recall incl. the nudge fence; time split; providers `none`, `bm25` (`bench::bm25`) and `jev` through `decide()` (`work_link.bench.v1`, subject `bench`); metrics, breakdown and bootstrap CIs), `fleet-hub decide bench work-link` with `--export-unlinked` / `--labels` for D39 (dataset H); the haiku baseline (D33) **[proposed]**; desktop chip / popover and the phone sheet show source `model`, confidence and the reason **[proposed]** |
+| Components | envelope; `work_link` adapter (after detection, off the hook path) **[proposed]**; the offline benchmark **[built]**: `fleet-core::service::decide::bench::work_link` (dataset A from `store::bench_work_link` — person-decided `manual`/`started` links; none-cases; the leakage guard `redact_prompt`; candidate recall incl. the nudge fence; time split; providers `none`, `bm25` (`bench::bm25`) and `jev` through `decide()` (`work_link.bench.v1`, subject `bench`); the question shape `--shape choice|choice+noul` (the Noul is a second call on the chosen item only, `work_link.bench.noul.v1`, kept above a dev-chosen threshold — the envelope sends one question per call); metrics, breakdown, bootstrap CIs, calibration (ECE / Brier per cell, `bench::Calibration`) and the acceptance above as PASS / FAIL / NOT JUDGED — Jev against BM25 at BM25's dev coverage (`EqualCoverage`) and the per-language-cell rule), `fleet-hub decide bench work-link` with `--export-unlinked` / `--labels` for D39 (dataset H); the haiku baseline (D33) **[proposed]**; desktop chip / popover and the phone sheet show source `model`, confidence and the reason **[proposed]** |
 | Kill | correction rate > 10% over 100 in a cell; any cross-org candidate reaching the model (a test and a runtime assertion) |
 
 ### J2 — outcome of a turn after Stop (hypothesis)
@@ -301,3 +303,8 @@ runs. Changing one after seeing results needs a new decision row.
   `--labels FILE`).
 - **The owner's J1 phase-0 run** on the real hub: recall first, then `bm25`,
   then `jev` for consenting orgs; the haiku baseline is still to build.
+- **The owner's J3 phase-0 run:** spot-check the synthetic section labels
+  (D43; `service/testdata/decide/status_map_sections.jsonl`), add the real
+  boards' sections, then `fleet-hub decide bench status-map --labels FILE
+  --provider rule --provider jev`. The order of the whole phase is the
+  checklist in `docs/decisions.md` → *How to run phase 0*.

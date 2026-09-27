@@ -228,6 +228,8 @@ fleet-hub decide clear-key
 fleet-hub decide status [--days 30] [--json]
 fleet-hub decide runs [--feature work_link] [--limit 50] [--json]
 fleet-hub decide proposals [--tracker ID] [--json]   # status_map, above
+fleet-hub decide bench status-map --fixture | --labels FILE [--provider none|todo|rule|jev ...]
+fleet-hub decide bench work-link [--split all] [--provider bm25 --provider jev] [--shape choice+noul]
 ```
 
 The key is never an argument (shell history, `ps`). `set-key` and
@@ -246,6 +248,7 @@ map's card J1, phase 0):
 
 ```bash
 fleet-hub decide bench work-link [--split dev|test|all] [--provider none|bm25|jev ...]
+                                 [--shape choice|choice+noul]
                                  [--days 365] [--org ID] [--max-cases N] [--max-calls 500]
                                  [--labels FILE] [--db FILE] [--json]
 fleet-hub decide bench work-link --export-unlinked 150 --out FILE
@@ -296,6 +299,18 @@ chosen on dev and applied to what is reported.
 
 The `claude -p haiku` baseline (D33) is not built yet.
 
+**Question shape** (`--shape`, Jev only). `choice` (the default) is the one
+Choice above. `choice+noul` is the test map's skill-suggestion pattern as
+the envelope allows it — one question per call: the same Choice, then, when
+it picked an item, **one Noul on that item only** ("does this session work
+on *title*?", version `work_link.bench.noul.v1`, subject
+`bench:<case>:noul`). The answer stands when the noul reaches a threshold
+chosen on dev (like BM25's: most right answers plus right abstentions) and
+is an abstention below it; that noul is then the score every other
+threshold uses. Both calls count against `--max-calls` (a case whose check
+no longer fits is skipped as `max_calls`), and a case's latency, tokens and
+cost are both calls together.
+
 **Metrics** (test map §4), per provider and dataset: accuracy on answered,
 coverage, coverage at precision 0.9 (the lowest threshold whose dev
 accuracy reaches 0.9 over at least 5 answers, applied to the reported
@@ -308,6 +323,37 @@ right item's title (`service::nl`), code density and candidate-set size. A
 cell under 5 cases shows as `<5` with no rates; a cell under 200 cases is
 marked *not judged* (test map §3).
 
+**Calibration** (Jev): ECE over 10 equal-width confidence bins and the
+Brier score of the Choice's confidence against whether its answer (an item,
+or `none`) was right, over every usable case, and per breakdown cell (the
+`ece` next to a cell's rates). With `choice+noul` the noul gets its own
+line (the noul against whether the chosen item was right). Under 5 answers
+neither number is shown.
+
+**Acceptance (card J1, when `jev` ran)**, per dataset, each line PASS, FAIL
+or NOT JUDGED:
+
+1. *Accuracy on answered ≥ 0.90 at coverage ≥ 0.40*, at the precision-0.9
+   point (threshold chosen on dev). FAIL when dev never reached 0.90.
+2. *≥ 10 points above BM25 at equal coverage.* BM25 answers at its abstain
+   threshold; its coverage on dev is the target, and Jev's confidence
+   threshold is the one whose dev coverage comes closest to it. Both are
+   applied to the reported cases and compared with a bootstrap interval
+   (the `at bm25's coverage` line).
+3. *Not worse than `claude -p haiku` by more than 3 points* — NOT JUDGED:
+   the baseline is not built.
+4. *Abstention quality ≥ 0.85* on none-cases, at Jev's operating point
+   (with `choice`, its own `none`; with `choice+noul`, the noul threshold).
+
+The overall verdict is over these four (so it is NOT JUDGED until the
+haiku baseline exists, unless one fails). Then **one line per language
+cell** (prompt × truth title): the cell at Jev's operating point against
+`en×en` thresholded to the same coverage; more than 10 points below
+English **falls back** (FAIL), otherwise it keeps (PASS). Anything with
+fewer than 200 cases — the dataset, the none-cases, a cell or the English
+cell — is NOT JUDGED. The thresholds of 1–2 need Jev's dev answers: run
+`--split all` (the note says so otherwise).
+
 **Hand labels (D39, dataset H).** `--export-unlinked N --out FILE` writes N
 sessions with a first prompt and no confirmed or suggested link, spread over
 the window, one JSON line each: the redacted prompt, the candidates (ids and
@@ -317,3 +363,115 @@ its own (a label naming an item outside the row's candidates is counted as a
 recall miss). **The file holds prompt and title text**: it is created
 `0600`, never over an existing file, and stays on the machine. The report
 itself never holds a prompt or a title.
+
+## Benchmarking status_map
+
+Before `status_map` is put in `shadow` for an org, it is measured offline
+(the test map's card J3, phase 0):
+
+```bash
+fleet-hub decide bench status-map --fixture                     # the built-in synthetic set
+fleet-hub decide bench status-map --labels sections.jsonl       # the owner's hand set
+fleet-hub decide bench status-map --fixture --provider rule --provider jev [--max-calls 500] [--db FILE] [--json]
+```
+
+**The cases** are labeled sections, one JSON line each:
+
+```json
+{"section": "Čaká na klienta", "project_sections": ["Nové", "V riešení", "Čaká na klienta", "Hotovo"],
+ "expect": "in_progress", "lang": "sk", "note": "ambiguous: started, waiting on the client", "org_id": 2}
+```
+
+`expect` is `todo`, `in_progress`, `done` or `not_planned`; `lang` is `en`,
+`sk`, `cs`, `de` or `mixed`; a `note` containing `ambiguous` marks a case a
+reasonable person could label otherwise, reported apart; `org_id` (optional)
+is the org whose consent a Jev call needs. Names are normalised as the
+probe stores them (trimmed, lower case; the board de-duplicated), and the
+Jev request is **the adapter's own** (`status_map::question_for`: the
+section and at most 30 board names), so the benchmark measures what
+`shadow` would send.
+
+> **The built-in set is synthetic.** `--fixture` reads
+> `crates/fleet-core/src/service/testdata/decide/status_map_sections.jsonl`:
+> 391 sections on 91 plausible boards — plain English boards, Slovak, Czech
+> and German ones with and without diacritics (`Rozpracované` /
+> `Rozpracovane`, `V řešení` / `V reseni`, `Prüfung` / `Pruefung`), emoji
+> prefixes (`🚀 Shipped`, `🧊 Icebox`), jokey names (`Parking lot`,
+> `Graveyard`, `Victory lap`), names that trap the keyword rule (`Not
+> started`, `Almost done`, `Abandoned`, `To be released`) and vague names
+> whose meaning depends on where they sit (`Ready` before *In progress* vs
+> after *Review*; `Next` or `Waiting` after *Done*). It was **written by an
+> LLM (decision D43) and has not been spot-checked by the owner yet**; 60
+> labels are marked ambiguous. Its verdicts are indicative: the card's gate
+> is the owner's hand set (`--labels`). It has no `org_id`, so a Jev run on
+> it is consented by `decide.jev.unassigned`, not by an org.
+
+**Providers.**
+
+| Provider | What it does |
+|---|---|
+| `none` | Always abstains. |
+| `todo` | Always `todo`: what fleet does today with a section the rule cannot classify. |
+| `rule` | The keyword rule `infer_section` (progress / doing / review / wip / started / active / testing / qa → in progress; done / shipped / complete / released / closed → done); abstains where it says nothing. |
+| `jev` | One Choice through the envelope — question version `status_map.bench.v1`, subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent. At most `--max-calls` calls. |
+
+Without `--provider jev` no database is opened at all. With it, the hub's
+database (or `--db FILE`) is opened for writing: it holds the gate's
+settings, and every call is recorded in `decision_runs`. No threshold is
+tuned on the set — the rule is fixed and Jev runs at the adapter's floor —
+so there is no dev/test split.
+
+**Metrics** per provider: accuracy on answered and coverage over every case,
+and the same **where the rule abstains** (the sections that today silently
+count as to do); accuracy with `not_planned` counted as `done` (as a section
+map stores it); **`done` precision** — of the answers that apply as done
+(`done` or `not_planned`), the share labeled so — which is the card's
+headline, since a wrong `done` hides live work (a strict column counts
+`done` alone); the confusion matrix (label → answer or abstain); ECE (10
+bins) and Brier over every category answer Jev gave with a confidence
+(under the floor included, `unsure` not); latency, tokens and cost.
+Differences in accuracy on answered between providers come with the same
+bootstrap interval as J1's, over all cases and (between providers that
+answer there) where the rule abstains. The breakdown is by language and by
+clear / ambiguous label; a cell under 200 cases is *not judged*.
+
+On the built-in set the rule answers 74 of 391 (accuracy 0.892) and
+abstains on 317; its `done` precision is 0.935 over 31 answers ("almost
+done" and "to be released" are live work). A test pins these numbers.
+
+**Acceptance (card J3)**, per provider that answers, each PASS, FAIL or NOT
+JUDGED (under 200 usable cases): `done` precision ≥ 0.97; accuracy on
+answered ≥ 0.90 where the rule abstains; coverage ≥ 0.60 of those sections;
+and "beats `claude -p haiku` or ties it at under 1/10 of its latency",
+NOT JUDGED until that baseline exists — so the overall verdict is NOT
+JUDGED at best, and FAIL if any measured line fails.
+
+## How to run phase 0
+
+A checklist for the owner, on the hub, before any feature leaves `off`:
+
+1. **Census** — which languages the prompts and titles are in, so the cells
+   are known: `fleet-hub census languages [--days 90] [--org ID]`.
+2. **Labels** — the hand sets the cards are judged on:
+   - J3: write (or correct) the section labels —
+     start from the built-in set, spot-check its `expect` and `note`
+     columns, and add your own boards' sections with their `org_id`;
+   - J1: `fleet-hub decide bench work-link --export-unlinked 150 --out
+     h.jsonl`, set each `label` (D39).
+3. **Offline baselines** (nothing sent):
+   `fleet-hub decide bench status-map --labels sections.jsonl` and
+   `fleet-hub decide bench work-link --split all --labels h.jsonl`.
+4. **Jev, gated** — the key (`fleet-hub decide set-key`), the kill switch
+   on, the feature's mode `shadow`, and consent for the orgs to be measured
+   (`fleet-hub org set <id> --jev on`; `decide.jev.unassigned` for rows
+   with no org). Then add `--provider jev` to the same commands (J1 with
+   `--split all`, and once more with `--shape choice+noul`); `--max-calls`
+   bounds the spend, `fleet-hub decide status` shows it.
+5. **Read the acceptance lines** of each report: PASS / FAIL / NOT JUDGED
+   against the thresholds registered in the test map, the calibration, and
+   the per-language cells (a cell that falls back stays off for that
+   language). A threshold changes only with a new decision row.
+6. **Shadow per org** — only for a card that passed: keep
+   `decide.jev.<feature>` at `shadow`, consent only the orgs whose cells
+   passed, and leave the rest off. Assist comes after shadow's own exit
+   criteria (test map §2).
