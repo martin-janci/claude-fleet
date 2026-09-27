@@ -175,6 +175,7 @@ const SOURCE_LABEL: Record<string, string> = {
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
+  agent_started: 'started for it by Claude',
   resumed: 'resumed',
   forked: 'forked',
   inherited: 'inherited',

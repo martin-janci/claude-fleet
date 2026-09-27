@@ -86,9 +86,12 @@ confirmation or rejection made through a per-host token (the host's own
 Claude) or by the operator (the agent panel's session) is recorded with
 source `agent`, even if it passes `source: manual`; one made from the
 desktop, the master token or a paired phone is recorded as yours
-(`manual`). An agent's confirmation therefore never counts as yours: it
-does not count toward a project's automatic trust, it is not written back
-to a tracker, and the usage summary counts it apart. When an agent
+(`manual`). The same holds for **Name this work…** (an agent's naming
+records `agent`) and for a ticket **start** (an agent's start records
+`agent_started`, a person's `started`). An agent's confirmation or start
+therefore never counts as yours: it does not count toward a project's
+automatic trust, it is not written back to a tracker, and the usage
+summary counts it apart. When an agent
 decides the same way you already did, your decision is kept.
 
 ### Detection
@@ -256,8 +259,8 @@ transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
-  suggestion, and a link or confirmation an agent made (`agent`) never
-  write.
+  suggestion, and a link, confirmation or ticket start an agent made
+  (`agent` / `agent_started`) never write.
 - **Only your own org's tracker.** A session in one org never writes to
   another org's tracker, even a link made with `force_cross_org`; the org is
   checked again just before sending.
@@ -335,7 +338,9 @@ knocking).
 
 A ticket start picks the project where that key's prefix last ran (asks
 when it is ambiguous), creates the branch and worktree `slug(key + title)`,
-names the session `KEY title` and links it with source `started`. With
+names the session `KEY title` and links it with source `started`
+(`agent_started` when an agent — a per-host token or the operator —
+started it: the same start, but not your decision). With
 **Brief Claude** on (the default), the ticket's context, its description
 fenced as untrusted, rides the first hook's context, and a short start
 prompt is typed only once Claude's REPL is ready, never into a trust
@@ -615,7 +620,7 @@ title, key, path or error text.
 
 | Group | What it counts |
 |---|---|
-| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, `agent`, …); a suggestion a person decided reads `manual`, one an agent decided `agent` |
+| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, `agent`, `agent_started`, …); a suggestion a person decided reads `manual`, one an agent decided `agent`; a ticket an agent started reads `agent_started` |
 | detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
 | handover | handovers requested and written, turns that ended without one, requests that could not be sent |
 | resume | resumes, with and without a brief |

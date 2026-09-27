@@ -129,7 +129,7 @@ a tier the most recent decision. Nothing is learned.
 | Rule | Condition | Outcome |
 |---|---|---|
 | R1 | a person's `confirmed` / `rejected` decision | final: the resolver never changes it |
-| R2 | `explicit` (`started`, `agent`, and fleet's carries `resumed` / `forked` / `inherited`) | confirmed (written by those paths, not the resolver) |
+| R2 | `explicit` (`started`, `agent`, `agent_started`, and fleet's carries `resumed` / `forked` / `inherited`) | confirmed (written by those paths, not the resolver) |
 | R3 | exactly one strong STATE candidate (branch key, PR head key, PR closing ref) in a trusted project | confirmed, auto (source `branch` / `pr`), Undo toast |
 | R3b | the same in an untrusted project | a pre-selected suggestion |
 | R3u | the same, but no tracker can resolve it (a GitHub `owner/repo#n` closing ref before a GitHub tracker exists, M6) | a pre-selected suggestion, even in a trusted project |

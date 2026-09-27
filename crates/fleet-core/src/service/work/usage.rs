@@ -29,6 +29,7 @@ pub const KNOWN_SOURCES: &[&str] = &[
     "manual",
     "started",
     "agent",
+    "agent_started",
     "branch",
     "pr",
     "trailer",

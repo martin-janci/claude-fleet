@@ -386,7 +386,7 @@ Index by area (names only; see the reference for details):
   suggestion (with `suggestions`, the count), kept apart so a guess never
   groups a session. A branch or PR change ends the automatic link it made
   (`end_reason` `branch_changed` | `pr_changed`, snapshotted as past work);
-  manual, `started` and `agent` links are never ended by it, and a rejected
+  manual, `started`, `agent` and `agent_started` links are never ended by it, and a rejected
   (session, target) pair is never proposed again. Decide with `work_link
   { session_id, action: "confirm", link_id }` or `{ action: "reject",
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
@@ -452,7 +452,8 @@ Index by area (names only; see the reference for details):
   it — jump, do not start a second); the project defaults to where that key
   prefix last ran (else `E_AMBIGUOUS` with candidates), the host likewise;
   the worktree is `slug(key + title)`, the session's name `KEY title`, and it
-  is linked `started`. With a brief, the ticket's context (its description
+  is linked `started` (`agent_started` for a per-host token or the operator).
+  With a brief, the ticket's context (its description
   fenced as untrusted) rides the first hook's `additionalContext` and a short
   start prompt is typed only into a ready REPL. A per-host token reads,
   looks up and starts only tickets linked to sessions on its own host, and

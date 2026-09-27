@@ -11,7 +11,7 @@
 //! | Rule | Condition | Outcome |
 //! |---|---|---|
 //! | R1 | a person's `confirmed` / `rejected` decision | final: never touched |
-//! | R2 | `explicit` (`started`, `agent`, carried links) | confirmed (not made here) |
+//! | R2 | `explicit` (`started`, `agent`, `agent_started`, carried links) | confirmed (not made here) |
 //! | R3 | exactly one strong state candidate, trusted project | confirmed, auto |
 //! | R3b | the same, untrusted project | a pre-selected suggestion |
 //! | R3u | the same, but no tracker can resolve it (`owner/repo#n` without a GitHub tracker) | a pre-selected suggestion, even when trusted |

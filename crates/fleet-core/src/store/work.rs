@@ -19,22 +19,27 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
 /// Why a link exists, as far as this slice can set it. Detection sources
-/// (branch, pr, url, prompt …) arrive with roadmap M4.
-pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent"];
+/// (branch, pr, url, prompt …) arrive with roadmap M4. `agent_started` is
+/// a ticket start an agent made (D34): the same start as `started`, but
+/// not a person's decision.
+pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent", "agent_started"];
 
 /// The sources that record a PERSON's decision: `manual` (a person linked,
 /// confirmed or rejected it) and `started` (a person started the session
-/// for it). Every other source is fleet's or an agent's. Only a person may
-/// overturn a person's rejection.
+/// for it). Every other source is fleet's or an agent's (`agent`,
+/// `agent_started`). Only a person may overturn a person's rejection, and
+/// only these count as a person's in usage, auto-trust and write-back.
 pub const PERSON_SOURCES: &[&str] = &["manual", "started"];
 
 /// Who makes a link decision. The decider, not what a caller claims,
 /// decides the `source` a decision records: work-link labels must say
-/// whether a person or an agent decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// whether a person or an agent decided. The default is a person: the
+/// desktop's commands are always a person's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Decider {
     /// A person: the desktop, the master token, a paired person's client.
     /// Records `manual`.
+    #[default]
     Person,
     /// An agent: a per-host token (the host's own Claude) or the operator
     /// (the UX agent's client). Records `agent`.
@@ -47,6 +52,16 @@ impl Decider {
         match self {
             Decider::Person => "manual",
             Decider::Agent => "agent",
+        }
+    }
+
+    /// The `source` a ticket start by this decider records: `started` for
+    /// a person, `agent_started` for an agent — the same start, but never a
+    /// person's decision (usage, auto-trust, write-back).
+    pub fn start_source(self) -> &'static str {
+        match self {
+            Decider::Person => "started",
+            Decider::Agent => "agent_started",
         }
     }
 }
@@ -770,9 +785,10 @@ impl Store {
     }
 
     /// Say that `session_id` works on `target`; it becomes the session's
-    /// primary work. `source`: `manual` (a person), `started` (the session
-    /// was created for it), `agent` (the in-session agent declared it). An
-    /// `agent` link never overturns a person's rejection of the same target
+    /// primary work. `source`: `manual` (a person), `started` (a person
+    /// created the session for it), `agent` (an agent declared it),
+    /// `agent_started` (an agent created the session for it). An agent's
+    /// link never overturns a person's rejection of the same target
     /// (`E_FORBIDDEN`).
     pub fn link_session_work(
         &self,

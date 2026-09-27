@@ -441,9 +441,20 @@ pub fn lookup_reference(args: &WorkArgs) -> Result<&str, IpcError> {
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "lookup needs key or url"))
 }
 
-/// The start half of [`WorkLinkArgs`] (work graph M3.4).
+/// The start half of [`WorkLinkArgs`] (work graph M3.4): a PERSON's start
+/// (the desktop's); an agent's goes through [`start_args_as`].
 pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::StartArgs {
+    start_args_as(args, Decider::Person)
+}
+
+/// [`start_args`] started by `decider`, which decides the link's source:
+/// `started` for a person, `agent_started` for an agent (D34).
+pub fn start_args_as(
+    args: &WorkLinkArgs,
+    decider: Decider,
+) -> crate::service::trackers::tickets::StartArgs {
     crate::service::trackers::tickets::StartArgs {
+        decider,
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,

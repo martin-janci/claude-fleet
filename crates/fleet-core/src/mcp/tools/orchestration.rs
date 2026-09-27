@@ -798,10 +798,13 @@ impl FleetTools {
             // a local item. The host and org fences are inside, and answer
             // another host's session as an unknown one (no existence oracle),
             // so the session is not resolved through the host gate here.
+            // The caller decides whose link it is (D34): an agent's reads
+            // `agent`, never a person's `manual`.
             use crate::service::work::local;
             return match (args.session_id, args.item_id) {
                 (Some(_), None) => ok_json(
-                    &local::name_session_work(&args, &self.store, &scope).map_err(to_mcp_err)?,
+                    &local::name_session_work_as(&args, &self.store, &scope, caller.work_decider())
+                        .map_err(to_mcp_err)?,
                 ),
                 (None, Some(_)) => ok_json(
                     &local::rename_local_item(&args, &self.store, &scope).map_err(to_mcp_err)?,
@@ -851,13 +854,15 @@ impl FleetTools {
             return ok_json(&report);
         }
         if args.action == "start" {
+            // The caller decides whose start it is (D34): an agent's links
+            // `agent_started`, never a person's `started`.
             if let Some(ids) = multi.as_deref() {
                 // Work graph M9.6: one sibling per repository, same branch.
                 let out = crate::service::trackers::tickets::start_work_many(
                     &self.store,
                     &self.ssh,
                     &self.reg,
-                    &crate::service::work::start_args(&args),
+                    &crate::service::work::start_args_as(&args, caller.work_decider()),
                     ids,
                     &scope,
                     &crate::service::trackers::default_net(),
@@ -872,7 +877,7 @@ impl FleetTools {
                 &self.store,
                 &self.ssh,
                 &self.reg,
-                &crate::service::work::start_args(&args),
+                &crate::service::work::start_args_as(&args, caller.work_decider()),
                 &scope,
                 &crate::service::trackers::default_net(),
             )
