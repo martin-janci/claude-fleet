@@ -665,7 +665,9 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - **M10.3** the written acceptance: #313 (below).
 - **M10.4** as above: #278.
 - **M10.5** Today, *Share standup* and the ticket card on the phone:
-  martin-janci/fleet-mobile#36.
+  martin-janci/fleet-mobile#36; the card on the session's work sheet with
+  *Copy* (never *Send*), and the org colour bar on rows:
+  martin-janci/fleet-mobile#48.
 - **M10.6** replay-ring pressure measured
   (`reviews/2026-09-25-replay-ring-pressure.md`), `session:updated` for a
   tracker item only when the row shows the change: #280. The first-sync
@@ -970,3 +972,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   every row; D16 corrected (the work-graph leg runs in CI since #314); D14
   corrected (#273 was closed; M4.6 reached `main` with #270). The critical
   path covers M9–M13.
+- 2026-09-27: M10.5 finished in fleet-mobile (martin-janci/fleet-mobile#48):
+  the ticket card on the session's work sheet (`work card`, read-only, any
+  token), *Copy* on every card, and the org colour bar on session rows
+  when two or more orgs show. No hub change, no contract bump.

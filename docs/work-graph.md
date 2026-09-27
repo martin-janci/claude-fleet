@@ -563,7 +563,7 @@ token:
 - **Today** with *Copy standup*, and the ticket card with its acceptance
   criteria, **read-only** (decision D15): the card offers *Copy*, never
   *Send*;
-- org labels and an org filter.
+- org labels, an org filter and each row's org colour bar.
 
 What stays on the desktop: multi-start (D15), naming or renaming local work
 (D20), tracker and org administration, and retention. A **readonly** token
