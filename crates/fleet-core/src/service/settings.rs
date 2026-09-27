@@ -75,6 +75,10 @@ pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
 pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
+/// Recreates the `oom` playbook may run on one session per 24 h
+/// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
+/// recreate while keeping the refusals on the timeline.
+pub const PLAYBOOK_OOM_MAX_ATTEMPTS: &str = "playbooks.oom_max_attempts";
 pub const GC_ENABLED: &str = "gc.enabled";
 pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
@@ -260,6 +264,11 @@ pub const SPECS: &[Spec] = &[
         key: PLAYBOOK_OOM_RECREATE,
         default: "false",
         kind: Kind::Bool,
+    },
+    Spec {
+        key: PLAYBOOK_OOM_MAX_ATTEMPTS,
+        default: "2",
+        kind: Kind::Int { min: 0, max: 20 },
     },
     Spec {
         key: GC_ENABLED,

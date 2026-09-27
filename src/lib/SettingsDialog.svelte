@@ -856,6 +856,16 @@
           onchange={() => toggleSetting(SETTING_KEYS.playbookOomRecreate)} />
         Recreate sessions that ran out of memory (at most once per hour)
       </label>
+      <div class="mcp-field">
+        <label class="lbl" for="playbook-oom-max-attempts">oom budget</label>
+        <input class="port" id="playbook-oom-max-attempts" type="number" min="0" max="20" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.playbookOomMaxAttempts)}
+          disabled={automationBusy}
+          aria-describedby="playbook-oom-max-attempts-desc"
+          data-testid="playbook-oom-max-attempts"
+          onchange={(e) => onSecsChange(SETTING_KEYS.playbookOomMaxAttempts, e)} />
+        <span class="hook-desc" id="playbook-oom-max-attempts-desc">recreates one session may get per 24 h (0 = never); a session that is working, or finished a turn after the flag, is never recreated</span>
+      </div>
       <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
 
       <label class="toggle gc-toggle">

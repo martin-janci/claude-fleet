@@ -447,9 +447,14 @@ impl Store {
                stuck_kind={new_stuck},
                -- stuck_since: keep the episode start while the kind is
                -- unchanged, restart it when the kind changes, clear when the
-               -- flag clears.
+               -- flag clears. An `oom` flag re-appearing within the recreate
+               -- spacing (?24) of the playbook's last action is `--resume`
+               -- re-rendering the text that action was for: the episode
+               -- continues, anchored on that action (F1).
                stuck_since=CASE WHEN ({new_stuck}) IS NULL THEN NULL
                                 WHEN ({new_stuck}) IS stuck_kind THEN COALESCE(stuck_since, ?19)
+                                WHEN ({new_stuck}) = 'oom' AND last_playbook_at IS NOT NULL
+                                     AND ?19 - last_playbook_at < ?24 THEN last_playbook_at
                                 ELSE ?19 END,
                idle_since={idle},
                pending_input={new_pending},
@@ -495,7 +500,8 @@ impl Store {
                 probe_started_at,
                 tmux_pane_id,
                 pending_input,
-                reconciled_at
+                reconciled_at,
+                crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -1923,6 +1929,44 @@ mod tests {
         // … and a different kind later starts a new episode.
         let r = reconcile_one(&mut s, "a", Some("blocked"), Some("oom"), None);
         assert!(r.stuck_since.is_some());
+    }
+
+    /// F1: `claude --resume` re-renders the last messages, so the `oom`
+    /// text the playbook recreated the session for comes straight back.
+    /// Today that is a NEW episode (`stuck_since` restarts on NULL → oom)
+    /// and only the 1 h spacing stands between two recreates. A re-fire
+    /// within that spacing of the playbook's last action is the same
+    /// episode, anchored on that action, so the planner's "already acted on
+    /// this episode" rule holds. `press_enter` keeps today's rule.
+    #[test]
+    fn an_oom_refire_within_the_recreate_spacing_continues_the_episode() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("oom"), None);
+        let acted = now_unix() - 100;
+        s.mark_playbook_applied(r.id, acted, "oom:recreate")
+            .unwrap();
+        // The fresh pane read clean …
+        let r = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        assert_eq!(r.stuck_since, None);
+        // … then `--resume` painted the word again.
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("oom"), None);
+        assert_eq!(
+            r.stuck_since,
+            Some(acted),
+            "the episode is the recreate's, not a new one"
+        );
+        assert!(r.last_playbook_at.unwrap() >= r.stuck_since.unwrap());
+
+        let p = reconcile_one(&mut s, "b", Some("blocked"), Some("press_enter"), None);
+        s.mark_playbook_applied(p.id, now_unix() - 100, "press_enter:press_enter")
+            .unwrap();
+        reconcile_one(&mut s, "b", Some("idle"), None, None);
+        let p = reconcile_one(&mut s, "b", Some("blocked"), Some("press_enter"), None);
+        assert!(
+            p.stuck_since.unwrap() > now_unix() - 100,
+            "a second Enter prompt is a new episode"
+        );
     }
 
     #[test]

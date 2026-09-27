@@ -998,6 +998,22 @@ impl Store {
         self.emit_session(id)
     }
 
+    /// How many times the `oom` playbook recreated session `id` — or tried
+    /// and failed — since `since`: `playbook_applied` rows whose detail is
+    /// exactly `oom:recreate` or starts with `oom:recreate:failed:`. A
+    /// refusal (`…:skipped:…`) is not an attempt.
+    pub fn count_oom_recreates_since(&self, id: i64, since: i64) -> Result<u32, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events \
+                 WHERE session_id = ?1 AND kind = 'playbook_applied' AND at >= ?2 \
+                   AND (detail = 'oom:recreate' OR detail LIKE 'oom:recreate:failed:%')",
+                rusqlite::params![id, since],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u32)
+    }
+
     /// Carry the row `(host_alias, old)` over to `new` after fleet renamed its
     /// tmux session (`rename_session`). Returns the renamed row, or `None`
     /// when no row held `old`.
@@ -3336,6 +3352,25 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("oom:recreate")));
+    }
+
+    #[test]
+    fn count_oom_recreates_since_counts_recreates_and_failures_not_refusals() {
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        for detail in [
+            "oom:recreate",
+            "oom:recreate:failed:boom",
+            "oom:recreate:skipped:working",
+            "press_enter:press_enter",
+        ] {
+            s.mark_playbook_applied(id, 100, detail).unwrap();
+        }
+        let now = now_unix();
+        assert_eq!(s.count_oom_recreates_since(id, now - 60).unwrap(), 2);
+        assert_eq!(s.count_oom_recreates_since(id, now + 60).unwrap(), 0);
     }
 
     // ---- hook writes: SessionEnd / StopFailure / Notification ----
