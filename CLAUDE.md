@@ -243,13 +243,13 @@ M13.4e, M13.4c and M13.4a of M13. D13 stays no: its build (M13.4f) reached
 `main` and was removed again (migration 062 stays, 064 drops its table;
 build notes:
 `docs/superpowers/plans/2026-09-26-work-graph-m13-decided-yes.md`).
-M13.4c (D10) is built on `claude/cloud-fleet-work-graph-m13`:
+M13.4c (D10) is landed (#327, fixed in #331):
 `work_link { action: summarize }`, on demand only, one tool-less
 print-mode fork on the session's own host (`service/work/summary.rs`,
 `work.summary_model`), stored as a journal `summary` and fenced in the
 brief.
-M13.4e (D3) is built there too: the PR remote link on Jira only, per
-tracker `settings.write_back.pr_remote_link` (off), queued by the PR probe
+M13.4e (D3) is landed too (#327, fixed in #332; tests #334): the PR
+remote link on Jira only, per tracker `settings.write_back.pr_remote_link` (off), queued by the PR probe
 for `manual` / `started` confirmed links in the tracker's own org, through
 the outbox `tracker_writes` (migration 061) drained by the sync pass
 (`service/trackers/write_back.rs`, `TrackerProvider::write`).
@@ -273,9 +273,19 @@ downgrade guard (`store::testgen`), the scale fixture and budget tests
 windows (`store/work_retention.rs`), trackers in `fleet_health` with a
 Reconnect Attention item, and the review of the decided-against list
 (`reviews/2026-09-26-work-graph-decisions-revisited.md`).
-M13 (live use) is next: `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`;
-open decisions are the roadmap's table, and a decision-gated feature starts
-only on the user's "yes".
+M13 (live use, `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`)
+is closed (M13.5, #337): M13.1 (partial sync failures, #320), M13.2
+(`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above are on
+`main`; M13.4a (D20) and M13.4d (D15, multi-start) are on fleet-mobile
+(#51, #50). The work graph is *operating* (D26): new work is issues and
+small plans. Two items stay open, waiting on the owner: the acceptance run
+and its triage (M13.3), and D5 (M13.4b). Open decisions are the roadmap's table, and a decision-gated
+feature starts only on the user's "yes".
+Work graph M14 (the Work view: org → group → task → every session, and a
+phone paired to one org) is the one milestone after it (D36), planned,
+M14.0 done: plan
+`docs/superpowers/plans/2026-09-27-work-graph-m14-work-view.md`, design
+`docs/superpowers/specs/2026-09-27-work-view-design.md`.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

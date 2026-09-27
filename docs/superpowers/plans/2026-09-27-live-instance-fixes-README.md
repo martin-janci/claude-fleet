@@ -36,6 +36,11 @@ files below are not both touched at once.
 Migration numbers are reserved as above; a plan executed out of order keeps
 its number (gaps are fine, collisions are not).
 
+> **Void (2026-09-27):** the migration reservations above (061–065) no longer
+> hold: `main` already took 061–064 for other changes. Migrations are numbered
+> at merge time: whoever merges second renumbers to the next free number, in a
+> merge commit (work graph M14 plan, design decision 3).
+
 ## Shared files (both plans edit the same file)
 
 | File | Plans | Rule |

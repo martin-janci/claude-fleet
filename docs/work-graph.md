@@ -333,14 +333,18 @@ dialog. The brief is editable before you start.
 
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
-one.
+one. While another device is still starting or resuming the same key (a
+multi-repo start holds it until its last repository), a second start or
+resume is refused: "ABC-123 is being started or resumed already; wait for
+that session, then jump to it".
 
 **Multi-start.** For work that spans repositories, the dialog's **Also
 start in** list (the projects the key ran in before) starts one sibling
 session per project, up to 8, all on the same branch name, each linked
 `started` and each brief naming its siblings (`work_link start {
 project_ids }`). A repository where the key already runs is skipped, not
-refused. Multi-start is a desktop feature (decision D15).
+refused. Multi-start is also on the phone, with a full token (decision D15;
+fleet-mobile #50).
 
 > **[Screenshot placeholder]** The New session dialog on a ticket, with
 > Brief Claude and Also start in.
@@ -667,8 +671,11 @@ token:
 - with a **full** token, **Name this work…** for a session with no work,
   and **Rename** for local work (D20; fleet-mobile M13.4a).
 
-What stays on the desktop: multi-start (D15), tracker and org
-administration, and retention. A **readonly** token
+- with a **full** token, **multi-start**: several repositories at once,
+  behind a confirm sheet; a cross-org start is refused in words (D15;
+  fleet-mobile M13.4d).
+
+What stays on the desktop: tracker and org administration, and retention. A **readonly** token
 is served `work` but not `work_link`, so it only reads. No client token ever
 reaches `work_admin`. Which of these screens your phone shows depends on its
 fleet-mobile release; the hub gates each action by the token, not by the
