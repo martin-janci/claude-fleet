@@ -160,7 +160,9 @@ paths.
 
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
-(pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Host
+(pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Since contract revision 5 a hub client adds
+projects through the hub (`add_project` / `list_github_repos` tools), per
+`docs/superpowers/specs/2026-09-27-hub-add-project-design.md`. Host
 reboot handling is landed in both halves, per
 `docs/superpowers/specs/2026-09-17-host-reboot-session-survival-design.md` and
 `docs/superpowers/plans/2026-09-19-host-reboot-recovery.md`: **survival**

@@ -1824,6 +1824,11 @@ standalone exactly as before.
   embedded control API in the desktop; two brains for one fleet is the failure
   this mode exists to prevent. The footer's version, database and schema are
   the hub's too — the badge beside them says whose.
+- **Projects are added through the hub.** "＋ Add project…" clones or
+  creates the repository on the host you pick, with that host's `git` and
+  `gh`; the new row arrives like any other change. Cancel stops the desktop
+  waiting, not the run on the host. The *Existing folder* source is absent
+  here, because it would mean a folder on the hub's machine.
 - **Its errors reach the hub.** Error-level events and frontend crashes are
   queued and posted to the hub's `/report` every few seconds — see *Error
   reports*; `CLAUDE_FLEET_HUB_REPORTS=0` turns it off.
