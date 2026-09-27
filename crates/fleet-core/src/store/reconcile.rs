@@ -316,9 +316,18 @@ impl Store {
         // observes the pane afresh and wins, as it should.
         // A `shell` row (kind set by `new_shell_session`) has no Claude in
         // it: its bare `❯` is the shell's prompt, never an idle REPL (F8).
+        // A StopFailure's `failed` is recognisable without a column: the
+        // failure hook stamps `last_hook_at` and `last_stop_at` together, and
+        // any later hook moves `last_hook_at` past `last_stop_at`. While that
+        // holds, the pane's idle prompt (the input box the failure left) does
+        // not overwrite it; a turn (`working`) or a dialog (`blocked`) does.
         const NEW_STATUS: &str = "CASE WHEN kind = 'shell' THEN NULL \
                                        WHEN ?20 > 0 AND last_hook_at IS NOT NULL \
                                             AND last_hook_at >= ?20 \
+                                       THEN claude_status \
+                                       WHEN claude_status = 'failed' AND last_hook_at IS NOT NULL \
+                                            AND last_hook_at = last_stop_at \
+                                            AND COALESCE(excluded.claude_status, '') NOT IN ('working','blocked') \
                                        THEN claude_status \
                                        ELSE COALESCE(excluded.claude_status, claude_status) END";
         // The candidate claude_session_id, refused when another live row on
@@ -1925,6 +1934,56 @@ mod tests {
         // A fresh row inserted already idle is stamped on insert.
         let r = reconcile_one(&mut s, "b", Some("stopped"), None, None);
         assert!(r.idle_since.is_some());
+    }
+
+    /// A failed turn leaves the input box on screen, which the pane
+    /// heuristic reads as `idle` every 20 s. The hook's `failed` must
+    /// outlive that read (the in-flight guard only covers a pass already
+    /// running when the hook landed), and give way to a real turn.
+    #[test]
+    fn a_hook_stamped_failure_survives_the_panes_idle_prompt_but_not_a_turn() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let r = reconcile_one(&mut s, "a", Some("working"), None, None);
+        s.record_stop_failure_hook_for_row(r.id).unwrap();
+        let pass = |s: &mut Store, status: &str| -> SessionRow {
+            s.apply_host_reconcile(HostReconcile {
+                alias: "local",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: now_unix() + 5,
+                // A pass that STARTED after the hook: the guard does not apply.
+                probe_started_at: now_unix() + 5,
+                sessions: &[ReconcileSession {
+                    tmux_name: "a",
+                    created_at: 1,
+                    last_activity_at: 1,
+                    claude_status: Some(status.to_string()),
+                    intel_observed: true,
+                    ..Default::default()
+                }],
+                keep: &["a".to_string()],
+                lost_ttl_cutoff: None,
+                skip_prune: false,
+                reconciled_at: None,
+            })
+            .unwrap();
+            s.get_session("a", "local").unwrap().unwrap()
+        };
+        assert_eq!(
+            pass(&mut s, "idle").claude_status.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            pass(&mut s, "blocked").claude_status.as_deref(),
+            Some("blocked")
+        );
+        s.record_stop_failure_hook_for_row(r.id).unwrap();
+        assert_eq!(
+            pass(&mut s, "working").claude_status.as_deref(),
+            Some("working")
+        );
     }
 
     /// The routine Phase 1 ghosting clears the same fields

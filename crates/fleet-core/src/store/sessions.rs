@@ -1323,15 +1323,32 @@ impl Store {
         Ok(self.emit_session(row_id)?)
     }
 
-    /// The StopFailure hook's write: the turn ended in an API error. The row
-    /// effect is exactly `Stop`'s (idle, `turn_seq` bump, stamps) so waiters
-    /// return and read the error from the transcript; the handler records
-    /// the `stop_failure` timeline event that tells the two apart.
+    /// The StopFailure hook's write: the turn ended in an API error (F3).
+    /// The Stop stamps are all made (`turn_seq`, `last_stop_at`,
+    /// `last_turn_at`, `last_hook_at`, `idle_since`, `pending_input`) so
+    /// waiters return and the GC clocks run, but the row reads `failed`
+    /// — until the next UserPromptSubmit (`working`) or Stop (`idle`), and
+    /// through reconcile's pane reads of the input box the failure left
+    /// behind (`store/reconcile.rs`, `NEW_STATUS`). The handler records the
+    /// `stop_failure` timeline event that says which error.
     pub fn record_stop_failure_hook_for_row(
         &self,
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        self.record_stop_hook_for_row(row_id)
+        let now = now_unix();
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
+                     last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
+                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL{END_COMPACTING} \
+                 WHERE id = ?1"
+            ),
+            rusqlite::params![row_id, now],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(self.emit_session(row_id)?)
     }
 
     /// The Notification hook's write. `status` is the mapped status;
@@ -3482,14 +3499,17 @@ mod tests {
         assert!(s.record_session_end_hook("nope").unwrap().is_none());
     }
 
+    /// The Stop stamps are all made, but the row reads `failed` (F3), so a
+    /// 429 no longer hides as a plain idle prompt.
     #[test]
-    fn record_stop_failure_hook_writes_like_stop() {
+    fn record_stop_failure_hook_stamps_like_stop_but_reads_failed() {
         let s = Store::open_in_memory().unwrap();
         hooked_session(&s);
         let a = s.record_stop_failure_hook("uuid-h").unwrap().unwrap();
-        assert_eq!(a.claude_status.as_deref(), Some("idle"));
+        assert_eq!(a.claude_status.as_deref(), Some("failed"));
         assert_eq!(a.turn_seq, 1);
         assert_eq!(a.last_stop_at, a.last_turn_at);
+        assert_eq!(a.last_stop_at, last_hook_at(&s));
         let b = s.record_stop_failure_hook("uuid-h").unwrap().unwrap();
         assert_eq!(b.turn_seq, 2);
     }
