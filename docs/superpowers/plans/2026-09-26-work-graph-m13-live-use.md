@@ -227,3 +227,10 @@ M13.5   last
   (multi-start on the phone, M13.4d, martin-janci/fleet-mobile#50) and
   keeps D5 off until the remote numbers are in. D3, D10 and D20 stand as
   recorded above; D13 goes back to no with M13.4f's removal (#330).
+- 2026-09-27: **M13.5 done.** The roadmap marks the work graph operating
+  (D26) and carries two items as open work: the acceptance triage (M13.3,
+  which waits on the owner's run) and D5 (M13.4b, which waits on the remote
+  numbers). `CHANGELOG.md`'s `[Unreleased]` section names what M13 changed
+  for users. `scripts/release.sh` folds that section into the next
+  release's own; a release without one behaves as before, byte for byte.
+  Cutting the release stays the owner's step.
