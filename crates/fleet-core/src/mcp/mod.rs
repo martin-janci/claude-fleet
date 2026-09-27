@@ -22,7 +22,6 @@ pub mod settings;
 mod tests_token_cache;
 mod token_cache;
 mod tools;
-pub mod tracker_hook;
 pub mod wire;
 
 use crate::cancel::CancellationRegistry;
@@ -123,10 +122,6 @@ pub struct McpGuards {
     /// operator's starts and kills (work graph M9.7) — is refused outright
     /// rather than handed a nonce nobody can approve.
     pub approver: bool,
-    /// Serve `POST /hooks/tracker/{id}` (work graph M13.4f). Only a hub
-    /// sets it ([`Self::with_tracker_hooks`]): the desktop never takes a
-    /// call from a tracker.
-    pub tracker_hooks: bool,
 }
 
 impl McpGuards {
@@ -138,21 +133,12 @@ impl McpGuards {
             notify,
             pairings: Arc::new(PendingPairings::new()),
             approver: true,
-            tracker_hooks: false,
         }
     }
 
     /// The same guards for a server with no one to approve a confirmation.
     pub fn without_approver(mut self) -> Self {
         self.approver = false;
-        self
-    }
-
-    /// The same guards for a server that takes tracker webhook nudges (a
-    /// hub). The route still answers 404 until the hub has a public URL and
-    /// the tracker a webhook secret.
-    pub fn with_tracker_hooks(mut self) -> Self {
-        self.tracker_hooks = true;
         self
     }
 }
@@ -739,10 +725,6 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             Arc::clone(&guards.rate),
             base_url,
         );
-        // Work graph M13.4f: only a hub mounts the webhook route.
-        let tracker_hooks = guards.tracker_hooks.then(|| {
-            tracker_hook::TrackerHookState::new(Arc::clone(&store), Arc::clone(&guards.rate))
-        });
         // Cloned before `guards` moves into `FleetTools`: the route and the
         // tool router must write and read the same counters.
         let metrics_for_route = Arc::clone(&guards.metrics);
@@ -781,13 +763,6 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             crate::agent::ws::AgentWsState::new(agent_registry.map(|r| (r, agents_store))),
             report_route::ReportState::new(reports_store),
         );
-        // Outside `authorize` and the Host allowlist, like `/pair`: the
-        // tracker's signature is what authorizes a delivery (see
-        // `tracker_hook`).
-        let app = match tracker_hooks {
-            Some(state) => app.merge(tracker_hook::router(state)),
-            None => app,
-        };
 
         let scheme = if tls.is_some() { "https" } else { "http" };
         tracing::info!("[mcp] control API listening on {scheme}://{addr}/mcp");
@@ -1664,10 +1639,15 @@ mod tests {
 
     /// A client left connected across a restart holds a list the new process
     /// never served it. Its first call carries the notification ahead of the
-    /// result — once — and the result is still the last frame, which is what
-    /// every in-repo reader (`wire::last_event_payload`) takes.
+    /// result, and the result is still the last frame, which is what every
+    /// in-repo reader (`wire::last_event_payload`) takes.
+    ///
+    /// It keeps being told until it actually lists. One label covers many
+    /// long-lived sessions (`master`, `host:<alias>`), so stopping at the
+    /// first call let whichever session called first absorb the only notice
+    /// its siblings would ever get.
     #[tokio::test]
-    async fn a_caller_that_never_listed_is_told_once_ahead_of_the_result() {
+    async fn a_caller_that_never_listed_is_told_ahead_of_the_result_until_it_lists() {
         let addr = serve_real_tools().await;
         let first = raw_round_trip(addr, &post_mcp(A_CALL)).await;
         let notice = first
@@ -1686,9 +1666,24 @@ mod tests {
             "the result is the last frame:\n{first}"
         );
 
+        // Still holding the stale list: a second call is told again. Being
+        // told is not proof the caller listened.
         let second = raw_round_trip(addr, &post_mcp(A_CALL)).await;
         assert!(second.contains(r#""id":3"#), "answered:\n{second}");
-        assert!(!second.contains(LIST_CHANGED), "told once:\n{second}");
+        assert!(
+            second.contains(LIST_CHANGED),
+            "told again until it lists:\n{second}"
+        );
+
+        // Listing is the only thing that stops it.
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        raw_round_trip(addr, &post_mcp(list)).await;
+        let third = raw_round_trip(addr, &post_mcp(A_CALL)).await;
+        assert!(third.contains(r#""id":3"#), "answered:\n{third}");
+        assert!(
+            !third.contains(LIST_CHANGED),
+            "listed, so current:\n{third}"
+        );
     }
 
     /// A paired client is told like any other caller: an assistant may hold
@@ -2027,6 +2022,47 @@ mod tests {
         assert!(
             !replayed.contains(r#"data: {"id":1}"#),
             "and nothing the client already had:\n{replayed}"
+        );
+    }
+
+    /// A phone away longer than the ring's grace window must be told to
+    /// re-list. The bus stops recording then, and the change it did not record
+    /// used to leave no trace: the ring still reached back to the phone's id,
+    /// `ready` said `resumed: true`, and the killed session stayed on screen.
+    #[tokio::test]
+    async fn a_resume_across_an_unrecorded_gap_is_refused() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut first = SseConn::open(addr, Some("s3cret"), "").await;
+        first.wait_for("event: ready").await;
+        bus.session_killed(1);
+        let seen = first.wait_for("event: session:killed").await.to_string();
+        let id = seen
+            .lines()
+            .find_map(|l| l.strip_prefix("id: "))
+            .expect("a row frame must carry an id")
+            .trim()
+            .to_string();
+        drop(first);
+        // Wait for the server to notice the disconnect, so nothing is
+        // subscribed when the grace window runs out.
+        for _ in 0..100 {
+            if bus.receiver_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(bus.receiver_count(), 0);
+        bus.expire_grace_for_test();
+        bus.session_killed(2);
+
+        let mut again = SseConn::open_resuming(addr, Some("s3cret"), "", Some(&id)).await;
+        let head = again.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":false"),
+            "a gap the ring never recorded must not be resumed across:\n{head}"
         );
     }
 

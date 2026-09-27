@@ -109,7 +109,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 173
+  verdict is written down once, in `backend/verdicts.rs`, for all 201
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -238,26 +238,21 @@ M9.7 (the operator's starts and kills always confirmed; refused on a hub),
 M9.3 (agent-written handover on demand, `work_link { action: handover }`)
 and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
 too. Write-back (D3), dead-session summaries (D10) and webhooks (D13) were
-decided against; the user said yes to them (and D20) on 2026-09-27, as
-M13.4e, M13.4c, M13.4f and M13.4a of M13 (build notes:
+decided against; the user said yes to D3, D10 and D20 on 2026-09-27, as
+M13.4e, M13.4c and M13.4a of M13. D13 stays no: its build (M13.4f) reached
+`main` and was removed again (migration 062 stays, 064 drops its table;
+build notes:
 `docs/superpowers/plans/2026-09-26-work-graph-m13-decided-yes.md`).
-M13.4c (D10) is built on `claude/cloud-fleet-work-graph-m13`:
+M13.4c (D10) is landed (#327, fixed in #331):
 `work_link { action: summarize }`, on demand only, one tool-less
 print-mode fork on the session's own host (`service/work/summary.rs`,
 `work.summary_model`), stored as a journal `summary` and fenced in the
 brief.
-M13.4e (D3) is built there too: the PR remote link on Jira only, per
-tracker `settings.write_back.pr_remote_link` (off), queued by the PR probe
+M13.4e (D3) is landed too (#327, fixed in #332; tests #334): the PR
+remote link on Jira only, per tracker `settings.write_back.pr_remote_link` (off), queued by the PR probe
 for `manual` / `started` confirmed links in the tracker's own org, through
 the outbox `tracker_writes` (migration 061) drained by the sync pass
 (`service/trackers/write_back.rs`, `TrackerProvider::write`).
-M13.4f (D13) too: webhook nudges on a public hub, `POST
-/hooks/tracker/{id}` outside `authorize` (`mcp/tracker_hook.rs`, mounted only
-with `McpGuards::with_tracker_hooks`, which only fleet-hub sets), HMAC-SHA256
-per provider (`service/trackers/webhook.rs`), only refreshing an item fleet
-already has; the secret is `tracker_webhooks` (migration 062), read ONLY by
-`Store::resolve_tracker_webhook_secret`, minted by `fleet-hub tracker
-webhook`.
 Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
 M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
 and the M5.5 filters (tracker / status / mine / has-session / archived)
@@ -278,22 +273,28 @@ downgrade guard (`store::testgen`), the scale fixture and budget tests
 windows (`store/work_retention.rs`), trackers in `fleet_health` with a
 Reconnect Attention item, and the review of the decided-against list
 (`reviews/2026-09-26-work-graph-decisions-revisited.md`).
-M13 (live use) is next: `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`;
-open decisions are the roadmap's table, and a decision-gated feature starts
-only on the user's "yes".
-
-Work graph M14 (the Work view) is built on `claude/fleet-dynamic-work-view-kwc3r9`
-(design `docs/superpowers/specs/2026-09-27-work-view-design.md`): org →
-group → task → sessions next to the Sessions view, over the same links.
-`work { tree | task | session_tasks | review | rules | rule_preview | views |
-org_impact }` (`service/work/view.rs`) and `work_link { set_primary |
-reconsider | ack | decide_batch | place | assign_org | rule_save | … }`
-(`service/work/structure.rs`), migration 063 (link `version` + trigger,
-placements, placement-only rules, saved views, local items' org,
-`client_tokens.org_id`). A client paired with `--org` is `OrgScope::Org`
-(`Caller::is_scoped()` covers host- and org-bound); writes carry the
-version they saw (compare-and-set, `E_CONFLICT`), and `SessionRow.work_rev` tells clients a
-secondary link changed. Acceptance Part R waits on the owner.
+M13 (live use, `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`)
+is closed (M13.5, #337): M13.1 (partial sync failures, #320), M13.2
+(`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above are on
+`main`; M13.4a (D20) and M13.4d (D15, multi-start) are on fleet-mobile
+(#51, #50). The work graph is *operating* (D26): new work is issues and
+small plans. Two items stay open, waiting on the owner: the acceptance run
+and its triage (M13.3), and D5 (M13.4b). Open decisions are the roadmap's table, and a decision-gated
+feature starts only on the user's "yes".
+Work graph M14 (the Work view: org → group → task → every session, and a
+phone paired to one org) is the one milestone after it (D36): plan
+`docs/superpowers/plans/2026-09-27-work-graph-m14-work-view.md`, design
+`docs/superpowers/specs/2026-09-27-work-view-design.md`. M14.1a–d (the
+backend: `work { tree | task | session_tasks | review | rules | … }` in
+`service/work/view.rs`, `work_link { set_primary | place | assign_org | … }`
+in `service/work/structure.rs`, migrations 066–067, org-bound clients as
+`OrgScope::Org`, compare-and-set with `E_CONFLICT`, the desktop commands
+and `work:changed`) and M14.2–M14.4 (the desktop Work view — `WorkTree`,
+`WorkTaskDetail`, `WorkReview`, the rules / place / org dialogs, state in
+`src/lib/work_view.ts` — and fleet-mobile's *My work*) are landed; the
+desktop re-reads on `onWorkChanged` and the `workChanged` tick in
+`work.ts`. `scripts/hub-e2e.sh` hub W section 10 runs the contract on a
+real hub. M14.5, the acceptance run (Part R), waits on the owner.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

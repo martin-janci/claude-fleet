@@ -138,6 +138,9 @@ pub struct SaveWorkViewArgs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeleteWorkViewArgs {
     pub view_id: i64,
+    /// The view's version the person saw; absent: no check.
+    #[serde(default)]
+    pub expected_version: Option<i64>,
 }
 
 fn read(action: &str) -> WorkArgs {
@@ -621,11 +624,14 @@ pub(crate) mod routed {
         let wire = WorkLinkArgs {
             action: "view_delete".into(),
             view_id: Some(args.view_id),
+            expected_version: args.expected_version,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("delete_work_view", &wire).await,
-            None => structure::view_delete(store, &OrgScope::All, args.view_id),
+            None => {
+                structure::view_delete(store, &OrgScope::All, args.view_id, args.expected_version)
+            }
         }
     }
 }

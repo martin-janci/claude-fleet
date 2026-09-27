@@ -1074,11 +1074,44 @@ export { workChanged, bumpWorkChanged };
 export const workTreeSessionIds = writable<ReadonlySet<number>>(new Set());
 
 /** A `work:changed` frame (ids only). */
-export interface WorkChangedFrame {
-  what: 'placement' | 'rule' | 'view' | 'org' | string;
-  task_id?: string | null;
-  rule_id?: number | null;
-  view_id?: number | null;
+/** `work:changed`: ids only. `resync` is the desktop's own: its hub stream
+ *  was re-established after a gap (`lagged`, or a connection that did not
+ *  resume), so nothing short of a whole reload is current. */
+export type WorkChanged =
+  | { what: 'placement'; task_id?: string }
+  | { what: 'org'; task_id?: string }
+  | { what: 'rule'; rule_id?: number }
+  | { what: 'view'; view_id?: number }
+  | { what: 'resync' };
+
+const WHATS = new Set(['placement', 'org', 'rule', 'view', 'resync']);
+
+/** Read one `work:changed` payload; `null` for anything malformed or a
+ *  `what` this build does not know (a newer hub's), which the caller drops. */
+export function parseWorkChanged(payload: unknown): WorkChanged | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  if (typeof p.what !== 'string' || !WHATS.has(p.what)) return null;
+  switch (p.what) {
+    case 'placement':
+    case 'org':
+      if (p.task_id !== undefined && typeof p.task_id !== 'string') return null;
+      return p.task_id === undefined ? { what: p.what } : { what: p.what, task_id: p.task_id };
+    case 'rule':
+      if (p.rule_id !== undefined && typeof p.rule_id !== 'number') return null;
+      return p.rule_id === undefined ? { what: 'rule' } : { what: 'rule', rule_id: p.rule_id };
+    case 'view':
+      if (p.view_id !== undefined && typeof p.view_id !== 'number') return null;
+      return p.view_id === undefined ? { what: 'view' } : { what: 'view', view_id: p.view_id };
+    default:
+      return { what: 'resync' };
+  }
+}
+
+/** Whether a batch of changes calls for reloading the whole view rather
+ *  than re-reading the visible page: a gap in the stream. */
+export function needsFullReload(changes: readonly WorkChanged[]): boolean {
+  return changes.some((c) => c.what === 'resync');
 }
 
 /** What of a row the Work view shows: its primary and suggested work, its
@@ -1132,5 +1165,13 @@ export function sessionEventsTouchWork(
 
 /** Route the batched `work:*` frames: a `changed` frame bumps the tick. */
 export function noteWorkEvents(events: readonly { type: string }[]): void {
-  if (events.some((e) => e.type === 'changed' || e.type === 'item')) bumpWorkChanged();
+  if (events.some((e) => e.type === 'item')) bumpWorkChanged();
+}
+
+/** `work:changed` frames (placements, rules, views, a task's org, or the
+ *  desktop's own `resync` after a stream gap): the Work view re-reads what
+ *  it shows. Every kind is a re-read today; `needsFullReload` tells the
+ *  cases a caller might one day treat differently apart. */
+export function noteWorkChanged(changes: readonly WorkChanged[]): void {
+  if (changes.length > 0) bumpWorkChanged();
 }

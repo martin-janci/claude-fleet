@@ -621,8 +621,10 @@ acceptance is still to do.
 - **M9.6 multi-repo start** (D11): `work_link start { project_ids }`, one
   sibling per repo on one branch, per-repo duplicate guard; *Also start in*
   in the New-session dialog.
-- **Not built, by decision:** write-back (D3 none), dead-session summaries
-  (D10 off), webhook nudges (D13 no).
+- **Not built in M9, by decision then:** write-back (D3), dead-session
+  summaries (D10) and webhook nudges (D13). The owner later said yes to D3
+  (the PR remote link only) and D10 (on demand only); both were built in
+  M13.4e / M13.4c. D13 stays no (M13.4f was built and removed, #330).
 - **On `main`:** M9.1 / M9.2 and M9.3 / M9.6 / M9.7 with #268, the M7
   follow-ups with #271, the handover fix (idle REPL only) with #274.
 - **Follow-ups on M7** (after #268): Today's **Stale** section opens M7's
@@ -665,7 +667,9 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - **M10.3** the written acceptance: #313 (below).
 - **M10.4** as above: #278.
 - **M10.5** Today, *Share standup* and the ticket card on the phone:
-  martin-janci/fleet-mobile#36.
+  martin-janci/fleet-mobile#36; the card on the session's work sheet with
+  *Copy* (never *Send*), and the org colour bar on rows:
+  martin-janci/fleet-mobile#48.
 - **M10.6** replay-ring pressure measured
   (`reviews/2026-09-25-replay-ring-pressure.md`), `session:updated` for a
   tracker item only when the row shows the change: #280. The first-sync
@@ -762,57 +766,81 @@ Plan: `plans/2026-09-26-work-graph-m13-live-use.md`.
   nothing leaves the machine (D24).
 - **M13.3** triage of the owner's M10.3 run (waits on the run).
 - **M13.4** the decision-gated builds, each only on a "yes": D20, D5, D10,
-  D15, D3, and D13 (M13.4f). The user said yes to D3, D10, D13 and D20 on
-  2026-09-27; build notes in `plans/2026-09-26-work-graph-m13-decided-yes.md`.
+  D15, D3, and D13 (M13.4f). The user said yes to D3, D10 and D20 on
+  2026-09-27 (D13 was built, then removed: it stays no); build notes in `plans/2026-09-26-work-graph-m13-decided-yes.md`.
 - **M13.5** close-out: the work graph is *operating* (D26).
 
 **Value:** the roadmap matches `main`, partial sync failures are visible,
 and every open decision gets an answer backed by usage.
 
-**Status (2026-09-26):**
-- **M13.0 done** (this revision).
-- M13.1 and M13.2 are not started. M13.3 waits on the owner's run.
-- M13.4: D3, D10, D13 and D20 are yes (2026-09-27). **M13.4c (D10),
-  M13.4e (D3) and M13.4f (D13) built** on `claude/cloud-fleet-work-graph-m13`;
-  **M13.4a (D20) built** on fleet-mobile's
-  `claude/work-graph-m13-4a-name-work`. D5 and D15 wait on the decisions.
+**Status (2026-09-27): M13 is closed; the work graph is operating (D26).**
+- **M13.0** the truth pass: #319.
+- **M13.1** partial sync failures visible ("Sync skipping items", D25):
+  #320 / #324.
+- **M13.2** `work_admin { usage }` (D24): #323 / #324.
+- **M13.4** on the owner's yes (2026-09-27):
+  - **M13.4a** (D20): naming and renaming local work on the phone,
+    martin-janci/fleet-mobile#51;
+  - **M13.4c** (D10): summaries of dead sessions, on demand, #327, with
+    the no-hooks fix #331;
+  - **M13.4d** (D15): multi-start on the phone, martin-janci/fleet-mobile#50;
+  - **M13.4e** (D3): the PR remote link to Jira, #327, with #332 and #334;
+  - **M13.4f** (D13): built with #327 and removed by #330 (D13 stays no;
+    migration 064 drops its table).
+- **M13.5** close-out: this revision, and the next release's
+  `[Unreleased]` notes in `CHANGELOG.md`.
+
+### Operating (after M13)
+
+The work graph has no more milestones (D26), except M14, the Work view,
+by the owner's choice (D36). New work arrives as an issue,
+or as a small plan in `plans/` against `docs/work-graph.md`, and every change
+a user sees updates the guide in the same PR. Two items carry over from M13
+as open work, not as a milestone:
+
+- **The owner's acceptance run** (`docs/work-graph-acceptance.md`, M10.3).
+  Its triage is what M13.3 described: a blocker gets a PR with a regression
+  test, a major is fixed or ticketed, minor and docs findings go into one
+  PR, and the decisions table takes the run's evidence.
+- **D5**, the SessionStart context: it stays off until the remote numbers
+  from `scripts/measure-session-start.sh` are in; a yes is then M13.4b's
+  one-line default flip plus the guide's settings table.
 
 ### M14: the Work view
 
-Design: `specs/2026-09-27-work-view-design.md` (capability matrix, contracts,
-security model, stages).
+Plan: `plans/2026-09-27-work-graph-m14-work-view.md`. Design (binding):
+`specs/2026-09-27-work-view-design.md`.
 
-A second, equal way into the same graph: org → project / group → task →
-sessions (active, past, suggested), next to the Sessions view's host → repo
-→ session → tasks. Built on the existing `work_links`; nothing is copied.
+The other direction through the same data: org → project / group → task →
+*every* session of that task (primary, secondary, suggested and past), and
+tasks with no session at all; one contract (`work { tree | task | … }`,
+`work_link { set_primary | … }`, no new tool, `CONTRACT_REVISION` 4) for
+the desktop and the phone, and a phone paired **to one org** that sees only
+that org (a new boundary, proved like M5's). M14 lands the backend already
+built on `claude/fleet-dynamic-work-view-kwc3r9`, cut into reviewable PRs
+and rebased on `main`; it does not redesign it.
 
-- **Read contract:** `work { tree | task | session_tasks | review | rules |
-  rule_preview | views | org_impact }` (`service/work/view.rs`), keyset
-  pages bound to their filters, one graph load per read, every link judged
-  by the caller's `OrgScope`.
-- **Writes:** `work_link { set_primary | reconsider | ack | decide_batch |
-  place | assign_org | rule_save | rule_delete | view_save | view_delete }`
-  (`service/work/structure.rs`) and `primary` / `expected_version` on
-  `link` / `confirm` / `reject` / `unlink`; compare-and-set on the link's
-  `version`, the placement's version and the session's visible primary,
-  `E_CONFLICT` with the current value.
-- **Migration 063:** `work_links.version` (+ trigger) and `review_ack_at`,
-  local items' `org_id`, `client_tokens.org_id` (org-bound paired clients,
-  `OrgScope::Org`, `fleet-hub pair --org` / `client bind|unbind`),
-  `work_placements`, `work_rules` (placement only, D34), `work_views`.
-- **Events:** `work:changed` (ids only), `SessionRow.work_rev` for
-  secondary-link changes.
-- **Desktop:** the Work view (⌘⇧W), task detail, the session's Tasks
-  panel, Review, placement, rules with preview, org change with impact.
-- **Phone:** My work, task, session tasks sheet, Review (fleet-mobile,
-  same branch).
+- **M14.0** the plan, the spec on `main`, the M13 truth pass (docs).
+- **M14.1a–d** the backend: the `start` race fix; migration `0NN_work_view`
+  (numbered at merge time) + reads + org-bound clients (D31); mutations with
+  compare-and-set; the desktop commands and `work:changed`.
+- **M14.2 / M14.3** the desktop Work view, read, then edits and Review.
+- **M14.4** the phone's *My work* tab (fleet-mobile), read, then edits.
+- **M14.5** acceptance (Part R), the user guide, close-out.
 
-**Status (2026-09-27):** built on `claude/fleet-dynamic-work-view-kwc3r9`
-in both repositories. `scripts/hub-e2e.sh` hub W section 10 runs it on a
-real hub (tree, session tasks, the primary's compare-and-set, placement,
-`work:changed`, Acme- and Beta-bound and readonly clients); acceptance
-Part R (steps 60–72) waits on the owner.
-D31–D35 hold the defaults the build took.
+**Status (2026-09-27): M14.0–M14.4 built.** M14.1a–d are on `main`
+(#341, #342, #345, #347); M14.2 / M14.3 (the desktop Work view, its edits
+and Review) and M14.4 (fleet-mobile's *My work*) came from
+`claude/fleet-dynamic-work-view-kwc3r9`, merged over that backend, with
+`scripts/hub-e2e.sh` hub W section 10 running the contract on a real hub
+(tree, session tasks, the primary's compare-and-set, placement,
+`work:changed`, Acme- and Beta-bound and readonly clients). Open: D31's
+per-org switch has no desktop control yet (`work_admin` sets it), and
+M14.5, the acceptance run (Part R), waits on the owner. D31–D36 are
+answered (the table below). M14 is the one milestone after M13's close-out, by the
+owner's choice (D36); D26's "operating" applies again once it is done. The
+two open items carried from M13 (the acceptance run, D5) stay where
+*Operating* puts them; M14 neither absorbs nor blocks them.
 
 ## Critical path and parallelism
 
@@ -824,7 +852,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
     └─ M0 PRs are independent of each other
 
 M4, M5, M6, M7, M8 ─> M9 ─> M10 ─┬─> M11 ─┐
-                                 └─> M12 ─┴─> M13 (live use)
+                                 └─> M12 ─┴─> M13 (live use) ─> M14 (the Work view)
                                         M10.3 (the owner's run) ─> M13.3 ─> M13.4
 ```
 
@@ -832,6 +860,8 @@ M4, M5, M6, M7, M8 ─> M9 ─> M10 ─┬─> M11 ─┐
   sync metrics.
 - In M13, M13.0–M13.2 do not wait on anything; M13.3 waits on the owner's
   M10.3 run, and each M13.4 item on its decision's "yes".
+- M14 follows M13's close-out; the two items M13 left open (the acceptance
+  run, D5) do not block it. Its order is in the M14 plan (M14.1a first).
 
 - M3 can start its transport spike and fixtures in parallel with M2.
 - M5's security boundary must land **before** a second org's tracker is
@@ -849,7 +879,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org. **Built** (M7, #267): `work.auto_tidy` off, `orgs.auto_tidy` per org, safe kill only |
 | D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-26: yes, the PR remote link only** (Jira Cloud / DC, opt-in per tracker, through an outbox): M13.4e. Transition on start and worklog stay out (D29) |
 | D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub. **Done** (M5.3, #264) |
-| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95. **Waits on the user** (M10.3 step; M13.4b) |
+| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95. **2026-09-27: not yet** — the owner keeps it off until the remote numbers are in (M13.4b not started) |
 | D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only. **Built anyway** (M6.5, #266): the M6 brief asked for it |
 | D7 | Isolate sessions (list, message, dispatch) across orgs? (M5 plan) | off per org · on per org | Off per org; the user turns it on per org. **Built** (M5.3, #264): `orgs.isolate_sessions`, off |
 | D8 | — | — | **Unused**: no decision was ever numbered D8 in the work graph |
@@ -857,29 +887,30 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-26: yes, on demand only** (*Summarise* on a past-work row; `work.summary_model`, default `haiku`, D27; never automatic, D30): M13.4c, **built** |
 | D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before.** Built (M9.6, #268) |
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always.** Built (M9.7, #268) |
-| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-26: yes, a nudge only** (HMAC per tracker, the payload never trusted, polling stays; GitHub, Jira Cloud and Linear, D28): M13.4f |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **No.** Recorded yes on 2026-09-26 and built as M13.4f (reached `main` with #327); **the owner reversed it on 2026-09-27 → no** (the M12.6 recommendation), and M13.4f was removed. Migration 062 stays in the chain, 064 drops its table (063 is another change, #333) |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25)**: `work.classify_nudge`. Opened as #273 (closed unmerged); the commit reached `main` with #270 |
-| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | Desktop only. **Waits on the user** after M10.3 (M13.4d) |
+| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | **Decided 2026-09-27 by the owner, before the M10.3 run: also on the phone** (M13.4d: multi-select with a confirm sheet, cross-org refused in words, full token only), **built** (martin-janci/fleet-mobile#50) |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done.** hub-e2e runs in CI's `hub-headless` job (`.github/workflows/ci.yml`, every PR and `main` push). Since #314 the job also builds an `e2e`-feature hub into `target/e2e` and passes it as `WBIN`, so the M10.2 work-graph leg runs on every PR; with `CI=true` a missing `WBIN` fails instead of skipping (`scripts/hub-e2e.sh`) |
 | D17 | Support `acli` (Atlassian CLI) as a Jira transport? (M11 plan) | yes · decided against | **Decided against:** REST and `via_host` (`gh`, `curl`) cover it. M12.6 keeps it; M13 does not reopen it |
 | D18 | First sync of a new tracker: suppress per-item frames? (M11 plan) | accept the flood · suppress (design change) | **Accept** (the M10.6 report, `reviews/2026-09-25-replay-ring-pressure.md`); nothing suppresses them on `main` |
 | D19 | May auto-tidy ever act on `idle_unlinked`? (M11 plan) | never · per org | **Never.** Enforced (M11.3, #291) in `TidyReason::auto_allowed`, `auto_selection` and the executor |
-| D20 | Local work items on the phone (name / rename)? (M11 plan) | no (read-only phone) · yes | **Decided 2026-09-26: yes**, fleet-mobile only, no hub change: M13.4a |
+| D20 | Local work items on the phone (name / rename)? (M11 plan) | no (read-only phone) · yes | **Decided 2026-09-26: yes**, fleet-mobile only, no hub change: M13.4a, **built** (martin-janci/fleet-mobile#51) |
 | D21 | Retention defaults: journal / done items / work timeline events (M12 plan) | 365 / 180 / 180 days · keep forever | **Built** (M12.3, #299): `work.retention.journal_days` 365, `…tracker_items_days` 180, `…timeline_work_events_days` 180; `0` = forever |
 | D22 | Should a failing tracker raise an Attention item, not only a health row? (M12 plan) | yes · health only | **Yes, built** (M12.4, #303): one "Reconnect …" item per tracker, deduplicated |
 | D23 | Per-org retention override (needs a migration)? (M12 plan) | now · later | **Later:** settings only (M12.3, #299); no migration |
-| D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2 |
-| D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1 |
-| D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | Yes (default); M13.5 |
+| D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2, **built** (#323 / #324) |
+| D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1, **built** (#320) |
+| D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | **Yes: operating since 2026-09-27** (M13.5). Issues and small plans, no milestones, except M14 (D36) |
 | D27 | Which model summarises a dead session, on whose quota? (M13.4c) | a small model · the session's configured model | `haiku` (`work.summary_model`: haiku / sonnet / opus), on the session's own host and account |
-| D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | GitHub, Jira Cloud, Linear (Asana needs a handshake; Jira DC later) |
+| D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | **Moot**: D13 is no, and M13.4f was removed |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
 | D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
-| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · no | Yes (default, built): assign every host and tracker to an org to fence everything |
-| D32 | Should a forced cross-org link raise a review item until acknowledged? (M14) | yes · no | Yes (default, built): `cross_org` review kind, `ack` clears it |
-| D33 | May a full, unbound phone change a local task's org? (M14) | yes, with the impact preview · desktop only | Yes (default, built); bound clients and hosts may not |
-| D34 | Placement rules only, or also link rules ("sessions in repo X are task Y")? (M14) | placement only · also links | Placement only (default, built): link rules would bypass detection's evidence and R9 |
-| D35 | Saved views: shared on the hub, or per device? (M14) | shared on the hub · per device | Shared (default, built); a bound client's views are its org's |
+| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · by setting | **Answered 2026-09-27: by setting.** A per-org flag `orgs.bound_sees_unassigned` (M14.1b's migration; `work_admin` org edit; Settings → Work → Organisations), **default on**. Off: the org's bound clients see only rows assigned to their org. An isolation row covers both values |
+| D32 | Does a forced cross-org link raise a review item until it is acknowledged? (M14) | yes · no | **Answered 2026-09-27: the default, yes** (`cross_org` review kind, cleared by `ack`) |
+| D33 | May a full, unbound phone change a local task's org? (M14) | yes, with the impact preview · no | **Answered 2026-09-27: the default, yes**, with the impact preview. Bound clients and hosts may not |
+| D34 | Placement rules only, or also link rules? (M14) | placement only · also link rules | **Answered 2026-09-27: the default, placement only.** Link rules would bypass detection's evidence and R9 |
+| D35 | Saved views: shared on the hub, or per device? (M14) | shared on the hub · per device | **Answered 2026-09-27: the default, shared on the hub.** A bound client's views are its org's |
+| D36 | M14 as a milestone, despite D26? Who drives it? (M14 plan) | yes · issues only | **Answered 2026-09-27: yes, M14 is the last work-graph milestone** (D26 applies after it); one driver session. The backend branch's session does not continue it |
 
 ## Risks to watch
 
@@ -1026,9 +1057,36 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   hold the defaults for their details. M13.4c (D10) is built; M13.4e (D3)
   is next. D13 had no slot in M13.4 ("M13 does not reopen it"), so it gets
   **M13.4f**. D5 and D15 are unchanged.
-- 2026-09-27: **M14, the Work view**, added and built on
-  `claude/fleet-dynamic-work-view-kwc3r9` (claude-fleet and fleet-mobile),
-  per `specs/2026-09-27-work-view-design.md`: migration 063, the `work` /
-  `work_link` view actions, org-bound paired clients, the desktop Work view
-  and the phone's My work. D31–D35 added with the defaults it took;
-  acceptance Part R (steps 60–72) added to `work-graph-acceptance.md`.
+- 2026-09-27: M10.5 finished in fleet-mobile (martin-janci/fleet-mobile#48):
+  the ticket card on the session's work sheet (`work card`, read-only, any
+  token), *Copy* on every card, and the org colour bar on session rows
+  when two or more orgs show. No hub change, no contract bump.
+- 2026-09-27: **D13 back to no.** The owner reversed the yes; M13.4f
+  (webhook nudges), which reached `main` with #327, is removed. Migration 062
+  stays in the chain so a database that ran it is not refused as newer, and
+  064 drops its `tracker_webhooks` table. D28 is moot.
+- 2026-09-27: The owner confirmed D3, D10 and D20 **yes** in this
+  session, and answered **D15 yes** (multi-start on the phone, M13.4d,
+  martin-janci/fleet-mobile#50). D5 stays off until the remote
+  SessionStart numbers are in. M13.3 still waits on the run. D13 is set
+  back to no with M13.4f's removal (#330).
+- 2026-09-27: **M13.5, close-out.** M13's status lists what landed and
+  where; the work graph is *operating* (D26), with the owner's acceptance
+  run and D5 carried as open work. `CHANGELOG.md` has an `[Unreleased]`
+  section naming what M13 changed for users, and `scripts/release.sh` now
+  turns that section into the release's own instead of stacking the
+  release above it.
+- 2026-09-27: **M14.2–M14.4.** The desktop Work view (tree, task detail,
+  Review, placement and rules, saved views, the org dialog) and the phone's
+  *My work* merged over M14.1's backend from
+  `claude/fleet-dynamic-work-view-kwc3r9`; the desktop follows
+  `work:changed` through `onWorkChanged` (a `resync` re-reads too).
+- 2026-09-27: **M14.0** (docs only; facts from `main` `f10d0b92` and its
+  merge history). M14 (the Work view) added, with its plan and the design
+  spec brought to `main`; D31–D36 added with the owner's answers. The M13
+  status block corrected: M13.1 (#320) and M13.2 (#323 / #324) are on
+  `main`, M13.4c / M13.4e with their fixes (#331, #332) and tests (#334),
+  M13.4a / M13.4d on fleet-mobile (#51, #50), M13.4f removed (#330). (Merged
+  with M13.5's close-out, #337, whose M13 status block is kept: M13 is
+  closed, and the acceptance run and D5 are open work.) The M9 "not built" line no longer says D3 none
+  and D10 off. D15, D20, D24 and D25 name their PRs.

@@ -62,6 +62,42 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
     assert_eq!(status_candidate(true, None, None), None);
 }
 
+/// F2: the cached `claude agents` status reports a session with live
+/// subagents as `working` — the very signal that kept two rows `working`
+/// for 40 h. Once the tick has demoted a row, only the pane's own spinner
+/// may lift the demotion.
+#[test]
+fn a_stale_working_demotion_is_not_undone_by_the_cached_agents_status() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let agents_working = Some(ClaudeStatus::Working);
+    assert_eq!(
+        stale_working_veto(false, agents_working, None),
+        agents_working
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, None),
+        None,
+        "keeps the stored idle"
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Idle)),
+        None
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Working)),
+        Some(ClaudeStatus::Working),
+        "the pane's spinner is real"
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Blocked)),
+        Some(ClaudeStatus::Blocked)
+    );
+    assert_eq!(
+        stale_working_veto(true, Some(ClaudeStatus::Idle), None),
+        Some(ClaudeStatus::Idle)
+    );
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),
@@ -215,6 +251,7 @@ fn row(
         ci_status: None,
         turn_seq: 0,
         last_stop_at: None,
+        stale_working_at: None,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -224,7 +261,6 @@ fn row(
         work_rejected: vec![],
         work_suggested: None,
         org_id: None,
-        work_rev: 0,
     }
 }
 
@@ -6012,12 +6048,14 @@ fn an_unchanged_identity_is_not_written_again() {
     assert_eq!(s.get_host_identity("vps").unwrap().tmux_server_pid, Some(8));
 }
 
-/// Requirement 3 (ruling: fold `last_reconciled_at` into the upsert): a pass
-/// that observes exactly what the store holds bumps each live row's
-/// `row_version` once — the upsert's physical UPDATE — not a second time
-/// for a separate freshness stamp. The stamp itself still moves.
+/// A pass that observes exactly what the store holds leaves every live
+/// row's `row_version` where it was (migration 063: the counter moves only
+/// on a client-visible change), so a `fresh_for` snapshot of full rows can
+/// answer `unchanged` across an idle tick. The freshness stamp
+/// `last_reconciled_at` — not a `SessionRow` field, and the ghost guards'
+/// evidence — still moves every pass.
 #[test]
-fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
+fn an_unchanged_pass_leaves_each_row_version_alone() {
     let mut s = Store::open_in_memory().unwrap();
     s.upsert_host("vps").unwrap();
     let projects = s.list_projects().unwrap();
@@ -6037,8 +6075,8 @@ fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
     let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
     assert_eq!(
         [after[0] - before[0], after[1] - before[1]],
-        [1, 1],
-        "an unchanged pass bumps each row_version exactly once"
+        [0, 0],
+        "an unchanged pass must not bump any row_version"
     );
     let stamp: i64 = s
         .conn_for_test()
@@ -6052,6 +6090,49 @@ fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
         stamp >= probe.started_at,
         "the pass still stamps last_reconciled_at ({stamp} < {})",
         probe.started_at
+    );
+}
+
+/// The other half: a pass that changes a field a client sees (here
+/// `last_activity_at`, from tmux's `session_activity`) bumps that row's
+/// `row_version` exactly once — one physical UPDATE — and leaves the
+/// unchanged row beside it alone.
+#[test]
+fn a_pass_that_changes_a_visible_field_bumps_that_row_version_once() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a"), tmux_session("dev-b")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let before = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    let mut active = tmux_session("dev-a");
+    active.last_activity = 50;
+    let probe = vps_probe(
+        &s,
+        vec![active, tmux_session("dev-b")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    assert_eq!(
+        [after[0] - before[0], after[1] - before[1]],
+        [1, 0],
+        "only the row whose last_activity_at moved bumps, and by one"
+    );
+    assert_eq!(
+        s.get_session("dev-a", "vps")
+            .unwrap()
+            .unwrap()
+            .last_activity_at,
+        50
     );
 }
 

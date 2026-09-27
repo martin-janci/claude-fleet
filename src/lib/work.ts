@@ -96,18 +96,16 @@ async function decide(cmd: string, args: Record<string, unknown>): Promise<Resul
   return r;
 }
 
-/** Work graph M14: the optional half of every link decision. `primary`
- *  (link / confirm): `false` adds a secondary link and leaves the primary
- *  alone; absent keeps today's behaviour (it takes the primary).
- *  `expectedVersion`: the link's `version` as last read; a mismatch answers
- *  `E_CONFLICT` and changes nothing. Both are sent only when set, so an older
- *  hub sees exactly what it always saw. */
-export interface LinkDecisionOpts {
+/** The Work view's guards on a decision (work graph M14): `primary: false`
+ *  links or confirms a secondary and leaves the primary where it is;
+ *  `expectedVersion` is the link version the person saw (`E_CONFLICT` when
+ *  it moved). Absent, a decision behaves as it always has. */
+export interface WorkDecisionGuards {
   primary?: boolean;
   expectedVersion?: number;
 }
 
-function decisionExtras(opts: LinkDecisionOpts): Record<string, unknown> {
+function guards(opts: WorkDecisionGuards): Record<string, unknown> {
   return {
     ...(opts.primary !== undefined ? { primary: opts.primary } : {}),
     ...(opts.expectedVersion !== undefined ? { expected_version: opts.expectedVersion } : {}),
@@ -115,20 +113,18 @@ function decisionExtras(opts: LinkDecisionOpts): Record<string, unknown> {
 }
 
 /** Say the session works on `ref`; it becomes the session's primary work
- *  (unless `primary: false`). `forceCrossOrg`: the person saw the cross-org
- *  refusal and meant it. */
+ *  (unless `primary: false`).
+ *  `forceCrossOrg`: the person saw the cross-org refusal and meant it. */
 export function linkSessionWork(
   sessionId: number,
   ref: WorkRef,
-  // No `expectedVersion`: a new link has no version to expect, and the
-  // `link_session_work` command (`LinkSessionWorkArgs`) takes none.
-  opts: { forceCrossOrg?: boolean } & Pick<LinkDecisionOpts, 'primary'> = {},
+  opts: { forceCrossOrg?: boolean } & WorkDecisionGuards = {},
 ): Promise<Result<SessionRow>> {
   return decide('link_session_work', {
     session_id: sessionId,
     ...ref,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
-    ...decisionExtras({ primary: opts.primary }),
+    ...guards(opts),
   });
 }
 
@@ -167,13 +163,13 @@ export function rejectSessionWork(sessionId: number, ref: WorkRef): Promise<Resu
 export function confirmSessionWork(
   sessionId: number,
   linkId: number,
-  opts: { forceCrossOrg?: boolean } & LinkDecisionOpts = {},
+  opts: { forceCrossOrg?: boolean } & WorkDecisionGuards = {},
 ): Promise<Result<SessionRow>> {
   return decide('confirm_session_work', {
     session_id: sessionId,
     link_id: linkId,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
-    ...decisionExtras(opts),
+    ...guards(opts),
   });
 }
 
@@ -182,9 +178,9 @@ export function confirmSessionWork(
 export function rejectWorkLink(
   sessionId: number,
   linkId: number,
-  opts: Pick<LinkDecisionOpts, 'expectedVersion'> = {},
+  opts: Pick<WorkDecisionGuards, 'expectedVersion'> = {},
 ): Promise<Result<SessionRow>> {
-  return decide('reject_session_work', { session_id: sessionId, link_id: linkId, ...decisionExtras(opts) });
+  return decide('reject_session_work', { session_id: sessionId, link_id: linkId, ...guards(opts) });
 }
 
 /** Trust (or stop trusting) branch keys in a project: a sole branch key there
@@ -291,9 +287,9 @@ export function newAutoLinks(prev: ReadonlyMap<number, number>, rows: readonly S
 export function unlinkSessionWork(
   sessionId: number,
   linkId: number,
-  opts: Pick<LinkDecisionOpts, 'expectedVersion'> = {},
+  opts: Pick<WorkDecisionGuards, 'expectedVersion'> = {},
 ): Promise<Result<SessionRow>> {
-  return decide('unlink_session_work', { session_id: sessionId, link_id: linkId, ...decisionExtras(opts) });
+  return decide('unlink_session_work', { session_id: sessionId, link_id: linkId, ...guards(opts) });
 }
 
 // ── Local work: "Name this work…" (work graph M11.1) ──

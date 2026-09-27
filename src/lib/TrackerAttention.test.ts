@@ -159,10 +159,6 @@ describe('tracker attention items (pure)', () => {
     expect(
       trackersSummary({ trackers: [{ tracker_id: 1, write_failures: 2 }, { tracker_id: 2, write_failures: 1 }] }),
     ).toBe('trackers: 3 writes not sent');
-    // M13.4f: refused webhook deliveries (a wrong secret, or someone knocking).
-    expect(trackersSummary({ trackers: [{ tracker_id: 1, webhook_enabled: true, webhook_rejected: 4 }] })).toBe(
-      'trackers: 4 webhooks refused',
-    );
   });
 });
 

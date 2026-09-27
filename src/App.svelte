@@ -6,11 +6,12 @@
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
+  import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
-  import { bumpWorkChanged, noteWorkEvents, sessionEventsTouchWork, toggleSidebarView } from './lib/work_view';
+  import { bumpWorkChanged, noteWorkChanged, noteWorkEvents, sessionEventsTouchWork, toggleSidebarView } from './lib/work_view';
   import type { SessionEvent } from './lib/sessions';
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
@@ -178,7 +179,7 @@
   // its FIRST sync, the sessions whose keys it owns just got titles and
   // status (retro-binding); say how many, and offer the Group-by-Work view.
   function onWorkEvents(events: WorkEvent[]) {
-    // The Work view (M14) re-reads what it shows on `work:changed`.
+    // The Work view (M14) re-reads what it shows when an item moved.
     noteWorkEvents(events);
     for (const t of applyWorkEvents(events)) {
       const keys = get(sessions).map((s) => s.work?.key ?? null);
@@ -226,6 +227,7 @@
     let healthFailure: string | null = null;
     if (hr0.ok) {
       health = hr0.value;
+      setContextRedPct(hr0.value.context_red_pct);
       trackersHealth.set(hr0.value.trackers ?? null);
     } else if (hr0.error.code === 'E_HUB_CONTRACT') {
       healthFailure = `health: ${hr0.error.code}`;
@@ -251,6 +253,8 @@
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
       onWorkEvents: onWorkEvents,
+      // `work:changed` (M14): the Work view re-reads.
+      onWorkChanged: noteWorkChanged,
     });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),

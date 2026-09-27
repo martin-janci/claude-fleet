@@ -4,14 +4,16 @@
 //! Every `work` / `work_link` / `work_admin` action — enumerated from
 //! `WORK_ACTIONS`, `WORK_LINK_ACTIONS` and `AdminAction::NAMES`, so a new
 //! action without a row here fails `every_action_has_a_matrix_row` — runs
-//! against six callers (master, client full, client readonly, a host in org
-//! A, a host in org B, a host in no org), with `isolate_sessions` off and on
-//! for org B. Each call goes through what `call_tool` does around a tool:
+//! against eight callers (master, client full, client readonly, a host in
+//! org A, a host in org B, a host in no org, and — work graph M14.1b — a
+//! full client bound to org A and one bound to org B), with
+//! `isolate_sessions` off and on for org B. The bound clients' second D31
+//! value (`bound_sees_unassigned` off) is `the_work_view_reads_follow_d31_off`. Each call goes through what `call_tool` does around a tool:
 //! the mode and admin gates before it, the org redaction after it.
 //!
 //! Two kinds of check run on every row:
 //!
-//! * **No leak.** Whatever a host-bound caller gets back — a result or an
+//! * **No leak.** Whatever a host-bound or org-bound caller gets back — a result or an
 //!   error sentence — never contains another org's markers (title, key,
 //!   journal and description text). A host in no org sees neither org's.
 //! * **The row's own expectation**: who gets what, which error, and that an
@@ -36,7 +38,7 @@ enum Who {
     HostA,
     HostB,
     HostNone,
-    /// A full paired client bound to org A / org B (work graph M14).
+    /// A full paired client bound to org A / org B (work graph M14.1b).
     BoundA,
     BoundB,
 }
@@ -1583,6 +1585,46 @@ async fn run_matrix(isolate: bool) {
         .await;
     }
 
+    // ── write-back (M13.4e, D3): only the master turns it on ────────────
+    // No tool triggers a write (the PR probe does); the one switch is this
+    // setting, and every other caller is refused before anything changes.
+    m.row(
+        "work_admin",
+        "update",
+        |fx, _| {
+            json!({
+                "action": "update",
+                "tracker_id": fx.tracker_a,
+                "settings": { "write_back": { "pr_remote_link": true } },
+            })
+        },
+        |fx, who, a| match who {
+            Who::Master => {
+                is_ok(who, a, "the master turns write-back on");
+                let on =
+                    fx.t.store
+                        .lock()
+                        .unwrap()
+                        .get_tracker(fx.tracker_a)
+                        .unwrap()
+                        .unwrap()
+                        .settings
+                        .write_back
+                        .pr_remote_link;
+                assert!(on, "the setting was stored");
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "write-back is the master's switch"),
+        },
+    )
+    .await;
+    // Back off, so no later row runs with a write-back tracker.
+    {
+        let s = fx.t.store.lock().unwrap();
+        let mut t = s.get_tracker(fx.tracker_a).unwrap().unwrap();
+        t.settings.write_back.pr_remote_link = false;
+        s.set_tracker_settings(fx.tracker_a, &t.settings).unwrap();
+    }
+
     // ── sessions (D7) ───────────────────────────────────────────────────
     // The rows below check what a host reads of another org's work ON A
     // SESSION ROW, so s_x (A's session carrying B's ticket) and s_b must
@@ -2318,7 +2360,43 @@ async fn run_matrix(isolate: bool) {
         }
     }
 
-    // ── the Work view (work graph M14) ─────────────────────────────────
+    // ── the Work view's reads (work graph M14.1b) ───────────────────────
+    // Navigation a person keeps (M14.1c writes it; seeded here): a rule on
+    // each org's tracker, one on a word of A's title, and a saved view of
+    // every owner. Their names are markers of their org.
+    let bravo_rule;
+    {
+        let s = fx.t.store.lock().unwrap();
+        let rule =
+            |name: &str, c: crate::store::RuleConditions, group: &str| s.seed_rule(name, &c, group);
+        let _ = rule(
+            "Alpha rule",
+            crate::store::RuleConditions {
+                tracker_id: Some(fx.tracker_a),
+                ..Default::default()
+            },
+            "SECRET-A group",
+        );
+        bravo_rule = rule(
+            "Bravo rule",
+            crate::store::RuleConditions {
+                tracker_id: Some(fx.tracker_b),
+                ..Default::default()
+            },
+            "SECRET-B group",
+        );
+        let _ = rule(
+            "Alpha login rule",
+            crate::store::RuleConditions {
+                title_contains: Some("login".into()),
+                ..Default::default()
+            },
+            "SECRET-A login",
+        );
+        s.seed_view("Everyone's", &json!({}), None);
+        s.seed_view("SECRET-A view", &json!({ "org": ORG_A }), Some(ORG_A));
+        s.seed_view("SECRET-B view", &json!({ "org": ORG_B }), Some(ORG_B));
+    }
     // The tree: each caller its own orgs' tasks; the forced cross-org link
     // (s_x, an A session, on B's BB-1) never names s_x to an org-B reader
     // nor BB-1 to an org-A one.
@@ -2444,15 +2522,30 @@ async fn run_matrix(isolate: bool) {
         "work",
         "rules",
         |_, _| json!({ "action": "rules" }),
-        |_, who, a| is_ok(who, a, "rules"),
+        |_, who, a| {
+            is_ok(who, a, "rules");
+            let t = text(a);
+            let (sa, sb) = (t.contains("Alpha rule"), t.contains("Bravo rule"));
+            match who {
+                w if w.is_unbound() => assert!(sa && sb && t.contains("Alpha login"), "{t}"),
+                // A host keeps no navigation.
+                w if w.is_host() => assert_eq!(t, "[]", "{who:?}"),
+                // A bound client: the rules that place a task it sees.
+                Who::BoundA => assert!(sa && !sb && t.contains("Alpha login"), "{t}"),
+                Who::BoundB => assert!(sb && !sa && !t.contains("Alpha login"), "{t}"),
+                _ => unreachable!(),
+            }
+        },
     )
     .await;
     m.row(
         "work",
         "rule_preview",
-        |_, _| {
+        // An edit of B's rule, previewed: it moves B's tasks to "Pay".
+        move |fx, _| {
             json!({ "action": "rule_preview",
-                    "rule": { "name": "p", "conditions": { "tracker_id": 2 }, "group": "Pay" } })
+                    "rule": { "id": bravo_rule, "name": "p",
+                              "conditions": { "tracker_id": fx.tracker_b }, "group": "Pay" } })
         },
         |_, who, a| match who {
             w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not preview rules"),
@@ -2474,45 +2567,121 @@ async fn run_matrix(isolate: bool) {
         "work",
         "views",
         |_, _| json!({ "action": "views" }),
-        |_, who, a| is_ok(who, a, "views"),
+        |_, who, a| {
+            is_ok(who, a, "views");
+            let names: Vec<String> = serde_json::from_str::<Vec<Value>>(text(a))
+                .unwrap()
+                .iter()
+                .filter_map(|v| v["name"].as_str().map(String::from))
+                .collect();
+            match who {
+                w if w.is_unbound() => assert_eq!(names.len(), 3, "{names:?}"),
+                w if w.is_host() => assert!(names.is_empty(), "{who:?}: {names:?}"),
+                // A bound client: its own org's views only (D35).
+                Who::BoundA => assert_eq!(names, vec!["SECRET-A view".to_string()]),
+                Who::BoundB => assert_eq!(names, vec!["SECRET-B view".to_string()]),
+                _ => unreachable!(),
+            }
+        },
     )
     .await;
     m.row(
         "work",
         "org_impact",
-        |_, _| json!({ "action": "org_impact", "task_id": "ref:LOC-1", "org_id": 0 }),
-        |_, who, a| match who {
-            Who::HostA | Who::HostB => is_code(who, a, "E_NOTFOUND", "not this host's work"),
-            _ => assert!(
-                text(a).contains("\"reason\":\"bare_key\""),
-                "{who:?}: {a:?}"
-            ),
+        |fx, _| json!({ "action": "org_impact", "task_id": format!("item:{}", fx.item_b), "org_id": 0 }),
+        |fx, who, a| match who {
+            // Only a caller that may move an org reads the impact of a
+            // move (D33): it names both orgs' hosts and bound clients.
+            w if w.is_unbound() => {
+                is_ok(who, a, "impact");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(v["reason"], "tracker_controlled", "{v}");
+                assert_eq!(v["from_org"], fx.org_b, "{v}");
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "a scoped caller moves no org"),
         },
     )
     .await;
-    // Mutations. A primary already primary is a no-op success.
+    // The refusal is the same for a task the caller sees and one it does
+    // not: no oracle.
+    for who in [Who::HostA, Who::BoundA, Who::BoundB] {
+        let seen = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "org_impact", "task_id": format!("item:{}", fx.item_a), "org_id": 0 }),
+        )
+        .await;
+        let unseen = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "org_impact", "task_id": "item:987654", "org_id": 0 }),
+        )
+        .await;
+        assert_eq!(seen, unseen, "{who:?}");
+    }
+    // ── the Work view's writes (work graph M14.1c) ──────────────────────
+    // Every write re-checks the caller's scope; a link, task or view out of
+    // scope answers exactly as an unknown one, a version is compared only
+    // after that, and readonly is refused by its mode.
     let primary_of = |fx: &Fx, sid: i64| -> i64 {
         fx.t.store
             .lock()
             .unwrap()
-            .session_work_links(sid)
+            .current_primary_link(sid)
             .unwrap()
-            .into_iter()
-            .find(|l| l.is_primary)
-            .map(|l| l.id)
             .unwrap_or(0)
     };
+    let version_of = |fx: &Fx, link: i64| -> i64 {
+        fx.t.store
+            .lock()
+            .unwrap()
+            .work_link_version(link)
+            .unwrap()
+            .unwrap_or(0)
+    };
+    // The session a caller may act on but must not reach: s_x (A's session
+    // carrying B's forced BB-1) for everyone but its own host's token and
+    // the unrestricted callers.
+    let s_x_refused = |who: Who, a: &Answer, ctx: &str| match who {
+        Who::Master | Who::ClientFull => unreachable!(),
+        // B's link on A's session: not A's to see; s_x not B's to reach.
+        Who::HostA | Who::BoundA | Who::BoundB => is_code(who, a, "E_NOTFOUND", ctx),
+        // Another host's session: the host fence.
+        _ => is_code(who, a, "E_FORBIDDEN", ctx),
+    };
+    // Own primary, named as seen: an idempotent success for every writer.
     m.row(
         "work_link",
         "set_primary",
         move |fx, who| {
             let sid = own(fx, who);
-            json!({ "action": "set_primary", "session_id": sid, "link_id": primary_of(fx, sid),
-                    "expected_primary": primary_of(fx, sid) })
+            let p = primary_of(fx, sid);
+            json!({ "action": "set_primary", "session_id": sid, "link_id": p, "expected_primary": p })
         },
         |_, who, a| {
             if !readonly_refused(who, a) {
-                is_ok(who, a, "own primary")
+                is_ok(who, a, "own primary");
+            }
+        },
+    )
+    .await;
+    // A stale expectation is a conflict for every writer, naming only the
+    // primary the caller sees.
+    m.row(
+        "work_link",
+        "set_primary",
+        move |fx, who| {
+            let sid = own(fx, who);
+            let p = primary_of(fx, sid);
+            json!({ "action": "set_primary", "session_id": sid, "link_id": p,
+                    "expected_primary": p + 1000 })
+        },
+        |_, who, a| {
+            if !readonly_refused(who, a) {
+                is_code(who, a, "E_CONFLICT", "stale primary");
+                assert!(text(a).contains("primary_link_id"), "{who:?}: {a:?}");
             }
         },
     )
@@ -2521,16 +2690,14 @@ async fn run_matrix(isolate: bool) {
         "work_link",
         "set_primary",
         |fx, _| json!({ "action": "set_primary", "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b) }),
-        |_, who, a| match who {
+        move |_, who, a| match who {
             _ if readonly_refused(who, a) => {}
             Who::Master | Who::ClientFull => is_ok(who, a, "the forced link is s_x's primary"),
-            Who::HostA | Who::BoundA | Who::BoundB => {
-                is_code(who, a, "E_NOTFOUND", "B's link / A's session")
-            }
-            _ => is_code(who, a, "E_FORBIDDEN", "another host's session"),
+            _ => s_x_refused(who, a, "set_primary on B's link / A's session"),
         },
     )
     .await;
+    // Undo is for proposed links; the fixture's are made by hand.
     m.row(
         "work_link",
         "reconsider",
@@ -2545,63 +2712,305 @@ async fn run_matrix(isolate: bool) {
                     a,
                     "E_INVALID_STATE",
                     "a link made by hand is removed, not undone",
-                )
+                );
             }
         },
     )
     .await;
     m.row(
         "work_link",
-        "ack",
-        |fx, _| json!({ "action": "ack", "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b) }),
-        |_, who, a| match who {
+        "reconsider",
+        |fx, _| json!({ "action": "reconsider", "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b) }),
+        move |_, who, a| match who {
             _ if readonly_refused(who, a) => {}
-            Who::Master | Who::ClientFull => is_ok(who, a, "keep the cross-org link"),
-            Who::HostA | Who::BoundA | Who::BoundB => is_code(who, a, "E_NOTFOUND", "not visible"),
-            _ => is_code(who, a, "E_FORBIDDEN", "another host's session"),
+            Who::Master | Who::ClientFull => is_code(who, a, "E_INVALID_STATE", "by hand"),
+            _ => s_x_refused(who, a, "reconsider B's link / A's session"),
         },
     )
     .await;
+    // D32: the forced cross-org link is a review item until it is kept.
+    // (Earlier rows unlink and re-make it: `relink` is its live id.)
+    let cross_org_listed = |fx: &Fx| {
+        let link = relink(fx, fx.s_x, fx.item_b);
+        let r =
+            crate::service::work::view::review(&fx.t.store, &OrgScope::All, None, None).unwrap();
+        r.items
+            .iter()
+            .any(|i| i.kind == "cross_org" && i.link_id == link)
+    };
+    assert!(cross_org_listed(&fx), "D32: the forced link is reviewed");
+    m.row(
+        "work_link",
+        "ack",
+        move |fx, _| {
+            let link = relink(fx, fx.s_x, fx.item_b);
+            json!({ "action": "ack", "session_id": fx.s_x, "link_id": link,
+                    "expected_version": version_of(fx, link) })
+        },
+        move |fx, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => {
+                is_ok(who, a, "keep the cross-org link");
+                assert!(!cross_org_listed(fx), "kept: out of the inbox");
+            }
+            _ => s_x_refused(who, a, "ack B's link / A's session"),
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute("UPDATE work_links SET review_ack_at = NULL", [])
+            .unwrap();
+    }
+    // A batch always answers, item by item: the forced link as above, and
+    // the caller's own primary confirmed again (allowed to every writer).
     m.row(
         "work_link",
         "decide_batch",
-        |fx, _| {
-            json!({ "action": "decide_batch",
-                    "decisions": [{ "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b), "decision": "ack" }] })
+        move |fx, who| {
+            let sid = own(fx, who);
+            json!({ "action": "decide_batch", "decisions": [
+                { "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b), "decision": "ack" },
+                { "session_id": sid, "link_id": primary_of(fx, sid), "decision": "confirm" },
+            ] })
         },
         |_, who, a| {
             if readonly_refused(who, a) {
                 return;
             }
             is_ok(who, a, "a batch always answers");
-            assert_eq!(
-                text(a).contains("\"ok\":true"),
-                who.is_unbound(),
-                "{who:?}: {a:?}"
-            );
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            let r = v["results"].as_array().unwrap();
+            assert_eq!(r[0]["ok"], who.is_unbound(), "{who:?}: {v}");
+            if !who.is_unbound() {
+                let want = match who {
+                    Who::HostA | Who::BoundA | Who::BoundB => "E_NOTFOUND",
+                    _ => "E_FORBIDDEN",
+                };
+                assert_eq!(r[0]["code"], want, "{who:?}: {v}");
+                assert!(r[0].get("version").is_none(), "{who:?}: {v}");
+            }
+            assert_eq!(r[1]["ok"], true, "{who:?}: one failing never stops the next: {v}");
         },
     )
     .await;
-    let placement = |fx: &Fx| -> i64 {
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute("UPDATE work_links SET review_ack_at = NULL", [])
+            .unwrap();
+    }
+    // A hidden link's version is no oracle: with or without a (wrong)
+    // expected_version, it answers as an unknown link.
+    let link_x = relink(&fx, fx.s_x, fx.item_b);
+    for who in [Who::HostA, Who::BoundA] {
+        for action in [
+            "confirm",
+            "reject",
+            "unlink",
+            "set_primary",
+            "reconsider",
+            "ack",
+        ] {
+            let ask = |link: i64| {
+                json!({ "action": action, "session_id": fx.s_x, "link_id": link,
+                        "expected_version": 99 })
+            };
+            let hidden = call(&fx, who, "work_link", ask(link_x)).await;
+            let unknown = call(&fx, who, "work_link", ask(999_999)).await;
+            is_code(who, &hidden, "E_NOTFOUND", action);
+            same_as_unknown(&hidden, &unknown, &link_x.to_string(), "999999");
+            assert!(
+                link_is_live(&fx, link_x),
+                "{who:?} {action}: nothing changed"
+            );
+        }
+    }
+    // link / confirm { primary: false, expected_version }: the caller's own
+    // work re-linked as a secondary keeps the primary; a stale version is a
+    // conflict.
+    let own_item = |fx: &Fx, who: Who| -> Value {
+        match who {
+            Who::HostB | Who::BoundB => json!({ "item_id": fx.item_b }),
+            Who::HostNone => json!({ "key": "LOC-1" }),
+            _ => json!({ "item_id": fx.item_a }),
+        }
+    };
+    for stale in [false, true] {
+        m.row(
+            "work_link",
+            "link",
+            move |fx, who| {
+                let sid = own(fx, who);
+                let p = primary_of(fx, sid);
+                let v = version_of(fx, p) + if stale { 5 } else { 0 };
+                let mut args = json!({ "action": "link", "session_id": sid, "primary": false,
+                                       "expected_version": v });
+                args.as_object_mut()
+                    .unwrap()
+                    .extend(own_item(fx, who).as_object().unwrap().clone());
+                args
+            },
+            move |fx, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                if stale {
+                    return is_code(who, a, "E_CONFLICT", "a stale link version");
+                }
+                is_ok(who, a, "re-link own work as a secondary");
+                let row: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(
+                    row["work"]["link_id"],
+                    primary_of(fx, own(fx, who)),
+                    "{who:?}"
+                );
+            },
+        )
+        .await;
+        m.row(
+            "work_link",
+            "confirm",
+            move |fx, who| {
+                let sid = own(fx, who);
+                let p = primary_of(fx, sid);
+                let v = version_of(fx, p) + if stale { 5 } else { 0 };
+                json!({ "action": "confirm", "session_id": sid, "link_id": p, "primary": false,
+                        "expected_version": v })
+            },
+            move |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                if stale {
+                    is_code(who, a, "E_CONFLICT", "a stale link version");
+                } else {
+                    is_ok(who, a, "confirm own primary as seen");
+                }
+            },
+        )
+        .await;
+    }
+    // Placement: never a host's; a bound client places only what it sees.
+    let placement_of = |fx: &Fx, task: &str| -> i64 {
         fx.t.store
             .lock()
             .unwrap()
-            .work_placement(&format!("item:{}", fx.item_b))
+            .work_placement(task)
             .unwrap()
             .map_or(0, |p| p.version)
     };
     m.row(
         "work_link",
         "place",
-        move |fx, _| {
-            json!({ "action": "place", "task_id": format!("item:{}", fx.item_b),
-                    "group": "Payroll", "expected_version": placement(fx) })
+        move |fx, who| {
+            let task = format!("item:{}", fx.item_b);
+            json!({ "action": "place", "task_id": task, "group": format!("Payroll {who:?}"),
+                    "expected_version": placement_of(fx, &task) })
         },
         |_, who, a| match who {
             _ if readonly_refused(who, a) => {}
             w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
             Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's task"),
-            _ => assert!(text(a).contains("\"source\":\"manual\""), "{who:?}: {a:?}"),
+            _ => {
+                is_ok(who, a, "place");
+                assert!(text(a).contains("\"source\":\"manual\""), "{who:?}: {a:?}");
+                assert!(
+                    text(a).contains(&format!("Payroll {who:?}")),
+                    "{who:?}: {a:?}"
+                );
+            }
+        },
+    )
+    .await;
+    // A stale version: a conflict only for a caller who sees the task.
+    m.row(
+        "work_link",
+        "place",
+        move |fx, _| {
+            let task = format!("item:{}", fx.item_b);
+            json!({ "action": "place", "task_id": task, "group": "late",
+                    "expected_version": placement_of(fx, &task) + 3 })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's task: no version oracle"),
+            _ => is_code(who, a, "E_CONFLICT", "a stale placement"),
+        },
+    )
+    .await;
+    let hidden = call(
+        &fx,
+        Who::BoundA,
+        "work_link",
+        json!({ "action": "place", "task_id": format!("item:{}", fx.item_b), "group": "x", "expected_version": 1 }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::BoundA,
+        "work_link",
+        json!({ "action": "place", "task_id": "item:999999", "group": "x", "expected_version": 1 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &fx.item_b.to_string(), "999999");
+    // Unassigned work (the bare key LOC-1): a bound client places it while
+    // D31 is on (the matrix's default; off is below).
+    m.row(
+        "work_link",
+        "place",
+        move |fx, _| {
+            json!({ "action": "place", "task_id": "ref:LOC-1", "group": "Local",
+                    "expected_version": placement_of(fx, "ref:LOC-1") })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
+            _ => is_ok(who, a, "unassigned work, D31 on"),
+        },
+    )
+    .await;
+    // assign_org (D33): the master and a full unbound client, with a fresh
+    // impact; never a host, never a bound client — refused before the task
+    // is looked at, so no oracle either.
+    m.row(
+        "work_link",
+        "assign_org",
+        move |fx, _| {
+            let task = format!("item:{local_a}");
+            let cur = crate::service::work::view::task(&fx.t.store, &OrgScope::All, &task)
+                .unwrap()
+                .task;
+            let to = if cur.org_source == "item" { 0 } else { ORG_A };
+            let imp = crate::service::work::structure::org_impact(
+                &fx.t.store,
+                &OrgScope::All,
+                &task,
+                Some(to),
+            )
+            .unwrap();
+            json!({ "action": "assign_org", "task_id": task, "org_id": to,
+                    "impact_token": imp.impact_token })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_ok(who, a, "move a local task's org"),
+            _ => is_code(who, a, "E_FORBIDDEN", "hosts and bound clients move no org"),
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "assign_org",
+        |fx, _| json!({ "action": "assign_org", "task_id": format!("item:{}", fx.item_b), "org_id": 0, "impact_token": "stale" }),
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => {
+                is_code(who, a, "E_FORBIDDEN", "a tracker item's org is its tracker's")
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "hosts and bound clients move no org"),
         },
     )
     .await;
@@ -2616,17 +3025,88 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.set_local_item_org(local_a, None).unwrap();
+    }
+    // Rules (D34): placement only, and the unrestricted callers' only.
     m.row(
         "work_link",
         "rule_save",
-        |_, _| {
+        |_, who| {
             json!({ "action": "rule_save",
-                    "rule": { "name": "z", "conditions": { "key_prefix": "ZZ" }, "group": "Z" } })
+                    "rule": { "name": format!("z {who:?}"), "conditions": { "key_prefix": "ZZ" }, "group": "Z" } })
         },
         |_, who, a| match who {
             _ if readonly_refused(who, a) => {}
             Who::Master | Who::ClientFull => is_ok(who, a, "rule"),
             _ => is_code(who, a, "E_FORBIDDEN", "rules reach every org"),
+        },
+    )
+    .await;
+    let rule_version = move |fx: &Fx| -> i64 {
+        fx.t.store
+            .lock()
+            .unwrap()
+            .work_rule(bravo_rule)
+            .unwrap()
+            .unwrap()
+            .version
+    };
+    m.row(
+        "work_link",
+        "rule_save",
+        move |fx, _| {
+            json!({ "action": "rule_save",
+                    "rule": { "id": bravo_rule, "name": "Bravo rule", "group": "SECRET-B group",
+                              "conditions": { "tracker_id": fx.tracker_b },
+                              "expected_version": rule_version(fx) + 1 } })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_code(who, a, "E_CONFLICT", "a stale rule"),
+            _ => is_code(who, a, "E_FORBIDDEN", "rules reach every org"),
+        },
+    )
+    .await;
+    let fresh_rule = std::cell::Cell::new(0_i64);
+    let fresh_rule = &fresh_rule;
+    m.row(
+        "work_link",
+        "rule_delete",
+        move |fx, _| {
+            let id = fx.t.store.lock().unwrap().seed_rule(
+                "doomed",
+                &crate::store::RuleConditions {
+                    key_prefix: Some("DD".into()),
+                    ..Default::default()
+                },
+                "D",
+            );
+            fresh_rule.set(id);
+            json!({ "action": "rule_delete", "rule_id": id, "expected_version": 1 })
+        },
+        move |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            let gone =
+                fx.t.store
+                    .lock()
+                    .unwrap()
+                    .work_rule(fresh_rule.get())
+                    .unwrap()
+                    .is_none();
+            match who {
+                Who::Master | Who::ClientFull => {
+                    is_ok(who, a, "delete");
+                    assert!(gone, "{who:?}");
+                }
+                _ => {
+                    is_code(who, a, "E_FORBIDDEN", "rules reach every org");
+                    assert!(!gone, "{who:?}: a refusal deletes nothing");
+                }
+            }
         },
     )
     .await;
@@ -2641,6 +3121,7 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Views (D35): shared on the hub, a bound client's its org's.
     m.row(
         "work_link",
         "view_save",
@@ -2655,6 +3136,106 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    let listed = call(&fx, Who::BoundA, "work", json!({ "action": "views" })).await;
+    assert!(
+        text(&listed).contains("open BoundA")
+            && !text(&listed).contains("open BoundB")
+            && !text(&listed).contains("open Master"),
+        "{listed:?}"
+    );
+    // Another org's view: replaced only by its org and the unrestricted.
+    let view_b: i64 = serde_json::from_str::<Vec<Value>>(text(
+        &call(&fx, Who::BoundB, "work", json!({ "action": "views" })).await,
+    ))
+    .unwrap()
+    .iter()
+    .find(|v| v["name"] == "SECRET-B view")
+    .and_then(|v| v["id"].as_i64())
+    .unwrap();
+    let unknown_view = &call(
+        &fx,
+        Who::BoundA,
+        "work_link",
+        json!({ "action": "view_save",
+                "view": { "id": 999_999, "name": "SECRET-B view", "filters": { "org": ORG_B } } }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "view_save",
+        move |_, _| {
+            json!({ "action": "view_save",
+                    "view": { "id": view_b, "name": "SECRET-B view", "filters": { "org": ORG_B } } })
+        },
+        move |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+            Who::BoundA => {
+                is_code(who, a, "E_NOTFOUND", "another org's view");
+                same_as_unknown(a, unknown_view, &view_b.to_string(), "999999");
+            }
+            _ => {
+                is_ok(who, a, "the org's own view, or the master's reach");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(v["owner_org"], ORG_B, "{who:?}: the owner stays");
+            }
+        },
+    )
+    .await;
+    // A bound client's view names only what it sees.
+    m.row(
+        "work_link",
+        "view_save",
+        |fx, who| {
+            json!({ "action": "view_save",
+                    "view": { "name": format!("tracker {who:?}"), "filters": { "tracker": fx.tracker_b } } })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's tracker"),
+            _ => is_ok(who, a, "a tracker it sees"),
+        },
+    )
+    .await;
+    let doomed_view = std::cell::Cell::new(0_i64);
+    let doomed_view = &doomed_view;
+    m.row(
+        "work_link",
+        "view_delete",
+        move |fx, who| {
+            let id = fx.t.store.lock().unwrap().seed_view(
+                &format!("doomed {who:?}"),
+                &json!({}),
+                Some(ORG_A),
+            );
+            doomed_view.set(id);
+            json!({ "action": "view_delete", "view_id": id, "expected_version": 1 })
+        },
+        move |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            let gone =
+                fx.t.store
+                    .lock()
+                    .unwrap()
+                    .work_view(doomed_view.get())
+                    .unwrap()
+                    .is_none();
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "A's view"),
+                _ => {
+                    is_ok(who, a, "delete");
+                    assert!(gone, "{who:?}");
+                    return;
+                }
+            }
+            assert!(!gone, "{who:?}: a refusal deletes nothing");
+        },
+    )
+    .await;
     m.row(
         "work_link",
         "view_delete",
@@ -2666,14 +3247,22 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
-    // A bound client lists only its own org's views.
-    let listed = call(&fx, Who::BoundA, "work", json!({ "action": "views" })).await;
-    assert!(
-        text(&listed).contains("open BoundA")
-            && !text(&listed).contains("open BoundB")
-            && !text(&listed).contains("open Master"),
-        "{listed:?}"
-    );
+    // D31's switch is org administration: the master's, and nobody else's.
+    m.row(
+        "work_admin",
+        "update_org",
+        |_, _| json!({ "action": "update_org", "org_id": ORG_A, "bound_sees_unassigned": true }),
+        |fx, who, a| match who {
+            Who::Master => {
+                is_ok(who, a, "D31");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(v["bound_sees_unassigned"], true, "{v}");
+                let _ = fx;
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "work_admin is master-only"),
+        },
+    )
+    .await;
     {
         let s = fx.t.store.lock().unwrap();
         s.conn_for_test()
@@ -2716,9 +3305,292 @@ async fn the_isolation_matrix_holds_with_org_b_isolating_sessions() {
     run_matrix(true).await;
 }
 
+/// D31 (work graph M14.1b), its second value: with an org's
+/// `bound_sees_unassigned` off — set through `work_admin`'s org edit, as the
+/// operator does — its bound clients read only rows assigned to their org:
+/// no unassigned session (s_n on the no-org host h-n) and no unassigned
+/// work (its bare key LOC-1), through any of the Work view's reads, nor
+/// the session list. The master and the hosts read as before: D31 is a
+/// bound client's switch only. The matrix above runs with the default (on).
+#[tokio::test]
+async fn the_work_view_reads_follow_d31_off() {
+    let fx = fixture(false);
+    for org in [ORG_A, ORG_B] {
+        let a = call(
+            &fx,
+            Who::Master,
+            "work_admin",
+            json!({ "action": "update_org", "org_id": org, "bound_sees_unassigned": false }),
+        )
+        .await;
+        is_ok(Who::Master, &a, "D31 off");
+        assert!(
+            text(&a).contains("\"bound_sees_unassigned\":false"),
+            "{a:?}"
+        );
+    }
+    // What an unassigned row would show: its key and its session's name.
+    const UNASSIGNED: &[&str] = &["LOC-1", "s-n"];
+    let reads = |fx: &Fx| -> Vec<(&'static str, Value)> {
+        vec![
+            ("tree", json!({ "action": "tree", "limit": 200 })),
+            ("task", json!({ "action": "task", "task_id": "ref:LOC-1" })),
+            (
+                "session_tasks",
+                json!({ "action": "session_tasks", "session_id": fx.s_n }),
+            ),
+            ("review", json!({ "action": "review" })),
+            ("rules", json!({ "action": "rules" })),
+            (
+                "rule_preview",
+                json!({ "action": "rule_preview",
+                        "rule": { "name": "loc", "conditions": { "key_prefix": "LOC" }, "group": "Loc" } }),
+            ),
+            ("views", json!({ "action": "views" })),
+            (
+                "org_impact",
+                json!({ "action": "org_impact", "task_id": "ref:LOC-1", "org_id": 0 }),
+            ),
+        ]
+    };
+    for who in [
+        Who::Master,
+        Who::HostA,
+        Who::HostNone,
+        Who::BoundA,
+        Who::BoundB,
+    ] {
+        for (action, args) in reads(&fx) {
+            let a = call(&fx, who, "work", args).await;
+            let t = text(&a);
+            for m in who.forbidden_markers() {
+                assert!(
+                    !t.contains(m),
+                    "LEAK: {who:?} read {m:?} through {action}: {t}"
+                );
+            }
+            if who.is_bound() {
+                // The asked-for key may come back in its own refusal.
+                for m in UNASSIGNED
+                    .iter()
+                    .filter(|m| !(action == "task" && **m == "LOC-1"))
+                {
+                    assert!(
+                        !t.contains(m),
+                        "D31 off: {who:?} read the unassigned {m:?} through {action}: {t}"
+                    );
+                }
+            }
+            match (who, action) {
+                (Who::Master, "tree") | (Who::HostNone, "tree") => {
+                    assert!(t.contains("LOC-1"), "unchanged for {who:?}: {t}")
+                }
+                (Who::Master, "task" | "session_tasks") => is_ok(who, &a, action),
+                (Who::HostNone, "task" | "session_tasks") => is_ok(who, &a, "its own host"),
+                (Who::BoundA | Who::BoundB, "task" | "session_tasks") => {
+                    is_code(who, &a, "E_NOTFOUND", "unassigned, D31 off")
+                }
+                (Who::BoundA, "tree") => assert!(t.contains("AA-1"), "its own org: {t}"),
+                (Who::BoundB, "tree") => assert!(t.contains("BB-1"), "its own org: {t}"),
+                (Who::BoundA | Who::BoundB, "rule_preview") => {
+                    assert!(t.contains("\"total\":0"), "{who:?}: {t}")
+                }
+                (Who::Master, "rule_preview") => assert!(t.contains("LOC-1"), "{t}"),
+                (w, "org_impact") if !w.is_unbound() => {
+                    is_code(who, &a, "E_FORBIDDEN", "a scoped caller moves no org")
+                }
+                _ => {}
+            }
+        }
+        // No oracle: the hidden bare key reads as a key nobody linked.
+        if who.is_bound() {
+            let hidden = call(
+                &fx,
+                who,
+                "work",
+                json!({ "action": "task", "task_id": "ref:LOC-1" }),
+            )
+            .await;
+            let unknown = call(
+                &fx,
+                who,
+                "work",
+                json!({ "action": "task", "task_id": "ref:NOPE-1" }),
+            )
+            .await;
+            same_as_unknown(&hidden, &unknown, "LOC-1", "NOPE-1");
+        }
+        // The session list follows the same switch.
+        let a = call(&fx, who, "list_sessions", json!({})).await;
+        if who.is_bound() {
+            assert!(!text(&a).contains("s-n"), "{who:?}: {a:?}");
+        }
+    }
+    // Nor does it start a session it could not see: an unassigned project
+    // on the no-org host is refused while the switch is off.
+    {
+        let s = fx.t.store.lock().unwrap();
+        let loose = s.upsert_project("loose", "x", "/src/loose").unwrap();
+        let err = super::support::require_bound_client_may_create(
+            &s,
+            &Who::BoundA.caller(),
+            "h-n",
+            loose,
+        )
+        .unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{err:?}");
+        assert!(super::support::require_bound_client_may_create(
+            &s,
+            &Who::BoundA.caller(),
+            "h-a",
+            fx.pid_acme
+        )
+        .is_ok());
+    }
+    // Back on: A's bound client reads the unassigned rows again, from its
+    // next call on (the scope is read with each call).
+    call(
+        &fx,
+        Who::Master,
+        "work_admin",
+        json!({ "action": "update_org", "org_id": ORG_A, "bound_sees_unassigned": true }),
+    )
+    .await
+    .unwrap();
+    let a = call(
+        &fx,
+        Who::BoundA,
+        "work",
+        json!({ "action": "tree", "limit": 200 }),
+    )
+    .await;
+    assert!(
+        text(&a).contains("LOC-1") && text(&a).contains("s-n"),
+        "{a:?}"
+    );
+    let a = call(
+        &fx,
+        Who::BoundB,
+        "work",
+        json!({ "action": "tree", "limit": 200 }),
+    )
+    .await;
+    assert!(
+        !text(&a).contains("LOC-1"),
+        "B's switch is still off: {a:?}"
+    );
+}
+
 /// Every Routed work command of the desktop maps to an action the matrix
 /// covers (src-tauri's routing tests hold `ROUTED_WORK_COMMANDS` to its
 /// verdict table).
+/// D31's second value for the writes (work graph M14.1c): with an org's
+/// `bound_sees_unassigned` off, its bound clients cannot write to
+/// unassigned work or sessions either — placing the bare key LOC-1,
+/// deciding on s_n's link, alone or in a batch, or naming the unassigned
+/// work in a view all answer as unknown. Their own org's writes, the
+/// master's and the hosts' are unchanged. The matrix above covers D31 on.
+#[tokio::test]
+async fn the_work_view_writes_follow_d31_off() {
+    let fx = fixture(false);
+    for org in [ORG_A, ORG_B] {
+        let a = call(
+            &fx,
+            Who::Master,
+            "work_admin",
+            json!({ "action": "update_org", "org_id": org, "bound_sees_unassigned": false }),
+        )
+        .await;
+        is_ok(Who::Master, &a, "D31 off");
+    }
+    let s_n_link =
+        fx.t.store
+            .lock()
+            .unwrap()
+            .current_primary_link(fx.s_n)
+            .unwrap()
+            .unwrap();
+    let writes = |fx: &Fx| -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "place",
+                json!({ "action": "place", "task_id": "ref:LOC-1", "group": "x", "expected_version": 0 }),
+            ),
+            (
+                "set_primary",
+                json!({ "action": "set_primary", "session_id": fx.s_n, "link_id": s_n_link }),
+            ),
+            (
+                "ack",
+                json!({ "action": "ack", "session_id": fx.s_n, "link_id": s_n_link }),
+            ),
+            (
+                "reconsider",
+                json!({ "action": "reconsider", "session_id": fx.s_n, "link_id": s_n_link }),
+            ),
+            (
+                "unlink",
+                json!({ "action": "unlink", "session_id": fx.s_n, "link_id": s_n_link,
+                        "expected_version": 1 }),
+            ),
+        ]
+    };
+    for who in [Who::BoundA, Who::BoundB] {
+        for (action, args) in writes(&fx) {
+            let a = call(&fx, who, "work_link", args).await;
+            is_code(who, &a, "E_NOTFOUND", action);
+        }
+        let batch = call(
+            &fx,
+            who,
+            "work_link",
+            json!({ "action": "decide_batch", "decisions": [
+                { "session_id": fx.s_n, "link_id": s_n_link, "decision": "confirm" },
+            ] }),
+        )
+        .await;
+        is_ok(who, &batch, "a batch always answers");
+        let v: Value = serde_json::from_str(text(&batch)).unwrap();
+        assert_eq!(v["results"][0]["code"], "E_NOTFOUND", "{who:?}: {v}");
+        // Its own org's work is still its to place.
+        let own = if who == Who::BoundA {
+            fx.item_a
+        } else {
+            fx.item_b
+        };
+        let placed = call(
+            &fx,
+            who,
+            "work_link",
+            json!({ "action": "place", "task_id": format!("item:{own}"), "group": format!("{who:?}"),
+                    "expected_version": 0 }),
+        )
+        .await;
+        is_ok(who, &placed, "own org's task");
+    }
+    assert!(link_is_live(&fx, s_n_link), "a refusal changes nothing");
+    // The master, the no-org host and an unbound client: as before.
+    for who in [Who::Master, Who::ClientFull, Who::HostNone] {
+        let p = call(
+            &fx,
+            who,
+            "work_link",
+            json!({ "action": "set_primary", "session_id": fx.s_n, "link_id": s_n_link,
+                    "expected_primary": s_n_link }),
+        )
+        .await;
+        is_ok(who, &p, "D31 is a bound client's switch only");
+    }
+    let placed = call(
+        &fx,
+        Who::Master,
+        "work_link",
+        json!({ "action": "place", "task_id": "ref:LOC-1", "group": "x", "expected_version": 0 }),
+    )
+    .await;
+    is_ok(Who::Master, &placed, "unassigned work, the master");
+}
+
 #[test]
 fn every_routed_work_command_names_a_covered_action() {
     for (cmd, tool, action) in crate::service::work::ROUTED_WORK_COMMANDS {
@@ -2808,6 +3680,106 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
                 .unwrap_or_default();
             assert!(!hosts.contains(&other_host), "{who:?}: {hosts:?}");
         }
+    }
+}
+
+/// Work graph M14: every roll-up in `fleet_health` that sums across hosts
+/// (spend by host and by day, host and session counts) is taken over the
+/// hosts an org-bound client sees — its org's, and unassigned ones only
+/// while D31 is on — so B's spend never reaches A's client, not even as a
+/// fleet-wide total. Everyone else reads as before.
+#[tokio::test]
+async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
+    let fx = fixture(false);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    {
+        let s = fx.t.store.lock().unwrap();
+        for (id, host, cost) in [
+            (fx.s_a, "h-a", 100),
+            (fx.s_b, "h-b", 20_000),
+            (fx.s_n, "h-n", 3_000),
+        ] {
+            s.apply_usage(
+                id,
+                host,
+                &crate::store::UsageDelta {
+                    reset: false,
+                    totals: crate::store::UsageTotals {
+                        input_tokens: cost,
+                        cost_micros: cost,
+                        ..Default::default()
+                    },
+                    model: None,
+                    offset: 1,
+                    source: "x.jsonl".into(),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now,
+                },
+            )
+            .unwrap();
+        }
+    }
+    // (daily cost, usage_by_host keys, hosts_total, sessions_total)
+    let read = |a: &Answer| -> (i64, Vec<String>, i64, i64) {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        let day: i64 = v["usage_by_day"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["cost_micros"].as_i64().unwrap())
+            .sum();
+        let hosts = v["usage_by_host"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        (
+            day,
+            hosts,
+            v["hosts_total"].as_i64().unwrap(),
+            v["sessions_total"].as_i64().unwrap(),
+        )
+    };
+    let names = |hs: &[&str]| hs.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+    let everything = (23_100, names(&["h-a", "h-b", "h-n"]), 3, 4);
+    for who in EVERYONE {
+        let a = call(&fx, *who, "fleet_health", json!({})).await;
+        assert_eq!(code(&a), "OK", "{who:?}: {a:?}");
+        let want = match who {
+            // D31 on (the default): the org's hosts and h-n. s_x is A's
+            // too; B's s_b and its 20 000 are nowhere.
+            Who::BoundA => (3_100, names(&["h-a", "h-n"]), 2, 3),
+            Who::BoundB => (23_000, names(&["h-b", "h-n"]), 2, 2),
+            // As before: its own host's spend, fleet-wide counts.
+            Who::HostA => (100, names(&["h-a"]), 3, 4),
+            Who::HostB => (20_000, names(&["h-b"]), 3, 4),
+            Who::HostNone => (3_000, names(&["h-n"]), 3, 4),
+            _ => everything.clone(),
+        };
+        assert_eq!(read(&a), want, "{who:?}");
+    }
+    // D31 off: the unassigned host leaves a bound client's totals too.
+    for org in [ORG_A, ORG_B] {
+        let a = call(
+            &fx,
+            Who::Master,
+            "work_admin",
+            json!({ "action": "update_org", "org_id": org, "bound_sees_unassigned": false }),
+        )
+        .await;
+        is_ok(Who::Master, &a, "D31 off");
+    }
+    for (who, want) in [
+        (Who::BoundA, (100, names(&["h-a"]), 1, 2)),
+        (Who::BoundB, (20_000, names(&["h-b"]), 1, 1)),
+        (Who::Master, everything.clone()),
+        (Who::ClientReadonly, everything.clone()),
+    ] {
+        let a = call(&fx, who, "fleet_health", json!({})).await;
+        assert_eq!(read(&a), want, "{who:?} with D31 off");
     }
 }
 
@@ -2995,4 +3967,144 @@ fn the_classification_nudge_offers_only_the_hosts_own_tickets() {
     let b = fresh("h-b", "conv-nudge-b").expect("B's own ticket is offered on h-b");
     assert!(b.contains("BB-9"), "{b}");
     assert!(!b.contains("AA-9"), "{b}");
+}
+
+/// Work graph M14.1d: `work:changed` is emitted — ids only — on a
+/// placement, a rule, a saved view and a local task's org change, and on
+/// `/events` it reaches only a caller that reads every org. A per-host
+/// token and an org-bound client never receive it (kind `work`): a frame
+/// naming a task, rule or view carries no session to fence it by, so they
+/// re-read what they may see through `work { … }` on their own
+/// `session:*` frames instead.
+#[test]
+fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
+    use crate::events::BroadcastEventBus;
+    use crate::mcp::events_route::{fence_frame, fence_host_bound, matches};
+    use crate::service::work::structure::{self as st, RuleInput, ViewInput};
+    use crate::store::RuleConditions;
+
+    let bus = std::sync::Arc::new(BroadcastEventBus::default());
+    // Subscribed first: the bus renders nothing nobody listens for.
+    let mut rx = bus.subscribe();
+    let store = std::sync::Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let local = {
+        let s = store.lock().unwrap();
+        for h in ["h-a", "h-b", "h-n"] {
+            s.upsert_host(h).unwrap();
+        }
+        let a = s.add_org("Alpha", None, false).unwrap();
+        let b = s.add_org("Bravo", None, false).unwrap();
+        assert_eq!((a.id, b.id), (ORG_A, ORG_B), "the callers' org ids");
+        s.set_host_org("h-a", Some(ORG_A)).unwrap();
+        s.set_host_org("h-b", Some(ORG_B)).unwrap();
+        let sid = s
+            .upsert_session("one", "h-a", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.name_session_work(sid, Some("LOC-1"), "SECRET-A billing")
+            .unwrap()
+            .0
+            .id
+    };
+    let tid = format!("item:{local}");
+    while rx.try_recv().is_ok() {}
+
+    st::place(
+        &store,
+        &OrgScope::All,
+        &tid,
+        Some("Payments"),
+        Some("SECRET-A note"),
+        Some(0),
+        "master",
+    )
+    .unwrap();
+    let rule = st::rule_save(
+        &store,
+        &OrgScope::All,
+        &RuleInput {
+            name: "Pay".into(),
+            conditions: RuleConditions {
+                key_prefix: Some("LOC".into()),
+                ..Default::default()
+            },
+            group: "Payments".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    st::rule_delete(&store, &OrgScope::All, rule.id, Some(rule.version)).unwrap();
+    let view = st::view_save(
+        &store,
+        &OrgScope::All,
+        &ViewInput {
+            name: "SECRET-A view".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    st::view_delete(&store, &OrgScope::All, view.id, Some(view.version)).unwrap();
+    let imp = st::org_impact(&store, &OrgScope::All, &tid, Some(ORG_B)).unwrap();
+    st::assign_org(
+        &store,
+        &OrgScope::All,
+        &tid,
+        Some(ORG_B),
+        Some(&imp.impact_token),
+    )
+    .unwrap();
+
+    let mut frames = Vec::new();
+    while let Ok(m) = rx.try_recv() {
+        if m.name == "work:changed" {
+            frames.push(m);
+        }
+    }
+    let whats: Vec<&str> = frames
+        .iter()
+        .map(|f| f.payload["what"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        whats,
+        ["placement", "rule", "rule", "view", "view", "org"],
+        "one frame per structural write"
+    );
+    assert_eq!(
+        frames[0].payload,
+        json!({ "what": "placement", "task_id": tid })
+    );
+    assert_eq!(
+        frames[1].payload,
+        json!({ "what": "rule", "rule_id": rule.id })
+    );
+    assert_eq!(
+        frames[3].payload,
+        json!({ "what": "view", "view_id": view.id })
+    );
+    assert_eq!(frames[5].payload, json!({ "what": "org", "task_id": tid }));
+    for f in &frames {
+        let text = f.payload.to_string();
+        assert!(!text.contains("SECRET"), "ids only: {text}");
+    }
+
+    for &who in EVERYONE {
+        let c = who.caller();
+        let kinds = fence_host_bound(&c, None);
+        let asked = fence_host_bound(&c, Some(vec!["work".into()]));
+        let scope = {
+            let s = store.lock().unwrap();
+            c.org_scope(&s).unwrap()
+        };
+        for f in &frames {
+            for k in [&kinds, &asked] {
+                let delivered =
+                    matches(k.as_ref(), f) && fence_frame(&scope, f, &|_| None).is_some();
+                assert_eq!(
+                    delivered,
+                    who.is_unbound(),
+                    "{who:?}: work:changed {} (asked {k:?})",
+                    f.payload
+                );
+            }
+        }
+    }
 }

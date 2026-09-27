@@ -478,8 +478,8 @@ impl Store {
     }
 
     /// [`Self::decide_work_link`], confirming as a secondary link when
-    /// `take_primary` is false (work graph M14) — still primary when the
-    /// session has none.
+    /// `take_primary` is false (work graph M14.1c) — still primary when the
+    /// session has no other primary.
     pub fn decide_work_link_as(
         &self,
         session_id: i64,

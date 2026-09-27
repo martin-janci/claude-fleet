@@ -79,6 +79,8 @@ export interface SessionRow {
   turn_seq: number;
   /** Unix secs of the last Stop hook. */
   last_stop_at: number | null;
+  /** When the tick demoted a stale `working` row to idle (attention `stale_working`); absent from an older hub. */
+  stale_working_at?: number | null;
   /** Requester session that dispatched the task this session works on. */
   parent_session_id: number | null;
   /** Labels set via `set_session_tags`; empty when none. */

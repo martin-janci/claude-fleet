@@ -113,18 +113,7 @@ export interface WorkItemRow {
 export type WorkEvent =
   | { type: 'item'; row: WorkItemRow }
   | { type: 'tracker'; row: TrackerRow }
-  | { type: 'tracker_removed'; id: number }
-  /** `work:changed` (work graph M14): the structure moved (a placement, a
-   *  rule, a view, a task's org). Ids only; the Work view re-reads. */
-  | { type: 'changed'; change: WorkChange };
-
-/** A `work:changed` payload. */
-export interface WorkChange {
-  what: 'placement' | 'rule' | 'view' | 'org' | string;
-  task_id?: string | null;
-  rule_id?: number | null;
-  view_id?: number | null;
-}
+  | { type: 'tracker_removed'; id: number };
 
 // ---------------------------------------------------------------------------
 // Commands (work graph M3). Reads and `start_work` route to a hub; the admin

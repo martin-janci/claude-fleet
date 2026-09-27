@@ -80,8 +80,8 @@ pub use trackers::{
     TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
-    canonical_key, github_ref, normalize_work_ref, split_github_repo, WorkItemRow, WorkLinkRow,
-    WorkSummary, WorkTarget, WORK_LINK_SOURCES,
+    canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo,
+    WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, WORK_LINK_SOURCES,
 };
 pub use work_detect::DetectionState;
 pub use work_journal::{

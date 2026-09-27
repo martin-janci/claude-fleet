@@ -642,6 +642,14 @@ impl BroadcastEventBus {
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
     }
+
+    /// Test-only: as though the last subscriber left longer ago than
+    /// [`RING_GRACE_SECS`], without waiting fifteen minutes for it.
+    #[cfg(test)]
+    pub(crate) fn expire_grace_for_test(&self) {
+        self.last_subscriber_at
+            .store(unix_now() - RING_GRACE_SECS - 1, Ordering::Relaxed);
+    }
 }
 
 impl Default for BroadcastEventBus {
@@ -667,6 +675,15 @@ impl EventBus for BroadcastEventBus {
         let now = unix_now();
         if self.receiver_count() == 0 {
             if now - self.last_subscriber_at.load(Ordering::Relaxed) > RING_GRACE_SECS {
+                // Not rendered — but not forgotten either. The event still
+                // takes a number, and the ring is emptied, so a client
+                // resuming from before it finds a hole (`replay_after` answers
+                // `None`) and re-lists, instead of a ring that still reaches
+                // back to its id and replays "nothing missed".
+                if let Ok(mut ring) = self.ring.lock() {
+                    ring.clear();
+                    self.seq.fetch_add(1, Ordering::Relaxed);
+                }
                 return;
             }
         } else {
@@ -1239,6 +1256,35 @@ mod tests {
             1,
             "the event that arrived while the phone was away is replayable"
         );
+    }
+
+    /// Past the grace window the bus stops recording — and an event it does
+    /// not record must still count as one a resuming client missed. It used
+    /// to be dropped without a sequence number, so the ring still reached
+    /// back to the client's id and the replay answered "nothing missed": a
+    /// phone away for twenty minutes resumed as current and never re-listed
+    /// the session that was killed while it was gone.
+    #[tokio::test]
+    async fn an_event_dropped_after_the_grace_window_refuses_a_resume_from_before_it() {
+        let bus = BroadcastEventBus::new(16);
+        let rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(1));
+        drop(rx);
+        bus.expire_grace_for_test();
+
+        // Nobody listening and the window gone: not recorded.
+        bus.emit(&RowChange::SessionKilled(2));
+
+        assert!(
+            bus.replay_after(bus.generation(), 1).is_none(),
+            "a client that saw 1 missed 2, so its resume must be refused"
+        );
+        // A fresh subscriber is unaffected, and what follows is replayable
+        // again from the ids it hands out.
+        let _rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(3));
+        let after = bus.replay_after(bus.generation(), 3);
+        assert_eq!(after.map(|v| v.len()), Some(0), "caught up at 3");
     }
 
     #[tokio::test]

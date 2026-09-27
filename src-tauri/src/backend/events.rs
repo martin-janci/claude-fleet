@@ -712,7 +712,7 @@ impl FleetResync for HubResync {
     async fn resync(&self) {
         // `force: false` — a reconcile pass belongs to whoever owns the fleet,
         // and that is the hub. This asks for what it already knows.
-        match self.hub.list_sessions(false).await {
+        let reached = match self.hub.list_sessions(false).await {
             Ok(rows) => {
                 let now: HashSet<i64> = rows.iter().map(|r| r.id).collect();
                 for row in &rows {
@@ -727,12 +727,16 @@ impl FleetResync for HubResync {
                     self.sink
                         .emit_remote("session:killed", serde_json::json!({ "id": id }));
                 }
+                true
             }
-            Err(e) => tracing::warn!(
-                code = %e.code,
-                "[hub events] could not re-list sessions after reconnecting"
-            ),
-        }
+            Err(e) => {
+                tracing::warn!(
+                    code = %e.code,
+                    "[hub events] could not re-list sessions after reconnecting"
+                );
+                false
+            }
+        };
         match self.hub.list_hosts().await {
             Ok(rows) => {
                 let now: HashSet<String> = rows.iter().map(|r| r.alias.clone()).collect();
@@ -775,6 +779,16 @@ impl FleetResync for HubResync {
                 code = %e.code,
                 "[hub events] could not re-list accounts after reconnecting"
             ),
+        }
+        // The Work view (work graph M14.1d) is read through the hub, not
+        // held in a store a re-list could refill: after a gap it reloads
+        // whole. This bridge never resumes a stream (a fresh subscription,
+        // or one that ended `lagged`), so every resync is that gap. Only
+        // once the hub answered: a reload against a hub that is down would
+        // only trade the view for an error.
+        if reached {
+            self.sink
+                .emit_remote("work:changed", serde_json::json!({ "what": "resync" }));
         }
     }
 }

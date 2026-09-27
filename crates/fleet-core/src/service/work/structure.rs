@@ -1,17 +1,27 @@
-//! The Work view's structure a person edits (work graph M14): where a task
-//! sits (placement), rules that place similar tasks, saved views, and a
-//! local task's org — the one edit here that moves a boundary, so it is
-//! previewed (`org_impact`) and applied only with the preview's token
-//! (`assign_org`).
+//! The Work view's structure (work graph M14.1b reads, M14.1c writes):
+//! where a task sits (placement), rules that place similar tasks, saved
+//! views, and a local task's org — the one edit here that moves a boundary,
+//! so it is previewed (`org_impact`) and applied only with the preview's
+//! token (`assign_org`). Also the review inbox's batch of link decisions.
 //!
-//! Who may write what (the spec's *Mutations*): a per-host token none of
-//! it (a session's agent does not reorganise the fleet); a client bound to
-//! an org may place what it sees and keep its own org's views, but not
-//! write rules (they reach every org's tasks) nor move orgs; everyone else
-//! all of it. Every write re-checks that the task is visible.
+//! Who reads what: a per-host token reads no rules and no views (a
+//! session's agent does not reorganise the fleet) and no org impact; a
+//! client bound to an org reads the rules that place a task it sees, its
+//! own org's views, and no org impact (it may not move an org, D33);
+//! everyone else all of it.
+//!
+//! Who writes what (the spec's *Mutations*): a per-host token none of it; a
+//! client bound to an org places what it sees and keeps its own org's views
+//! (D35), but writes no rule (D34: a rule reaches every org's tasks) and
+//! moves no org (D33); everyone else all of it. Every write re-checks that
+//! the task is visible, and answers an out-of-scope id as an unknown one.
+//! Each write that replaces a row names the version it saw
+//! (`expected_version`): another device's change meanwhile is `E_CONFLICT`
+//! with the current value, never a silent overwrite.
 
 use super::view::{
-    self, check_filters, find_task, rule_matches, Graph, GroupRef, WorkTask, WorkTreeFilters,
+    self, check_filters, find_task, rule_matches, Graph, GroupRef, IdOrWord, WorkTask,
+    WorkTreeFilters,
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::OrgScope;
@@ -56,6 +66,7 @@ pub struct RuleInput {
 )]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ViewInput {
+    /// Absent: a new view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
     #[serde(default)]
@@ -71,6 +82,7 @@ pub struct ViewInput {
     Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
 )]
 #[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
 pub struct LinkDecision {
     pub session_id: i64,
     pub link_id: i64,
@@ -92,7 +104,7 @@ pub struct DecisionResult {
     pub code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// The link's version after the decision.
+    /// The link's version after the decision (a successful one only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<i64>,
 }
@@ -154,6 +166,8 @@ fn no_host(scope: &OrgScope, what: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Refused to a per-host token and to a client bound to an org: the write
+/// reaches beyond one org (a rule, an org move).
 fn unbound_only(scope: &OrgScope, what: &str) -> Result<(), IpcError> {
     no_host(scope, what)?;
     if scope.bound_org().is_some() {
@@ -168,8 +182,10 @@ fn unbound_only(scope: &OrgScope, what: &str) -> Result<(), IpcError> {
 
 /// `work_link { action: place, task_id, group, note?, expected_version }`:
 /// put a task in a group (empty `group` and no `note`: back to where it
-/// would sit by itself). Navigation only; a tracker-controlled value is
-/// never written back. Answers the task as it now reads.
+/// would sit by itself). Navigation only, never a boundary; a
+/// tracker-controlled value is never written back. `expected_version` is
+/// the placement version the person saw (`0`: none). Answers the task as
+/// it now reads.
 pub fn place(
     store: &Mutex<Store>,
     scope: &OrgScope,
@@ -187,6 +203,8 @@ pub fn place(
     let note = clean_text(note.unwrap_or_default(), "note", NOTE_MAX_CHARS, true)?;
     let s = lock(store)?;
     let g = Graph::load(&s)?;
+    // Visibility first: a task out of scope answers as an unknown one, and
+    // its placement's version is never compared (no oracle).
     let (task, _) = find_task(&g, scope, task_id, false)?;
     s.set_work_placement(
         &task.task_id,
@@ -228,12 +246,37 @@ fn clean_rule(r: &RuleInput) -> Result<(String, RuleConditions, String), IpcErro
 }
 
 /// `work { action: rules }`. Rules are fleet-wide navigation, not work
-/// data: a host reads none.
+/// data: a host reads none. A bound client reads only the rules that match
+/// a task it sees and name no tracker it does not: a rule's conditions
+/// (another org's tracker, its project keys, its repositories) are not its
+/// to learn.
 pub fn rules(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<WorkRule>, IpcError> {
-    if scope.host().is_some() {
-        return Ok(Vec::new());
+    match scope {
+        OrgScope::All => lock(store)?.work_rules(),
+        OrgScope::Host { .. } => Ok(Vec::new()),
+        OrgScope::Org { .. } => {
+            let g = {
+                let s = lock(store)?;
+                Graph::load(&s)?
+            };
+            let tasks = view::all_tasks(&g, scope, 0);
+            Ok(g.rules
+                .iter()
+                .filter(|r| {
+                    r.conditions.tracker_id.is_none_or(|t| {
+                        g.trackers.get(&t).is_some_and(|t| scope.sees_org(t.org_id))
+                    })
+                })
+                .filter(|r| {
+                    tasks.iter().any(|t| {
+                        let item = t.item_id.and_then(|i| g.items.get(&i));
+                        rule_matches(r, item, t.key.as_deref(), &t.title, &t.repos)
+                    })
+                })
+                .cloned()
+                .collect())
+        }
     }
-    lock(store)?.work_rules()
 }
 
 /// One task a rule would move.
@@ -323,7 +366,9 @@ pub fn rule_preview(
     })
 }
 
-/// `work_link { action: rule_save, rule }`.
+/// `work_link { action: rule_save, rule }`: create or replace a placement
+/// rule (D34: placement only — a rule never links a session). What it
+/// would move is `work { rule_preview }` of the same `rule`.
 pub fn rule_save(
     store: &Mutex<Store>,
     scope: &OrgScope,
@@ -369,7 +414,7 @@ pub fn rule_delete(
 fn view_owner(scope: &OrgScope) -> Option<Option<i64>> {
     match scope {
         OrgScope::All => None,
-        OrgScope::Org { org } => Some(Some(*org)),
+        OrgScope::Org { org, .. } => Some(Some(*org)),
         OrgScope::Host { .. } => Some(Some(i64::MIN)),
     }
 }
@@ -382,7 +427,39 @@ pub fn views(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<WorkView>, Ip
     lock(store)?.work_views(view_owner(scope))
 }
 
-/// `work_link { action: view_save, view }`.
+/// A view's filters may name only an org or a tracker the caller sees: a
+/// scoped caller naming another org's (or an unknown) id is answered as
+/// the unknown id it is to it (work graph M14.1c).
+fn check_view_filters(s: &Store, scope: &OrgScope, f: &WorkTreeFilters) -> Result<(), IpcError> {
+    check_filters(f)?;
+    if scope.is_all() {
+        return Ok(());
+    }
+    if let Some(IdOrWord::Id(o)) = &f.org {
+        if s.get_org(*o)?.is_none() || !scope.sees_org(Some(*o)) {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("org {o} not found"),
+            ));
+        }
+    }
+    if let Some(IdOrWord::Id(t)) = &f.tracker {
+        if !s
+            .get_tracker(*t)?
+            .is_some_and(|tr| scope.sees_org(tr.org_id))
+        {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("tracker {t} not found"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `work_link { action: view_save, view }`: shared on the hub (D35); a
+/// bound client's views are its org's, and it can neither see nor replace
+/// another's.
 pub fn view_save(
     store: &Mutex<Store>,
     scope: &OrgScope,
@@ -390,20 +467,28 @@ pub fn view_save(
 ) -> Result<WorkView, IpcError> {
     no_host(scope, "view_save")?;
     let name = clean_text(&v.name, "view name", LABEL_MAX_CHARS, false)?.unwrap_or_default();
-    check_filters(&v.filters)?;
+    let s = lock(store)?;
+    check_view_filters(&s, scope, &v.filters)?;
     let filters = serde_json::to_value(&v.filters)
         .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
-    lock(store)?.save_work_view(v.id, &name, &filters, scope.bound_org(), v.expected_version)
+    s.save_work_view(
+        v.id,
+        &name,
+        &filters,
+        scope.bound_org().map(Some),
+        v.expected_version,
+    )
 }
 
-/// `work_link { action: view_delete, view_id }`.
+/// `work_link { action: view_delete, view_id, expected_version? }`.
 pub fn view_delete(
     store: &Mutex<Store>,
     scope: &OrgScope,
     view_id: i64,
+    expected: Option<i64>,
 ) -> Result<Deleted, IpcError> {
     no_host(scope, "view_delete")?;
-    lock(store)?.delete_work_view(view_id, scope.bound_org())?;
+    lock(store)?.delete_work_view(view_id, view_owner(scope), expected)?;
     Ok(Deleted { deleted: true })
 }
 
@@ -617,6 +702,15 @@ pub fn org_impact(
     task_id: &str,
     org_id: Option<i64>,
 ) -> Result<OrgImpact, IpcError> {
+    // Only a caller that may move an org reads what a move would change
+    // (D33): the impact names every host and bound client of both orgs, and
+    // the journal of sessions a scoped caller does not see.
+    if !scope.is_all() {
+        return Err(forbidden(
+            "org_impact is not available to a per-host token or an org-bound client: it may \
+             not move a task's org",
+        ));
+    }
     let to = org_arg(org_id)?;
     let s = lock(store)?;
     let g = Graph::load(&s)?;
@@ -624,8 +718,10 @@ pub fn org_impact(
 }
 
 /// `work_link { action: assign_org, task_id, org_id, impact_token }`: move
-/// a local task to another org (or to none), if the impact is still the
-/// one the person saw. The links stay; each is re-evaluated by every read
+/// a local task to another org (or to none, `0`), if the impact is still
+/// the one the person previewed (`E_CONFLICT` with the fresh impact
+/// otherwise). D33: the master or a full unbound client; never a per-host
+/// token nor a bound client. The links stay; each is judged by every read
 /// from now on (a link's org is its item's), and the live sessions' rows
 /// are re-announced, so a reader outside the new org stops receiving the
 /// task from its next read or frame.
@@ -674,8 +770,10 @@ pub fn assign_org(
 
 /// `work_link { action: decide_batch, decisions }`: each decision on its
 /// own — its session through `gate` (the transport's host / bound-client
-/// fence), then the same checks as the single action (scope, version).
-/// One failing never stops the others; the answer says which did what.
+/// session fence), then exactly the single action's checks (scope, version,
+/// cross-org). One failing never undoes or stops the others; the answer
+/// says, per item and in order, which did what. There is no
+/// `force_cross_org` in a batch: a cross-org confirm is decided alone.
 pub fn decide_batch(
     store: &Mutex<Store>,
     scope: &OrgScope,
@@ -713,7 +811,6 @@ pub fn decide_batch(
             };
             super::work_link(&args, store, scope).map(|_| ())
         })();
-        let version = lock(store)?.work_link_version(d.link_id)?;
         results.push(match outcome {
             Ok(()) => DecisionResult {
                 link_id: d.link_id,
@@ -721,7 +818,7 @@ pub fn decide_batch(
                 ok: true,
                 code: None,
                 message: None,
-                version,
+                version: lock(store)?.work_link_version(d.link_id)?,
             },
             Err(e) => DecisionResult {
                 link_id: d.link_id,

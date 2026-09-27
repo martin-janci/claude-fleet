@@ -595,13 +595,17 @@ impl Store {
         state: &str,
         source: &str,
     ) -> Result<WorkLinkRow, IpcError> {
-        self.decide_session_work_as(session_id, target, state, source, true)
+        self.decide_session_work_as(session_id, target, state, source, true, None)
     }
 
     /// [`Self::decide_session_work`], choosing whether a confirmed link
-    /// takes the primary (work graph M14): `take_primary: false` adds a
+    /// takes the primary (work graph M14.1c): `take_primary: false` adds a
     /// secondary link, which still becomes primary when the session has
     /// none. Changing the primary never removes or ends another link.
+    /// `expected` is the version of the session's live link to `target` the
+    /// person saw (`Some(0)`: none); another change meanwhile answers
+    /// `E_CONFLICT` and writes nothing. `None` checks nothing (older
+    /// clients).
     fn decide_session_work_as(
         &self,
         session_id: i64,
@@ -609,6 +613,7 @@ impl Store {
         state: &str,
         source: &str,
         take_primary: bool,
+        expected: Option<i64>,
     ) -> Result<WorkLinkRow, IpcError> {
         if !WORK_LINK_SOURCES.contains(&source) {
             return Err(IpcError::new(
@@ -631,17 +636,31 @@ impl Store {
         let primary = state == "confirmed" && (take_primary || !has_primary);
 
         let tx = self.conn.unchecked_transaction()?;
-        let existing: Option<i64> = self
+        let existing: Option<(i64, i64)> = self
             .conn
             .query_row(
-                "SELECT id FROM work_links \
+                "SELECT id, version FROM work_links \
                  WHERE participant_id = ?1 AND ended_at IS NULL \
                    AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
                  ORDER BY id LIMIT 1",
                 rusqlite::params![participant, item_id, ref_key],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        if let Some(want) = expected {
+            let have = existing.map_or(0, |(_, v)| v);
+            if have != want {
+                return Err(match existing {
+                    Some((id, _)) => self.link_conflict(id)?,
+                    None => super::work_view::version_conflict(
+                        "this session's link to that work",
+                        0,
+                        serde_json::json!({ "link_id": null, "version": 0 }),
+                    ),
+                });
+            }
+        }
+        let existing = existing.map(|(id, _)| id);
         if primary {
             self.conn.execute(
                 "UPDATE work_links SET is_primary = 0 \
@@ -651,17 +670,17 @@ impl Store {
         }
         let id = match existing {
             // A decision over a suggestion keeps its evidence and rule, so
-            // the link can still say what proposed it.
-            // Re-linking a secondary link keeps it secondary; re-linking the
-            // primary keeps it primary.
+            // the link can still say what proposed it. Re-linking as a
+            // secondary leaves `is_primary` as it is: a secondary stays one,
+            // and the primary stays the primary.
             Some(id) if state == "confirmed" && !primary => {
                 self.conn.execute(
                     "UPDATE work_links SET state = ?1, source = ?2, \
-                     decided_at = ?4, strength = 'explicit', preselected = 0, \
+                     decided_at = ?3, strength = 'explicit', preselected = 0, \
                      claude_session_id = COALESCE((SELECT claude_session_id FROM sessions \
-                                                   WHERE id = ?6), claude_session_id) \
-                     WHERE id = ?5",
-                    rusqlite::params![state, source, 0, now, id, session_id],
+                                                   WHERE id = ?5), claude_session_id) \
+                     WHERE id = ?4",
+                    rusqlite::params![state, source, now, id, session_id],
                 )?;
                 id
             }
@@ -717,16 +736,82 @@ impl Store {
     }
 
     /// [`Self::link_session_work`] as a secondary link when `primary` is
-    /// false (work graph M14): the session's primary stays where it is,
-    /// unless it has none.
+    /// false (work graph M14.1c) — the session's primary stays where it is,
+    /// unless it has none — and as a compare-and-set on the version of the
+    /// session's live link to `target` when `expected` is given.
     pub fn link_session_work_as(
         &self,
         session_id: i64,
         target: WorkTarget<'_>,
         source: &str,
         primary: bool,
+        expected: Option<i64>,
     ) -> Result<WorkLinkRow, IpcError> {
-        self.decide_session_work_as(session_id, target, "confirmed", source, primary)
+        self.decide_session_work_as(session_id, target, "confirmed", source, primary, expected)
+    }
+
+    /// [`Self::reject_session_work`] as a compare-and-set (M14.1c).
+    pub fn reject_session_work_as(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        expected: Option<i64>,
+    ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_session_work_as(session_id, target, "rejected", "manual", true, expected)
+    }
+
+    /// `E_CONFLICT` naming link `link_id`'s current state (work graph
+    /// M14.1c). Only ever built for a link the caller was already allowed
+    /// to name: the service checks visibility first.
+    pub(super) fn link_conflict(&self, link_id: i64) -> Result<IpcError, IpcError> {
+        let (v, state, primary, ended): (i64, String, i64, Option<i64>) = self.conn.query_row(
+            "SELECT version, state, is_primary, ended_at FROM work_links WHERE id = ?1",
+            rusqlite::params![link_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok(super::work_view::version_conflict(
+            &format!("work link {link_id}"),
+            v,
+            serde_json::json!({
+                "link_id": link_id, "version": v, "state": state,
+                "primary": primary != 0, "ended": ended.is_some(),
+            }),
+        ))
+    }
+
+    /// Refuse with `E_CONFLICT` when link `link_id` is no longer at
+    /// `expected` (work graph M14.1c: a person decided on a state someone
+    /// else changed since). `None` expects nothing (an older client). A
+    /// link that is gone passes: the action itself answers `E_NOTFOUND`.
+    /// The caller has checked that the link is one it may name.
+    pub fn check_link_version(&self, link_id: i64, expected: Option<i64>) -> Result<(), IpcError> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        let have: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT version FROM work_links WHERE id = ?1",
+                rusqlite::params![link_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match have {
+            Some(v) if v != expected => Err(self.link_conflict(link_id)?),
+            _ => Ok(()),
+        }
+    }
+
+    /// A link's current `version` (migration 066), `None` when it is gone.
+    pub fn work_link_version(&self, link_id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT version FROM work_links WHERE id = ?1",
+                rusqlite::params![link_id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// The session's current primary link (live, confirmed), if any.
@@ -745,7 +830,7 @@ impl Store {
     }
 
     /// Make live confirmed link `link_id` the session's primary work, as a
-    /// compare-and-set (work graph M14): `expected_primary` names the
+    /// compare-and-set (work graph M14.1c): `expected_primary` names the
     /// primary the caller saw (`Some(0)`: none; `None`: no check). Another
     /// device's change meanwhile answers `E_CONFLICT` with the current
     /// primary. Setting the link that is already primary changes nothing.
@@ -770,17 +855,7 @@ impl Store {
             .optional()?;
         if let Some(expected) = expected_primary {
             if current.unwrap_or(0) != expected {
-                return Err(IpcError::new(
-                    codes::E_CONFLICT,
-                    format!(
-                        "session {session_id}'s primary work changed meanwhile (now {}); \
-                         reload it and decide again",
-                        current.map_or("none".to_string(), |c| format!("link {c}"))
-                    ),
-                )
-                .with_details(serde_json::json!({
-                    "session_id": session_id, "primary_link_id": current,
-                })));
+                return Err(primary_conflict(session_id, current));
             }
         }
         let target: Option<String> = self
@@ -826,10 +901,11 @@ impl Store {
         Ok(())
     }
 
-    /// Undo a person's decision (work graph M14): a live confirmed or
+    /// Undo a person's decision (work graph M14.1c): a live confirmed or
     /// rejected link that detection had proposed goes back to a suggestion,
     /// keeping its evidence. A link made by hand, with nothing that proposed
-    /// it, is refused — remove it instead (`unlink`).
+    /// it, is refused — remove it instead (`unlink`). A suggestion is left
+    /// as it is (idempotent).
     pub fn reconsider_work_link(&self, session_id: i64, link_id: i64) -> Result<(), IpcError> {
         let participant = self.work_participant(session_id)?;
         let row: Option<(String, Option<String>, Option<String>)> = self
@@ -874,9 +950,10 @@ impl Store {
         Ok(())
     }
 
-    /// A person keeps a conflict on purpose (work graph M14): a live
-    /// confirmed link to another org's task or to an unavailable ticket
-    /// leaves the review inbox.
+    /// A person keeps a conflict on purpose (work graph M14.1c, D32): a
+    /// live confirmed link to another org's task or to an unavailable
+    /// ticket leaves the review inbox. Idempotent: the first ack's time
+    /// stays.
     pub fn ack_work_link(&self, session_id: i64, link_id: i64) -> Result<(), IpcError> {
         let participant = self.work_participant(session_id)?;
         let n = self.conn.execute(
@@ -1341,6 +1418,23 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
+}
+
+/// `E_CONFLICT` for a `set_primary` whose expected primary is no longer the
+/// session's (work graph M14.1c). `current` is the primary the caller may
+/// be told about (`None`: none, or one it does not see).
+pub fn primary_conflict(session_id: i64, current: Option<i64>) -> IpcError {
+    IpcError::new(
+        codes::E_CONFLICT,
+        format!(
+            "session {session_id}'s primary work changed meanwhile (now {}); \
+             reload it and decide again",
+            current.map_or("none".to_string(), |c| format!("link {c}"))
+        ),
+    )
+    .with_details(serde_json::json!({
+        "session_id": session_id, "primary_link_id": current,
+    }))
 }
 
 #[cfg(test)]

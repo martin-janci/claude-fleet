@@ -88,6 +88,16 @@ pub struct OrgRow {
     /// `work.auto_tidy`. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tidy: Option<bool>,
+    /// D31 (work graph M14.1b, migration 067): the org's bound paired
+    /// clients also see unassigned work and sessions (the default), as a
+    /// host does; off, only rows assigned to the org. Absent from an older
+    /// hub, which has no bound client.
+    #[serde(default = "bound_sees_unassigned_default")]
+    pub bound_sees_unassigned: bool,
+}
+
+fn bound_sees_unassigned_default() -> bool {
+    true
 }
 
 /// One placement rule. At least one of `owner`, `path_prefix`, `host_alias`
@@ -264,7 +274,8 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
     Ok(r)
 }
 
-const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy";
+const ORG_COLUMNS: &str =
+    "id, name, color, isolate_sessions, created_at, auto_tidy, bound_sees_unassigned";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -275,6 +286,7 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         isolate_sessions: r.get::<_, i64>(3)? != 0,
         created_at: r.get(4)?,
         auto_tidy: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
+        bound_sees_unassigned: r.get::<_, i64>(6)? != 0,
     })
 }
 
@@ -387,6 +399,20 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE orgs SET auto_tidy = ?2 WHERE id = ?1",
             rusqlite::params![id, on.map(|b| b as i64)],
+        )?;
+        if n == 0 {
+            return Err(org_not_found(id));
+        }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// Set D31 for an org (work graph M14.1b): whether its bound paired
+    /// clients also see unassigned work and sessions. A change bumps the
+    /// auth epoch (migration 067's trigger).
+    pub fn set_org_bound_sees_unassigned(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE orgs SET bound_sees_unassigned = ?2 WHERE id = ?1",
+            rusqlite::params![id, on as i64],
         )?;
         if n == 0 {
             return Err(org_not_found(id));
@@ -723,8 +749,11 @@ impl Store {
         }
         let tx = self.conn.unchecked_transaction()?;
         {
-            // A no-op UPDATE: migration 042's trigger bumps `row_version`.
-            let mut bump = tx.prepare("UPDATE sessions SET status = status WHERE id = ?1")?;
+            // An explicit bump: the org is computed, not a `sessions` column,
+            // so no column changes — and since migration 063 a same-value
+            // UPDATE no longer moves `row_version` on its own.
+            let mut bump =
+                tx.prepare("UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1")?;
             for id in &moved {
                 bump.execute(rusqlite::params![id])?;
             }

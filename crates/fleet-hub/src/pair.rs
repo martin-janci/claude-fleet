@@ -332,7 +332,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             .to_string()
     };
     let time = |r: &serde_json::Value, k: &str| fmt_time(r.get(k).and_then(|v| v.as_i64()));
-    // The org a client is bound to (work graph M14), a dash when unbound.
+    // The org a client is bound to (work graph M14.1b), a dash when unbound.
     let org = |r: &serde_json::Value| {
         r.get("org_id")
             .and_then(|v| v.as_i64())
@@ -395,7 +395,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
 /// `fleet-hub pair --name <name> [--mode …] [--ttl …] [--trusted] [--org
 /// <id>]`: mint a code through the running hub and show the URL as a QR for a
 /// phone camera. `--org` binds the client to one org from its first request
-/// (work graph M14).
+/// (work graph M14.1b).
 pub async fn pair(
     opts: &HubOptions,
     env: &HashMap<String, String>,
@@ -433,7 +433,8 @@ pub async fn pair(
     ));
     if let Some(o) = v["org_id"].as_i64() {
         out::line(&format!(
-            "org:     {o} — it reads only that org's and unassigned work and sessions"
+            "org:     {o} — it reads only that org's work and sessions (and unassigned ones \
+             while the org's bound_sees_unassigned is on)"
         ));
     }
     out::line(&format!(
@@ -506,8 +507,8 @@ pub async fn client_bind(
     let shown = v["name"].as_str().unwrap_or(name);
     out::line(&match v["org_id"].as_i64() {
         Some(o) => format!(
-            "bound {shown} to org {o}: from its next request it reads only that org's and \
-             unassigned work and sessions"
+            "bound {shown} to org {o}: from its next request it reads only that org's work \
+             and sessions (and unassigned ones while the org's bound_sees_unassigned is on)"
         ),
         None => format!("unbound {shown}: it reads every org again"),
     });

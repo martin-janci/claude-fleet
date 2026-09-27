@@ -356,6 +356,35 @@ describe('QuickSwitcher tickets', () => {
     expect(get(newSessionRequest)).toBeNull();
   });
 
+  it('a lost start race still jumps, and names the session it left unlinked', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    clearToasts();
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      calls.push([cmd, args]);
+      const view = (args as { args?: { view?: string } } | undefined)?.args?.view;
+      if (cmd === 'work_tickets' && view === 'mine') return [ticket('ABC-1')];
+      if (cmd === 'work_tickets') return [];
+      if (cmd === 'start_work')
+        throw {
+          code: 'E_EXISTS',
+          message: 'ABC-1 already has a live session (w on box); the session this start made (dev-abc-1) is not linked to it',
+          details: { session_id: 7, orphan_session_id: 9 },
+        };
+      return null;
+    });
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    await fireEvent.input(input, { target: { value: 'abc-1' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+    await vi.waitFor(() => expect(get(selectedSession)?.id).toBe(7));
+    const shown = get(toasts);
+    expect(shown).toHaveLength(1);
+    expect(shown[0].message).toContain('dev-abc-1');
+    clearToasts();
+  });
+
   it('a pasted ticket URL offers a lookup row', async () => {
     render(QuickSwitcher);
     const input = await openSwitcher();

@@ -1,7 +1,8 @@
-//! Work view storage (work graph M14, migration 063): what the Work view
-//! reads in one pass (every item, every link with its live session), and the
-//! three things a person keeps there — placements, placement rules and saved
-//! views — each with a `version` a write must name to replace it.
+//! Work view storage (work graph M14.1b / M14.1c, migration 066): what the
+//! Work view reads in one pass (every item, every link with its live
+//! session), and the three things a person keeps there — placements,
+//! placement rules and saved views — each with a `version` a write must name
+//! to replace it (M14.1c's compare-and-set), plus a local item's own org.
 //!
 //! Nothing here decides visibility: `service::work::view` filters by the
 //! caller's `OrgScope`, and `service::work::structure` gates the writes.
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// One work item as the Work view reads it: the row, its meta (assignee,
 /// description), the tracker's containers (project / team keys, Asana
-/// project gids) and a local item's own org (063).
+/// project gids) and a local item's own org (066).
 #[derive(Debug, Clone)]
 pub struct ViewItem {
     pub item: WorkItemRow,
@@ -28,7 +29,7 @@ pub struct ViewItem {
 
 /// One link as the Work view reads it: the row (its `org_id` still the
 /// snapshot's org, `snap_org_id`, as `map_link` leaves it), the live session
-/// its participant is on, and the 063 columns.
+/// its participant is on, and the 066 columns.
 #[derive(Debug, Clone)]
 pub struct ViewLink {
     pub link: WorkLinkRow,
@@ -111,7 +112,8 @@ pub struct WorkView {
     pub updated_at: i64,
 }
 
-/// `E_CONFLICT` for a write that named a version the row no longer has.
+/// `E_CONFLICT` for a write that named a version the row no longer has
+/// (work graph M14.1c); `details` carry the current value.
 pub fn version_conflict(what: &str, current: i64, details: serde_json::Value) -> IpcError {
     IpcError::new(
         codes::E_CONFLICT,
@@ -121,6 +123,10 @@ pub fn version_conflict(what: &str, current: i64, details: serde_json::Value) ->
         ),
     )
     .with_details(details)
+}
+
+fn not_found(what: &str, id: i64) -> IpcError {
+    IpcError::new(codes::E_NOTFOUND, format!("{what} {id} not found"))
 }
 
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -165,11 +171,6 @@ fn map_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkView> {
 const VIEW_COLUMNS: &str = "id, name, filters, owner_org, version, updated_at";
 
 impl Store {
-    /// Emit `work:changed` (ids only).
-    pub fn emit_work_changed(&self, change: WorkChanged) {
-        self.bus.emit(&RowChange::WorkChanged(change));
-    }
-
     // --- the one read pass --------------------------------------------------
 
     /// Every work item the Work view may show: local items, items of a
@@ -233,49 +234,11 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// A link's current `version` (migration 063), `None` when it is gone.
-    pub fn work_link_version(&self, link_id: i64) -> Result<Option<i64>, IpcError> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT version FROM work_links WHERE id = ?1",
-                rusqlite::params![link_id],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
-
-    /// Refuse with `E_CONFLICT` when link `link_id` is no longer at
-    /// `expected` (a person decided on a state someone else changed since).
-    /// `None` expects nothing (an older client): no check.
-    pub fn check_link_version(&self, link_id: i64, expected: Option<i64>) -> Result<(), IpcError> {
-        let Some(expected) = expected else {
-            return Ok(());
-        };
-        let row: Option<(i64, String, i64, Option<i64>)> = self
-            .conn
-            .query_row(
-                "SELECT version, state, is_primary, ended_at FROM work_links WHERE id = ?1",
-                rusqlite::params![link_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-        match row {
-            Some((v, state, primary, ended)) if v != expected => Err(version_conflict(
-                &format!("work link {link_id}"),
-                v,
-                serde_json::json!({
-                    "link_id": link_id, "version": v, "state": state,
-                    "primary": primary != 0, "ended": ended.is_some(),
-                }),
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    /// Set a local item's own org (063). Refused for a tracker item, whose
-    /// org is its tracker's. Emits the rows of every live session linked to
-    /// it (their `work.org_id` moved) and `work:changed { org }`.
+    /// Set a local item's own org (work graph M14.1c, `assign_org`).
+    /// Refused for a tracker item, whose org is its tracker's. Re-announces
+    /// the row of every live session linked to it (their `work.org_id`
+    /// moved), so a reader outside the new org stops receiving the task
+    /// from its next frame.
     pub fn set_local_item_org(&self, item_id: i64, org: Option<i64>) -> Result<(), IpcError> {
         let tracker: Option<Option<i64>> = self
             .conn
@@ -286,12 +249,7 @@ impl Store {
             )
             .optional()?;
         match tracker {
-            None => {
-                return Err(IpcError::new(
-                    codes::E_NOTFOUND,
-                    format!("work item {item_id} not found"),
-                ))
-            }
+            None => return Err(not_found("work item", item_id)),
             Some(Some(_)) => {
                 return Err(IpcError::new(
                     codes::E_FORBIDDEN,
@@ -305,10 +263,7 @@ impl Store {
         }
         if let Some(o) = org {
             if self.get_org(o)?.is_none() {
-                return Err(IpcError::new(
-                    codes::E_NOTFOUND,
-                    format!("org {o} not found"),
-                ));
+                return Err(not_found("org", o));
             }
         }
         let sessions: Vec<i64> = {
@@ -341,6 +296,13 @@ impl Store {
         Ok(())
     }
 
+    /// Emit `work:changed` (work graph M14.1d): ids only, kind `work`, so a
+    /// host-bound or org-bound stream never carries it; a client re-reads
+    /// what it shows.
+    pub fn emit_work_changed(&self, change: WorkChanged) {
+        self.bus.emit(&RowChange::WorkChanged(change));
+    }
+
     // --- placements ---------------------------------------------------------
 
     pub fn work_placements(&self) -> Result<Vec<Placement>, IpcError> {
@@ -366,9 +328,9 @@ impl Store {
 
     /// Place `task_id` in `group` with `note` — both `None` removes the
     /// placement — if its placement is still at `expected` (`0`: there is
-    /// none). A compare-and-set: a concurrent placement from another device
-    /// answers `E_CONFLICT` instead of being overwritten. Emits
-    /// `work:changed { placement }`. Returns the placement, if one remains.
+    /// none). A compare-and-set (work graph M14.1c): a concurrent placement
+    /// from another device answers `E_CONFLICT` instead of being
+    /// overwritten. Returns the placement, if one remains.
     pub fn set_work_placement(
         &self,
         task_id: &str,
@@ -390,7 +352,6 @@ impl Store {
                 }),
             ));
         }
-        let now = now_unix();
         if group.is_none() && note.is_none() {
             self.conn.execute(
                 "DELETE FROM work_placements WHERE task_id = ?1",
@@ -402,7 +363,7 @@ impl Store {
                  VALUES (?1, ?2, ?3, 1, ?4, ?5) \
                  ON CONFLICT(task_id) DO UPDATE SET group_label = ?2, note = ?3, \
                    version = version + 1, updated_at = ?4, updated_by = ?5",
-                rusqlite::params![task_id, group, note, now, by],
+                rusqlite::params![task_id, group, note, now_unix(), by],
             )?;
         }
         tx.commit()?;
@@ -438,7 +399,7 @@ impl Store {
     }
 
     /// Create a rule (`id` `None`) or replace rule `id` if it is still at
-    /// `expected`. The caller validated the fields.
+    /// `expected` (`None`: any). The caller validated the fields.
     pub fn save_work_rule(
         &self,
         id: Option<i64>,
@@ -471,17 +432,13 @@ impl Store {
             }
             Some(id) => {
                 let tx = self.conn.unchecked_transaction()?;
-                let cur = self.work_rule(id)?.ok_or_else(|| {
-                    IpcError::new(codes::E_NOTFOUND, format!("rule {id} not found"))
-                })?;
-                if let Some(e) = expected {
-                    if e != cur.version {
-                        return Err(version_conflict(
-                            &format!("rule {id}"),
-                            cur.version,
-                            serde_json::json!({ "rule_id": id, "version": cur.version }),
-                        ));
-                    }
+                let cur = self.work_rule(id)?.ok_or_else(|| not_found("rule", id))?;
+                if expected.is_some_and(|e| e != cur.version) {
+                    return Err(version_conflict(
+                        &format!("rule {id}"),
+                        cur.version,
+                        serde_json::json!({ "rule_id": id, "version": cur.version }),
+                    ));
                 }
                 self.conn.execute(
                     "UPDATE work_rules SET name = ?2, enabled = ?3, tracker_id = ?4, container = ?5, \
@@ -516,9 +473,7 @@ impl Store {
 
     /// Delete rule `id` if it is still at `expected` (`None`: any).
     pub fn delete_work_rule(&self, id: i64, expected: Option<i64>) -> Result<(), IpcError> {
-        let cur = self
-            .work_rule(id)?
-            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("rule {id} not found")))?;
+        let cur = self.work_rule(id)?.ok_or_else(|| not_found("rule", id))?;
         if expected.is_some_and(|e| e != cur.version) {
             return Err(version_conflict(
                 &format!("rule {id}"),
@@ -567,16 +522,22 @@ impl Store {
             )
             .optional()?)
     }
+}
 
-    /// Create or replace a saved view. Replacing needs the view to be at
-    /// `expected` when given; a name another view of the same owner has is
-    /// refused (`E_EXISTS`).
+impl Store {
+    /// Create a saved view kept by `owner_org` (`None`: an unrestricted
+    /// caller's), or replace view `id` when `owner` may reach it and it is
+    /// still at `expected` (`None`: any). `owner` is whose views the caller
+    /// keeps (`None`: every view, `Some(o)`: only those with `owner_org`
+    /// `o`) — a view out of reach answers as one that does not exist. A
+    /// replaced view keeps its owner. A name another view of the same owner
+    /// has is refused (`E_EXISTS`).
     pub fn save_work_view(
         &self,
         id: Option<i64>,
         name: &str,
         filters: &serde_json::Value,
-        owner_org: Option<i64>,
+        owner: Option<Option<i64>>,
         expected: Option<i64>,
     ) -> Result<WorkView, IpcError> {
         let now = now_unix();
@@ -601,18 +562,17 @@ impl Store {
                     .execute(
                         "INSERT INTO work_views (name, filters, owner_org, version, created_at, updated_at) \
                          VALUES (?1, ?2, ?3, 1, ?4, ?4)",
-                        rusqlite::params![name, raw, owner_org, now],
+                        rusqlite::params![name, raw, owner.flatten(), now],
                     )
                     .map_err(dup)?;
                 self.conn.last_insert_rowid()
             }
             Some(id) => {
+                let tx = self.conn.unchecked_transaction()?;
                 let cur = self
                     .work_view(id)?
-                    .filter(|v| v.owner_org == owner_org)
-                    .ok_or_else(|| {
-                        IpcError::new(codes::E_NOTFOUND, format!("view {id} not found"))
-                    })?;
+                    .filter(|v| owner.is_none_or(|o| v.owner_org == o))
+                    .ok_or_else(|| not_found("view", id))?;
                 if expected.is_some_and(|e| e != cur.version) {
                     return Err(version_conflict(
                         &format!("view {id}"),
@@ -627,6 +587,7 @@ impl Store {
                         rusqlite::params![id, name, raw, now],
                     )
                     .map_err(dup)?;
+                tx.commit()?;
                 id
             }
         };
@@ -640,18 +601,30 @@ impl Store {
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "view vanished after write"))
     }
 
-    /// Delete a saved view of `owner_org`.
-    pub fn delete_work_view(&self, id: i64, owner_org: Option<i64>) -> Result<(), IpcError> {
-        let n = self.conn.execute(
-            "DELETE FROM work_views WHERE id = ?1 AND owner_org IS ?2",
-            rusqlite::params![id, owner_org],
-        )?;
-        if n == 0 {
-            return Err(IpcError::new(
-                codes::E_NOTFOUND,
-                format!("view {id} not found"),
+    /// Delete saved view `id` when `owner` may reach it (as in
+    /// [`Self::save_work_view`]) and it is still at `expected` (`None`:
+    /// any).
+    pub fn delete_work_view(
+        &self,
+        id: i64,
+        owner: Option<Option<i64>>,
+        expected: Option<i64>,
+    ) -> Result<(), IpcError> {
+        let cur = self
+            .work_view(id)?
+            .filter(|v| owner.is_none_or(|o| v.owner_org == o))
+            .ok_or_else(|| not_found("view", id))?;
+        if expected.is_some_and(|e| e != cur.version) {
+            return Err(version_conflict(
+                &format!("view {id}"),
+                cur.version,
+                serde_json::json!({ "view_id": id, "version": cur.version }),
             ));
         }
+        self.conn.execute(
+            "DELETE FROM work_views WHERE id = ?1 AND version = ?2",
+            rusqlite::params![id, cur.version],
+        )?;
         self.emit_work_changed(WorkChanged {
             what: "view".into(),
             task_id: None,
@@ -671,4 +644,108 @@ fn map_placement(r: &rusqlite::Row<'_>) -> rusqlite::Result<Placement> {
         updated_at: r.get(4)?,
         updated_by: r.get(5)?,
     })
+}
+
+/// Seeds for the Work view's read tests (work graph M14.1b). The writes a
+/// person makes through the hub — placement, rules, views, a local item's
+/// org, a secondary link — are M14.1c's; until then the tests write the
+/// rows the reads answer directly.
+#[cfg(test)]
+impl Store {
+    pub(crate) fn seed_placement(&self, task_id: &str, group: Option<&str>, note: Option<&str>) {
+        self.conn
+            .execute(
+                "INSERT INTO work_placements (task_id, group_label, note, updated_at, updated_by) \
+                 VALUES (?1, ?2, ?3, ?4, 'test') \
+                 ON CONFLICT(task_id) DO UPDATE SET group_label = ?2, note = ?3, \
+                   version = version + 1, updated_at = ?4",
+                rusqlite::params![task_id, group, note, super::now_unix()],
+            )
+            .unwrap();
+    }
+
+    pub(crate) fn seed_rule(&self, name: &str, c: &RuleConditions, group: &str) -> i64 {
+        self.conn
+            .execute(
+                "INSERT INTO work_rules (name, tracker_id, container, key_prefix, title_contains, \
+                   repo, group_label, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                rusqlite::params![
+                    name,
+                    c.tracker_id,
+                    c.container,
+                    c.key_prefix,
+                    c.title_contains,
+                    c.repo,
+                    group,
+                    super::now_unix()
+                ],
+            )
+            .unwrap();
+        self.conn.last_insert_rowid()
+    }
+
+    pub(crate) fn seed_rule_enabled(&self, id: i64, on: bool) {
+        self.conn
+            .execute(
+                "UPDATE work_rules SET enabled = ?2, version = version + 1 WHERE id = ?1",
+                rusqlite::params![id, on as i64],
+            )
+            .unwrap();
+    }
+
+    pub(crate) fn seed_view(
+        &self,
+        name: &str,
+        filters: &serde_json::Value,
+        owner_org: Option<i64>,
+    ) -> i64 {
+        self.conn
+            .execute(
+                "INSERT INTO work_views (name, filters, owner_org, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![name, filters.to_string(), owner_org, super::now_unix()],
+            )
+            .unwrap();
+        self.conn.last_insert_rowid()
+    }
+
+    pub(crate) fn seed_local_item_org(&self, item_id: i64, org: Option<i64>) {
+        self.conn
+            .execute(
+                "UPDATE work_items SET org_id = ?2 WHERE id = ?1 AND tracker_id IS NULL",
+                rusqlite::params![item_id, org],
+            )
+            .unwrap();
+    }
+
+    /// Make live link `link_id` its session's only primary (`true`) or a
+    /// secondary (`false`), as M14.1c's `set_primary` / `primary: false` will.
+    pub(crate) fn seed_link_primary(&self, link_id: i64, primary: bool) {
+        if primary {
+            self.conn
+                .execute(
+                    "UPDATE work_links SET is_primary = 0 WHERE ended_at IS NULL AND id <> ?1 \
+                       AND participant_id = (SELECT participant_id FROM work_links WHERE id = ?1)",
+                    rusqlite::params![link_id],
+                )
+                .unwrap();
+        }
+        self.conn
+            .execute(
+                "UPDATE work_links SET is_primary = ?2 WHERE id = ?1",
+                rusqlite::params![link_id, primary as i64],
+            )
+            .unwrap();
+    }
+
+    /// A conflict a person kept (M14.1c's `ack`).
+    pub(crate) fn seed_review_ack(&self, link_id: i64) {
+        self.conn
+            .execute(
+                "UPDATE work_links SET review_ack_at = ?2 WHERE id = ?1",
+                rusqlite::params![link_id, super::now_unix()],
+            )
+            .unwrap();
+    }
 }

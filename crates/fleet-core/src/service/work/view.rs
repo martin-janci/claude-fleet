@@ -1,6 +1,6 @@
-//! The Work view (work graph M14): organisation → group → task → every
-//! session, read as a projection of the one graph of items, links and
-//! sessions (`docs/superpowers/specs/2026-09-27-work-view-design.md`).
+//! The Work view (work graph M14.1b, the reads): organisation → group →
+//! task → every session, read as a projection of the one graph of items,
+//! links and sessions (`docs/superpowers/specs/2026-09-27-work-view-design.md`).
 //!
 //! One read pass ([`Graph::load`]) takes every item, link, live session,
 //! tracker, org, project, placement and rule under the store lock; the rest
@@ -19,7 +19,8 @@
 //!   visible when that org is; a per-host token additionally needs work of
 //!   it on its own host (M3's fence); a task with no org of its own is
 //!   visible to a scoped caller only through a visible link — or when it has
-//!   no work at all yet (unassigned data).
+//!   no work at all yet (unassigned data: for a bound client only while its
+//!   org's `bound_sees_unassigned` is on, D31).
 //!
 //! Rejected links are never tasks' sessions (only `task` lists them, as
 //! decisions); ended suggestions and rejections are dropped altogether.
@@ -656,7 +657,11 @@ fn task_visible(g: &Graph, scope: &OrgScope, b: &Built<'_>) -> bool {
         OrgScope::All => true,
         // M3's fence: a host reads only work its own host did.
         OrgScope::Host { .. } => b.on_own_host,
-        OrgScope::Org { .. } => fence.is_some() || shown || b.any_links == 0,
+        // A task with no work at all yet is unassigned data: seen only
+        // while the org's `bound_sees_unassigned` is on (D31).
+        OrgScope::Org { .. } => {
+            fence.is_some() || shown || (b.any_links == 0 && scope.sees_org(None))
+        }
     }
 }
 
@@ -1544,7 +1549,15 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         })
         .map(|r| r.id)
         .collect();
-    let placement = g.placements.get(&task.task_id).cloned();
+    // Who placed it is the unrestricted caller's to read: a device name is
+    // not a scoped caller's to learn (an unassigned task is placed by
+    // bound clients of several orgs, M14.1c).
+    let placement = g.placements.get(&task.task_id).cloned().map(|mut p| {
+        if !scope.is_all() {
+            p.updated_by = None;
+        }
+        p
+    });
     Ok(TaskDetail {
         task,
         aliases,

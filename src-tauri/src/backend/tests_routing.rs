@@ -1478,6 +1478,90 @@ fn routed_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Work graph M14.1d: a secondary link and the compare-and-set guard
+        // travel on the existing decisions.
+        (
+            "link_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "link", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": "manual", "primary": false,
+                    "expected_version": 2 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::link_session_work(
+                    b,
+                    commands::work::LinkSessionWorkArgs {
+                        session_id: 7,
+                        key: Some("ABC-1".into()),
+                        primary: Some(false),
+                        expected_version: Some(2),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "confirm_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "confirm", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "primary": false, "expected_version": 3 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::confirm_session_work(
+                    b,
+                    commands::work::ConfirmSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        primary: Some(false),
+                        expected_version: Some(3),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reject_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "reject", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "expected_version": 3 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::reject_session_work(
+                    b,
+                    commands::work::RejectSessionWorkArgs {
+                        session_id: 7,
+                        link_id: Some(5),
+                        expected_version: Some(3),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unlink_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "unlink", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "expected_version": 4 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::unlink_session_work(
+                    b,
+                    commands::work::UnlinkSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        expected_version: Some(4),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "archive_session_work",
             "work_link",
@@ -2219,12 +2303,15 @@ fn routed_mutation_cases() -> Vec<Case> {
             "delete_work_view",
             "work_link",
             json!({ "session_id": null, "action": "view_delete", "key": null, "item_id": null,
-                    "link_id": null, "source": null, "view_id": 9 }),
+                    "link_id": null, "source": null, "view_id": 9, "expected_version": 1 }),
             r#"{"deleted":true}"#,
             Box::new(|b, s, _| {
                 block_on(commands::work_view::routed::delete_work_view(
                     b,
-                    commands::work_view::DeleteWorkViewArgs { view_id: 9 },
+                    commands::work_view::DeleteWorkViewArgs {
+                        view_id: 9,
+                        expected_version: Some(1),
+                    },
                     s,
                 ))
                 .map(|_| ())

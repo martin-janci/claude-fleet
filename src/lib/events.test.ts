@@ -77,6 +77,25 @@ afterEach(() => {
 });
 
 describe('subscribeToRowEvents', () => {
+  it('delivers work:changed (M14.1d) to onWorkChanged as one batch, dropping malformed frames', async () => {
+    const seen: unknown[][] = [];
+    await subscribeToRowEvents({ onWorkChanged: (changes) => seen.push(changes) });
+    fire('work:changed', { what: 'placement', task_id: 'item:3' });
+    fire('work:changed', { what: 'rule', rule_id: 'x' }); // malformed id
+    fire('work:changed', { what: 'someday' }); // a newer hub's
+    fire('work:changed', { what: 'resync' });
+    await flush();
+    expect(seen).toEqual([[{ what: 'placement', task_id: 'item:3' }, { what: 'resync' }]]);
+  });
+
+  it('listens for work:changed only when asked', async () => {
+    vi.mocked(listen).mockClear();
+    await subscribeToRowEvents({ onWorkEvents: () => {} });
+    const names = vi.mocked(listen).mock.calls.map((c) => c[0]);
+    expect(names).toContain('work:item');
+    expect(names).not.toContain('work:changed');
+  });
+
   it('fires onSessionCreated when session:created is emitted', async () => {
     const seen: number[] = [];
     await subscribeToRowEvents({
@@ -423,19 +442,3 @@ describe('row event batching', () => {
   });
 });
 
-describe('work:changed (work graph M14)', () => {
-  it('arrives in the batched work handler with the frame, in order with work:item', async () => {
-    const seen: unknown[] = [];
-    const unlisten = await subscribeToRowEvents({ onWorkEvents: (evs) => seen.push(...evs) });
-    fire('work:changed', { what: 'placement', task_id: 'item:12' });
-    fire('work:tracker_removed', { id: 3 });
-    fire('work:changed', { what: 'rule', rule_id: 4 });
-    await flush();
-    expect(seen).toEqual([
-      { type: 'changed', change: { what: 'placement', task_id: 'item:12' } },
-      { type: 'tracker_removed', id: 3 },
-      { type: 'changed', change: { what: 'rule', rule_id: 4 } },
-    ]);
-    unlisten();
-  });
-});

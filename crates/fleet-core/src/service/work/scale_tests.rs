@@ -575,8 +575,12 @@ fn scale_usage_summary() {
     budget("usage", p95, 1_500.0);
 }
 
-/// Work graph M14 (UC13): the Work view at scale. The view is a projection
-/// of the whole graph (every item, link and session, read once), so unlike
+/// Work graph M14.1b (UC13): the Work view's reads at scale. The 3,000 ms
+/// bound is the branch's, re-measured on `main` (2026-09-27, test build):
+/// p95 first page 831 ms, filtered 875, per-host token 594, bound client
+/// 684, task 619, review 704 — a margin of about 3.4x, like the M12 budgets.
+/// The view is a projection of the whole graph (every item, link and
+/// session, read once), so unlike
 /// the reads above its statements DO read the big tables in full — by
 /// design, once per request, off the writer (the MCP read pool). What is
 /// held here is the wall clock of a first page, a filtered page, a section,
@@ -644,7 +648,10 @@ fn scale_work_view() {
         tree(store, &host, &TreeArgs::default()).unwrap()
     });
     budget("work tree (host)", p95, 3_000.0);
-    let bound = OrgScope::Org { org: 1 };
+    let bound = OrgScope::Org {
+        org: 1,
+        sees_unassigned: true,
+    };
     let (page, p95) = {
         let p = tree(
             store,

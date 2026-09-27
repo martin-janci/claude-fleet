@@ -286,7 +286,7 @@ impl Store {
     /// Bind the live client named `name` to `org` (work graph M14), or
     /// unbind it (`None`). A bound client reads only that org's and
     /// unassigned work and sessions (`OrgScope::Org`). The auth epoch
-    /// trigger of migration 063 invalidates every cached caller, so the new
+    /// trigger of migration 066 invalidates every cached caller, so the new
     /// binding holds from the client's next request on. A peer hub link is
     /// never bound (it is not a reader of work). `E_NOTFOUND` when no live
     /// client holds the name, or the org does not exist.

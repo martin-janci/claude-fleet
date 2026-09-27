@@ -1262,7 +1262,7 @@ The questions of the M12.6 review
 ([decisions revisited](superpowers/reviews/2026-09-26-work-graph-decisions-revisited.md#what-m103-should-capture)),
 answered from this run. Write what happened, not what you expect.
 
-### D3: write-back to trackers (decided against)
+### D3: write-back to trackers (yes: the PR remote link only, M13.4e)
 
 How often, during the run, did a ticket's status or PR have to be updated
 by hand in the tracker after a fleet start or PR? Did that feel like
@@ -1274,7 +1274,7 @@ friction?
 
 Answer:
 
-### D10: summaries of dead sessions (decided against)
+### D10: summaries of dead sessions (yes: on demand only, M13.4c)
 
 For each resume of a **dead** session (steps 26, 27): was the built brief
 enough to continue, or did you open the transcript by hand? One example of
@@ -1296,7 +1296,7 @@ Answer:
 
 Answer:
 
-### D15 / D20: the phone (multi-start and naming stay on the desktop)
+### D15 / D20: the phone (yes: multi-start and naming are on the phone, M13.4d / M13.4a)
 
 - fleet-mobile release on the phone: ____ ; *Ask for a handover* there
   (M8.6.3)? (yes / no)

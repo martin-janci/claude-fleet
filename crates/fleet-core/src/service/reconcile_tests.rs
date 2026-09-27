@@ -360,8 +360,8 @@ async fn status_transitions_emit_session_events_and_stamp_lifecycle_columns() {
     );
 
     // Pass 2 — nothing changed: identical row, zero events of either kind.
-    // `row_version` (migration 042) is excluded: the trigger bumps it on
-    // every physical UPDATE, no-op or not, so it is not part of "identical".
+    // Compared modulo `row_version`, the counter a client orders by (since
+    // migration 063 a no-op pass does not move it either).
     f.pass().await;
     assert!(
         f.row("work", "alpha").eq_ignoring_row_version(&r1),
@@ -575,11 +575,17 @@ async fn no_phantom_status_change_when_the_last_hook_at_guard_wins() {
         Some("working"),
         "the hook-stamped status wins over the pane"
     );
-    // Only pass 1's first sighting of `c1` is on the timeline.
+    // Pass 1's first sighting of `c1`, then the hook's OWN transition
+    // (the hooks record theirs since the timeline-hygiene change) — and no
+    // phantom `status_change` from the pass: the guard kept the stored
+    // status, so reconcile transitioned nothing.
     assert_eq!(
         f.timeline(r1.id),
-        vec![ev("conversation_started", Some("unknown"))],
-        "the guard kept the stored status, so nothing transitioned"
+        vec![
+            ev("conversation_started", Some("unknown")),
+            ev("status_change", Some("working")),
+        ],
+        "the guard kept the stored status, so only the hook's transition is written"
     );
 }
 

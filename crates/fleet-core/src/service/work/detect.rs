@@ -720,7 +720,7 @@ pub fn decide(s: &Store, session_id: i64, link_id: i64, confirm: bool) -> Result
 }
 
 /// [`decide`], confirming as a secondary link when `take_primary` is false
-/// (work graph M14).
+/// (work graph M14.1c).
 pub fn decide_as(
     s: &Store,
     session_id: i64,

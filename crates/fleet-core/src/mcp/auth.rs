@@ -146,7 +146,7 @@ impl Caller {
     /// its host's org, read from the store now, so a host moved by the
     /// master is fenced from its next call on; a client bound to an org
     /// (M14) is bounded by that org. The binding travels in the cached
-    /// caller, and a re-bind bumps the auth epoch (migration 063), so a
+    /// caller, and a re-bind bumps the auth epoch (migration 066), so a
     /// re-bound client is fenced from its next request on.
     pub fn org_scope(
         &self,
@@ -159,7 +159,7 @@ impl Caller {
                 Some(ClientRef {
                     org_id: Some(org), ..
                 }),
-            ) => Ok(crate::service::orgs::OrgScope::Org { org: *org }),
+            ) => crate::service::orgs::OrgScope::for_client(store, *org),
             (None, _) => Ok(crate::service::orgs::OrgScope::All),
         }
     }

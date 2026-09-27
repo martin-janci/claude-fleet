@@ -278,11 +278,14 @@
       selectSessionExplicitly(r.value);
       return;
     }
-    const d = r.error.details as { session_id?: number } | null | undefined;
+    const d = r.error.details as { session_id?: number; orphan_session_id?: number } | null | undefined;
     if (r.error.code === 'E_EXISTS' && d?.session_id != null) {
       const live = $sessions.find((s) => s.id === d.session_id);
       if (live) {
         selectSessionExplicitly(live);
+        // A lost race: this start's own session spawned and runs unlinked.
+        // The hub names it; say so rather than leave it to be found.
+        if (d.orphan_session_id != null) push({ kind: 'warning', message: r.error.message });
         return;
       }
     }

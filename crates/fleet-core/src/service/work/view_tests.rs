@@ -1,10 +1,12 @@
-//! The Work view's read model and its edits (work graph M14), one test per
-//! use case of the spec (`docs/superpowers/specs/2026-09-27-work-view-design.md`)
-//! where the hub owns the behaviour. The org boundary per caller is the
-//! isolation matrix's (`mcp/tools/tests_isolation.rs`).
+//! The Work view's read model (work graph M14.1b), one test per use case of
+//! the spec (`docs/superpowers/specs/2026-09-27-work-view-design.md`) where
+//! the hub owns the behaviour. Some rows the reads answer are seeded
+//! (`Store::seed_*`); the writes a person makes through the hub (M14.1c)
+//! are `view_write_tests.rs`. The org boundary per caller is the isolation
+//! matrix's (`mcp/tools/tests_isolation.rs`).
 
 use super::*;
-use crate::service::work::structure::{self, LinkDecision, RuleInput};
+use crate::service::work::structure::{self, RuleInput};
 use crate::service::work::{work_link, WorkLinkArgs};
 use crate::store::{RuleConditions, TrackerConfig, TrackerItemWrite, WorkTarget};
 
@@ -117,6 +119,8 @@ fn wl(w: &W, action: &str, sid: i64) -> WorkLinkArgs {
     }
 }
 
+/// Link `sid` to `item`; `primary: false` makes it a secondary link
+/// (M14.1c's `link { primary: false }`).
 fn link(w: &W, sid: i64, item: i64, primary: bool) -> SessionRow {
     work_link(
         &WorkLinkArgs {
@@ -128,6 +132,20 @@ fn link(w: &W, sid: i64, item: i64, primary: bool) -> SessionRow {
         &OrgScope::All,
     )
     .unwrap()
+}
+
+fn bound(org: i64) -> OrgScope {
+    OrgScope::Org {
+        org,
+        sees_unassigned: true,
+    }
+}
+
+fn strict(org: i64) -> OrgScope {
+    OrgScope::Org {
+        org,
+        sees_unassigned: false,
+    }
 }
 
 fn links_of(w: &W, sid: i64) -> SessionTasks {
@@ -167,75 +185,6 @@ fn a_session_on_two_tasks_is_one_identity_under_both() {
     assert_eq!(st.links.len(), 2, "the Sessions view lists every task");
     assert_eq!(st.links.iter().filter(|l| l.link.primary).count(), 1);
     assert_eq!(st.primary_link_id, Some(a.sessions[0].link_id));
-}
-
-/// UC8: the primary moves atomically as a compare-and-set; the other link
-/// stays; a second device acting on the old primary gets a conflict.
-#[test]
-fn moving_the_primary_keeps_every_link_and_refuses_a_stale_device() {
-    let w = world();
-    link(&w, w.s1, w.t1, true);
-    link(&w, w.s1, w.t2, false);
-    let before = links_of(&w, w.s1);
-    let old = before.primary_link_id.unwrap();
-    let new = before
-        .links
-        .iter()
-        .find(|l| !l.link.primary)
-        .unwrap()
-        .link
-        .link_id;
-    // Device 1.
-    let row = work_link(
-        &WorkLinkArgs {
-            link_id: Some(new),
-            expected_primary: Some(old),
-            ..wl(&w, "set_primary", w.s1)
-        },
-        &w.st,
-        &OrgScope::All,
-    )
-    .unwrap();
-    assert_eq!(row.work.unwrap().link_id, new);
-    // Device 2 still thinks `old` is primary.
-    let err = work_link(
-        &WorkLinkArgs {
-            link_id: Some(old),
-            expected_primary: Some(old),
-            ..wl(&w, "set_primary", w.s1)
-        },
-        &w.st,
-        &OrgScope::All,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, codes::E_CONFLICT);
-    assert_eq!(err.details.as_ref().unwrap()["primary_link_id"], new);
-    let after = links_of(&w, w.s1);
-    assert_eq!(after.links.len(), 2, "no link was removed or ended");
-    assert_eq!(after.primary_link_id, Some(new));
-    assert!(after.links.iter().all(|l| l.link.state == "active"));
-    // Idempotent: setting the primary it already has changes nothing.
-    work_link(
-        &WorkLinkArgs {
-            link_id: Some(new),
-            expected_primary: Some(new),
-            ..wl(&w, "set_primary", w.s1)
-        },
-        &w.st,
-        &OrgScope::All,
-    )
-    .unwrap();
-    // A suggestion cannot be made primary.
-    let err = work_link(
-        &WorkLinkArgs {
-            link_id: Some(999_999),
-            ..wl(&w, "set_primary", w.s1)
-        },
-        &w.st,
-        &OrgScope::All,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, codes::E_NOTFOUND);
 }
 
 /// UC3 + UC9 (part): a task lists its active and past sessions; a past one
@@ -311,7 +260,7 @@ fn a_ticket_without_a_session_is_a_task() {
 }
 
 /// UC5: a suggestion is listed apart, never active, with its reason; a
-/// rejection is final and does not come back; undo returns it.
+/// rejection is final and does not come back.
 #[test]
 fn a_suggestion_is_distinct_explained_and_decided() {
     let w = world();
@@ -345,11 +294,10 @@ fn a_suggestion_is_distinct_explained_and_decided() {
     assert!(!it.why.is_empty());
     assert_eq!(it.alternatives.len(), 1, "TK-2 is the other guess");
 
-    // Reject, with the version the person saw.
+    assert_eq!(it.link_version, 1, "a fresh link");
     work_link(
         &WorkLinkArgs {
             link_id: Some(it.link_id),
-            expected_version: Some(it.link_version),
             ..wl(&w, "reject", w.s1)
         },
         &w.st,
@@ -367,215 +315,16 @@ fn a_suggestion_is_distinct_explained_and_decided() {
             .any(|i| i.task.key.as_deref() == Some("TK-3")),
         "R9: a rejected pair is not proposed again"
     );
-    // Undo: back to a suggestion, evidence kept.
-    work_link(
-        &WorkLinkArgs {
-            link_id: Some(it.link_id),
-            ..wl(&w, "reconsider", w.s1)
-        },
-        &w.st,
-        &OrgScope::All,
-    )
-    .unwrap();
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
-    assert!(r
-        .items
-        .iter()
-        .any(|i| i.link_id == it.link_id && i.kind == "suggestion"));
-}
-
-/// UC11: a decision on a version someone else changed is a conflict, and
-/// changes nothing; a batch answers each decision on its own.
-#[test]
-fn a_stale_decision_conflicts_and_a_batch_answers_each_item() {
-    let w = world();
-    {
-        let s = w.st.lock().unwrap();
-        crate::service::work::detect::on_prompt(&s, w.s1, "TK-3 and TK-2 both", false).unwrap();
-    }
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
-    let (a, b) = (&r.items[0], &r.items[1]);
-    // Another device confirms `a` first.
-    work_link(
-        &WorkLinkArgs {
-            link_id: Some(a.link_id),
-            expected_version: Some(a.link_version),
-            ..wl(&w, "confirm", w.s1)
-        },
-        &w.st,
-        &OrgScope::All,
-    )
-    .unwrap();
-    // This device rejects `a` on the version it saw.
-    let err = work_link(
-        &WorkLinkArgs {
-            link_id: Some(a.link_id),
-            expected_version: Some(a.link_version),
-            ..wl(&w, "reject", w.s1)
-        },
-        &w.st,
-        &OrgScope::All,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, codes::E_CONFLICT);
-    assert_eq!(err.details.as_ref().unwrap()["state"], "confirmed");
+    // The decision moved the link's version (the compare-and-set token of
+    // M14.1c), and the rejection is listed with the session's links.
     let st = links_of(&w, w.s1);
-    assert!(st
+    let rejected = st
         .links
         .iter()
-        .any(|l| l.link.link_id == a.link_id && l.link.state == "active"));
-
-    let res = structure::decide_batch(
-        &w.st,
-        &OrgScope::All,
-        &[
-            LinkDecision {
-                session_id: w.s1,
-                link_id: a.link_id,
-                decision: "reject".into(),
-                expected_version: Some(a.link_version),
-                primary: None,
-            },
-            LinkDecision {
-                session_id: w.s1,
-                link_id: b.link_id,
-                decision: "confirm".into(),
-                expected_version: Some(b.link_version),
-                primary: Some(false),
-            },
-        ],
-        &|_| Ok(()),
-    )
-    .unwrap();
-    assert_eq!(res.results[0].code.as_deref(), Some(codes::E_CONFLICT));
-    assert!(
-        res.results[1].ok && res.results[1].version.is_some(),
-        "{:?}",
-        res.results[1]
-    );
-    let st = links_of(&w, w.s1);
-    assert_eq!(
-        st.links.iter().filter(|l| l.link.state == "active").count(),
-        2
-    );
-    assert_eq!(
-        st.links.iter().filter(|l| l.link.primary).count(),
-        1,
-        "one primary"
-    );
-}
-
-/// UC6: where a task sits and why; a person's placement beats a rule,
-/// a rule beats the tracker; placements are compare-and-set; a disabled
-/// rule is the way back.
-#[test]
-fn placement_and_rules_explain_the_group_and_can_be_undone() {
-    let w = world();
-    let group = |w: &W, key: &str| {
-        task_of(&page(w, &OrgScope::All, WorkTreeFilters::default()), key)
-            .group
-            .clone()
-    };
-    let g = group(&w, "TK-1");
-    assert_eq!((g.source.as_str(), g.label.as_str()), ("tracker", "TP"));
-    assert_eq!(g.id, format!("tracker:{}:TP", w.tracker));
-
-    // Preview first: nothing is saved by it.
-    let draft = RuleInput {
-        name: "Audit".into(),
-        conditions: RuleConditions {
-            title_contains: Some("audit".into()),
-            ..Default::default()
-        },
-        group: "Compliance".into(),
-        ..Default::default()
-    };
-    let pv = structure::rule_preview(&w.st, &OrgScope::All, &draft).unwrap();
-    assert_eq!(pv.total, 1);
-    assert_eq!(pv.affected[0].key.as_deref(), Some("TK-2"));
-    assert_eq!(pv.affected[0].to.label, "Compliance");
-    assert_eq!(
-        group(&w, "TK-2").source,
-        "tracker",
-        "a preview changes nothing"
-    );
-    let rule = structure::rule_save(&w.st, &OrgScope::All, &draft).unwrap();
-    let g = group(&w, "TK-2");
-    assert_eq!((g.source.as_str(), g.rule_id), ("rule", Some(rule.id)));
-    assert_eq!(
-        g.tracker_value.as_deref(),
-        Some("TP"),
-        "what the tracker says stays visible"
-    );
-
-    // A one-off correction of TK-2 only.
-    let t2 = structure::place(
-        &w.st,
-        &OrgScope::All,
-        "item:2",
-        Some("Security"),
-        None,
-        Some(0),
-        "me",
-    )
-    .unwrap();
-    assert_eq!(
-        (t2.group.source.as_str(), t2.group.label.as_str()),
-        ("manual", "Security")
-    );
-    assert_eq!(group(&w, "TK-1").source, "tracker", "the others stay");
-    // A second device placing on the version it saw (none) conflicts.
-    let err = structure::place(
-        &w.st,
-        &OrgScope::All,
-        "item:2",
-        Some("Other"),
-        None,
-        Some(0),
-        "phone",
-    )
-    .unwrap_err();
-    assert_eq!(err.code, codes::E_CONFLICT);
-    // The manual placement is kept by the preview of another matching rule.
-    let pv = structure::rule_preview(&w.st, &OrgScope::All, &draft).unwrap();
-    assert_eq!((pv.total, pv.kept_manual), (0, 1));
-    // Clearing the placement falls back to the rule; disabling the rule to
-    // the tracker.
-    structure::place(
-        &w.st,
-        &OrgScope::All,
-        "item:2",
-        None,
-        None,
-        Some(t2.placement_version),
-        "me",
-    )
-    .unwrap();
-    assert_eq!(group(&w, "TK-2").source, "rule");
-    structure::rule_save(
-        &w.st,
-        &OrgScope::All,
-        &RuleInput {
-            id: Some(rule.id),
-            enabled: Some(false),
-            expected_version: Some(rule.version),
-            ..draft.clone()
-        },
-    )
-    .unwrap();
-    assert_eq!(group(&w, "TK-2").source, "tracker");
-    // An empty rule is refused.
-    let err = structure::rule_save(
-        &w.st,
-        &OrgScope::All,
-        &RuleInput {
-            name: "all".into(),
-            group: "x".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
-    assert_eq!(err.code, codes::E_INVALID);
+        .find(|l| l.link.link_id == it.link_id)
+        .unwrap();
+    assert_eq!(rejected.link.state, "rejected");
+    assert!(rejected.link.link_version > it.link_version);
 }
 
 /// UC9: a sync that renames a ticket keeps the person's placement; a
@@ -584,18 +333,9 @@ fn placement_and_rules_explain_the_group_and_can_be_undone() {
 fn a_sync_updates_the_ticket_and_keeps_local_decisions() {
     let w = world();
     link(&w, w.s1, w.t1, true);
-    structure::place(
-        &w.st,
-        &OrgScope::All,
-        "item:1",
-        Some("Mine"),
-        None,
-        Some(0),
-        "me",
-    )
-    .unwrap();
     {
         let s = w.st.lock().unwrap();
+        s.seed_placement("item:1", Some("Mine"), None);
         s.upsert_tracker_item(
             w.tracker,
             &TrackerItemWrite {
@@ -633,85 +373,6 @@ fn a_sync_updates_the_ticket_and_keeps_local_decisions() {
         .any(|i| i.kind == "unavailable" && i.task.key.as_deref() == Some("TK-1")));
 }
 
-/// UC7: a local task changes org only with a fresh impact token; the
-/// impact names what changes; after the move a client bound to the old
-/// org no longer receives the task, nor its link on its own session.
-#[test]
-fn a_local_task_moves_org_only_with_a_fresh_impact() {
-    let w = world();
-    let local = {
-        let s = w.st.lock().unwrap();
-        s.name_session_work(w.s1, Some("LOC-9"), "Refactor billing")
-            .unwrap()
-            .0
-            .id
-    };
-    let tid = format!("item:{local}");
-    let bound_a = OrgScope::Org { org: w.org_a };
-    assert!(task(&w.st, &bound_a, &tid).is_ok(), "unassigned: visible");
-
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(w.org_b)).unwrap();
-    assert!(imp.allowed);
-    assert_eq!((imp.from_org, imp.to_org), (None, Some(w.org_b)));
-    assert!(imp.links[0].becomes_cross_org, "s1 is org A's");
-    assert_eq!(imp.hosts_losing, vec!["h1".to_string()]);
-
-    let err = structure::assign_org(&w.st, &OrgScope::All, &tid, Some(w.org_b), Some("stale"))
-        .unwrap_err();
-    assert_eq!(err.code, codes::E_CONFLICT);
-    let err = structure::assign_org(
-        &w.st,
-        &bound_a,
-        &tid,
-        Some(w.org_b),
-        Some(&imp.impact_token),
-    )
-    .unwrap_err();
-    assert_eq!(err.code, codes::E_FORBIDDEN, "a bound client moves no org");
-    let moved = structure::assign_org(
-        &w.st,
-        &OrgScope::All,
-        &tid,
-        Some(w.org_b),
-        Some(&imp.impact_token),
-    )
-    .unwrap();
-    assert_eq!(
-        (moved.org_id, moved.org_source.as_str()),
-        (Some(w.org_b), "item")
-    );
-    assert!(moved.sessions[0].cross_org);
-
-    let err = task(&w.st, &bound_a, &tid).unwrap_err();
-    assert_eq!(
-        err.code,
-        codes::E_NOTFOUND,
-        "gone for A, answered as unknown"
-    );
-    let st = session_tasks(&w.st, &bound_a, w.s1).unwrap();
-    assert!(
-        st.links.is_empty(),
-        "A's own session no longer names B's task"
-    );
-    let row =
-        w.st.lock()
-            .unwrap()
-            .get_session_by_id(w.s1)
-            .unwrap()
-            .unwrap();
-    assert_eq!(
-        row.work.unwrap().org_id,
-        Some(w.org_b),
-        "the row's work carries the new org"
-    );
-    // A tracker item's org is its tracker's.
-    let t = structure::org_impact(&w.st, &OrgScope::All, "item:1", Some(w.org_b)).unwrap();
-    assert_eq!(
-        (t.allowed, t.reason.as_deref()),
-        (false, Some("tracker_controlled"))
-    );
-}
-
 /// A bound client's review and tree never show the other org's task on a
 /// session they share (the spec's multi-org session behaviour).
 #[test]
@@ -722,17 +383,22 @@ fn a_session_with_tasks_of_two_orgs_shows_each_side_only_its_own() {
         let (it, _) = s
             .name_session_work(w.s2, Some("SECRET-9"), "Beta secret")
             .unwrap();
-        s.set_local_item_org(it.id, Some(w.org_b)).unwrap();
+        s.seed_local_item_org(it.id, Some(w.org_b));
         it.id
     };
-    link(&w, w.s1, w.t1, true);
-    // A person forces B's task onto A's session s1 (the store takes it).
-    w.st.lock()
-        .unwrap()
-        .link_session_work_as(w.s1, WorkTarget::Item(local_b), "manual", false)
-        .unwrap();
-    let a = OrgScope::Org { org: w.org_a };
-    let b = OrgScope::Org { org: w.org_b };
+    let tk1 = link(&w, w.s1, w.t1, true).work.unwrap().link_id;
+    // A person forces B's task onto A's session s1 as a secondary link (the
+    // store takes it; M14.1c's `link { primary: false, force_cross_org }`).
+    let forced = {
+        let s = w.st.lock().unwrap();
+        let l = s
+            .link_session_work(w.s1, WorkTarget::Item(local_b), "manual")
+            .unwrap();
+        s.seed_link_primary(tk1, true);
+        l.id
+    };
+    let a = bound(w.org_a);
+    let b = bound(w.org_b);
     fn dump<T: serde::Serialize>(x: &T) -> String {
         serde_json::to_string(x).unwrap()
     }
@@ -767,7 +433,14 @@ fn a_session_with_tasks_of_two_orgs_shows_each_side_only_its_own() {
         .iter()
         .any(|l| l.session_id == Some(w.s1) && l.cross_org));
     let r = review(&w.st, &OrgScope::All, None, None).unwrap();
-    assert!(r.items.iter().any(|i| i.kind == "cross_org"));
+    assert!(r
+        .items
+        .iter()
+        .any(|i| i.kind == "cross_org" && i.link_id == forced));
+    // A kept conflict (M14.1c's `ack`) leaves the inbox.
+    w.st.lock().unwrap().seed_review_ack(forced);
+    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
+    assert!(!r.items.iter().any(|i| i.link_id == forced));
 }
 
 /// UC13: pages are a stable keyset — every task once, in order; a cursor
@@ -898,7 +571,7 @@ fn the_graph_and_the_store_agree_on_item_orgs() {
     let local = {
         let s = w.st.lock().unwrap();
         let (it, _) = s.name_session_work(w.s1, None, "Unkeyed").unwrap();
-        s.set_local_item_org(it.id, Some(w.org_b)).unwrap();
+        s.seed_local_item_org(it.id, Some(w.org_b));
         it.id
     };
     let s = w.st.lock().unwrap();
@@ -927,16 +600,9 @@ fn dump_wire_samples_when_asked() {
         let s = w.st.lock().unwrap();
         crate::service::work::detect::on_prompt(&s, w.s2, "look at TK-3", false).unwrap();
     }
-    structure::place(
-        &w.st,
-        &OrgScope::All,
-        "item:2",
-        Some("Security"),
-        Some("why"),
-        Some(0),
-        "me",
-    )
-    .unwrap();
+    w.st.lock()
+        .unwrap()
+        .seed_placement("item:2", Some("Security"), Some("why"));
     let write = |name: &str, v: serde_json::Value| {
         std::fs::write(
             format!("{dir}/{name}.json"),
@@ -982,67 +648,372 @@ fn dump_wire_samples_when_asked() {
     );
 }
 
-/// A client bound to org A whose session's primary is another org's task (a
-/// forced link) saw "no primary": its compare-and-set is on what it can
-/// see, so it is neither refused forever nor told the hidden link's id.
+/// UC6: where a task sits and why — a person's placement beats a rule, a
+/// rule beats the tracker; a rule's preview changes nothing; a disabled
+/// rule and a cleared placement fall back.
 #[test]
-fn a_hidden_primary_neither_blocks_nor_leaks_to_a_bound_client() {
+fn placement_and_rules_explain_the_group() {
+    let w = world();
+    let group = |w: &W, key: &str| {
+        task_of(&page(w, &OrgScope::All, WorkTreeFilters::default()), key)
+            .group
+            .clone()
+    };
+    let g = group(&w, "TK-1");
+    assert_eq!((g.source.as_str(), g.label.as_str()), ("tracker", "TP"));
+    assert_eq!(g.id, format!("tracker:{}:TP", w.tracker));
+
+    let conditions = RuleConditions {
+        title_contains: Some("audit".into()),
+        ..Default::default()
+    };
+    let draft = RuleInput {
+        name: "Audit".into(),
+        conditions: conditions.clone(),
+        group: "Compliance".into(),
+        ..Default::default()
+    };
+    let pv = structure::rule_preview(&w.st, &OrgScope::All, &draft).unwrap();
+    assert_eq!(pv.total, 1);
+    assert_eq!(pv.affected[0].key.as_deref(), Some("TK-2"));
+    assert_eq!(pv.affected[0].to.label, "Compliance");
+    assert_eq!(
+        group(&w, "TK-2").source,
+        "tracker",
+        "a preview changes nothing"
+    );
+    let rule =
+        w.st.lock()
+            .unwrap()
+            .seed_rule("Audit", &conditions, "Compliance");
+    let g = group(&w, "TK-2");
+    assert_eq!((g.source.as_str(), g.rule_id), ("rule", Some(rule)));
+    assert_eq!(
+        g.tracker_value.as_deref(),
+        Some("TP"),
+        "what the tracker says stays visible"
+    );
+    assert_eq!(
+        task(&w.st, &OrgScope::All, "item:2").unwrap().rules,
+        vec![rule]
+    );
+    let rules = structure::rules(&w.st, &OrgScope::All).unwrap();
+    assert_eq!(rules.len(), 1);
+
+    // A person's placement of TK-2 only.
+    w.st.lock()
+        .unwrap()
+        .seed_placement("item:2", Some("Security"), None);
+    let d = task(&w.st, &OrgScope::All, "item:2").unwrap();
+    assert_eq!(
+        (d.task.group.source.as_str(), d.task.group.label.as_str()),
+        ("manual", "Security")
+    );
+    assert_eq!(d.task.placement_version, 1);
+    assert_eq!(d.placement.unwrap().group.as_deref(), Some("Security"));
+    assert_eq!(group(&w, "TK-1").source, "tracker", "the others stay");
+    // The manual placement is kept by the preview of another matching rule.
+    let pv = structure::rule_preview(&w.st, &OrgScope::All, &draft).unwrap();
+    assert_eq!((pv.total, pv.kept_manual), (0, 1));
+    // A cleared placement falls back to the rule; a disabled rule to the
+    // tracker.
+    w.st.lock().unwrap().seed_placement("item:2", None, None);
+    assert_eq!(group(&w, "TK-2").source, "rule");
+    w.st.lock().unwrap().seed_rule_enabled(rule, false);
+    assert_eq!(group(&w, "TK-2").source, "tracker");
+    // An empty rule is refused, even as a preview.
+    let err = structure::rule_preview(
+        &w.st,
+        &OrgScope::All,
+        &RuleInput {
+            name: "all".into(),
+            group: "x".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+}
+
+/// UC7's preview: what moving a local task to another org would change,
+/// named for the unrestricted caller only (D33: a bound client or a host
+/// may not move an org, so it does not read the impact either). A tracker
+/// item's org is its tracker's.
+#[test]
+fn the_org_impact_names_the_move_for_an_unrestricted_caller_only() {
+    let w = world();
+    let local = {
+        let s = w.st.lock().unwrap();
+        s.name_session_work(w.s1, Some("LOC-9"), "Refactor billing")
+            .unwrap()
+            .0
+            .id
+    };
+    let tid = format!("item:{local}");
+    assert!(
+        task(&w.st, &bound(w.org_a), &tid).is_ok(),
+        "unassigned: visible"
+    );
+    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(w.org_b)).unwrap();
+    assert!(imp.allowed);
+    assert_eq!((imp.from_org, imp.to_org), (None, Some(w.org_b)));
+    assert!(imp.links[0].becomes_cross_org, "s1 is org A's");
+    assert_eq!(imp.hosts_losing, vec!["h1".to_string()]);
+    assert!(!imp.impact_token.is_empty());
+    for scope in [bound(w.org_a), strict(w.org_a)] {
+        let err = structure::org_impact(&w.st, &scope, &tid, Some(w.org_b)).unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+    }
+    let err = structure::org_impact(&w.st, &OrgScope::All, &tid, None).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID, "org_id is required (0: none)");
+    let t = structure::org_impact(&w.st, &OrgScope::All, "item:1", Some(w.org_b)).unwrap();
+    assert_eq!(
+        (t.allowed, t.reason.as_deref()),
+        (false, Some("tracker_controlled"))
+    );
+    // Once the item is B's (M14.1c's `assign_org`, seeded), A no longer
+    // receives it, nor its link on A's own session.
+    w.st.lock()
+        .unwrap()
+        .seed_local_item_org(local, Some(w.org_b));
+    let err = task(&w.st, &bound(w.org_a), &tid).unwrap_err();
+    assert_eq!(err.code, codes::E_NOTFOUND, "answered as unknown");
+    let st = session_tasks(&w.st, &bound(w.org_a), w.s1).unwrap();
+    assert!(st.links.is_empty(), "A's session no longer names B's task");
+}
+
+/// A client bound to org A whose session's primary is another org's task (a
+/// forced link) is never told that link: no primary is named, and the
+/// review inbox does not call the session "without a primary" either.
+#[test]
+fn a_hidden_primary_is_neither_named_nor_reported_missing_to_a_bound_client() {
     let w = world();
     let local_b = {
         let s = w.st.lock().unwrap();
         let (it, _) = s.name_session_work(w.s2, Some("HID-1"), "Hidden").unwrap();
-        s.set_local_item_org(it.id, Some(w.org_b)).unwrap();
+        s.seed_local_item_org(it.id, Some(w.org_b));
         it.id
     };
     // s1 (org A): B's task is its primary; A's TK-1 a secondary.
     let hidden =
         w.st.lock()
             .unwrap()
-            .link_session_work_as(w.s1, WorkTarget::Item(local_b), "manual", true)
+            .link_session_work(w.s1, WorkTarget::Item(local_b), "manual")
             .unwrap()
             .id;
     link(&w, w.s1, w.t1, false);
-    let a = OrgScope::Org { org: w.org_a };
+    let a = bound(w.org_a);
     let st = session_tasks(&w.st, &a, w.s1).unwrap();
     assert_eq!(st.primary_link_id, None, "the hidden primary is not named");
-    let mine = st.links[0].link.link_id;
-    // A stale expectation is a conflict that names nothing hidden.
-    let err = work_link(
-        &WorkLinkArgs {
-            link_id: Some(mine),
-            expected_primary: Some(mine),
-            ..wl(&w, "set_primary", w.s1)
-        },
+    assert_eq!(st.links.len(), 1);
+    let text = serde_json::to_string(&st).unwrap();
+    assert!(!text.contains("HID-1") && !text.contains(&format!("\"link_id\":{hidden}")));
+    let r = review(&w.st, &a, None, None).unwrap();
+    assert!(
+        !r.items.iter().any(|i| i.kind == "no_primary"),
+        "{:?}",
+        r.items
+    );
+    let all = links_of(&w, w.s1);
+    assert_eq!(all.primary_link_id, Some(hidden));
+}
+
+/// D31: an org's bound clients see unassigned work and sessions while its
+/// `bound_sees_unassigned` is on (the default), and only rows assigned to
+/// the org while it is off — never another org's either way.
+#[test]
+fn d31_decides_whether_a_bound_client_sees_unassigned_work() {
+    let w = world();
+    let (h2_session, loose, bare) = {
+        let s = w.st.lock().unwrap();
+        // An unassigned host and its session; a local item with no org and
+        // no work; a bare key on the unassigned session.
+        s.upsert_host("h2").unwrap();
+        let sid = s
+            .upsert_session("free", "h2", None, None, 1, 1, "running", None)
+            .unwrap();
+        let loose = s
+            .create_local_work_item(Some("LOOSE-1"), "Nobody's")
+            .unwrap();
+        s.link_session_work(sid, WorkTarget::Ref("FREE-7"), "manual")
+            .unwrap();
+        (sid, loose.id, "ref:FREE-7")
+    };
+    link(&w, w.s1, w.t1, true);
+    let keys = |scope: &OrgScope| -> BTreeSet<String> {
+        page(&w, scope, WorkTreeFilters::default())
+            .tasks
+            .iter()
+            .filter_map(|t| t.key.clone())
+            .collect()
+    };
+    let on = keys(&bound(w.org_a));
+    assert!(on.contains("TK-1") && on.contains("LOOSE-1") && on.contains("FREE-7"));
+    assert!(session_tasks(&w.st, &bound(w.org_a), h2_session).is_ok());
+    assert!(task(&w.st, &bound(w.org_a), bare).is_ok());
+
+    let off = keys(&strict(w.org_a));
+    assert!(off.contains("TK-1") && off.contains("TK-3"), "{off:?}");
+    assert!(
+        !off.contains("LOOSE-1") && !off.contains("FREE-7"),
+        "unassigned work is hidden: {off:?}"
+    );
+    let p = page(&w, &strict(w.org_a), WorkTreeFilters::default());
+    assert_eq!(p.groups.iter().map(|g| g.count).sum::<u32>(), p.total);
+    assert!(p.orgs.iter().all(|o| o.id == w.org_a));
+    for (tid, what) in [
+        (format!("item:{loose}"), "a loose item"),
+        (bare.into(), "a bare key"),
+    ] {
+        let err = task(&w.st, &strict(w.org_a), &tid).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND, "{what}");
+    }
+    let err = session_tasks(&w.st, &strict(w.org_a), h2_session).unwrap_err();
+    assert_eq!(err.code, codes::E_NOTFOUND, "an unassigned session");
+    // Org B's client, either way, sees none of A's.
+    for b in [bound(w.org_b), strict(w.org_b)] {
+        let k = keys(&b);
+        assert!(!k.iter().any(|k| k.starts_with("TK-")), "{k:?}");
+    }
+}
+
+/// Rules and saved views are navigation, but what they name is not every
+/// caller's: a bound client reads the rules that place a task it sees and
+/// its own org's views; a host reads neither.
+#[test]
+fn rules_and_views_are_fenced_per_caller() {
+    let w = world();
+    let (mine, theirs) = {
+        let s = w.st.lock().unwrap();
+        let b_tracker = s
+            .add_tracker("jira", "Jira (beta)", "https://beta.atlassian.net")
+            .unwrap();
+        s.set_tracker_org(b_tracker.id, Some(w.org_b)).unwrap();
+        let mine = s.seed_rule(
+            "Audit",
+            &RuleConditions {
+                title_contains: Some("audit".into()),
+                ..Default::default()
+            },
+            "Compliance",
+        );
+        let theirs = s.seed_rule(
+            "Beta payments",
+            &RuleConditions {
+                tracker_id: Some(b_tracker.id),
+                container: Some("PAY".into()),
+                ..Default::default()
+            },
+            "Payments",
+        );
+        s.seed_view("Everything", &serde_json::json!({}), None);
+        s.seed_view(
+            "A open",
+            &serde_json::json!({"status": "open"}),
+            Some(w.org_a),
+        );
+        s.seed_view(
+            "B secret",
+            &serde_json::json!({"query": "beta"}),
+            Some(w.org_b),
+        );
+        (mine, theirs)
+    };
+    let ids = |scope: &OrgScope| -> Vec<i64> {
+        structure::rules(&w.st, scope)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    assert_eq!(ids(&OrgScope::All), vec![mine, theirs]);
+    assert_eq!(ids(&bound(w.org_a)), vec![mine]);
+    assert!(ids(&bound(w.org_b)).is_empty(), "B sees none of A's tasks");
+    let host = OrgScope::for_host(&w.st.lock().unwrap(), "h1").unwrap();
+    assert!(ids(&host).is_empty());
+    let names = |scope: &OrgScope| -> Vec<String> {
+        structure::views(&w.st, scope)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.name)
+            .collect()
+    };
+    assert_eq!(names(&OrgScope::All).len(), 3);
+    assert_eq!(names(&bound(w.org_a)), vec!["A open".to_string()]);
+    assert_eq!(names(&strict(w.org_b)), vec!["B secret".to_string()]);
+    assert!(names(&host).is_empty());
+    let err = structure::rule_preview(
         &w.st,
-        &a,
+        &host,
+        &RuleInput {
+            name: "x".into(),
+            group: "x".into(),
+            conditions: RuleConditions {
+                key_prefix: Some("TK".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     )
     .unwrap_err();
-    assert_eq!(err.code, codes::E_CONFLICT);
-    assert!(
-        !err.message.contains(&hidden.to_string()),
-        "{}",
-        err.message
-    );
-    assert_eq!(
-        err.details.as_ref().unwrap()["primary_link_id"],
-        serde_json::Value::Null
-    );
-    // What it saw ("none") is accepted: A's task becomes primary; B's link
-    // stays, as a secondary.
-    work_link(
-        &WorkLinkArgs {
-            link_id: Some(mine),
-            expected_primary: Some(0),
-            ..wl(&w, "set_primary", w.s1)
-        },
-        &w.st,
-        &a,
-    )
-    .unwrap();
-    let all = links_of(&w, w.s1);
-    assert_eq!(all.primary_link_id, Some(mine));
-    assert!(all
-        .links
-        .iter()
-        .any(|l| l.link.link_id == hidden && l.link.state == "active"));
+    assert_eq!(err.code, codes::E_FORBIDDEN);
 }
+
+/// UC13 under change: a page's cursor stays valid while tasks are added
+/// and moved — no task is repeated across pages, and a later page never
+/// goes back before the cursor.
+#[test]
+fn a_cursor_is_stable_under_concurrent_change() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        for i in 0..20 {
+            s.create_local_work_item(Some(&format!("LOC-{i}")), &format!("local {i}"))
+                .unwrap();
+        }
+    }
+    let args = |cursor: Option<String>| TreeArgs {
+        cursor,
+        limit: Some(5),
+        per_task: Some(0),
+        ..Default::default()
+    };
+    let first = tree(&w.st, &OrgScope::All, &args(None)).unwrap();
+    let seen_first: BTreeSet<String> = first.tasks.iter().map(|t| t.task_id.clone()).collect();
+    // Meanwhile: new tasks arrive and one on the first page gains a session
+    // (it moves up the order).
+    {
+        let s = w.st.lock().unwrap();
+        for i in 20..25 {
+            s.create_local_work_item(Some(&format!("LOC-{i}")), &format!("local {i}"))
+                .unwrap();
+        }
+    }
+    link(&w, w.s1, w.t1, true);
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = first.next_cursor.clone();
+    while let Some(c) = cursor {
+        let p = tree(&w.st, &OrgScope::All, &args(Some(c))).unwrap();
+        seen.extend(p.tasks.iter().map(|t| t.task_id.clone()));
+        cursor = p.next_cursor;
+    }
+    let unique: BTreeSet<&String> = seen.iter().collect();
+    assert_eq!(unique.len(), seen.len(), "no task twice across later pages");
+    assert!(
+        seen.iter().all(|t| !seen_first.contains(t)),
+        "a later page never repeats the first page"
+    );
+    // The same cursor, replayed, answers the same page.
+    let again = tree(&w.st, &OrgScope::All, &args(first.next_cursor.clone())).unwrap();
+    let again2 = tree(&w.st, &OrgScope::All, &args(first.next_cursor)).unwrap();
+    assert_eq!(again.tasks, again2.tasks);
+    // A cursor that is not the hub's is refused, never read as a start.
+    let err = tree(&w.st, &OrgScope::All, &args(Some("bogus".into()))).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    // The review inbox pages the same way.
+    let err = review(&w.st, &OrgScope::All, Some("bogus"), None).unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+}
+
+#[path = "view_write_tests.rs"]
+mod writes;

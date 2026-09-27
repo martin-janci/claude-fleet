@@ -166,7 +166,7 @@ pub struct WorkLinkArgs {
     /// item:<id> or ref:<KEY>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// Link version seen.
+    /// Version seen (0 none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<i64>,
     /// Primary link seen; 0 none.
@@ -408,6 +408,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
     ("summarize_past_work", "work_link", "summarize"),
+    // Work graph M14.1d: the Work view's desktop commands.
     ("work_tree", "work", "tree"),
     ("work_task", "work", "task"),
     ("work_session_tasks", "work", "session_tasks"),
@@ -446,9 +447,9 @@ fn work_link_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::sch
 }
 
 /// The Work view's nested parameters (work graph M14) are served as a bare
-/// `object` / `array`: their shape is in `docs/control-api.md` and the spec,
-/// and a typed schema per nested struct would cost the tool budget (C21)
-/// several kilobytes. The server still deserialises them strictly — a
+/// `object` / `array`: their shape is in `docs/control-api.md` and the
+/// spec, and a typed schema per nested struct would cost the tool budget
+/// (C21) several kilobytes. The server still deserialises them strictly — a
 /// malformed one is refused, never ignored.
 fn object_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
     rmcp::schemars::json_schema!({ "type": "object" })
@@ -687,6 +688,20 @@ pub fn work_link<'a>(
         )
     })?;
     let s = lock(store)?;
+    // A client bound to an org never reaches another org's session (the
+    // transport's session gate says so first; this keeps the service's own
+    // answer the same — the unknown session's — for every entry point, the
+    // batch's included).
+    if matches!(scope, OrgScope::Org { .. })
+        && !s
+            .get_session_by_id(session_id)?
+            .is_some_and(|row| scope.sees_row(&row))
+    {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {session_id} not found"),
+        ));
+    }
     let force = args.force_cross_org.unwrap_or(false);
     // The target's org, checked against the scope (visibility) before
     // anything is written.
@@ -792,63 +807,65 @@ pub fn work_link<'a>(
             s.never_tidy(session_id, Some(link_id))?;
             return lifecycle_row(&s, session_id);
         }
-        // Work graph M14: move the primary (compare-and-set), keep a
-        // conflict, undo a decision. The link must be one the caller sees.
-        "set_primary" | "reconsider" | "ack" => {
-            let link_id = args.link_id.ok_or_else(|| {
-                IpcError::new(codes::E_INVALID, format!("{} needs link_id", args.action))
-            })?;
-            if !scope.is_all() {
-                visible_link(link_id)?;
-            }
-            s.check_link_version(link_id, args.expected_version)?;
-            match args.action.as_str() {
-                "set_primary" => {
-                    // The compare-and-set is on the primary the CALLER can
-                    // see (work graph M14): a scoped caller whose session's
-                    // primary is another org's (a forced link) saw "none",
-                    // and must neither be refused forever nor be told that
-                    // link's id. The store's own check then runs on the
-                    // actual primary, under this same lock.
-                    let actual = s.current_primary_link(session_id)?;
-                    let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
-                    if let Some(expected) = args.expected_primary {
-                        if seen.unwrap_or(0) != expected {
-                            return Err(IpcError::new(
-                                codes::E_CONFLICT,
-                                format!(
-                                    "session {session_id}'s primary work changed meanwhile (now {}); \
-                                     reload it and decide again",
-                                    seen.map_or("none".to_string(), |c| format!("link {c}"))
-                                ),
-                            )
-                            .with_details(serde_json::json!({
-                                "session_id": session_id, "primary_link_id": seen,
-                            })));
-                        }
-                    }
-                    s.set_primary_work_link(session_id, link_id, Some(actual.unwrap_or(0)))?;
-                    return lifecycle_row(&s, session_id);
+        _ => {}
+    }
+    // Work graph M14.1c: a decision on a link by id names the version the
+    // person saw; someone else's change meanwhile is `E_CONFLICT` with the
+    // link's current state. Checked only AFTER the link is known to be one
+    // the caller may name (this session's live link, in its scope): a
+    // version or state is never an oracle for a link out of scope. The
+    // store lock is held from here to the write, so the check and the
+    // write are one step.
+    let checked_link = |link_id: i64| -> Result<(), IpcError> {
+        visible_link(link_id)?;
+        s.check_link_version(link_id, args.expected_version)
+    };
+    let take_primary = args.primary.unwrap_or(true);
+    match args.action.as_str() {
+        // Move the primary (compare-and-set), keep a conflict, undo a
+        // decision.
+        "set_primary" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_primary needs link_id"))?;
+            checked_link(link_id)?;
+            // The compare-and-set is on the primary the CALLER can see: a
+            // scoped caller whose session's primary is another org's (a
+            // forced link) saw "none", and must neither be refused forever
+            // nor be told that link's id. The store's own check then runs
+            // on the actual primary, under this same lock.
+            let actual = s.current_primary_link(session_id)?;
+            let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
+            if let Some(expected) = args.expected_primary {
+                if seen.unwrap_or(0) != expected {
+                    return Err(crate::store::primary_conflict(session_id, seen));
                 }
-                "ack" => {
-                    s.ack_work_link(session_id, link_id)?;
-                    return lifecycle_row(&s, session_id);
-                }
-                // A reconsidered primary frees the primary: the resolver
-                // below picks the next one.
-                _ => s.reconsider_work_link(session_id, link_id)?,
             }
+            s.set_primary_work_link(session_id, link_id, Some(actual.unwrap_or(0)))?;
+            return lifecycle_row(&s, session_id);
+        }
+        // D32: a person keeps a conflict (a forced cross-org link, a link
+        // to an unavailable ticket); the review inbox stops listing it.
+        "ack" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "ack needs link_id"))?;
+            checked_link(link_id)?;
+            s.ack_work_link(session_id, link_id)?;
+            return lifecycle_row(&s, session_id);
+        }
+        // Undo: a person's confirm / reject goes back to a suggestion. A
+        // reconsidered primary frees the primary: the resolver below picks
+        // the next one.
+        "reconsider" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "reconsider needs link_id"))?;
+            checked_link(link_id)?;
+            s.reconsider_work_link(session_id, link_id)?;
         }
         _ => {}
     }
-    // A decision on a link by id names the version the person saw
-    // (work graph M14): someone else's change meanwhile is a conflict.
-    if matches!(args.action.as_str(), "confirm" | "reject" | "unlink") {
-        if let Some(link_id) = args.link_id {
-            s.check_link_version(link_id, args.expected_version)?;
-        }
-    }
-    let take_primary = args.primary.unwrap_or(true);
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
             (Some(id), None) => Ok(WorkTarget::Item(id)),
@@ -870,21 +887,21 @@ pub fn work_link<'a>(
                 let (key, tracker) = inferred_target(&s, t)?;
                 detect::on_agent_inference(&s, session_id, &key, tracker)?;
             } else {
-                s.link_session_work_as(session_id, t, source, take_primary)?;
+                s.link_session_work_as(session_id, t, source, take_primary, args.expected_version)?;
             }
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
         // `reject { key | item_id }` any target.
         "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
             let link_id = args.link_id.unwrap_or_default();
-            if !scope.is_all() {
-                visible_link(link_id)?;
+            if !scope.is_all() || args.expected_version.is_some() {
+                checked_link(link_id)?;
             }
             detect::decide(&s, session_id, link_id, false)?;
         }
         "reject" => {
             let (t, _) = visible_target(target()?)?;
-            s.reject_session_work(session_id, t)?;
+            s.reject_session_work_as(session_id, t, args.expected_version)?;
         }
         "confirm" => {
             let link_id = args
@@ -902,14 +919,17 @@ pub fn work_link<'a>(
             } else if !scope.is_all() {
                 visible_link(link_id)?;
             }
+            if args.expected_version.is_some() {
+                checked_link(link_id)?;
+            }
             detect::decide_as(&s, session_id, link_id, true, take_primary)?;
         }
         "unlink" => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
-            if !scope.is_all() {
-                visible_link(link_id)?;
+            if !scope.is_all() || args.expected_version.is_some() {
+                checked_link(link_id)?;
             }
             if !s.unlink_session_work(session_id, link_id)? {
                 return Err(IpcError::new(

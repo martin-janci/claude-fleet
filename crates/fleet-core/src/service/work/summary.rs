@@ -125,8 +125,12 @@ pub fn summary_script(
         "--no-session-persistence",
         "--model",
         &quote(model),
+        // `disableAllHooks`, not `{"hooks":{}}`: Claude Code keeps the
+        // user-level hooks (fleet's own, in ~/.claude/settings.json) under an
+        // empty `hooks` object, so the fork would report itself to fleet as a
+        // new conversation and prompt. Checked against Claude Code 2.1.283.
         "--settings",
-        &quote(r#"{"hooks":{}}"#),
+        &quote(r#"{"disableAllHooks":true}"#),
         "--tools",
         &quote(""),
         "--strict-mcp-config",

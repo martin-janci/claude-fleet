@@ -1676,4 +1676,34 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     expect(cmds).not.toContain('new_session');
     sessionsModule.sessions.set([]);
   });
+
+  it('a lost start race jumps to the winner and says which session it left unlinked', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    clearToasts();
+    const onCancel = vi.fn();
+    sessionsModule.sessions.set([{ ...started, id: 5, friendly_name: 'already' } as never]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_work')
+        throw {
+          code: 'E_EXISTS',
+          message: 'ABC-7 already has a live session (already on box); the session this start made (dev-abc-7) is not linked to it',
+          details: { session_id: 5, orphan_session_id: 9 },
+        };
+      return null;
+    });
+    render(NewSessionDialog, {
+      props: { project, ticket, initialName: 'ABC-7 Fix login', onCreate: () => {}, onCancel },
+    });
+    await tick();
+    await fireEvent.click(screen.getByTestId('create-btn'));
+    await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+    expect(get(selectedSession)?.id).toBe(5);
+    // The start did spawn a session: it runs, unlinked, and the person is
+    // told so rather than left to find it.
+    const shown = get(toasts);
+    expect(shown).toHaveLength(1);
+    expect(shown[0].message).toContain('dev-abc-7');
+    sessionsModule.sessions.set([]);
+    clearToasts();
+  });
 });

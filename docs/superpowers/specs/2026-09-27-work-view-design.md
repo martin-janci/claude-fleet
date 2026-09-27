@@ -1,9 +1,10 @@
 # Work view: design and contracts (work graph M14)
 
 **Date:** 2026-09-27
-**Roadmap:** `../2026-09-24-work-graph-roadmap.md` (M14 is new; this document adds it).
-**Builds on:** M0–M13 on `main` at `be0e2bc` (claude-fleet) and `4506abb` (fleet-mobile).
-**User guide:** `docs/work-graph.md` → *The Work view*. **Acceptance:** `docs/work-graph-acceptance.md` → Part P.
+**Roadmap:** `../2026-09-24-work-graph-roadmap.md` → *M14: the Work view*.
+**Plan:** `../plans/2026-09-27-work-graph-m14-work-view.md` (binding for the order of work and the owner's answers).
+**Builds on:** M0–M13 on `main` at `f10d0b92` (claude-fleet) and `8ca9afa` (fleet-mobile, with #50 and #51).
+**User guide:** `docs/work-graph.md` → *The Work view*. **Acceptance:** `docs/work-graph-acceptance.md` → Part R.
 
 ## Goal
 
@@ -22,20 +23,22 @@ desktop and phone read one contract under one set of permissions.
 
 ## Stage 0: what exists, what is extended, what is new
 
-Verified against `main` `be0e2bc` on 2026-09-27.
+Written against `main` `be0e2bc`; re-checked against `main` `f10d0b92` on 2026-09-27.
+The migration is `0NN_work_view.sql`: its number is taken when it merges (plan M14,
+design decision 3). On `f10d0b92` 061–064 are taken, so it is 065 or later.
 
 | Capability | State before M14 | M14 |
 |---|---|---|
 | Work item identity (`work_items.id`; tracker `(tracker_id, external_id)`; local item; bare `ref_key`) | exists (046, 048) | **reused**; a task's wire id is `item:<id>` or `ref:<KEY>` |
 | Session identity independent of tmux name / host (participant, 043/045) | exists | reused |
-| Link session ↔ task, N:M, `state` confirmed / rejected / suggested, `source`, `strength`, `rule`, `evidence`, `created_at`, `decided_at`, `ended_at`, snapshot | exists (046, 049) | **extended**: `version` (063) |
+| Link session ↔ task, N:M, `state` confirmed / rejected / suggested, `source`, `strength`, `rule`, `evidence`, `created_at`, `decided_at`, `ended_at`, snapshot | exists (046, 049) | **extended**: `version` (`0NN`) |
 | One primary link per session | exists, but every `link` / `confirm` *takes* the primary; no way to add a secondary link or to move the primary without rewriting the link's source | **extended**: `link` / `confirm` `{primary: false}`; new `set_primary` (atomic, compare-and-set) |
 | Group-by-primary-work in the sidebar | exists (`buildSessionsByWork`) | kept as is |
 | All links of a session (live + ended + suggested) with task details | partly: `work { links, session_id }` returns live links only, no titles | **new** `work { session_tasks }` |
 | All sessions of a task (active, suggested, past) | partly: `live_session_ids` on a ticket, the resume plan's candidates | **new** `work { task }` |
 | Tasks without a session | partly: ⌘K *My work* (tracker cache, 20 rows) | **new** `work { tree }` lists every cached / local task |
 | Paginated, server-filtered read | none (sidebar builds groups client-side from `list_sessions`) | **new** keyset cursor on `tree` / `review` |
-| Organisation as a boundary | exists for per-host tokens (`OrgScope::Host`); a paired client is always `All` | **extended**: a paired client can be **bound to an org** (`OrgScope::Org`, migration 063) |
+| Organisation as a boundary | exists for per-host tokens (`OrgScope::Host`); a paired client is always `All` | **extended**: a paired client can be **bound to an org** (`OrgScope::Org`, migration `0NN`) |
 | Organisation of a task | tracker item → tracker's org; local item → none (its links take their session's) | **extended**: a local item can carry an explicit org (`work_items.org_id`), with an impact preview |
 | Project / group of a task | none (the sidebar groups by work key only) | **new**: derived (tracker container, repository, key prefix) or placed by a person / a rule, with provenance |
 | Local placement ("put this task under group X") | none | **new** `work_placements` + `work_link { place }` |
@@ -46,7 +49,7 @@ Verified against `main` `be0e2bc` on 2026-09-27.
 | Optimistic concurrency | none (`sessions.row_version` is bumped by every UPDATE, so it cannot be a CAS token) | **new** per-link `version`, per-placement / rule / view `version`, `expected_*` parameters, `E_CONFLICT` |
 | Duplicate start of one ticket from two devices | **bug**: `start` re-checks only after the SSH spawn; the loser's session stays up unlinked | **fixed**: `start` claims the key in the in-flight registry `resume` already used |
 | Structure change events | links → `session:updated` (whole row); items → `work:item` | **new** `work:changed` (ids only) for placement / rule / view / org; lagged / not-resumed stream → full reload (existing `ready.resumed` / `lagged`) |
-| Upgrade | 062 | **063**, additive; older hubs and phones keep working (below) |
+| Upgrade | 064 | **`0NN`** (065 or later), additive; older hubs and phones keep working (below) |
 
 ## Product model
 
@@ -96,7 +99,7 @@ Verified against `main` `be0e2bc` on 2026-09-27.
 | Caller | Scope | Work data | Sessions |
 |---|---|---|---|
 | master, desktop, paired client (unbound) | `All` | everything; org is a view | everything |
-| paired client **bound to org O** (new) | `Org { org: O }` | O's and unassigned | O's and unassigned only (strict: the client asked to be restricted) |
+| paired client **bound to org O** (new) | `Org { org: O }` | O's, and unassigned while O's `bound_sees_unassigned` is on (D31) | O's, and unassigned while that flag is on (strict: the client asked to be restricted) |
 | per-host token of host H in org O | `Host { alias: H, org: O }` | O's and unassigned, plus M3's host fence | D7 `isolate_sessions` |
 
 A client is bound with `fleet-hub pair --org <name>` (or `fleet-hub client
@@ -104,6 +107,13 @@ bind <name> --org <org>` / `--no-org`). The binding is stored in
 `client_tokens.org_id` without a foreign key: deleting the org leaves the
 client bound to an org that no longer exists, which sees unassigned data
 only — **fail closed**, never widened to `All`.
+
+Whether a bound client sees *unassigned* work and sessions is a per-org
+setting (D31): `orgs.bound_sees_unassigned`, added by migration `0NN`,
+**default on** (as a host sees today), edited through `work_admin`'s org
+edit and Settings → Work → Organisations. Off: the org's bound clients see
+only rows assigned to their org. The isolation matrix has a row for both
+values.
 
 Everything that filtered on `scope.host()` for the org half of the boundary
 now filters on `!scope.is_all()` (`scope_links`, `tickets::allowed`,
@@ -161,7 +171,7 @@ every new action has a row, and the leak check runs over every answer.
 
 ### Concurrency
 
-- `work_links.version` (063) is bumped by a trigger on every change of
+- `work_links.version` (`0NN`) is bumped by a trigger on every change of
   `state`, `source`, `is_primary`, `ended_at`, `item_id`, `ref_key`,
   `archived_at` or `review_ack_at`.
 - Link mutations accept `expected_version`; on a mismatch they answer
@@ -354,7 +364,7 @@ with the fields of the action above.
   lists `tree` in `work`'s action enum; each write only when its action is
   listed (the phone's existing capability gate). The desktop on an older hub
   gets `E_INVALID unknown work action` and shows "Needs a newer hub".
-- Migration 063 is additive (new columns with defaults, new tables); the
+- Migration `0NN` is additive (new columns with defaults, new tables); the
   upgrade test and the downgrade guard (`store::testgen`) cover it.
 
 ## Desktop UX
@@ -405,21 +415,87 @@ with the fields of the action above.
 ## Stages (this milestone)
 
 0. This document (matrix and contracts).
-1. Read contract: migration 063, `tree` / `task` / `session_tasks` /
+1. Read contract: migration `0NN`, `tree` / `task` / `session_tasks` /
    `review` / `rules` / `rule_preview` / `views` / `org_impact`, the org-bound
    client scope, isolation rows, scale test.
 2. Desktop Work view (read, filters, detail, navigation both ways).
 3. Mutations (`set_primary`, versions, `reconsider`, `ack`, `decide_batch`,
    `place`, `assign_org`, rules, views), the start race fix, review inbox.
 4. Phone.
-5. Acceptance (Part P of `docs/work-graph-acceptance.md`), user guide.
+5. Acceptance (Part R of `docs/work-graph-acceptance.md`), user guide.
 
-## Open decisions (the user's)
+## Decisions (the owner's, answered 2026-09-27)
 
-| # | Question | Default built |
+| # | Question | Answer |
 |---|---|---|
-| D31 | May an org-bound client see *unassigned* work and sessions? | Yes (as a host does); assign every host and tracker to an org to fence everything |
-| D32 | Should a cross-org link (forced) raise a review item until acknowledged? | Yes |
-| D33 | May a full, unbound phone change a local task's org? | Yes, with the impact preview; bound clients and hosts may not |
-| D34 | Placement rules only (navigation), or also link rules ("sessions in repo X are task Y")? | Placement only; link rules would bypass detection's evidence and R9 |
-| D35 | Saved views: shared on the hub, or per device? | Shared on the hub (a bound client's views are its org's) |
+| D31 | May an org-bound client see *unassigned* work and sessions? | **By setting**: a per-org flag `orgs.bound_sees_unassigned`, default on (as a host sees today); off, the org's bound clients see only rows assigned to their org. Built in M14.1b's migration, with an isolation row for both values |
+| D32 | Should a cross-org link (forced) raise a review item until acknowledged? | **The default**: yes (`cross_org` review kind, cleared by `ack`) |
+| D33 | May a full, unbound phone change a local task's org? | **The default**: yes, with the impact preview; bound clients and hosts may not |
+| D34 | Placement rules only (navigation), or also link rules ("sessions in repo X are task Y")? | **The default**: placement only; link rules would bypass detection's evidence and R9 |
+| D35 | Saved views: shared on the hub, or per device? | **The default**: shared on the hub (a bound client's views are its org's) |
+
+D36 (M14 as a milestone despite D26, and who drives it) is the plan's, not
+this design's.
+
+## Revisions
+
+- 2026-09-27 (M14.1d, desktop commands and events): the eighteen commands
+  above, each `Routed` to its `work` / `work_link` action (no `LocalOnly`
+  row), and `link_session_work` / `confirm_session_work` take `primary`
+  and `expected_version`, `reject_session_work` / `unlink_session_work`
+  `expected_version`. `delete_work_view` takes the optional
+  `expected_version` M14.1c gave `view_delete`. `work:changed` is emitted
+  by the store after the write commits: `placement` (`task_id`), `rule`
+  (`rule_id`, on save and delete), `view` (`view_id`, on save and delete)
+  and `org` (`task_id`, a local task's org; its sessions' rows also go out
+  as `session:updated`). The desktop's hub bridge never resumes a stream
+  (every connection, the one after `lagged` included, re-lists), so its
+  resync ends with a desktop-only `work:changed { what: "resync" }` —
+  emitted only when the hub answered the re-list — which the Work view
+  reads as "reload whole"; a hub never sends it. `SessionRow.work_rev`
+  (*Events* above) is not built: neither #342 nor #345 has it, and it is
+  service logic, which M14.1d does not add.
+- 2026-09-27 (M14.1c, the writes): no migration (066's columns carry every
+  version). `E_CONFLICT` is a new `IpcError` code. A link's version is
+  compared only after the link is known to be the caller's to name (this
+  session's live link, in scope), so neither a version nor a state is an
+  oracle for a hidden link. `link { expected_version }` compares against
+  the session's live link to that work (`0`: none). `set_primary`'s
+  compare-and-set is on the primary the caller sees, so a scoped caller
+  whose session's primary is another org's (a forced link) expects `0`
+  and is never told that link's id. `view_delete` also takes an optional
+  `expected_version`; the master reaches every view (a replaced view keeps
+  its owner); a bound client's view may name only an org or tracker it
+  sees (`E_NOTFOUND` otherwise). A batch does not carry `force_cross_org`.
+  The service refuses a bound client another org's session itself, not
+  only at the transport's gate. `work:changed` and the Tauri commands are
+  M14.1d's: the writes here emit only the existing `session:updated`.
+- 2026-09-27 (M14.1b, the reads): migration `0NN` is two, **066**
+  (`work_view`) and **067** (`orgs.bound_sees_unassigned`, its own
+  migration because an `orgs` column is re-added when that table is rebuilt,
+  as 053's `auto_tidy` is); 065 went to lifecycle F2's `stale_working` on
+  `main` (#343) first. 066 carries `work_links.version` and its trigger
+  although only M14.1c writes against it: the reads answer `link_version`.
+  Security changes against the backend branch: `org_impact` is refused
+  (`E_FORBIDDEN`) to every scoped caller — hosts and bound clients may not
+  move an org (D33), and the impact named other orgs' hosts, bound-client
+  counts and journal counts; a bound client's `rules` are only the rules
+  that place a task it sees and name no tracker outside its org; a task with
+  no work at all is unassigned data, so it follows D31; a bound client whose
+  org was deleted sees no unassigned data either (stricter than *Scopes*
+  above, which said it would). With D31 off, a bound client also may not
+  start or resume a session in an unassigned project or host. `pair --org`
+  takes the org's id.
+  The inference the PR's threat note listed — a bound client reading
+  fleet-wide daily spend in `fleet_health` and so another org's activity —
+  is closed: for a bound client every roll-up there that sums across hosts
+  (spend by day and by host, host / session / status counts, tunnels, the
+  detection backlog) is taken over the hosts it sees only, its org's and,
+  under D31, unassigned ones (`health::scope_to_org`). The master, unbound
+  clients and host tokens read as before.
+- 2026-09-27 (M14.0, brought to `main`): based on `main` `f10d0b92` instead
+  of `be0e2bc`; the acceptance section is Part R (Part P is GHES on `main`);
+  the migration is `0NN_work_view.sql`, numbered at merge time, not 063
+  (063 is `row_version_on_visible_change` on `main`); D31 is the per-org
+  setting `orgs.bound_sees_unassigned`, default on, instead of a fixed
+  "yes"; D32–D35 are answered with their defaults.

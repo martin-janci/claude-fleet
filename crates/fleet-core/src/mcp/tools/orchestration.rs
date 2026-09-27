@@ -713,9 +713,7 @@ impl FleetTools {
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). Work view: primary:false links a secondary; \
-        expected_version guards a link; set_primary {expected_primary}; \
-        reconsider; ack; decide_batch; place; assign_org {impact_token}; \
-        rule_save|rule_delete; view_save|view_delete.")]
+        expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -946,9 +944,10 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
             return ok_json(&row);
         }
-        // Work graph M14: the Work view's structure and batch decisions.
+        // Work graph M14.1c: the Work view's structure and batch decisions.
         // Who may write what is inside (`structure`): never a per-host
-        // token; a bound client its own org's views and placements only.
+        // token; a bound client its own org's placements and views only;
+        // rules and org moves the master and unbound clients only.
         {
             use crate::service::work::structure as st;
             let need_task = || {
@@ -1010,36 +1009,23 @@ impl FleetTools {
                     let id = args
                         .view_id
                         .ok_or_else(|| mcp_err("E_INVALID", "view_delete needs view_id", None))?;
-                    return ok_json(&st::view_delete(&self.store, &scope, id).map_err(to_mcp_err)?);
+                    return ok_json(
+                        &st::view_delete(&self.store, &scope, id, args.expected_version)
+                            .map_err(to_mcp_err)?,
+                    );
                 }
                 "decide_batch" => {
-                    let decisions = args.decisions.clone().unwrap_or_default();
+                    let decisions = args.decisions.as_deref().unwrap_or_default();
                     // Each decision's session passes the same gate a single
-                    // decision's does (host, bound client), answered as an
-                    // unknown session when it does not.
+                    // decision's does (the host fence, the bound client's
+                    // session fence), with the gate's own code and sentence.
                     let gate = |sid: i64| -> Result<(), IpcError> {
                         self.resolve_target_row(&caller, Some(sid), None, None, "the session")
                             .map(|_| ())
-                            .map_err(|e| {
-                                let code = e
-                                    .data
-                                    .as_ref()
-                                    .and_then(|d| d.get("code"))
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("E_FORBIDDEN")
-                                    .to_string();
-                                IpcError::new(
-                                    if code == codes::E_NOTFOUND {
-                                        codes::E_NOTFOUND
-                                    } else {
-                                        codes::E_FORBIDDEN
-                                    },
-                                    e.message.to_string(),
-                                )
-                            })
+                            .map_err(ipc_of_mcp)
                     };
                     return ok_json(
-                        &st::decide_batch(&self.store, &scope, &decisions, &gate)
+                        &st::decide_batch(&self.store, &scope, decisions, &gate)
                             .map_err(to_mcp_err)?,
                     );
                 }
@@ -1134,5 +1120,27 @@ impl FleetTools {
     ) -> Result<crate::service::orgs::OrgScope, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         caller.org_scope(&s).map_err(to_mcp_err)
+    }
+}
+
+/// A coded [`McpError`] (built by `mcp_err` / `to_mcp_err`) back as the
+/// [`IpcError`] it carries — its code, its sentence without the code
+/// prefix, its details — for a batch item's result (work graph M14.1c).
+fn ipc_of_mcp(e: McpError) -> IpcError {
+    let data = e.data.as_ref();
+    let code = data
+        .and_then(|d| d.get(super::support::ERR_CODE_KEY))
+        .and_then(|c| c.as_str())
+        .unwrap_or(codes::E_FORBIDDEN)
+        .to_string();
+    let message = e
+        .message
+        .strip_prefix(&format!("{code}: "))
+        .unwrap_or(&e.message)
+        .to_string();
+    IpcError {
+        code,
+        message,
+        details: None,
     }
 }

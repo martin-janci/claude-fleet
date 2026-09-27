@@ -44,15 +44,20 @@ pub fn org_generation() -> u64 {
 pub enum OrgScope {
     /// Master, an unbound paired client, the desktop: everything.
     All,
-    /// A paired client bound to one org (work graph M14): that org's and
-    /// unassigned work, and — strictly, whatever `isolate_sessions` says —
-    /// only that org's and unassigned sessions. The client asked to be
-    /// restricted, so nothing of another org reaches it. There is no host
-    /// fence: a phone is not a host.
+    /// A paired client bound to one org (work graph M14): that org's work,
+    /// and — strictly, whatever `isolate_sessions` says — only that org's
+    /// sessions; unassigned work and sessions too while the org's
+    /// `bound_sees_unassigned` is on (D31, the default). The client asked
+    /// to be restricted, so nothing of another org reaches it. There is no
+    /// host fence: a phone is not a host.
     Org {
         /// The bound org. An org that was deleted since still binds: the
-        /// client then reads unassigned data only (fail closed).
+        /// client then reads nothing of any org, and no unassigned data
+        /// either (fail closed, never widened to `All`).
         org: i64,
+        /// D31: `orgs.bound_sees_unassigned`, read with the scope. `false`
+        /// for an org that no longer exists.
+        sees_unassigned: bool,
     },
     /// A per-host token.
     Host {
@@ -74,6 +79,16 @@ impl OrgScope {
         })
     }
 
+    /// The scope of a paired client bound to `org` (work graph M14), with
+    /// D31's switch read now, so a change applies from the client's next
+    /// call on.
+    pub(crate) fn for_client(s: &Store, org: i64) -> Result<Self, IpcError> {
+        Ok(OrgScope::Org {
+            org,
+            sees_unassigned: s.get_org(org)?.is_some_and(|o| o.bound_sees_unassigned),
+        })
+    }
+
     pub fn is_all(&self) -> bool {
         matches!(self, OrgScope::All)
     }
@@ -89,18 +104,25 @@ impl OrgScope {
     /// The org a bound client is fenced to (work graph M14).
     pub fn bound_org(&self) -> Option<i64> {
         match self {
-            OrgScope::Org { org } => Some(*org),
+            OrgScope::Org { org, .. } => Some(*org),
             _ => None,
         }
     }
 
-    /// Work data of `org` is visible: always for `All`; for a host or a
-    /// bound client, its own org's and unassigned data.
+    /// Work data of `org` is visible: always for `All`; for a host, its own
+    /// org's and unassigned data; for a bound client, its own org's, and
+    /// unassigned data while its org's `bound_sees_unassigned` is on (D31).
     pub fn sees_org(&self, org: Option<i64>) -> bool {
         match self {
             OrgScope::All => true,
             OrgScope::Host { org: mine, .. } => org.is_none() || org == *mine,
-            OrgScope::Org { org: mine } => org.is_none() || org == Some(*mine),
+            OrgScope::Org {
+                org: mine,
+                sees_unassigned,
+            } => match org {
+                None => *sees_unassigned,
+                Some(o) => o == *mine,
+            },
         }
     }
 
@@ -116,8 +138,8 @@ impl OrgScope {
         match self {
             OrgScope::All => true,
             // Strict for a bound client: another org's session never reaches
-            // it, isolated or not (M14).
-            OrgScope::Org { org } => row_org.is_none() || row_org == Some(*org),
+            // it, isolated or not (M14); an unassigned one only under D31.
+            OrgScope::Org { .. } => self.sees_org(row_org),
             OrgScope::Host {
                 alias,
                 org,
@@ -148,8 +170,6 @@ impl OrgScope {
             return;
         }
         row.work_rejected.clear();
-        // Another org's hidden link would move it (M14).
-        row.work_rev = 0;
         if !self.sees_org(row.org_id) {
             row.work = None;
             row.work_suggested = None;
@@ -192,7 +212,6 @@ impl OrgScope {
                     && WORK_FIELDS.iter().any(|k| map.contains_key(*k));
                 if is_row {
                     map.remove("work_rejected");
-                    map.remove("work_rev");
                     let org = session_org(map);
                     if !self.sees_org(org) {
                         for k in WORK_FIELDS {
@@ -610,8 +629,12 @@ pub fn admin(
                 args.color.as_deref(),
                 args.isolate_sessions.unwrap_or(false),
             )?;
-            to_json(&match auto {
+            let org = match auto {
                 Some(a) => s.set_org_auto_tidy(org.id, a)?,
+                None => org,
+            };
+            to_json(&match args.bound_sees_unassigned {
+                Some(on) => s.set_org_bound_sees_unassigned(org.id, on)?,
                 None => org,
             })?
         }
@@ -624,8 +647,14 @@ pub fn admin(
                 args.color.as_deref(),
                 args.isolate_sessions,
             )?;
-            to_json(&match auto {
+            let org = match auto {
                 Some(a) => s.set_org_auto_tidy(id, a)?,
+                None => org,
+            };
+            // D31 (work graph M14.1b): what the org's bound clients see of
+            // unassigned work and sessions.
+            to_json(&match args.bound_sees_unassigned {
+                Some(on) => s.set_org_bound_sees_unassigned(id, on)?,
                 None => org,
             })?
         }

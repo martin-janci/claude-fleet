@@ -674,7 +674,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claude-fleet"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1003,7 +1003,6 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
- "subtle",
 ]
 
 [[package]]
@@ -1351,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-agent"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "clap",
  "fleet-proto",
@@ -1382,7 +1381,6 @@ dependencies = [
  "fleet-proto",
  "futures-util",
  "hex",
- "hmac",
  "libc",
  "proptest",
  "rand 0.10.1",
@@ -1409,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-hub"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "clap",
  "directories",
@@ -1428,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-proto"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1967,15 +1965,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest",
-]
 
 [[package]]
 name = "html5ever"

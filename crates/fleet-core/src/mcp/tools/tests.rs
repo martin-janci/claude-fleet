@@ -3467,12 +3467,15 @@ fn the_served_definition_budget_stays_bounded() {
     // (+144); plus 100.
     // Merged with M13.4c (`work_link` `summarize`): measured at 56,950 on
     // 2026-09-27; plus 100.
-    // Work graph M14 (the Work view): 8 `work` and 10 `work_link` actions,
-    // their parameters, one sentence per tool, and `pair_client`'s
-    // `org_id`. The nested objects (filters, rule, view, decisions) are
-    // served as a bare object / array (6,700 B typed, 1,960 B so); no new
-    // tool. Measured at 59,014 on 2026-09-27; plus 100.
-    const BUDGET_BYTES: usize = 59_114;
+    // Work graph M14.1b (the Work view's reads): 8 `work` actions and their
+    // parameters (the nested `filters` / `rule` served as a bare object),
+    // `pair_client`'s `org_id` and `work_admin`'s `bound_sees_unassigned`
+    // (D31); no new tool. Measured at 57,859 on 2026-09-27; plus 100.
+    // Work graph M14.1c (the Work view's writes): 10 `work_link` actions,
+    // 14 optional parameters (the nested `rule` / `view` / `decisions`
+    // served as a bare object / array) and one description clause; no new
+    // tool. Measured at 58,977 on 2026-09-27; plus 100.
+    const BUDGET_BYTES: usize = 59_077;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -6550,6 +6553,103 @@ async fn list_sessions_fresh_for_answers_changed_after_a_status_change() {
     );
 }
 
+/// A reconcile tick that observed nothing new must not break a `fresh_for`
+/// snapshot of FULL rows (`summary: false`), which carry `row_version`:
+/// the tick re-stamps `last_reconciled_at` on every live row, and before
+/// migration 063 that physical UPDATE bumped `row_version`, so the hash
+/// moved every 20 s and `unchanged` never fired.
+#[tokio::test]
+async fn list_sessions_fresh_for_full_rows_is_unchanged_across_an_idle_reconcile_tick() {
+    use crate::store::{HostReconcile, ReconcileSession};
+    let s = Store::open_in_memory().unwrap();
+    // See the comment in `list_sessions_fresh_for_answers_unchanged_on_a_repeat_read`.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
+    s.upsert_host("hosta").unwrap();
+    let t = test_tools(s);
+    let tick = |t: &FleetTools, at: i64| {
+        let live = [
+            ReconcileSession {
+                tmux_name: "dev",
+                created_at: 1,
+                last_activity_at: 1,
+                claude_status: Some("idle".to_string()),
+                intel_observed: true,
+                ..Default::default()
+            },
+            ReconcileSession {
+                tmux_name: "reader",
+                created_at: 1,
+                last_activity_at: 1,
+                ..Default::default()
+            },
+        ];
+        let keep = ["dev".to_string(), "reader".to_string()];
+        t.store
+            .lock()
+            .unwrap()
+            .apply_host_reconcile(HostReconcile {
+                alias: "hosta",
+                reachable: true,
+                last_pinged_at: at,
+                probe_started_at: at,
+                sessions: &live,
+                keep: &keep,
+                reconciled_at: Some(at),
+                ..Default::default()
+            })
+            .unwrap();
+    };
+    tick(&t, 1_000);
+    let reader = t
+        .store
+        .lock()
+        .unwrap()
+        .get_session("reader", "hosta")
+        .unwrap()
+        .unwrap()
+        .id;
+    let params = || {
+        let mut p: ListSessionsParams =
+            serde_json::from_value(serde_json::json!({ "summary": false })).unwrap();
+        p.fresh_for = Some(reader);
+        p
+    };
+    let first = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
+    let v1 = result_json(&first);
+    assert_eq!(v1["unchanged"], false, "{v1}");
+    assert!(
+        v1["data"][0].get("row_version").is_some(),
+        "the full shape carries row_version: {v1}"
+    );
+
+    // The idle tick: the same observation, a later stamp.
+    tick(&t, 1_020);
+    let stamp: i64 = t
+        .store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT MIN(last_reconciled_at) FROM sessions", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(stamp, 1_020, "the idle tick still stamps every live row");
+
+    let second = t
+        .list_sessions(Extension(Caller::master()), Parameters(params()))
+        .await
+        .unwrap();
+    let v2 = result_json(&second);
+    assert_eq!(
+        v2["unchanged"], true,
+        "an idle reconcile tick must not change a full-row snapshot: {v2}"
+    );
+}
+
 /// Ruling 16 (reader-id reuse): `sessions.id` has no AUTOINCREMENT, so a
 /// killed-and-reaped reviewer's id goes to the NEXT session created. That
 /// new session's FIRST `list_sessions fresh_for` must carry the payload —
@@ -7069,6 +7169,75 @@ async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
     .expect("link is not gated");
 }
 
+/// Work graph M13.4c (decision D10): the operator's summary of a dead
+/// session spends a model call, so it waits for a person's approval; a hub
+/// (no approver) refuses it outright; a phone's is never gated.
+#[tokio::test]
+async fn an_operator_summary_is_confirm_gated_and_refused_on_a_hub() {
+    use crate::service::work::WorkLinkArgs;
+    // No past work of PAY-404 exists: past the gate, the summary itself
+    // refuses the link.
+    let summarize = |nonce: Option<String>| WorkLinkArgs {
+        action: "summarize".into(),
+        key: Some("PAY-404".into()),
+        link_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    // A phone: straight through to the service.
+    let phone = t
+        .work_link(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(summarize(None)),
+        )
+        .await
+        .unwrap_err();
+    assert!(phone.message.starts_with("E_NOTFOUND"), "{}", phone.message);
+    // The operator: asked first; approved, it reaches the same refusal.
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(summarize(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let after = t
+        .work_link(Extension(op.clone()), Parameters(summarize(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(after.message.starts_with("E_NOTFOUND"), "{}", after.message);
+    // Denied: refused before anything runs.
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(summarize(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, false));
+    let denied = t
+        .work_link(Extension(op.clone()), Parameters(summarize(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        denied.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        denied.message
+    );
+    // A hub: nobody could approve it, so it is refused.
+    let (s, _, _) = two_host_store();
+    let hub = guarded_tools(s, false);
+    let e = hub
+        .work_link(Extension(op), Parameters(summarize(None)))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    assert!(e.message.contains("no approver"), "{}", e.message);
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();
@@ -7148,6 +7317,87 @@ async fn a_hub_with_no_approver_refuses_the_operator_s_start_outright() {
         e.message
     );
     assert!(t.guards.confirms.pending_tools().is_empty());
+}
+
+/// M13.4c: the operator's `summarize` spends a model call, so it waits for a
+/// person like a start (approve / deny), is refused outright on a hub with no
+/// approver, and a phone's own request is not gated.
+#[tokio::test]
+async fn an_operator_summary_is_confirmed_and_refused_without_an_approver() {
+    use crate::service::work::WorkLinkArgs;
+    let args = |nonce: Option<String>| WorkLinkArgs {
+        action: "summarize".into(),
+        key: Some("PAY-7".into()),
+        // An unknown link: the summary itself fails locally, after the gate.
+        link_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let phone = t
+        .work_link(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(args(None)),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !phone.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        phone.message
+    );
+
+    let asked = t
+        .work_link(Extension(operator()), Parameters(args(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let after = t
+        .work_link(Extension(operator()), Parameters(args(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        !after.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        after.message
+    );
+    assert!(
+        !after.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        after.message
+    );
+
+    let asked = t
+        .work_link(Extension(operator()), Parameters(args(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, false));
+    let denied = t
+        .work_link(Extension(operator()), Parameters(args(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        denied.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        denied.message
+    );
+
+    let (s, _, _) = two_host_store();
+    let hub = guarded_tools(s, false);
+    let e = hub
+        .work_link(Extension(operator()), Parameters(args(None)))
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("no approver"),
+        "{}",
+        e.message
+    );
+    assert!(hub.guards.confirms.pending_tools().is_empty());
 }
 
 fn operator() -> Caller {

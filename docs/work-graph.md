@@ -16,6 +16,8 @@ acceptance run, [work-graph-acceptance.md](work-graph-acceptance.md).
 
 - [What "work" is](#what-work-is)
 - [The Work view](#the-work-view)
+- [The Work view (reads)](#the-work-view-reads)
+- [Work view: edits](#work-view-edits)
 - [Linking and detection](#linking-and-detection)
 - [Trackers](#trackers)
 - [Starting work](#starting-work)
@@ -77,8 +79,9 @@ of its occurrences opens it.
 project or group with its count; each task shows its key and title, its
 tracker, its status, how many active and past sessions it has, a dot when a
 session needs you, **?** when something waits for review, a struck-through
-title when the tracker no longer answers for it, and *tracker down* when its
-tracker is failing (which is not the same as having no sessions). A task
+title when the tracker no longer answers for it, and what is wrong with its
+tracker when it is not answering (*tracker: token expired or wrong*,
+*tracker: not tested yet*, …), which is not the same as having no sessions. A task
 with no session at all stays in the tree. Under a task, each session says
 what its link is:
 
@@ -160,6 +163,106 @@ make one session; the other device is pointed at it.
 
 > **[Screenshot placeholder]** The Work view with an org, two groups, a task
 > with a primary, a secondary and a past session, and the Review tab.
+
+## The Work view (reads)
+
+The hub answers the other way into the work graph — organisation → group →
+task → *every* session of the task (primary, secondary, suggested and past),
+including tasks with no session at all — as reads of the `work` tool
+(work graph M14.1b; the screens above and the phone's *My work* use them):
+
+- `work { action: tree, filters?, cursor?, limit?, per_task? }`: a page of
+  tasks with their sessions, the section headers (`groups`, each with its
+  count under the filters), and the orgs and trackers the caller sees.
+  Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
+  `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
+  `suggested`), `review`, `query`, `group`. Pages are a keyset: pass
+  `next_cursor` back with the same filters (other filters refuse it). No
+  task is repeated across pages while the fleet changes; a task that moved
+  meanwhile may be skipped until the next full read.
+- `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
+  with every session and why it is linked, its tracker description, the
+  last known outcome, its placement and the rules that match it.
+- `work { action: session_tasks, session_id }`: every link of one session
+  (active, suggested, rejected, ended), each with its task.
+- `work { action: review, cursor?, limit? }`: suggestions and conflicts
+  (a cross-org link, an unavailable ticket, a session with no primary).
+- `work { action: rules }`, `work { action: rule_preview, rule }`: the
+  placement rules, and what a drafted rule would move before it is saved.
+- `work { action: views }`: saved filters (a device bound to an org lists
+  its org's only).
+- `work { action: org_impact, task_id, org_id }`: what moving a local task
+  to another org would change (the master and unbound devices only).
+
+Every read is fenced by the caller's organisation boundary, like every
+other work read: a per-host token and a device bound to an org see only
+what their org may, and a task outside it answers exactly as one that does
+not exist. Each task says where its org and group come from (`org_source`:
+tracker, item, sessions, none; `group.source`: manual, rule, tracker,
+repo, key, none).
+
+## Work view: edits
+
+The Work view's changes are `work_link` actions (work graph M14.1c; the
+desktop's and the phone's screens make them). None of them is a new tool, and an
+older device that sends none of the new parameters behaves as before.
+
+- **A second task on a session.** `link { primary: false }` and
+  `confirm { link_id, primary: false }` add a *secondary* link: the
+  session's primary work stays where it is (a session with no primary
+  still gets one). Without `primary`, a link or confirm takes the primary,
+  as it always did.
+- **Make primary.** `set_primary { session_id, link_id, expected_primary }`
+  moves the primary to another confirmed link of the session, and changes
+  nothing else: no link is removed or ended. `expected_primary` is the
+  primary link you saw (`0`: none).
+- **Undo.** `reconsider { session_id, link_id }` turns a confirm or a
+  rejection of a *suggestion* back into a suggestion, with its evidence. A
+  link you made by hand has nothing to go back to: remove it (`unlink`).
+- **Keep a conflict.** `ack { session_id, link_id }` takes a conflict you
+  mean to keep — a forced cross-org link, a link to an unavailable ticket —
+  out of the review inbox (D32: a forced cross-org link is a review item
+  until someone acks or removes it).
+- **Decide many.** `decide_batch { decisions: [{session_id, link_id,
+  decision: confirm | reject | reconsider | ack, expected_version?,
+  primary?}] }` (at most 100) decides each item on its own, with the same
+  checks as the single action, and answers per item (`ok`, `code`,
+  `message`, the link's new `version`). One refused item never stops or
+  undoes the others. A cross-org confirm needs `force_cross_org`, which a
+  batch does not carry: decide it alone.
+- **Place a task.** `place { task_id, group, note?, expected_version }`
+  puts a task in a group of your choosing (an empty `group` and no `note`
+  puts it back where it would sit by itself). Navigation only: it never
+  changes who sees the task, and never writes to the tracker.
+- **Rules.** `rule_save { rule }` creates or edits a placement rule
+  (`{id?, name, enabled, conditions, group, expected_version?}`),
+  `rule_delete { rule_id, expected_version? }` removes one. Rules only
+  place tasks in groups (D34): they never link a session. Preview a rule
+  with `work { rule_preview }` first; saving it moves exactly those tasks.
+- **Saved views.** `view_save { view }` (`{id?, name, filters,
+  expected_version?}`) and `view_delete { view_id, expected_version? }`.
+  Views are shared on the hub (D35).
+- **A local task's org.** `assign_org { task_id, org_id, impact_token }`
+  (`org_id` `0`: none) moves a *local* task to another org, with the
+  `impact_token` of a fresh `work { org_impact }`: if what the move changes
+  is no longer what you previewed, it is refused with the new impact. A
+  tracker ticket's org is its tracker's (`work_admin assign_tracker`).
+
+**Two devices at once.** Each change names the version it saw
+(`expected_version` on a link, a placement, a rule or a view;
+`expected_primary` for the primary). If someone else changed it
+meanwhile, the answer is `E_CONFLICT` with the current value in `details`,
+and nothing is written: reload and decide again. Without `expected_*` a
+change applies as before (older devices).
+
+**Who may change what.** A read-only token changes nothing. A per-host
+token decides only its own host's sessions' links (`set_primary`,
+`reconsider`, `ack`, `decide_batch`) and does not place, write rules or
+views, or move orgs. A device bound to an org decides links and places
+tasks it sees, and keeps its org's saved views; it writes no rules and
+moves no org (D33, D34). The master and an unbound full device may do all
+of it. A cross-org link still needs `force_cross_org` from everyone, and
+anything outside what you may see answers exactly as if it did not exist.
 
 ## Linking and detection
 
@@ -282,8 +385,7 @@ Trackers give you:
 
 Fleet writes one thing back, and only where you turn it on (decision D3):
 a session's pull request as a link on its Jira ticket (see *Write-back*
-below). On a hub with a public URL, a tracker can also nudge fleet with a
-webhook (D13, *Webhook nudges* below); polling stays either way.
+below). It has no inbound webhook (D13).
 
 ### Connecting one
 
@@ -374,38 +476,6 @@ once in a browser), `rate_limited` and `unreachable` (both retry on their
 own). See [troubleshooting.md](troubleshooting.md#work-and-trackers) when a
 sync fails.
 
-### Webhook nudges (a public hub; off by default)
-
-Polling is the source of truth. On a hub with a public URL, Jira Cloud,
-GitHub and Linear (D28) can also call the hub when an issue changes, so it
-shows up in seconds instead of at the next pass:
-
-```sh
-fleet-hub tracker webhook 1            # prints the URL and a new secret, once
-fleet-hub tracker webhook 1 --rotate   # a new secret; the old one stops at once
-fleet-hub tracker webhook 1 --off
-```
-
-Register the URL (`https://<public-url>/hooks/tracker/<id>`) and the secret
-on the tracker, for issue events. A delivery only **nudges**:
-
-- it must carry the provider's HMAC-SHA256 signature made with that secret
-  (GitHub `X-Hub-Signature-256`, Jira `X-Hub-Signature`, Linear
-  `Linear-Signature` within a minute of its timestamp); anything else is
-  refused (401) and counted;
-- fleet reads only the issue's key from it, and only refreshes an issue it
-  already has for that tracker, from the tracker's own API. A delivery can
-  never add, change or reach anything else;
-- deliveries for one issue within 5 seconds make one refresh, and the route
-  is rate-limited and takes at most 64 KiB;
-- without a public URL or a secret, the route is not there (404). The
-  desktop never serves it.
-
-`fleet_health` shows, per tracker, `webhook_enabled`,
-`webhook_last_delivery_at` and `webhook_rejected` (the footer says "N
-webhooks refused" — a wrong secret on the tracker's side, or someone
-knocking).
-
 ## Starting work
 
 - **From ⌘K:** type a key or paste a ticket URL, or pick a ticket from
@@ -426,14 +496,18 @@ dialog. The brief is editable before you start.
 
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
-one.
+one. While another device is still starting or resuming the same key (a
+multi-repo start holds it until its last repository), a second start or
+resume is refused: "ABC-123 is being started or resumed already; wait for
+that session, then jump to it".
 
 **Multi-start.** For work that spans repositories, the dialog's **Also
 start in** list (the projects the key ran in before) starts one sibling
 session per project, up to 8, all on the same branch name, each linked
 `started` and each brief naming its siblings (`work_link start {
 project_ids }`). A repository where the key already runs is skipped, not
-refused. Multi-start is a desktop feature (decision D15).
+refused. Multi-start is also on the phone, with a full token (decision D15;
+fleet-mobile #50).
 
 > **[Screenshot placeholder]** The New session dialog on a ticket, with
 > Brief Claude and Also start in.
@@ -591,6 +665,9 @@ it. `0` keeps a table forever.
   kept ticket.
 - `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
   timeline events. The newest of each kind per session stays.
+- The write-back outbox (see *Write-back*) follows the journal's window:
+  a PR link that was sent, or given up on, goes once it is older than
+  `work.retention.journal_days`; one still waiting is never swept.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
 Settings → Limits → Retention (standalone desktop) shows the row counts, a
@@ -626,12 +703,14 @@ move offers **Move anyway**). Detection never guesses across orgs.
 orgs' hosts.
 
 A paired device can be **bound to one organisation** (`fleet-hub pair --org
-<id>` or `fleet-hub client bind <name> <id>`): it then reads only that org's
-and unassigned work and sessions. A session that has tasks of two orgs (a
-link someone forced across) shows each side only its own: the other org's
-task, its title, evidence, conversation and summary never reach a device
-bound to the first org, and a device bound to the other org sees the task
-without the first org's session.
+<id>` or `fleet-hub client bind <name> <id>`): it then reads only that
+org's work and sessions — and unassigned ones while the org's
+`bound_sees_unassigned` is on (the default, D31; see *Settings*). Another
+org's session is hidden from it whatever `isolate_sessions` says. A session
+that has tasks of two orgs (a link someone forced across) shows each side
+only its own: the other org's task, its title, evidence, conversation and
+summary never reach a device bound to the first org, and a device bound to
+the other org sees the task without the first org's session.
 
 Orgs are managed in Settings → Work → Organisations on a standalone
 desktop (read-only on a paired desktop), or with `fleet-hub org …` on a
@@ -750,22 +829,16 @@ token:
 - **Today** with *Copy standup*, and the ticket card with its acceptance
   criteria, **read-only** (decision D15): the card offers *Copy*, never
   *Send*;
-- org labels and an org filter.
+- org labels, an org filter and each row's org colour bar.
 
 - with a **full** token, **Name this work…** for a session with no work,
   and **Rename** for local work (D20; fleet-mobile M13.4a).
-- the **Work** tab (fleet-mobile, work graph M14): the same tree as the
-  desktop's Work view as collapsible org and group sections, the same
-  filters and the hub's saved views as chips, a task screen with every
-  session and Open / Continue / Start here, a session's **Tasks** (make
-  primary, remove, add), **Place in group…** from a list, and the **Review**
-  sheet with Confirm / Reject / Change… and Undo. Offline, it keeps the last
-  page marked "Offline · as of …" and sends nothing: an edit is only ever
-  shown as saved once the hub answered, and a conflict or refusal shows the
-  hub's sentence with **Reload**. Rules and org moves stay on the desktop.
 
-What stays on the desktop: multi-start (D15), tracker and org
-administration, and retention. A **readonly** token
+- with a **full** token, **multi-start**: several repositories at once,
+  behind a confirm sheet; a cross-org start is refused in words (D15;
+  fleet-mobile M13.4d).
+
+What stays on the desktop: tracker and org administration, and retention. A **readonly** token
 is served `work` but not `work_link`, so it only reads. No client token ever
 reaches `work_admin`. Which of these screens your phone shows depends on its
 fleet-mobile release; the hub gates each action by the token, not by the
@@ -814,5 +887,11 @@ table.
 | `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | retention of done tickets no link names |
 | `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | retention of handover, nudge and tidy timeline events |
 
-Per-org overrides: `auto_tidy` (`on` / `off` / `inherit`) and
-`isolate_sessions`, set on the org, not here.
+Per-org settings, set on the org (Settings → Work → Organisations, or
+`work_admin { action: "update_org", org_id, … }` on a hub), not here:
+
+| Org setting | Default | Range | What it does |
+|---|---|---|---|
+| `auto_tidy` | `inherit` | `on` / `off` / `inherit` | overrides `work.auto_tidy` for the org's sessions |
+| `isolate_sessions` | `false` | on / off | also hides the org's sessions from other orgs' hosts (D7) |
+| `bound_sees_unassigned` | `true` | on / off | devices bound to the org (`fleet-hub pair --org`) also see unassigned work and sessions, as a host does; off, only the org's own (D31) |

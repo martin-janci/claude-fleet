@@ -579,6 +579,7 @@ mod tests {
             ci_status: None,
             turn_seq: 0,
             last_stop_at: None,
+            stale_working_at: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -588,7 +589,6 @@ mod tests {
             work_rejected: vec![],
             work_suggested: None,
             org_id: None,
-            work_rev: 0,
         }
     }
 

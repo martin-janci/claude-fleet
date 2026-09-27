@@ -1,19 +1,24 @@
--- Work graph M14 (docs/superpowers/specs/2026-09-27-work-view-design.md):
--- the Work view — versions for concurrent edits, local placement, placement
--- rules, saved views, a local item's own org and org-bound paired clients.
--- Additive only: every column has a default, every table is new.
+-- Work graph M14.1b (docs/superpowers/specs/2026-09-27-work-view-design.md):
+-- the Work view's read contract — local placement, placement rules, saved
+-- views, a local item's own org, link versions, a conflict's review ack and
+-- org-bound paired clients (D31's per-org switch is 067). Additive only: every
+-- column has a default, every table is new. The writes that use them
+-- (compare-and-set, placement, rules, views, ack) are M14.1c's; this
+-- migration carries their schema because the reads answer it.
 --
 -- work_links.version        bumped by the trigger below on every change a
 --                           person can race (state, source, primary, end,
---                           target, archive, review ack): the compare-and-set
---                           token of `work_link { expected_version }`.
+--                           target, archive, review ack). The reads answer it
+--                           as `link_version`; M14.1c's `expected_version`
+--                           compares against it.
 -- work_links.review_ack_at  a person kept a conflict on purpose (a forced
 --                           cross-org link, a link to an unavailable ticket):
---                           the review inbox stops listing it.
--- work_items.org_id         a LOCAL item's own org, set by a person with an
---                           impact preview (`work_link { assign_org }`). A
---                           tracker item's org stays its tracker's; this
---                           column is never read for one.
+--                           the review inbox stops listing it. Read here;
+--                           written by M14.1c's `work_link { ack }`.
+-- work_items.org_id         a LOCAL item's own org (M14.1c's `assign_org`
+--                           sets it, with an impact preview). A tracker
+--                           item's org stays its tracker's; this column is
+--                           never read for one.
 -- work_placements           where a person put a task in the Work view (its
 --                           group), keyed by the task id (`item:<id>` or
 --                           `ref:<KEY>`, never a title). Navigation only:
@@ -95,4 +100,4 @@ CREATE TABLE IF NOT EXISTS work_views (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_work_views_name
   ON work_views(COALESCE(owner_org, 0), name);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+INSERT OR IGNORE INTO schema_version (version) VALUES (66);

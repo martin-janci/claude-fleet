@@ -25,7 +25,7 @@ pub(super) fn audit(tool: &str, detail: &str) {
 /// Key under which [`mcp_err`] stores the `E_*` code in `McpError::data`.
 /// `ServerHandler::call_tool` reads it back to tell a tool-execution error
 /// (→ `CallToolResult { is_error: true }`) from an rmcp protocol error.
-const ERR_CODE_KEY: &str = "code";
+pub(super) const ERR_CODE_KEY: &str = "code";
 
 /// Map a backend `IpcError` to an MCP tool error, preserving the `E_*` code.
 /// Structured `details` (e.g. `E_AMBIGUOUS` candidates) ride along as the
@@ -260,13 +260,16 @@ pub(super) fn require_bound_client_may_create(
     host: &str,
     project_id: i64,
 ) -> Result<(), McpError> {
-    let Some(bound) = caller.client.as_ref().and_then(|c| c.org_id) else {
+    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
         return Ok(());
-    };
+    }
+    // Its org's projects and hosts — and unassigned ones only while the
+    // org's `bound_sees_unassigned` is on (D31).
+    let scope = caller.org_scope(s).map_err(to_mcp_err)?;
     let org = s
         .org_for_new_session(host, project_id)
         .map_err(to_mcp_err)?;
-    if org.is_some_and(|o| o != bound) {
+    if !scope.sees_org(org) {
         return Err(mcp_err(
             codes::E_FORBIDDEN,
             "a client bound to an org starts sessions only in its own org's projects and hosts",
@@ -975,10 +978,29 @@ pub(super) struct SessionWithController {
 }
 
 impl SessionWithController {
+    /// [`Self::with_threshold`] at the default threshold, for tests that
+    /// have no store; production callers hold the store and pass its value.
+    #[cfg(test)]
     pub(super) fn new(is_controller: bool, row: crate::store::SessionRow) -> Self {
+        Self::with_threshold(
+            is_controller,
+            row,
+            crate::service::attention::DEFAULT_CONTEXT_RED_PCT,
+        )
+    }
+
+    /// [`Self::new`] at the store's `health.context_red_pct`
+    /// (`service::health::context_red_pct`), which every caller holding the
+    /// store should pass so `context_full` and `fleet_health.context_red`
+    /// agree.
+    pub(super) fn with_threshold(
+        is_controller: bool,
+        row: crate::store::SessionRow,
+        context_red_pct: f64,
+    ) -> Self {
         Self {
             is_controller,
-            needs_attention: crate::service::attention::needs_attention(&row),
+            needs_attention: crate::service::attention::needs_attention_with(&row, context_red_pct),
             row,
         }
     }

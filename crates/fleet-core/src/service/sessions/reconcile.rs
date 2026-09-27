@@ -75,6 +75,23 @@ pub(super) fn read_lost_ttl_cutoff(raw: Option<String>, now: i64) -> Option<i64>
     }
 }
 
+/// Resolve the external-ghost grace from the raw `gc.external_lost_ttl_secs`
+/// value, like [`read_lost_ttl_cutoff`]: `<= 0` disables the grace (`None`,
+/// reaped on the next pass); otherwise the cutoff is `now - grace`.
+pub(super) fn read_external_grace_cutoff(raw: Option<String>, now: i64) -> Option<i64> {
+    let grace = crate::service::settings::resolve(
+        crate::service::settings::GC_EXTERNAL_LOST_TTL_SECS,
+        raw.as_deref(),
+    )
+    .parse::<i64>()
+    .unwrap_or(3600);
+    if grace <= 0 {
+        None
+    } else {
+        Some(now - grace)
+    }
+}
+
 /// Why every session on a reachable host should be treated as lost this
 /// pass, or `None` for a normal pass. Each comparison needs BOTH sides
 /// known, so a first probe after upgrade or a failed identity read never
@@ -703,37 +720,48 @@ fn write_reachable_host(
             .as_deref()
             .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
         let pane_status = pane.and_then(|p| p.derived_status);
+        // Transition-detection: remember the PRIOR stored values (the
+        // upsert below overwrites them). A first sighting skips the
+        // status/stuck detection but still opens its conversation; a
+        // read failure skips the session entirely. Read here, before the
+        // candidate, because the stale-working veto needs the stored stamp.
+        let prior_read = s.get_session(&sess.name, &host.alias);
+        if let Err(e) = &prior_read {
+            tracing::warn!(
+                host = %host.alias,
+                session = %sess.name,
+                error = %e,
+                "[reconcile] prior row read failed"
+            );
+            s.ensure_in_tx()?;
+        }
+        let prior_row = prior_read.as_ref().ok().cloned().flatten();
+        let stale = prior_row
+            .as_ref()
+            .is_some_and(|p| p.stale_working_at.is_some());
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
         // this pass actually asked, `Blocked`-only otherwise (a
         // cadence-skipped or unanswerable pass must not let a weak
-        // pane guess overwrite the stored status every time).
-        let claude_status =
-            status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status)
-                .map(|s| s.as_str().to_string());
+        // pane guess overwrite the stored status every time). A row the
+        // tick demoted for staleness keeps its `idle` unless the pane
+        // itself shows a turn (`stale_working_veto`, F2).
+        let claude_status = stale_working_veto(
+            stale,
+            status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status),
+            pane_status,
+        )
+        .map(|s| s.as_str().to_string());
         let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
-        // Transition-detection: remember the PRIOR stored values (the
-        // upsert below overwrites them). A first sighting skips the
-        // status/stuck detection but still opens its conversation; a
-        // read failure skips the session entirely.
-        match s.get_session(&sess.name, &host.alias) {
-            Ok(prior) => priors.push((
+        if prior_read.is_ok() {
+            priors.push((
                 sess.name.clone(),
-                prior.map(|p| Prior {
+                prior_row.map(|p| Prior {
                     claude_status: p.claude_status,
                     stuck_kind: p.stuck_kind,
                     claude_session_id: p.claude_session_id,
                 }),
-            )),
-            Err(e) => {
-                tracing::warn!(
-                    host = %host.alias,
-                    session = %sess.name,
-                    error = %e,
-                    "[reconcile] prior row read failed"
-                );
-                s.ensure_in_tx()?;
-            }
+            ));
         }
         sessions.push(ReconcileSession {
             tmux_name: &sess.name,
@@ -882,7 +910,7 @@ fn write_reachable_host(
         // current and the UI can dim rows whose host has gone quiet. It is
         // also the BE-3 ghost guard's evidence (`probe_started_at` above).
         // Carried by the upsert itself (Task 4), not a second UPDATE after
-        // it, so an unchanged pass bumps each row's `row_version` once.
+        // it; an unchanged pass bumps no `row_version` (migration 063).
         reconciled_at: Some(now),
     })?;
     // Work detection (M4.2): the PR probe's signals, written outside
@@ -1283,9 +1311,20 @@ pub(super) fn reconcile_agent_rows(
         .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
         .ok()
         .flatten();
+    let grace_raw = s
+        .get_setting(crate::service::settings::GC_EXTERNAL_LOST_TTL_SECS)
+        .ok()
+        .flatten();
     s.ensure_in_tx()?;
     let lost_ttl_cutoff = read_lost_ttl_cutoff(lost_ttl_raw, now);
-    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, lost_ttl_cutoff) {
+    let external_grace_cutoff = read_external_grace_cutoff(grace_raw, now);
+    if let Err(e) = s.ghost_and_clean_bg_sessions(
+        host_alias,
+        &keep,
+        now,
+        lost_ttl_cutoff,
+        external_grace_cutoff,
+    ) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
         s.ensure_in_tx()?;
     }
@@ -1937,5 +1976,56 @@ pub(super) fn status_candidate(
             Some(crate::service::pane_intel::ClaudeStatus::Blocked)
         }
         _ => None,
+    }
+}
+
+/// A row the tick demoted for staleness (`stale_working_at` set) is not
+/// handed back to `working` by the cached `claude agents` status alone.
+/// Only the pane's own spinner (`Working`) lifts the demotion; a `Blocked`
+/// pane still surfaces; anything else yields `None` so the upsert keeps
+/// the stored `idle`.
+pub(super) fn stale_working_veto(
+    stale: bool,
+    candidate: Option<crate::service::pane_intel::ClaudeStatus>,
+    pane: Option<crate::service::pane_intel::ClaudeStatus>,
+) -> Option<crate::service::pane_intel::ClaudeStatus> {
+    use crate::service::pane_intel::ClaudeStatus;
+    if !stale {
+        return candidate;
+    }
+    match (candidate, pane) {
+        (Some(ClaudeStatus::Working), Some(ClaudeStatus::Working)) => Some(ClaudeStatus::Working),
+        (Some(ClaudeStatus::Working), Some(ClaudeStatus::Blocked)) => Some(ClaudeStatus::Blocked),
+        (Some(ClaudeStatus::Working), _) => None,
+        (other, _) => other,
+    }
+}
+
+/// The tick's stale-`working` sweep: reads `reconcile.stale_working_secs`
+/// and demotes every qualifying row (`Store::age_out_stale_working`).
+/// Best-effort; returns how many rows were demoted.
+pub fn age_out_stale_working(store: &Mutex<Store>) -> usize {
+    let Ok(s) = store.lock() else {
+        return 0;
+    };
+    let secs = crate::service::settings::get_secs(
+        &s,
+        crate::service::settings::RECONCILE_STALE_WORKING_SECS,
+    ) as i64;
+    match s.age_out_stale_working(now_unix(), secs) {
+        Ok(rows) => {
+            for r in &rows {
+                tracing::info!(
+                    host = %r.host_alias,
+                    session = %r.tmux_name,
+                    "[reconcile] stale working demoted to idle"
+                );
+            }
+            rows.len()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "[reconcile] stale-working sweep failed");
+            0
+        }
     }
 }

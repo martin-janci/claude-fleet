@@ -27,6 +27,7 @@ import {
   isOccurrenceOf,
   isOlderHub,
   mergeTasks,
+  noteWorkChanged,
   noteWorkEvents,
   normalizeFilters,
   occurrenceKind,
@@ -142,11 +143,8 @@ describe('commands: every one takes { args: { … } } with the action’s fields
     expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, key: 'ABC-12' } }]);
     await linkSessionWork(7, { item_id: 12 }, { primary: false });
     expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, item_id: 12, primary: false } }]);
-    // `link_session_work` takes no version (a new link has none to expect):
-    // the wrapper never sends a field the command would silently drop.
-    // @ts-expect-error — not an option of linkSessionWork.
     await linkSessionWork(7, { key: 'ABC-12' }, { expectedVersion: 3 });
-    expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, key: 'ABC-12' } }]);
+    expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, key: 'ABC-12', expected_version: 3 } }]);
     await confirmSessionWork(7, 42, { expectedVersion: 0 });
     expect(lastCall()).toEqual(['confirm_session_work', { args: { session_id: 7, link_id: 42, expected_version: 0 } }]);
     await confirmSessionWork(7, 42, { primary: false, expectedVersion: 3 });
@@ -466,12 +464,17 @@ describe('stores', () => {
     expect(get(workChanged)).toBe(before);
   });
 
-  it('work:changed bumps the tick; tracker frames do not', () => {
+  it('work:changed and a work item bump the tick; tracker frames do not', () => {
     const before = get(workChanged);
     noteWorkEvents([{ type: 'tracker' }]);
+    noteWorkChanged([]);
     expect(get(workChanged)).toBe(before);
-    noteWorkEvents([{ type: 'changed' }]);
+    noteWorkChanged([{ what: 'placement', task_id: 'item:12' }]);
     expect(get(workChanged)).toBe(before + 1);
+    noteWorkChanged([{ what: 'resync' }]);
+    expect(get(workChanged)).toBe(before + 2);
+    noteWorkEvents([{ type: 'item' }]);
+    expect(get(workChanged)).toBe(before + 3);
   });
 
   it('session events touch work only when a row’s work, org or attention moved', () => {

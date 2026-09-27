@@ -297,32 +297,6 @@ M13.4 ── independent (fleet-mobile repository)
   - `fleet_health.trackers[].write_failures` (additive; never part of
     `health`) and the footer's "N writes not sent".
   - Settings → Work: a checkbox per Jira tracker.
-- 2026-09-27: **M13.4f built** on `claude/cloud-fleet-work-graph-m13`.
-  - Verifiers checked against the providers' docs: GitHub
-    `X-Hub-Signature-256: sha256=<hex>`, Jira Cloud `X-Hub-Signature:
-    sha256=<hex>` (admin and REST webhooks with a secret, since 2024),
-    Linear `Linear-Signature: <hex>` plus `webhookTimestamp` within 60 s. HMAC
-    from the `hmac` 0.12 crate (the only new dependency), checked against
-    RFC 4231; compared with the existing `constant_time_eq`.
-  - Narrower than planned: a delivery refreshes only an item fleet already
-    has for that tracker (`tracker_item_for_key_in`), so a forged payload
-    can at most cause refetches of known items; new items still come by
-    polling.
-  - The route is mounted only with `McpGuards::with_tracker_hooks` (set by
-    fleet-hub), not inferred from a public URL: the desktop runs the same
-    server and even a tracker sync. It still answers 404 until the hub has
-    a public URL and the tracker a secret.
-  - The secret is its own table, `tracker_webhooks` (migration **062**; 061
-    is the M13.4e outbox), with one reader and a grep guard like
-    `tracker_secrets`, masked in diagnostics. `fleet-hub tracker webhook`
-    writes the store directly, like `peer add`, so no tool reply ever
-    carries it and the tool surface does not grow.
-  - Coalescing is per server (the route's `Coalescer`), not process-global.
-    Health fields are flat (`webhook_enabled`, `webhook_last_delivery_at`,
-    `webhook_rejected`) rather than a nested object.
-  - hub-e2e: a signed delivery refreshes E2E-3 from the fake Jira without a
-    sync pass; a forged one is 401, an unknown tracker 404, and
-    `fleet_health` reports it.
 - 2026-09-27: **M13.4a built** in fleet-mobile, branch
   `claude/work-graph-m13-4a-name-work` (61b09a7). No hub change.
   - *Name this work…* is in the session menu when the session has no
@@ -335,3 +309,50 @@ M13.4 ── independent (fleet-mobile repository)
     rename is offered where the work already is, the session's sheet.
   - `:shared:jvmTest` passes 1,006 / 1,006. The Android emulator and iOS
     jobs run only in fleet-mobile's CI.
+- 2026-09-27: **M13.4c review fixes.**
+  - The fork ran with `--settings '{"hooks":{}}'`, which does **not** turn
+    fleet's hooks off: Claude Code keeps the user-level hooks
+    (`~/.claude/settings.json`) under an empty `hooks` object. Checked with
+    Claude Code 2.1.283 in an isolated HOME: SessionStart and
+    UserPromptSubmit hooks fired with `{}` and with `{"hooks":{}}`, and did
+    not fire with `{"disableAllHooks":true}`. So every summary reported its
+    fork to fleet as a new conversation and prompt. It now passes
+    `{"disableAllHooks":true}`, and the flag test refuses the empty object.
+  - A test pins the operator's `summarize`: it gets a confirm nonce, runs once
+    approved, is `E_FORBIDDEN` once denied, and is refused outright on a hub
+    with no approver. A phone's own request is not gated. Removing the gate
+    fails it.
+  - Recorded deviation: the run's timeout is 170 s on the host (`timeout`)
+    and 180 s for the SSH call, not the plan's 120 s. A cold `--resume` of a
+    long transcript needs the margin; the cap on the output is unchanged.
+- 2026-09-27: **M13.4f removed.** Its build (webhook nudges, D13) reached
+  `main` with #327, but the owner keeps D13 at *no* (the M12.6
+  recommendation), so the commit is reverted. Migration 062
+  (`tracker_webhooks`) stays in the chain: it is on `main`, a database that
+  ran it would otherwise be refused by the downgrade guard, and migrations
+  are one-way. Nothing reads or writes the table any more. The `hmac`
+  dependency, the `/hooks/tracker/{id}` route, `fleet-hub tracker webhook`,
+  the `fleet_health` webhook fields and the hub-e2e checks are gone.
+- 2026-09-27: **M13.4e review fixes.**
+  - Conformance row 11 (`c11_write`, every provider): only a `caps.write`
+    provider writes. For Jira Cloud and DC, that is one POST to
+    `/issue/{key}/remotelink` with the same `globalId` on a repeat and no
+    secret in the body; 429 maps to `RateLimited` with its `Retry-After`,
+    and 403 to `Forbidden`. A bad key sends nothing. Every other provider
+    refuses without a request.
+  - An isolation row: turning `write_back.pr_remote_link` on through
+    `work_admin update` is the master's alone; every other caller gets
+    `E_FORBIDDEN`.
+  - The outbox's retention moved from the Jira drain to the M12.3 GC
+    sweep. The drain only ran after a successful pass, so a failing
+    tracker's outbox never shrank. It is capped per tick, one batch per
+    lock, by the journal's window, and counted as `tracker_writes` in the
+    sweep record (`fleet-hub tracker status`, Settings → Retention).
+    **Deviation kept**: failed rows go by the same window as done ones. A
+    year-old failure is no longer a live signal for `write_failures`, and
+    keeping it forever would be growth without bound. Pending rows never
+    go.
+  - Not changed, and left for the owner: `pr_title` accepts a PR URL on
+    any `https` host, because the URL comes from `gh` on the session's
+    host. Limiting it to github.com plus the configured GHES hostnames
+    would need a small new rule.

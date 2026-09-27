@@ -89,8 +89,9 @@ enum Cmd {
         /// untrusted-content marker. Only for a keyboard that is yours.
         #[arg(long)]
         trusted: bool,
-        /// Bind the client to one org (its id, see `fleet-hub org list`): it
-        /// reads only that org's and unassigned work and sessions.
+        /// Bind the client to one org (its id): it reads only that org's work
+        /// and sessions, and unassigned ones while the org's
+        /// `bound_sees_unassigned` is on (the default).
         #[arg(long)]
         org: Option<i64>,
         #[command(flatten)]
@@ -213,7 +214,7 @@ enum ClientCmd {
     Trust { name: String },
     /// Take that back: its prompts are marked as untrusted input again.
     Untrust { name: String },
-    /// Bind a client to one org: it reads only that org's and unassigned work and sessions.
+    /// Bind a client to one org (its id): it reads only that org's work and sessions.
     Bind { name: String, org: i64 },
     /// Lift a client's org binding: it reads every org again.
     Unbind { name: String },

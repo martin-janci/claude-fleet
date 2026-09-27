@@ -761,24 +761,35 @@ What a client may do:
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
   this option keeps marking everything, which is the safe direction.
-- **Bound to an org** (work graph M14). `fleet-hub pair --org <id>`, or
-  `fleet-hub client bind <name> <id>` later (`work_admin { action:
-  "assign_client", name, org_id }`; no `org_id` unbinds), restricts a client
-  to one organisation: it reads that org's and unassigned work **and
-  sessions** only — the tree, a task, a session's tasks, the review inbox,
-  tickets, Today, conversations, `list_sessions`, every session-addressed
-  tool and every `/events` frame. Another org's session answers exactly as
+- **Bound to an org** (work graph M14.1b). `fleet-hub pair --name <name>
+  --org <org id>`, or `fleet-hub client bind <name> <org id>` later
+  (`work_admin { action: "assign_client", name, org_id }`; no `org_id` and
+  `fleet-hub client unbind <name>` unbind), restricts a client to one
+  organisation: it reads that org's work **and sessions** only — the Work
+  view (`work { tree | task | session_tasks | review | rules | rule_preview
+  | views }`), tickets, Today, conversations, `list_sessions`, every
+  session-addressed tool, `fleet_health`'s trackers, spend and counts, and
+  every `/events` frame. Whether it also sees *unassigned* work and sessions
+  (no org) is the org's switch `bound_sees_unassigned` (decision D31): on by
+  default, as a host sees them; `fleet-hub`'s master turns it off with
+  `work_admin { action: "update_org", org_id, bound_sees_unassigned: false }`
+  (or Settings → Work → Organisations), and the org's bound clients then see
+  only rows assigned to it. Another org's session or task answers exactly as
   one that does not exist, whatever `isolate_sessions` says (a bound client
   asked to be restricted, so the session fence is always on for it), and
   `work` frames are not sent to it at all (it re-reads through `work { … }`).
-  It cannot start or resume a session in another org's project or host,
-  move a task between orgs, write placement rules, or change trust or
-  reopened work. The binding takes effect from its next request (re-binding
-  invalidates the token cache) and ends its open event streams at their next
-  beat. Deleting the org leaves the client bound to an org that no longer
-  exists — it then reads unassigned data only, never every org (fail
-  closed). Use it for a device that belongs to one company's work, such as a
-  contractor's second phone.
+  It cannot start or resume a session in another org's project or host, read
+  what moving a task between orgs would change (`org_impact`) or move one
+  (`assign_org`), write placement rules (`rule_save` / `rule_delete`), or
+  change trust or reopened work; it may decide links and place tasks it
+  sees, and keep its own org's saved views (M14.1c). The binding and the switch take effect from its
+  next request (re-binding invalidates the token cache; an open event
+  stream re-reads its scope and ends at its next beat when re-bound).
+  Deleting the org leaves the client bound to an org that no longer
+  exists — it then reads nothing of any org and no unassigned data either,
+  never every org (fail closed). A peer hub link is never bound. Use it for
+  a device that belongs to one company's work, such as a contractor's
+  second phone.
 
 **Work on a phone** (the work graph, M8). A client token is served `work`
 and — `full` only — `work_link`, and never `work_admin`, so tracker
@@ -942,18 +953,7 @@ fleet-hub tracker list
 fleet-hub tracker status          # each tracker's last sync pass, and retention
 fleet-hub work usage --days 30    # how the work graph is used, counts only
 fleet-hub tracker remove 1        # its items stay, marked unavailable
-fleet-hub tracker webhook 1       # webhook nudges (Jira Cloud, GitHub, Linear): URL + secret, once
 ```
-
-**Webhook nudges** (work graph M13.4f) need `--public-url`: the tracker
-calls `POST https://<public-url>/hooks/tracker/<id>`. The route sits beside
-`/pair` outside the bearer check and the `Host` allowlist; what authorizes a
-delivery is its HMAC-SHA256 signature made with the tracker's secret, which
-`tracker webhook` mints (`--rotate`, `--off`) and prints once. A delivery
-only makes the hub refresh an issue it already has for that tracker; polling
-stays. Without a public URL or a secret the route answers 404, and it is
-rate-limited and capped at 64 KiB. The secret is masked in diagnostics like
-a tracker token. See `docs/work-graph.md` → *Webhook nudges*.
 
 A token is read from **stdin**, from an environment variable of that command
 (`--from-env JIRA_TOKEN`), or not read at all: `--ref env:NAME` or `--ref

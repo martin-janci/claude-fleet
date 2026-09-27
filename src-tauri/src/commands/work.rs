@@ -46,6 +46,10 @@ pub struct LinkSessionWorkArgs {
     /// `false`: a secondary link, the primary stays (work graph M14).
     #[serde(default)]
     pub primary: Option<bool>,
+    /// The version of the link being replaced that the person saw (work
+    /// graph M14); absent: no check.
+    #[serde(default)]
+    pub expected_version: Option<i64>,
 }
 
 /// Say a session does NOT work on a key or item (sticky) — or, with
@@ -661,6 +665,7 @@ pub(crate) mod routed {
             source: Some("manual".into()),
             force_cross_org: args.force_cross_org.then_some(true),
             primary: args.primary,
+            expected_version: args.expected_version,
             ..Default::default()
         };
         match backend.hub() {
