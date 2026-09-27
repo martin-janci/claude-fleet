@@ -215,6 +215,61 @@ describe('WorkTaskDetail', () => {
     expect(calls('assign_work_org').map((a) => a.impact_token)).toEqual(['tok-1', 'tok-2']);
   });
 
+  it('Assign org: an inferred org is not "now"; a changed target drops the old impact', async () => {
+    handlers.work_task = () => ({ ...localTask, task: { ...localTask.task, org_id: 1, org_source: 'sessions', org_fenced: false } });
+    handlers.work_org_impact = (a) => impact(`tok-${a.org_id}`, { to_org: a.org_id as number });
+    render(WorkTaskDetail, { taskId: 'item:77' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-assign-org'));
+    await flush();
+    const dialog = screen.getByTestId('work-org-dialog');
+    expect(dialog.textContent).toContain('Now: no organisation');
+    // Its sessions' org is a target like any other; "No organisation" is where it is.
+    const options = Array.from((screen.getByTestId('work-org-target') as HTMLSelectElement).options, (o) => o.value);
+    expect(options).toEqual(['', '1', '2']);
+    await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
+    await fireEvent.click(screen.getByTestId('work-org-review'));
+    await flush();
+    expect(screen.getByTestId('work-org-impact')).toBeTruthy();
+    await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '1' } });
+    await flush();
+    expect(screen.queryByTestId('work-org-impact')).toBeNull();
+    expect(screen.getByTestId('work-org-confirm').hasAttribute('disabled')).toBe(true);
+    await fireEvent.click(screen.getByTestId('work-org-review'));
+    await flush();
+    handlers.assign_work_org = () => localTask.task;
+    await fireEvent.click(screen.getByTestId('work-org-confirm'));
+    await flush();
+    expect(calls('assign_work_org')).toEqual([{ task_id: 'item:77', org_id: 1, impact_token: 'tok-1' }]);
+  });
+
+  it('Place in group keeps the placement note unless edited, and shows the new placement at once', async () => {
+    const placed = { group: 'Infra', note: 'owned by ops', version: 2, updated_at: null, updated_by: 'mj' };
+    handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, placement_version: 2 }, placement: placed });
+    handlers.place_work = () => ({
+      ...trackerTask.task,
+      group: { id: 'label:Payments', label: 'Payments', source: 'manual' },
+      placement_version: 3,
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.getByTestId('work-task-placement').textContent).toContain('owned by ops');
+    await fireEvent.click(screen.getByTestId('work-task-place'));
+    await flush();
+    expect((screen.getByTestId('work-place-note-input') as HTMLInputElement).value).toBe('owned by ops');
+    await fireEvent.input(screen.getByTestId('work-place-group'), { target: { value: 'Payments' } });
+    // The detail's next read answers the new placement.
+    handlers.work_task = () => ({
+      ...trackerTask,
+      task: { ...trackerTask.task, placement_version: 3 },
+      placement: { ...placed, group: 'Payments', version: 3 },
+    });
+    await fireEvent.click(screen.getByTestId('work-place-submit'));
+    await flush();
+    expect(calls('place_work')[0]).toEqual({ task_id: 'item:12', group: 'Payments', note: 'owned by ops', expected_version: 2 });
+    expect(calls('work_task').length).toBeGreaterThanOrEqual(2);
+  });
+
   it('a tracker-controlled org is refused with the admin path', async () => {
     handlers.work_org_impact = () => impact('x', { allowed: false, reason: 'tracker_controlled', impact_token: null });
     render(WorkTaskDetail, { taskId: 'item:77' });

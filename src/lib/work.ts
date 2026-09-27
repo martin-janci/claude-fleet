@@ -128,7 +128,7 @@ export function linkSessionWork(
     session_id: sessionId,
     ...ref,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
-    ...decisionExtras(opts),
+    ...decisionExtras({ primary: opts.primary }),
   });
 }
 

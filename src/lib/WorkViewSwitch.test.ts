@@ -26,7 +26,7 @@ describe('Sessions | Work switch', () => {
   });
 
   it('shows the Sessions tree by default and the Work tree when chosen', async () => {
-    render(Sidebar);
+    render(Sidebar, { onCollapse: () => {} });
     await flush();
     expect(screen.getByTestId('sidebar-search')).toBeTruthy();
     expect(screen.queryByTestId('work-tree')).toBeNull();
@@ -37,9 +37,28 @@ describe('Sessions | Work switch', () => {
     expect(screen.queryByTestId('sidebar-search')).toBeNull();
     // The footer (New session) stays in both.
     expect(screen.getByTestId('new-session-footer')).toBeTruthy();
+    // So does the shared chrome: Refresh, Needs you, select, Tasks, Settings.
+    for (const id of ['sidebar-refresh', 'needs-you-filter', 'select-mode', 'tasks-open', 'settings-open', 'sidebar-collapse']) {
+      expect(screen.getByTestId(id)).toBeTruthy();
+    }
+    // One collapse control, not two.
+    expect(screen.queryByTestId('work-collapse')).toBeNull();
     await fireEvent.click(screen.getByTestId('sidebar-view-sessions'));
     await flush();
     expect(screen.getByTestId('sidebar-search')).toBeTruthy();
+    expect(screen.queryByTestId('work-tree')).toBeNull();
+  });
+
+  it('Needs you in the Work view goes to the Sessions list with the filter on', async () => {
+    sidebarView.set('work');
+    render(Sidebar, { onCollapse: () => {} });
+    await flush();
+    const pill = screen.getByTestId('needs-you-filter');
+    expect(pill.getAttribute('aria-pressed')).toBe('false');
+    await fireEvent.click(pill);
+    await flush();
+    expect(get(sidebarView)).toBe('sessions');
+    expect(screen.getByTestId('needs-you-filter').getAttribute('aria-pressed')).toBe('true');
     expect(screen.queryByTestId('work-tree')).toBeNull();
   });
 });

@@ -69,6 +69,20 @@ describe('WorkFiltersBar', () => {
     expect(get(workViewFilters)).toEqual({});
   });
 
+  it('a filter changing while the search is typed does not overwrite the typing', async () => {
+    render(WorkFiltersBar, { orgs, trackers, searchDebounceMs: 20 });
+    await flush();
+    const input = screen.getByTestId('work-search') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'log' } });
+    workViewFilters.update((f) => ({ ...f, status: 'open' }));
+    await flush();
+    expect(input.value).toBe('log');
+    await new Promise((r) => setTimeout(r, 40));
+    await flush();
+    expect(get(workViewFilters)).toEqual({ status: 'open', query: 'log' });
+    expect(input.value).toBe('log');
+  });
+
   it('applies a view; Update is offered once the filters differ, with the view’s version', async () => {
     handlers.save_work_view = (a) => ({ ...(a.view as object), version: 2 });
     render(WorkFiltersBar, { orgs, trackers });

@@ -169,6 +169,21 @@ describe('SessionTasks', () => {
     expect(get(taskDetailOpen)).toBe(true);
   });
 
+  it('re-reads when a secondary link changed (work_rev), not on a status tick', async () => {
+    const { rerender } = render(SessionTasks, { session: row });
+    await flush();
+    expect(calls('work_session_tasks').length).toBe(1);
+    // The primary is the same; only the claude status moved: nothing to read.
+    await rerender({ session: { ...row, claude_status: 'working' } });
+    await flush();
+    expect(calls('work_session_tasks').length).toBe(1);
+    // A secondary link was added / removed elsewhere: the primary did not
+    // move, `work_rev` did.
+    await rerender({ session: { ...row, work_rev: 17 } });
+    await flush();
+    expect(calls('work_session_tasks').length).toBe(2);
+  });
+
   it('stays out of the way on an older hub', async () => {
     handlers.work_session_tasks = () => {
       throw { code: 'E_INVALID', message: 'unknown work action: session_tasks' };

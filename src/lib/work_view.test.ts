@@ -141,6 +141,13 @@ describe('commands: every one takes { args: { … } } with the action’s fields
     expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, key: 'ABC-12' } }]);
     await linkSessionWork(7, { item_id: 12 }, { primary: false });
     expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, item_id: 12, primary: false } }]);
+    // `link_session_work` takes no version (a new link has none to expect):
+    // the wrapper never sends a field the command would silently drop.
+    // @ts-expect-error — not an option of linkSessionWork.
+    await linkSessionWork(7, { key: 'ABC-12' }, { expectedVersion: 3 });
+    expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, key: 'ABC-12' } }]);
+    await confirmSessionWork(7, 42, { expectedVersion: 0 });
+    expect(lastCall()).toEqual(['confirm_session_work', { args: { session_id: 7, link_id: 42, expected_version: 0 } }]);
     await confirmSessionWork(7, 42, { primary: false, expectedVersion: 3 });
     expect(lastCall()).toEqual([
       'confirm_session_work',
@@ -374,6 +381,14 @@ describe('errors and undo', () => {
     expect(isOlderHub({ code: 'E_INVALID', message: 'cursor from other filters' })).toBe(false);
     expect(readErrorText({ code: 'E_INVALID', message: 'unknown action tree' })).toBe(NEWER_HUB);
     expect(readErrorText({ code: 'E_HUB', message: 'hub unreachable' })).toBe('hub unreachable');
+    expect(isOlderHub({ code: 'E_INVALID', message: 'unknown work_link action "place"; one of link, unlink' })).toBe(true);
+    // Not every refusal is an older hub: an unknown host, a protocol error
+    // that is not a missing tool, an unknown error.
+    expect(isOlderHub({ code: 'E_INVALID', message: 'unknown host "gpu"; the action needs one' })).toBe(false);
+    expect(isOlderHub({ code: 'E_HUB_PROTOCOL', message: 'the hub refused the work call: invalid params' })).toBe(false);
+    expect(isOlderHub({ code: 'E_HUB_PROTOCOL', message: 'the hub refused the work call: tool not found' })).toBe(true);
+    expect(isOlderHub({ code: 'E_UNKNOWN', message: 'boom' })).toBe(false);
+    expect(isOlderHub({ code: 'E_UNKNOWN_COMMAND', message: 'x' })).toBe(false);
   });
 
   it('undoes a confirm or a reject by reconsidering, with the new version', () => {
@@ -411,6 +426,43 @@ describe('stores', () => {
     expect(get(selectedTaskId)).toBe('item:13');
   });
 
+  it('every successful work write bumps the tick at once; a refused one does not', async () => {
+    vi.mocked(invoke).mockResolvedValue(session('mefistos', 'api', { id: 7 }));
+    sessions.set([]);
+    const writes: [string, () => Promise<unknown>][] = [
+      ['set_primary_work', () => setPrimaryWork(7, 43, 42)],
+      ['reconsider_work_link', () => reconsiderWorkLink(7, 42, 1)],
+      ['ack_work_link', () => ackWorkLink(7, 42, 1)],
+      ['decide_work_batch', () => decideWorkBatch([{ session_id: 7, link_id: 42, decision: 'confirm' }])],
+      ['place_work', () => placeWork('item:12', 'Payments', 0)],
+      ['assign_work_org', () => assignWorkOrg('item:12', 2, 'tok')],
+      ['save_work_rule', () => saveWorkRule({ name: 'R', enabled: true, conditions: {}, group: 'G' })],
+      ['delete_work_rule', () => deleteWorkRule(3, 1)],
+      ['save_work_view', () => saveWorkView({ name: 'V', filters: {} })],
+      ['delete_work_view', () => deleteWorkView(1)],
+      ['link_session_work', () => linkSessionWork(7, { key: 'ABC-1' }, { primary: false })],
+      ['confirm_session_work', () => confirmSessionWork(7, 42, { expectedVersion: 1 })],
+      ['reject_session_work', () => rejectWorkLink(7, 42, { expectedVersion: 1 })],
+      ['unlink_session_work', () => unlinkSessionWork(7, 42, { expectedVersion: 1 })],
+    ];
+    for (const [cmd, w] of writes) {
+      const before = get(workChanged);
+      await w();
+      expect([cmd, get(workChanged)]).toEqual([cmd, before + 1]);
+    }
+    vi.mocked(invoke).mockRejectedValue({ code: 'E_CONFLICT', message: 'changed' });
+    const before = get(workChanged);
+    await setPrimaryWork(7, 43, 42);
+    await placeWork('item:12', 'Payments', 0);
+    await unlinkSessionWork(7, 42, { expectedVersion: 1 });
+    expect(get(workChanged)).toBe(before);
+    // Reads never bump.
+    vi.mocked(invoke).mockResolvedValue(null);
+    await workTree({});
+    await workSessionTasks(7);
+    expect(get(workChanged)).toBe(before);
+  });
+
   it('work:changed bumps the tick; tracker frames do not', () => {
     const before = get(workChanged);
     noteWorkEvents([{ type: 'tracker' }]);
@@ -428,8 +480,15 @@ describe('stores', () => {
     const cur = [plain, worked];
     // A status tick of a session with no work, not shown: nothing.
     expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, claude_status: 'working' } }], cur, new Set())).toBe(false);
-    // …unless the tree shows it.
-    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, claude_status: 'working' } }], cur, new Set([1]))).toBe(true);
+    // Shown by the tree: working ↔ idle is too chatty to re-read on…
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, claude_status: 'working' } }], cur, new Set([1]))).toBe(false);
+    // …but "needs you" (blocked, stuck, failed) and alive / dead are drawn.
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, claude_status: 'blocked' } }], cur, new Set([1]))).toBe(true);
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, stuck_kind: 'oom' } }], cur, new Set([1]))).toBe(true);
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, status: 'dead' } }], cur, new Set([1]))).toBe(true);
+    // A secondary link changed: only `work_rev` says so.
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...worked, work_rev: 99 } }], cur, new Set())).toBe(true);
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...worked, claude_status: 'working' } }], cur, new Set())).toBe(false);
     // Its work moved.
     expect(
       sessionEventsTouchWork([{ type: 'updated', row: { ...worked, work: { ...worked.work!, link_id: 43 } } }], cur, new Set()),

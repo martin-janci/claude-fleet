@@ -17,6 +17,7 @@ import {
   activeWorkViewId,
   bumpWorkChanged,
   NEWER_HUB,
+  revealTaskRequest,
   selectedTaskId,
   showTaskInWorkView,
   taskDetailOpen,
@@ -97,6 +98,7 @@ describe('WorkTree', () => {
     workViewFilters.set({});
     selectedTaskId.set(null);
     taskDetailOpen.set(false);
+    revealTaskRequest.set(null);
     sessions.set([session('mefistos', 'api', { id: 7 }), session('mefistos', 'web', { id: 9 })]);
     treeImpl = (a) => {
       if (a.filters?.group === 'label:Payments') {
@@ -267,5 +269,61 @@ describe('WorkTree', () => {
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(get(workExpanded).custom?.['1|label:Payments']).toBe(true);
     expect(get(selectedTaskId)).toBe('item:31');
+  });
+
+  it('"Show in Work view" made before the tree mounts is revealed once it has loaded', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const a = (raw as Args | undefined)?.args ?? {};
+      if (cmd === 'work_task') return { task: task({ task_id: 'item:31', group: PAY, org_id: 1 }), rules: [] };
+      if (cmd === 'work_tree') return treeImpl(a);
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      return [];
+    });
+    // The Sessions view is showing: the request switches the sidebar, which
+    // mounts the tree only afterwards.
+    showTaskInWorkView('item:31');
+    render(WorkTree);
+    await flush();
+    await flush();
+    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments' }, limit: 50 });
+    expect(screen.getByText('Receipts')).toBeTruthy();
+    expect(get(workExpanded).custom?.['1|label:Payments']).toBe(true);
+    // Consumed: a later mount does not reveal it again.
+    expect(get(revealTaskRequest)).toBeNull();
+  });
+
+  it('a refresh while a section is loading re-issues it; the section never stays loading', async () => {
+    const base = treeImpl;
+    let release: (() => void) | null = null;
+    let held = 0;
+    treeImpl = (a) => {
+      if (a.filters?.group === 'label:Payments' && held++ === 0) {
+        return new Promise((res) => {
+          release = () => res(base(a));
+        });
+      }
+      return base(a);
+    };
+    render(WorkTree, { debounceMs: 5 });
+    await flush();
+    await fireEvent.click(screen.getAllByTestId('work-group-head')[1]);
+    await flush();
+    expect(screen.getByTestId('work-section-loading')).toBeTruthy();
+    // A refresh while the section's read is in flight.
+    bumpWorkChanged();
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    const sectionReads = () => treeCalls().filter((a) => a.filters?.group === 'label:Payments');
+    expect(sectionReads()).toHaveLength(2);
+    const group = () => screen.getAllByTestId('work-group')[1];
+    const ids = () => within(group()).getAllByTestId('work-task').map((t) => t.getAttribute('data-task-id'));
+    expect(screen.queryByTestId('work-section-loading')).toBeNull();
+    expect(ids()).toEqual(['item:30', 'item:31']);
+    // The cancelled read answers late: dropped, the section stays loaded.
+    release!();
+    await flush();
+    expect(screen.queryByTestId('work-section-loading')).toBeNull();
+    expect(ids()).toEqual(['item:30', 'item:31']);
+    expect(within(group()).getByTestId('work-load-more')).toBeTruthy();
   });
 });
