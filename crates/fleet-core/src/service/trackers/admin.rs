@@ -520,11 +520,29 @@ pub fn admin_sync(
                 check_host_transport(&s, &t)?;
                 s.set_tracker_transport(id, &t)?;
             }
+            let changed_settings = settings.is_some();
             if let Some(st) = settings {
                 s.set_tracker_settings(id, &st)?;
             }
             s.emit_tracker(id)?;
-            json(&s.require_tracker(id)?)
+            let updated = s.require_tracker(id)?;
+            if changed_settings {
+                // J3: a person's section map is the reference the
+                // `status_map` proposals are measured against. Never fails
+                // the update.
+                if let Err(e) = crate::service::decide::status_map::record_followups(
+                    &s,
+                    &updated,
+                    crate::store::now_unix(),
+                ) {
+                    tracing::debug!(
+                        tracker_id = id,
+                        "[decide] status_map follow-up not recorded: {}",
+                        e.message
+                    );
+                }
+            }
+            json(&updated)
         }
         AdminAction::SetCredential => {
             let id = args.tracker()?;

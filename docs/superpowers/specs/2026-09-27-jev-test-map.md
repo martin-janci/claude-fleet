@@ -125,7 +125,7 @@ runs. Changing one after seeing results needs a new decision row.
 | Field | Plan |
 |---|---|
 | Decision | For an Asana section name the keyword rule cannot classify (`infer_section` returns none → today `todo`), propose `todo / in_progress / done / not_planned` |
-| Input | provider, section name, the project's other section names in order (position is a strong signal), nothing else — no task text **[proposed]** |
+| Input | provider, section name, the project's other section names in order (position is a strong signal, at most 30), nothing else — no task text **[built]** |
 | Candidates | closed: the four categories plus `unsure` |
 | Reference | the section map a person confirms (`settings.section_map`), plus a hand-labeled set of ~300 section names (English, Slovak, German, emoji-prefixed, jokey) |
 | Baseline | the keyword rule `infer_section`; "always todo" (today's effective behaviour); `claude -p haiku` (D33) |
@@ -136,7 +136,7 @@ runs. Changing one after seeing results needs a new decision row.
 | Acceptance (assist) | on the hand set: `done` precision ≥ 0.97; accuracy on answered ≥ 0.90 at coverage ≥ 0.60 of rule-abstained sections; beats haiku or ties it at < 1/10 of its latency |
 | Auto | never automatic: a proposal is applied only when a person confirms it (`work_admin update settings.section_map`) |
 | Rollback | set the mode to `off`; confirmed maps stay (they are the person's) |
-| Components | `service/decide` envelope; `status_map` adapter on the probe/sync path; `fleet-hub decide proposals`; the section map UI that exists |
+| Components | **[built]** the `service/decide` envelope; the probe keeps `config.unmapped_sections` and `config.project_sections` (`service/trackers/asana.rs`); the adapter `service/decide/status_map.rs` — `propose_for_tracker` (question `status_map.v1`, subject `tracker_section <tracker>:<HMAC section id>`, ≤ 40 asks a run, no re-ask within 14 days on the same fingerprint / version / mode / model), `StatusMapTrigger` after a clean sync pass (`spawn_tracker_sync`, at most daily per tracker, off the sync's path), `record_followups` in `work_admin update`; `fleet-hub decide proposals` (read-only) and `fleet-hub tracker section-map` to apply; the section map UI that exists. Tests: `service/decide/status_map_tests.rs` |
 | Kill | a `done` precision under 0.95 on any 100 consecutive proposals |
 
 ### J1 — choosing a work item for a session no rule linked (`work_link`)

@@ -93,6 +93,17 @@ pub struct TrackerConfig {
     /// confirms goes to `TrackerSettings::section_map`, which wins.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub section_map: std::collections::BTreeMap<String, String>,
+    /// Asana: the section names (lower case, trimmed, deduplicated, at most
+    /// `asana::MAX_UNMAPPED_SECTIONS`) the keyword rule could NOT classify —
+    /// today's `todo`. What the `status_map` decision adapter may propose a
+    /// category for (docs/decisions.md). Older rows parse without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmapped_sections: Vec<String>,
+    /// Asana: each project's section names in board order (lower case),
+    /// as `(project gid, names)`, at most `asana::MAX_SECTIONS_PER_PROJECT`
+    /// per project. A section's position is a strong hint of its stage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_sections: Vec<(String, Vec<String>)>,
 }
 
 /// What the ADMIN set for a tracker (migration 050, work graph M6), kept

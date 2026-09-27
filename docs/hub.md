@@ -922,6 +922,7 @@ fleet-hub tracker status          # each tracker's last sync pass, and retention
 fleet-hub work usage --days 30    # how the work graph is used, counts only
 fleet-hub tracker remove 1        # its items stay, marked unavailable
 fleet-hub tracker webhook 1       # webhook nudges (Jira Cloud, GitHub, Linear): URL + secret, once
+fleet-hub tracker section-map 2 --set 'ideas=todo'   # Asana: set sections' categories and confirm the map
 ```
 
 **Webhook nudges** (work graph M13.4f) need `--public-url`: the tracker
@@ -976,7 +977,11 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   Which **sections** mean *in progress* is inferred on the first test from
   their names (progress / doing / review → in progress, done / shipped →
   done) and shown in Settings → Work with a Confirm button; once confirmed,
-  your map wins (`work_admin update` with `settings.section_map`).
+  your map wins (`work_admin update` with `settings.section_map`, or
+  `fleet-hub tracker section-map <id> --set 'name=category'`). The names the
+  rule cannot classify stay *to do*; with the `status_map` decision feature
+  on (off by default, [`decisions.md`](decisions.md#status_map--asana-section-proposals-j3))
+  the hub can propose a category for them, which you apply the same way.
 - **Linear vs Jira keys:** `ENG-123` belongs to the tracker whose probed
   prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
   trackers claim is never bound automatically.
@@ -1252,23 +1257,30 @@ paired to it, a phone and an agent host never call out). Everything is
 **off by default**: the kill switch `decide.jev.enabled`, each feature's
 mode (`decide.jev.status_map`, `decide.jev.work_link`: `off | shadow |
 assist`), each org's consent, and the global `decide.jev.unassigned` for
-rows with no org. With the defaults no request can leave the hub. Nothing
-in fleet asks the model yet; the envelope and its record are in place for
-the use cases that come next. The full guide — what is sent, what is
-recorded (never raw text), the fallbacks, retention, how to turn it off —
-is [`decisions.md`](decisions.md).
+rows with no org. With the defaults no request can leave the hub. The
+first use case is `status_map` (J3): after a clean sync, at most daily, an
+Asana tracker's section names the keyword rule could not classify are put
+to the model; in `assist` its answers are **proposals** a person applies
+(`fleet-hub tracker section-map`), never written by themselves. The full
+guide — what is sent, what is recorded (never raw text), the fallbacks,
+retention, how to turn it off — is [`decisions.md`](decisions.md).
 
 ```bash
 fleet-hub decide set-key < jev-key.txt          # or --from-env NAME / --ref file:/run/secrets/jev
 fleet-hub org set 2 --jev on                    # this org consents
 fleet-hub decide status                         # read-only: flag, modes, consent, breaker, spend
 fleet-hub decide runs --feature work_link --limit 20
+fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]   # status_map: section → category (confidence)
+fleet-hub tracker section-map 3 --set 'ideas=todo' --set 'parked=done'   # a person applies them
 ```
 
 The `decide.*` settings are set like the `work.*` ones, with `set_setting`
 (master token). `set-key` and `clear-key` write `state.db` directly, like
-`fleet-hub tracker webhook`; `status` and `runs` open it read-only and
-print ids, words and numbers — never the key.
+`fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
+read-only and print ids, words and numbers — never the key; the section
+names `proposals` shows come from the trackers' stored config, never from
+the record. `tracker section-map` is a `work_admin update` over loopback
+(master token) that confirms the section map with your entries on top.
 
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
