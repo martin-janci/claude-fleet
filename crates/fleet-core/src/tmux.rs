@@ -1274,7 +1274,10 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 /// `claude_cli.rs`, `service/account_usage.rs`, `service/add_project.rs` and
 /// `service/move_session/carry.rs` all write their exec'd stubs through it.
 /// Any new fake the test process itself spawns belongs here too.
-#[cfg(test)]
+///
+/// Unix only: the fakes are `sh` scripts exec'd by path, so a test that needs
+/// one is a Unix test.
+#[cfg(all(test, unix))]
 pub(crate) mod fake_exec {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -2122,6 +2125,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_script_is_unknown_when_tmux_is_missing_from_path() {
         // The 127 case this whole fix exists for: a login profile edit or a

@@ -178,9 +178,10 @@ fn output_from(host: &str, frame: AgentFrame, cap: Option<usize>) -> Result<Outp
 
 /// The agent reports a plain exit code, negative when the child was killed by
 /// a signal or never started. Rebuild the `ExitStatus` so `.success()` and
-/// `.code()` read the way they do for a locally spawned child.
+/// `.code()` read the way they do for a locally spawned child. Also how the
+/// test fakes build a status portably (`ssh_fake`, the `Output` helpers).
 #[cfg(unix)]
-fn exit_status(exit_code: i32) -> ExitStatus {
+pub fn exit_status(exit_code: i32) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt;
     if exit_code >= 0 {
         // A wait status, not an exit code: the low byte is the signal.
@@ -198,7 +199,7 @@ fn exit_status(exit_code: i32) -> ExitStatus {
 }
 
 #[cfg(not(unix))]
-fn exit_status(exit_code: i32) -> ExitStatus {
+pub fn exit_status(exit_code: i32) -> ExitStatus {
     use std::os::windows::process::ExitStatusExt;
     ExitStatus::from_raw(if exit_code >= 0 { exit_code as u32 } else { 1 })
 }

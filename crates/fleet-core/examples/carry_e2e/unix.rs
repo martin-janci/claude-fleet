@@ -1020,7 +1020,7 @@ fn scenario(c: &mut Ctx, env: &Env, s: &Scenario) -> ScenarioLeftovers {
     }
 }
 
-fn main() {
+pub(crate) fn main() {
     let host = std::env::args()
         .nth(1)
         .expect("usage: carry_e2e <ssh-host>");

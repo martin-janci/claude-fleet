@@ -1203,8 +1203,8 @@ mod curl_tests {
 }
 
 /// The real script, run locally against a fake `curl` that records its argv
-/// and the header file it was handed.
-#[cfg(test)]
+/// and the header file it was handed. Unix only: the fake is an `sh` script.
+#[cfg(all(test, unix))]
 mod curl_script_tests {
     use super::*;
 

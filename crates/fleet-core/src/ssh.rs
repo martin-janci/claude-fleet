@@ -940,7 +940,7 @@ impl SshClient {
         resolved
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn forget_toolchain_for_tests(&self, host: &str) {
         self.inner.toolchains.remove(host);
     }
@@ -2130,6 +2130,7 @@ mod tests {
     /// the fix and explains why a rename alone is not one; the probe guard it
     /// prepends runs before `body`, so a fake that counts its invocations
     /// still counts only the real ones.
+    #[cfg(unix)]
     fn fake_ssh(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
         write_exec(dir, "ssh", &format!("#!/bin/sh\n{PROBE_GUARD}{body}\n"))
@@ -2138,11 +2139,10 @@ mod tests {
     #[test]
     fn mux_failures_are_exit_255_with_a_master_message() {
         let out = |code: i32, stderr: &str| Output {
-            status: std::process::ExitStatus::from_raw(code << 8),
+            status: crate::agent::transport::exit_status(code),
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         };
-        use std::os::unix::process::ExitStatusExt;
         assert!(is_mux_failure(&out(
             255,
             "mux_client_request_session: read from master failed"
@@ -2175,6 +2175,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_resets_the_master_and_retries_once() {
         // `-O check` answers 1 (dead) so the master is actually reset.
@@ -2203,6 +2204,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_on_a_live_master_retries_without_resetting() {
         // `-O check` answers 0 (alive): a mux failure on this command does
@@ -2232,6 +2234,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_is_retried_only_once() {
         // Always fails, and the master never answers `-O check` (dead), so
@@ -2252,6 +2255,7 @@ mod tests {
         assert_eq!(c.master_reset_counts().get("h-twice"), Some(&1));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_dead_host_is_not_retried() {
         let dir = tempfile::tempdir().unwrap();
@@ -2303,6 +2307,7 @@ mod tests {
         assert!(parse_toolchain("").is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn toolchain_is_resolved_once_and_a_failure_is_retried_after_the_backoff() {
         let dir = tempfile::tempdir().unwrap();
@@ -2345,6 +2350,7 @@ mod tests {
     /// `via_cli:local` / `via_host:local` on a desktop: the stdin-fed
     /// script runs here, the way `run_shell` treats `local`, and `ssh` is
     /// never spawned for a host that resolves to nothing.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_with_stdin_on_local_spawns_locally_and_never_ssh() {
         let dir = tempfile::tempdir().unwrap();

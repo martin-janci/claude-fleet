@@ -1032,13 +1032,16 @@ fn stderr_of(out: &std::process::Output) -> String {
 /// and per call: the pid, a process-wide counter and the clock. The counter
 /// alone keeps concurrent calls apart. The clock is only microsecond-granular
 /// on macOS, so two calls in the same tick used to collide on `create_new`
-/// with `File exists (os error 17)`.
+/// with `File exists (os error 17)`. On Windows the mode is not set: the
+/// file lives in the per-user `%LOCALAPPDATA%\Temp`, whose ACL already keeps
+/// other users out.
 struct TempFile(std::path::PathBuf);
 
 impl TempFile {
     /// An empty private file plus its open handle, for a payload written in
     /// pieces (see [`download`]).
     fn create(ext: &str) -> Result<(Self, std::fs::File), IpcError> {
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1051,11 +1054,11 @@ impl TempFile {
             "claude-fleet-move-{}-{seq}-{nanos}.{ext}",
             std::process::id()
         ));
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let f = opts.open(&path)?;
         Ok((TempFile(path), f))
     }
 
@@ -1077,11 +1080,12 @@ impl Drop for TempFile {
 #[cfg(test)]
 mod temp_file_tests {
     use super::TempFile;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// Writes started at once never collide on the name (the macOS clock is
     /// only microsecond-granular): each gets its own path, holds its own
-    /// bytes, is private (0600), and is removed on drop.
+    /// bytes, is private (0600 on Unix), and is removed on drop.
     #[test]
     fn concurrent_writes_get_unique_private_files_removed_on_drop() {
         const N: usize = 32;
@@ -1101,8 +1105,11 @@ mod temp_file_tests {
         // Joined in spawn order, so `files[i]` is the file thread `i` wrote:
         // asserting the exact body catches content crossing between them.
         for (i, f) in files.iter().enumerate() {
-            let mode = std::fs::metadata(&f.0).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "{}", f.0.display());
+            #[cfg(unix)]
+            {
+                let mode = std::fs::metadata(&f.0).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{}", f.0.display());
+            }
             let body = std::fs::read_to_string(&f.0).unwrap();
             assert_eq!(body, format!("transcript {i}"), "{}", f.0.display());
         }

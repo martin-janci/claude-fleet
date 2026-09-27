@@ -2528,6 +2528,7 @@ mod tests {
         std::fs::write(dir.join(format!("{SID}.jsonl")), text).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_fallback_dir_resolves_to_the_physical_transcript_dir() {
         // Claude records a session started under `link/proj` (link → real)

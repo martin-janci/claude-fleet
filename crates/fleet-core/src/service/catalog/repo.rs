@@ -991,6 +991,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_dir_skips_symlinks_in_resources_and_terminates() {
         let root = tmp("symlink");
@@ -1012,6 +1013,7 @@ mod tests {
         assert_eq!(skill.resources[0].rel_path, "resources/real.txt");
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_dir_records_problem_when_kind_dir_unreadable_and_continues() {
         use std::os::unix::fs::PermissionsExt;
@@ -1236,6 +1238,7 @@ mod tests {
         assert_eq!(err.code, "E_ASSET_NOT_FOUND");
     }
 
+    #[cfg(unix)]
     #[test]
     fn remove_asset_refuses_symlinked_targets() {
         let root = tmp("remove-symlink");

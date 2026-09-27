@@ -2746,6 +2746,7 @@ pub(crate) mod tests {
     /// (F4) `umask 077` keeps the transfer directory private, but it must
     /// not govern what git writes into the USER's repository: a `0700`
     /// `objects/ab/` locks every other writer out of a group-shared clone.
+    #[cfg(unix)]
     #[test]
     fn the_snapshot_writes_into_the_users_repo_under_the_original_umask() {
         if !require(&["git", "bash"]) {
@@ -2933,6 +2934,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn snapshot_script_fails_cleanly_if_the_bundle_size_cannot_be_determined() {
         if !require(&["git", "bash"]) {
@@ -2975,6 +2977,7 @@ pub(crate) mod tests {
         assert!(String::from_utf8_lossy(&out.stderr).contains(FAILED));
     }
 
+    #[cfg(unix)]
     #[test]
     fn snapshot_and_pack_write_their_transfer_dir_private() {
         if !require(&["git", "bash", "tar"]) {
