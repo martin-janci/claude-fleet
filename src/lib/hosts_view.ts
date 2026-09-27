@@ -148,11 +148,16 @@ export function compareVersions(a: string | null, b: string | null): number {
   return 0;
 }
 
-/** The newest `claude_version` in the fleet, or null. */
-export function newestClaudeVersion(hosts: readonly HostRow[]): string | null {
+/** A version stamp the badge may trust: read from the host within `maxAgeSecs`. */
+export function versionFresh(host: HostRow, now: number, maxAgeSecs: number): boolean {
+  return host.claude_version_at != null && now - host.claude_version_at <= maxAgeSecs;
+}
+
+/** The newest FRESH `claude_version` in the fleet, or null. */
+export function newestClaudeVersion(hosts: readonly HostRow[], now: number, maxAgeSecs: number): string | null {
   let best: string | null = null;
   for (const h of hosts) {
-    if (!versionParts(h.claude_version)) continue;
+    if (!versionFresh(h, now, maxAgeSecs) || !versionParts(h.claude_version)) continue;
     if (best === null || compareVersions(h.claude_version, best) > 0) best = h.claude_version;
   }
   return best;
@@ -180,8 +185,12 @@ export function hostAttention(args: {
   hook: HookHealth;
   sessionCount: number;
   newestClaude: string | null;
+  /** Unix seconds; the version stamp is judged against it. */
+  now: number;
+  /** `health.version_max_age_secs`: a stamp older than this earns no `claude_old` mark. */
+  versionMaxAgeSecs: number;
 }): HostAttention | null {
-  const { host, hasToken, tokensLoaded, hook, sessionCount, newestClaude } = args;
+  const { host, hasToken, tokensLoaded, hook, sessionCount, newestClaude, now, versionMaxAgeSecs } = args;
   if (tokensLoaded && !hasToken) {
     if (hook.state === 'seen') {
       return {
@@ -203,11 +212,18 @@ export function hostAttention(args: {
       title: `Fleet hooks are installed on ${host.alias}, but none of its sessions has reported a finished turn. The hooks may be stale — re-provision the host.`,
     };
   }
-  if (newestClaude && host.claude_version && compareVersions(host.claude_version, newestClaude) < 0) {
+  // ux F-13: only a version read from the host recently earns the mark; a
+  // provisioning-day cache stamped with today's ping was wrong on 3 of 4.
+  if (
+    newestClaude &&
+    host.claude_version &&
+    versionFresh(host, now, versionMaxAgeSecs) &&
+    compareVersions(host.claude_version, newestClaude) < 0
+  ) {
     return {
       kind: 'claude_old',
       glyph: '⬆',
-      title: `Claude Code ${host.claude_version} on ${host.alias} is older than ${newestClaude}, the newest in the fleet.`,
+      title: `Claude Code ${host.claude_version} on ${host.alias} is older than ${newestClaude}, the newest in the fleet (checked ${formatAge(now - (host.claude_version_at ?? now))} ago).`,
     };
   }
   return null;

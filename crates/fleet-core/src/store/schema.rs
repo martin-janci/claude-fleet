@@ -117,6 +117,18 @@ fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 066: `hosts` already has its
+/// `claude_version_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
+/// again. See [`Migration`].
+fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'claude_version_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 043: `session_messages` already has
 /// its `to_participant_id` column, and `ALTER TABLE ... ADD COLUMN` would
 /// fail again. See [`Migration`].
@@ -627,6 +639,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 65,
         sql: include_str!("../../migrations/065_stale_working.sql"),
         already_applied: Some(sessions_has_stale_working_at),
+    },
+    // Host identity & health, task 1: `hosts.claude_version_at`. Guarded:
+    // ADD COLUMN. (Numbered at merge time — `migrations_are_contiguous_from_one`
+    // allows no gap — so a sibling plan merged first shifts these.)
+    Migration {
+        version: 66,
+        sql: include_str!("../../migrations/066_host_claude_version_at.sql"),
+        already_applied: Some(hosts_has_claude_version_at),
     },
 ];
 

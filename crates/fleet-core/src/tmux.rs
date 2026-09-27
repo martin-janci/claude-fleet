@@ -98,11 +98,25 @@ pub trait TmuxExec: Send + Sync {
         None
     }
 
+    /// `tmux -V` + `claude --version` on the host. `None` = could not tell
+    /// (or an executor that does not implement it); the stored versions
+    /// are then left alone. `LocalTmux` and `RemoteTmux` override it.
+    async fn host_versions(&self) -> Option<HostVersions> {
+        None
+    }
+
     /// Everything a reconcile pass needs from the host. The default composes
     /// the per-call methods (local tmux, test fakes); `RemoteTmux` overrides
     /// it with one script so a pass costs one round trip, not 5 + N.
-    async fn probe_snapshot(&self, tail_lines: u32) -> ProbeSnapshot {
+    /// `want_versions`: ask for the versions section this pass (see
+    /// `service::sessions::versions_due`).
+    async fn probe_snapshot(&self, tail_lines: u32, want_versions: bool) -> ProbeSnapshot {
         let identity = self.host_identity().await;
+        let versions = if want_versions {
+            self.host_versions().await
+        } else {
+            None
+        };
         let sessions = self.list_sessions().await;
         let account = if sessions.is_ok() {
             self.read_oauth_account().await
@@ -122,6 +136,7 @@ pub trait TmuxExec: Send + Sync {
             sessions,
             account,
             pane_tails,
+            versions,
         }
     }
 }
@@ -176,6 +191,8 @@ pub struct ProbeSnapshot {
     pub account: Option<crate::service::hosts::OauthAccount>,
     /// Pane text per live session, exactly `capture-pane -S -<n> -p`.
     pub pane_tails: std::collections::HashMap<String, String>,
+    /// The versions section, when this pass asked for it and it parsed.
+    pub versions: Option<HostVersions>,
 }
 
 /// Shell script listing the most recently modified Claude transcripts under
@@ -252,6 +269,37 @@ pub struct HostIdentity {
 /// DST change, or after NTP steps the clock, and a spurious change is read
 /// downstream as a reboot that marks every session on the host lost.
 pub const HOST_IDENTITY_SCRIPT: &str = "printf 'boot=%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.bootsessionuuid 2>/dev/null)\"; out=$(tmux list-sessions -F '#{pid}' 2>&1); rc=$?; printf 'tmuxrc=%s\\n' \"$rc\"; printf 'tmuxout=%s\\n' \"$(printf '%s' \"$out\" | head -n 1)\"";
+
+/// The versions the fleet shows for a host, read from the host itself.
+/// `None` = the binary answered nothing (not on `PATH`, or the section was
+/// not asked for this pass) — the stored value is then kept, never blanked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostVersions {
+    /// `2.1.282` (the first word of `claude --version`).
+    pub claude_version: Option<String>,
+    /// `3.6a` (`tmux -V` without the `tmux ` prefix).
+    pub tmux_version: Option<String>,
+}
+
+/// Prints `tmuxv=<tmux -V>` and `claudev=<first line of claude --version>`.
+/// `claude --version` is a node start (0.3–1 s), so the reconcile pass asks
+/// for this section only when the stored stamp is older than
+/// [`crate::service::sessions::VERSIONS_REFRESH_SECS`].
+pub const HOST_VERSIONS_SCRIPT: &str = "printf 'tmuxv=%s\\n' \"$(tmux -V 2>/dev/null)\"; printf 'claudev=%s\\n' \"$(claude --version 2>/dev/null | head -n 1)\"";
+
+/// Parse [`HOST_VERSIONS_SCRIPT`] output. Missing or empty lines are
+/// `None`; nothing here is ever an error.
+pub fn parse_host_versions(stdout: &str) -> HostVersions {
+    let mut v = HostVersions::default();
+    for line in stdout.lines() {
+        if let Some(t) = line.strip_prefix("tmuxv=") {
+            v.tmux_version = crate::service::hosts::parse_tmux_version(t.trim());
+        } else if let Some(c) = line.strip_prefix("claudev=") {
+            v.claude_version = crate::service::hosts::parse_claude_version(c.trim());
+        }
+    }
+    v
+}
 
 /// Parse [`HOST_IDENTITY_SCRIPT`] output. Requires BOTH a `tmuxrc=` line
 /// (tmux's exit code) and a `tmuxout=` line (the first line of its combined
@@ -419,6 +467,16 @@ impl TmuxExec for LocalTmux {
             .filter(|o| o.status.success())?;
         parse_host_identity(&String::from_utf8_lossy(&out.stdout))
     }
+    async fn host_versions(&self) -> Option<HostVersions> {
+        local_allowed().ok()?;
+        let out = tokio::process::Command::new("bash")
+            .args(["-c", HOST_VERSIONS_SCRIPT])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(parse_host_versions(&String::from_utf8_lossy(&out.stdout)))
+    }
 }
 
 /// tmux over an `SshExec`. Generic (defaulting to the production client) so
@@ -492,10 +550,18 @@ const SESSIONS_FORMAT: &str = "#{session_name}|#{session_created}|#{session_acti
 /// `parse_probe_snapshot` undoes the escape on the sessions section before
 /// parsing it (pane tails keep the leading space verbatim: it's just
 /// display text there).
-pub fn probe_snapshot_script(tail_lines: u32) -> String {
+pub fn probe_snapshot_script(tail_lines: u32, want_versions: bool) -> String {
     let start = scrollback_start(tail_lines);
+    // The versions section costs a `claude --version` node start, so it is
+    // only in the script on a pass that is due for it.
+    let versions = if want_versions {
+        format!("printf '%s\\n' '---FLEET:versions'; {HOST_VERSIONS_SCRIPT}; ")
+    } else {
+        String::new()
+    };
     format!(
         "printf '%s\\n' '---FLEET:identity'; {HOST_IDENTITY_SCRIPT}; \
+         {versions}\
          printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'; \
          printf '%s\\n' '---FLEET:account'; {}; \
          printf '%s\\n' '---FLEET:panes'; \
@@ -581,6 +647,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
     };
     let account =
         section("account").and_then(|b| crate::service::hosts::parse_oauth_account(b.trim()));
+    let versions = section("versions").map(parse_host_versions);
     let mut pane_tails = std::collections::HashMap::new();
     for (name, body) in &sections {
         if let Some(pane) = name.strip_prefix("pane ") {
@@ -592,6 +659,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         sessions,
         account,
         pane_tails,
+        versions,
     })
 }
 
@@ -795,14 +863,23 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .filter(|o| o.status.success())?;
         parse_host_identity(&String::from_utf8_lossy(&out.stdout))
     }
-    async fn probe_snapshot(&self, tail_lines: u32) -> ProbeSnapshot {
-        let script = probe_snapshot_script(tail_lines);
+    async fn host_versions(&self) -> Option<HostVersions> {
+        let out = self
+            .remote_sh(HOST_VERSIONS_SCRIPT)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(parse_host_versions(&String::from_utf8_lossy(&out.stdout)))
+    }
+    async fn probe_snapshot(&self, tail_lines: u32, want_versions: bool) -> ProbeSnapshot {
+        let script = probe_snapshot_script(tail_lines, want_versions);
         match self.remote_sh(&script).await {
             Err(e) => ProbeSnapshot {
                 identity: None,
                 sessions: Err(e),
                 account: None,
                 pane_tails: Default::default(),
+                versions: None,
             },
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -820,6 +897,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                             sessions: Err(IpcError::new(codes::E_SSH, why)),
                             account: None,
                             pane_tails: Default::default(),
+                            versions: None,
                         }
                     }
                 }
@@ -1449,9 +1527,10 @@ mod tests {
 
     #[test]
     fn probe_snapshot_script_has_every_section_and_escapes_pane_lines() {
-        let s = probe_snapshot_script(8);
+        let s = probe_snapshot_script(8, true);
         for section in [
             "---FLEET:identity",
+            "---FLEET:versions",
             "---FLEET:sessions",
             "---FLEET:account",
             "---FLEET:panes",
@@ -1463,7 +1542,13 @@ mod tests {
             );
         }
         assert!(s.contains(HOST_IDENTITY_SCRIPT));
+        assert!(s.contains(HOST_VERSIONS_SCRIPT));
         assert!(s.contains(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT));
+        // A pass that is not due for versions leaves the section (and its
+        // `claude --version` node start) out entirely.
+        let without = probe_snapshot_script(50, false);
+        assert!(!without.contains("---FLEET:versions"), "{without}");
+        assert!(!without.contains(HOST_VERSIONS_SCRIPT), "{without}");
         assert!(
             s.contains(
                 "tmux capture-pane -t \"=$s:\" -S -8 -p 2>/dev/null | sed 's/^---FLEET/ &/'"
@@ -2004,6 +2089,19 @@ mod tests {
         let id = parse_host_identity("boot=abc-123\ntmuxrc=0\ntmuxout=4242\n").unwrap();
         assert_eq!(id.boot_id.as_deref(), Some("abc-123"));
         assert_eq!(id.tmux_server_pid, Some(4242));
+    }
+
+    #[test]
+    fn parse_host_versions_reads_both_lines_and_tolerates_a_missing_binary() {
+        let v = parse_host_versions("tmuxv=tmux 3.6a\nclaudev=2.1.282 (Claude Code)\n");
+        assert_eq!(v.tmux_version.as_deref(), Some("3.6a"));
+        assert_eq!(v.claude_version.as_deref(), Some("2.1.282"));
+        // `claude` not on PATH: the line is empty, the field is unknown, the
+        // other one still parses.
+        let v = parse_host_versions("tmuxv=tmux 3.3a\nclaudev=\n");
+        assert_eq!(v.tmux_version.as_deref(), Some("3.3a"));
+        assert_eq!(v.claude_version, None);
+        assert_eq!(parse_host_versions(""), HostVersions::default());
     }
 
     #[test]

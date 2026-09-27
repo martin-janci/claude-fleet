@@ -17,6 +17,8 @@ export interface HostRow {
   transport: 'ssh' | 'agent';
   /** The host's org (work graph M5): its per-host token's boundary. */
   org_id?: number | null;
+  /** When claude/tmux versions were last read from the host; null = never. Absent from an older hub. */
+  claude_version_at?: number | null;
 }
 
 export interface SshHost {
@@ -123,7 +125,7 @@ function removeHost(alias: string): void {
 export type HostEvent =
   | { type: 'added' | 'probed'; row: HostRow }
   /** A probe that changed nothing but the stamp — patched onto the row we hold. */
-  | { type: 'pinged'; alias: string; last_pinged_at: number; reachable: boolean }
+  | { type: 'pinged'; alias: string; last_pinged_at: number; reachable: boolean; claude_version_at?: number | null }
   | { type: 'removed'; alias: string };
 
 /** Apply a burst of host events in ONE store update, in order (see
@@ -145,6 +147,7 @@ export function applyHostEvents(events: readonly HostEvent[]): void {
           next = rows.mergeInto(next, {
             ...have,
             last_pinged_at: ev.last_pinged_at,
+            claude_version_at: ev.claude_version_at ?? have.claude_version_at,
             reachable: ev.reachable,
           });
         }

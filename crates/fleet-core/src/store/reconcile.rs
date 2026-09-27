@@ -221,6 +221,7 @@ impl Store {
             let only_the_stamp_moved = prior.is_some_and(|before| {
                 HostRow {
                     last_pinged_at: row.last_pinged_at,
+                    claude_version_at: row.claude_version_at,
                     ..before
                 } == row
             });
@@ -229,6 +230,7 @@ impl Store {
                     alias: row.alias,
                     last_pinged_at: row.last_pinged_at.unwrap_or(last_pinged_at),
                     reachable: row.reachable,
+                    claude_version_at: row.claude_version_at,
                 }
             } else {
                 RowChange::HostProbed(row)
@@ -974,6 +976,7 @@ mod tests {
             provisioned: false,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
         }
     }
 

@@ -39,6 +39,7 @@
   import HostDetail from './HostDetail.svelte';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
+  import { fleetSettings, SETTING_KEYS, settingSecs } from './fleet_settings';
 
   let {
     preselect = null,
@@ -94,7 +95,8 @@
   const allGroups = $derived(groupHostsByAccount($hosts, $accounts));
   const groups = $derived(filterGroups(allGroups, filter));
   const ordered = $derived(groups.flatMap((g) => g.hosts));
-  const newestClaude = $derived(newestClaudeVersion($hosts));
+  const versionMaxAge = $derived(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs));
+  const newestClaude = $derived(newestClaudeVersion($hosts, now, versionMaxAge));
 
   const rowInfo = $derived.by(() => {
     const m = new Map<string, HostRowInfo>();
@@ -107,6 +109,8 @@
         hook: hookHealth(h.alias, $hostTokens.has(h.alias), $sessions),
         sessionCount: counts.total,
         newestClaude,
+        now,
+        versionMaxAgeSecs: versionMaxAge,
       });
       m.set(h.alias, { counts, attention });
     }

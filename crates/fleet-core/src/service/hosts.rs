@@ -179,6 +179,11 @@ pub async fn add_host(
             tmux_ver.as_deref(),
             now_unix(),
         )?;
+        // Task 1: a version read from the host is stamped as such, so the
+        // desktop's badge and the reconcile cadence trust it.
+        if claude_ver.is_some() {
+            s.set_host_versions_at(&args.alias, now_unix())?;
+        }
     }
     list_one(store, &args.alias)
 }
@@ -289,6 +294,11 @@ pub async fn probe_host(
             tmux_ver.as_deref(),
             now_unix(),
         )?;
+        // Task 1: an explicit re-probe that read a version from the host
+        // stamps it like the reconcile pass does.
+        if claude_ver.is_some() {
+            s.set_host_versions_at(&args.alias, now_unix())?;
+        }
     }
     list_one(store, &args.alias)
 }
@@ -637,14 +647,14 @@ pub(crate) fn sync_host_account(
     Ok(Some(row.uuid))
 }
 
-fn parse_tmux_version(line: &str) -> Option<String> {
+pub(crate) fn parse_tmux_version(line: &str) -> Option<String> {
     // `tmux 3.6a` → "3.6a"
     line.strip_prefix("tmux ")
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
 
-fn parse_claude_version(line: &str) -> Option<String> {
+pub(crate) fn parse_claude_version(line: &str) -> Option<String> {
     // `2.1.144 (Claude Code)` → "2.1.144"
     line.split_whitespace()
         .next()

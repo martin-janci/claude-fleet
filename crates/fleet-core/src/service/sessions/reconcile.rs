@@ -191,10 +191,26 @@ pub(crate) const PR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// up on later passes as the per-session cache expires.
 pub(super) const PR_PROBE_BATCH: usize = 12;
 
+/// How old a host's `claude_version_at` may be before the next pass asks
+/// the host for its versions again (`---FLEET:versions`, one `claude
+/// --version` node start per host per window). The desktop's `claude_old`
+/// badge trusts a stamp younger than `health.version_max_age_secs` (24 h),
+/// so a 6 h refresh keeps it honest with room to spare.
+pub const VERSIONS_REFRESH_SECS: i64 = 6 * 3600;
+
+/// Whether this pass should ask the host for its versions.
+pub(super) fn versions_due(claude_version_at: Option<i64>, now: i64) -> bool {
+    claude_version_at.is_none_or(|at| now - at >= VERSIONS_REFRESH_SECS)
+}
+
 /// One host's probe result, carried from the off-lock probe task to the
 /// under-lock writer.
 pub(super) struct HostProbe {
     pub(super) host: HostRow,
+    /// The versions section, when this pass asked and the host answered
+    /// (task 1). `None`: not due, or unanswerable — the stored versions
+    /// are kept and the stamp does not move.
+    pub(super) versions: Option<crate::tmux::HostVersions>,
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     /// `None`: not asked this pass (cadence) or unanswerable — the bg
     /// pruner is skipped.
@@ -888,12 +904,26 @@ fn write_reachable_host(
         .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
         .ok()
         .flatten();
+    // Task 1: a version the host answered THIS pass replaces the stored
+    // one; a missing answer (not due, or the binary said nothing) keeps
+    // it. Only an answered `claude --version` moves the stamp — the stamp
+    // means "read from the host", never "asked".
+    let probed = probe.versions.as_ref();
+    let claude_version = probed
+        .and_then(|v| v.claude_version.as_deref())
+        .or(host.claude_version.as_deref());
+    let tmux_version = probed
+        .and_then(|v| v.tmux_version.as_deref())
+        .or(host.tmux_version.as_deref());
+    if probed.is_some_and(|v| v.claude_version.is_some()) {
+        s.set_host_versions_at(&host.alias, now)?;
+    }
     s.ensure_in_tx()?;
     s.apply_host_reconcile_in_tx(HostReconcile {
         alias: &host.alias,
         reachable: true,
-        claude_version: host.claude_version.as_deref(),
-        tmux_version: host.tmux_version.as_deref(),
+        claude_version,
+        tmux_version,
         last_pinged_at: now,
         probe_started_at: probe.started_at,
         sessions: &sessions,
@@ -1432,10 +1462,18 @@ pub(super) async fn probe_with_timeout(
         // still names the sessions it just lost. Only trustworthy when we
         // actually reached the host this pass, so it is discarded below
         // when the list fails.
-        let snap = tmux.probe_snapshot(PANE_TAIL_LINES).await;
+        // The versions section rides the same script, but only on a pass
+        // that is due for it (task 1): `claude --version` is a node start.
+        let want_versions = versions_due(host.claude_version_at, started_at);
+        let snap = tmux.probe_snapshot(PANE_TAIL_LINES, want_versions).await;
         let tmux_result = snap.sessions;
         let identity = if tmux_result.is_ok() {
             snap.identity
+        } else {
+            None
+        };
+        let versions = if tmux_result.is_ok() {
+            snap.versions
         } else {
             None
         };
@@ -1484,11 +1522,13 @@ pub(super) async fn probe_with_timeout(
             intel,
             account,
             identity,
+            versions,
         )
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, agent_mtimes, intel, account, identity)) => HostProbe {
+        Ok((result, agent_rows, agent_mtimes, intel, account, identity, versions)) => HostProbe {
             host,
+            versions,
             result,
             agent_rows,
             agent_mtimes,
@@ -1506,6 +1546,7 @@ pub(super) async fn probe_with_timeout(
             );
             return HostProbe {
                 host,
+                versions: None,
                 result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
                 agent_rows: None,
                 agent_mtimes: None,

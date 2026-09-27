@@ -71,6 +71,11 @@ pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
 /// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
 /// by Task 6.
 pub const SESSIONS_LOST_TTL_SECS: &str = "sessions.lost_ttl_secs";
+/// How old `hosts.claude_version_at` may be for the desktop's "Claude older
+/// than the newest in the fleet" badge to trust the stored version. Older
+/// than this (or never stamped) shows no badge at all: a stale number was
+/// the wrong badge on 3 of 4 hosts (ux F-13). Default 24 h.
+pub const HEALTH_VERSION_MAX_AGE_SECS: &str = "health.version_max_age_secs";
 /// How many resumable lost sessions a batch restore resumes in parallel.
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
@@ -424,6 +429,11 @@ pub const SPECS: &[Spec] = &[
         key: HEALTH_CONTEXT_RED_PCT,
         default: "85",
         kind: Kind::Int { min: 1, max: 100 },
+    },
+    Spec {
+        key: HEALTH_VERSION_MAX_AGE_SECS,
+        default: "86400",
+        kind: Kind::Secs,
     },
     Spec {
         key: WORK_RETENTION_JOURNAL_DAYS,

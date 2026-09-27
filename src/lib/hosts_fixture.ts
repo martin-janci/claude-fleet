@@ -49,6 +49,7 @@ export function host(alias: string, over: Partial<HostRow> = {}): HostRow {
     account_uuid: null,
     provisioned: true,
     transport: 'ssh',
+    claude_version_at: NOW - 2 * MIN,
     ...over,
   };
 }

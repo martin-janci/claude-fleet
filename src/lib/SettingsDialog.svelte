@@ -1025,6 +1025,16 @@
         <span class="hook-desc" id="limit-context-red-pct-desc">percent of the context window at which a session needs you (the chip turns red here, amber 15 points below)</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="health-version-max-age-hours">version badge</label>
+        <input class="port" id="health-version-max-age-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-version-max-age-hours-desc"
+          data-testid="health-version-max-age-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthVersionMaxAgeSecs, e)} />
+        <span class="hook-desc" id="health-version-max-age-hours-desc">hours a probed Claude version stays trusted for the "older than the fleet" mark</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
         <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}

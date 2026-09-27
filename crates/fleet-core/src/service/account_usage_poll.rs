@@ -256,6 +256,7 @@ mod tests {
             provisioned: true,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
         }
     }
 

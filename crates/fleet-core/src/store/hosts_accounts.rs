@@ -201,6 +201,20 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
+    /// Stamp when the host's versions were last read from the host itself
+    /// (migration 066). Written by the reconcile pass only on a pass whose
+    /// probe carried a `versions` section, and by `probe_host`; the
+    /// versions themselves still travel through `update_host_probe`. No
+    /// event: the same transaction's `update_host_probe_in_tx` announces
+    /// the row (as a ping, carrying this stamp).
+    pub fn set_host_versions_at(&self, alias: &str, at: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET claude_version_at = ?1 WHERE alias = ?2",
+            rusqlite::params![at, alias],
+        )?;
+        Ok(())
+    }
+
     pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE hosts SET hidden=?1 WHERE alias=?2",
@@ -638,6 +652,20 @@ mod tests {
         assert_eq!(row.claude_version.as_deref(), Some("2.1.144"));
         assert_eq!(row.tmux_version.as_deref(), Some("3.6a"));
         assert_eq!(row.last_pinged_at, Some(1000));
+    }
+
+    #[test]
+    fn set_host_versions_at_stamps_the_row_and_lists_it() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let before = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(
+            before.claude_version_at, None,
+            "a fresh host has never been version-probed"
+        );
+        s.set_host_versions_at("h", 1_700_000_000).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.claude_version_at, Some(1_700_000_000));
     }
 
     #[test]

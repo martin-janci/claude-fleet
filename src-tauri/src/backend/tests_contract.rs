@@ -140,6 +140,7 @@ pub(crate) fn sample_host() -> HostRow {
         // `transport` is not an `Option`, so either value pins the same key.
         transport: "ssh".into(),
         org_id: Some(2),
+        claude_version_at: Some(1_725_000_000),
     }
 }
 

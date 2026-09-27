@@ -111,6 +111,8 @@ describe('hostAttention', () => {
     hook: { state: 'seen' as const, lastAt: NOW },
     sessionCount: 6,
     newestClaude: '2.1.145',
+    now: NOW,
+    versionMaxAgeSecs: 86400,
   };
 
   it('is null for a healthy host', () => {
@@ -140,7 +142,29 @@ describe('hostAttention', () => {
     expect(compareVersions('2.1.99', '2.1.145')).toBeLessThan(0);
     expect(compareVersions('2.10.0', '2.9.9')).toBeGreaterThan(0);
     expect(compareVersions(null, '1')).toBe(0);
-    expect(newestClaudeVersion([host('a', { claude_version: '2.1.99' }), host('b'), host('c', { claude_version: null })])).toBe('2.1.145');
+    expect(
+      newestClaudeVersion([host('a', { claude_version: '2.1.99' }), host('b'), host('c', { claude_version: null })], NOW, 86400),
+    ).toBe('2.1.145');
+  });
+
+  it('flags an older Claude only while its version stamp is fresh', () => {
+    // ux F-13: the badge was wrong on 3 of 4 hosts because the compared
+    // number was a provisioning-day cache stamped with today's ping.
+    const old = host('claude-fleet-oci', { claude_version: '2.1.99 (Claude Code)', claude_version_at: NOW - 3600 });
+    expect(hostAttention({ ...base, host: old })?.kind).toBe('claude_old');
+    expect(hostAttention({ ...base, host: old })?.title).toContain('checked 1h ago');
+    const stale = host('claude-fleet-oci', { claude_version: '2.1.99', claude_version_at: NOW - 2 * 86400 });
+    expect(hostAttention({ ...base, host: stale })).toBeNull();
+    const never = host('claude-fleet-oci', { claude_version: '2.1.99', claude_version_at: null });
+    expect(hostAttention({ ...base, host: never })).toBeNull();
+  });
+
+  it('the fleet newest ignores stale stamps', () => {
+    const hosts = [
+      host('a', { claude_version: '2.1.99', claude_version_at: NOW - 60 }),
+      host('b', { claude_version: '2.1.277', claude_version_at: NOW - 3 * 86400 }),
+    ];
+    expect(newestClaudeVersion(hosts, NOW, 86400)).toBe('2.1.99');
   });
 });
 

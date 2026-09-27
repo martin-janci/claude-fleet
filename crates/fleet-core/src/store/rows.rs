@@ -685,6 +685,11 @@ pub struct HostRow {
     /// per-host token. `None` = no org (the token sees only unassigned work).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// When `claude_version` / `tmux_version` were last read from the host
+    /// (migration 066). `None`: never — the values are whatever `add_host`
+    /// or an older store left. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub claude_version_at: Option<i64>,
 }
 
 /// The only values `hosts.transport` may hold (migration 034). The single
@@ -695,7 +700,7 @@ pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
-     last_pinged_at, account_uuid, provisioned, transport, org_id";
+     last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -711,6 +716,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         provisioned: row.get::<_, i64>(8)? != 0,
         transport: row.get(9)?,
         org_id: row.get(10)?,
+        claude_version_at: row.get(11)?,
     })
 }
 

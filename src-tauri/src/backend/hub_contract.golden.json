@@ -210,6 +210,7 @@
       "account_uuid",
       "alias",
       "claude_version",
+      "claude_version_at",
       "hidden",
       "last_pinged_at",
       "org_id",

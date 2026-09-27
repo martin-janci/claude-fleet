@@ -78,7 +78,7 @@ type Queued =
   | { name: 'session:event'; payload: TimelineEvent }
   | { name: 'session:conversations'; payload: { session_id: number } }
   | { name: 'host:added' | 'host:probed'; payload: HostRow }
-  | { name: 'host:pinged'; payload: { alias: string; last_pinged_at: number; reachable: boolean } }
+  | { name: 'host:pinged'; payload: { alias: string; last_pinged_at: number; reachable: boolean; claude_version_at?: number | null } }
   | { name: 'host:removed'; payload: { alias: string } }
   | { name: 'account:upserted'; payload: AccountRow }
   | { name: 'project:updated'; payload: ProjectRow }

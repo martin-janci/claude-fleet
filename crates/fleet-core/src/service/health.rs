@@ -586,6 +586,7 @@ mod tests {
             provisioned: false,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
         }
     }
 
