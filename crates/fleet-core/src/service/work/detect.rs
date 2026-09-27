@@ -851,7 +851,20 @@ pub fn decide(
     confirm: bool,
     decider: Decider,
 ) -> Result<bool, IpcError> {
-    let link = s.decide_work_link(session_id, link_id, confirm, decider)?;
+    decide_as(s, session_id, link_id, confirm, true, decider)
+}
+
+/// [`decide`], confirming as a secondary link when `take_primary` is false
+/// (work graph M14.1c).
+pub fn decide_as(
+    s: &Store,
+    session_id: i64,
+    link_id: i64,
+    confirm: bool,
+    take_primary: bool,
+    decider: Decider,
+) -> Result<bool, IpcError> {
+    let link = s.decide_work_link_as(session_id, link_id, confirm, take_primary, decider)?;
     let mut trusted_now = false;
     if confirm && decider == Decider::Person && matches!(link.rule.as_deref(), Some("R3b" | "R4")) {
         if let Some(pid) = s.detection_state(session_id)?.and_then(|st| st.project_id) {

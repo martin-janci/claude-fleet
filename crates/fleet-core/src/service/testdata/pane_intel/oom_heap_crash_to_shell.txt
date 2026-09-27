@@ -1,0 +1,9 @@
+❯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+
+<--- Last few GCs --->
+[41233:0x6a3c2b0]  9187654 ms: Mark-Compact 4054.3 (4142.9) -> 4041.7 (4143.4) MB, 2911.09 / 0.00 ms  (average mu = 0.108, current mu = 0.041) allocation failure; scavenge might not succeed
+
+FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory
+ 1: 0x104c5f2a8 node::Abort() [/opt/homebrew/bin/node]
+me@mefistos:~/projects/claude-fleet$

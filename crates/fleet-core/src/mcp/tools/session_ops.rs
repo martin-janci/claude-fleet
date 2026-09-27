@@ -50,12 +50,16 @@ impl FleetTools {
         // may see (D7, `isolate_sessions`), and each row without the work
         // of other orgs — here, before `fresh_for` hashes the page, and not
         // only in the result gate.
-        let (controller, scope) = {
+        let (controller, scope, context_red_pct) = {
             let s = lock(reader).map_err(to_mcp_err)?;
             let controller = s
                 .get_controller()
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?;
-            (controller, caller.org_scope(&s).map_err(to_mcp_err)?)
+            (
+                controller,
+                caller.org_scope(&s).map_err(to_mcp_err)?,
+                crate::service::health::context_red_pct(&s),
+            )
         };
         let tagged = rows
             .into_iter()
@@ -98,7 +102,10 @@ impl FleetTools {
                 // it is the difference between a phone fetching 44 rows to
                 // find 3 and fetching 3.
                 if let Some(want) = p.needs_attention {
-                    if crate::service::attention::needs_attention(row).is_some() != want {
+                    if crate::service::attention::needs_attention_with(row, context_red_pct)
+                        .is_some()
+                        != want
+                    {
                         return false;
                     }
                 }
@@ -108,7 +115,7 @@ impl FleetTools {
                 let is_controller = controller
                     .as_ref()
                     .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
-                SessionWithController::new(is_controller, row)
+                SessionWithController::with_threshold(is_controller, row, context_red_pct)
             })
             // `limit` applies AFTER the filters so a filtered page is a real
             // page of matches, not the first N rows of the whole fleet.
@@ -266,7 +273,7 @@ impl FleetTools {
         // Scoped so the store guard is released before
         // `stored_local_fleet_id` takes it again below — `Store` is a plain
         // (non-reentrant) `std::sync::Mutex`.
-        let (row, is_controller) = {
+        let (row, is_controller, context_red_pct) = {
             let s = lock(self.reader()).map_err(to_mcp_err)?;
             let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
             let row = sessions::find_session_by_tmux_name_scoped(&s, &p.tmux_name, &scope)
@@ -277,7 +284,8 @@ impl FleetTools {
             let is_controller = controller
                 .as_ref()
                 .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
-            (row, is_controller)
+            let context_red_pct = crate::service::health::context_red_pct(&s);
+            (row, is_controller, context_red_pct)
         };
         // Reported, never minted: `whoami` is a read, and a readonly token
         // can call it — a read must not write (final review, Minor 7). Null
@@ -285,8 +293,12 @@ impl FleetTools {
         // only thing that mints one (`ensure_local_fleet_id`).
         let fleet_id =
             crate::service::address::stored_local_fleet_id(self.reader()).map_err(to_mcp_err)?;
-        let mut payload = serde_json::to_value(SessionWithController::new(is_controller, row))
-            .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+        let mut payload = serde_json::to_value(SessionWithController::with_threshold(
+            is_controller,
+            row,
+            context_red_pct,
+        ))
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
         if let serde_json::Value::Object(map) = &mut payload {
             map.insert(
                 "fleet_id".to_string(),
@@ -313,6 +325,10 @@ impl FleetTools {
         );
         // A per-host token may only spawn on its own host (B1).
         require_host(&caller, &p.host_alias, "the new session")?;
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            require_bound_client_may_create(&s, &caller, &p.host_alias, p.project_id)?;
+        }
         self.confirm_gate(
             "new_session",
             p.confirm_nonce.as_deref(),
@@ -355,6 +371,10 @@ impl FleetTools {
         );
         // A per-host token may only spawn on its own host (B1).
         require_host(&caller, &p.host_alias, "the new session")?;
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            require_bound_client_may_create(&s, &caller, &p.host_alias, p.project_id)?;
+        }
         self.confirm_gate(
             "new_shell_session",
             p.confirm_nonce.as_deref(),

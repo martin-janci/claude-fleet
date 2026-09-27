@@ -7,6 +7,8 @@ export interface Health {
   schema_version: number;
   /** Work graph M12.4: the tracker roll-up; absent from an older hub. */
   trackers?: TrackersHealth;
+  /** The hub's context threshold (percent); absent from an older hub. */
+  context_red_pct?: number;
 }
 
 /**

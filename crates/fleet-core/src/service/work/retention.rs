@@ -94,6 +94,10 @@ pub struct RetentionSweep {
     pub tracker_items: usize,
     #[serde(default)]
     pub timeline_work_events: usize,
+    /// Settled rows of the write-back outbox (M13.4e), by the journal's
+    /// window.
+    #[serde(default)]
+    pub tracker_writes: usize,
 }
 
 impl RetentionSweep {
@@ -192,6 +196,31 @@ pub fn sweep_capped(store: &Mutex<Store>, now: i64, batch: usize, cap: usize) ->
         }
         out.add(t, done);
     }
+    // The write-back outbox (M13.4e, D3): settled rows, by the journal's
+    // window, here rather than in a tracker's pass so a failing tracker's
+    // outbox still shrinks.
+    if days.journal > 0 {
+        let cutoff = now - days.journal * 86_400;
+        while out.tracker_writes < cap {
+            let want = batch.min(cap - out.tracker_writes);
+            let n = match store.lock() {
+                Ok(s) => s.sweep_tracker_writes(cutoff, want),
+                Err(_) => break,
+            };
+            match n {
+                Ok(n) => {
+                    out.tracker_writes += n;
+                    if n < want {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "[gc] tracker write outbox sweep failed");
+                    break;
+                }
+            }
+        }
+    }
     if let Ok(s) = store.lock() {
         if let Ok(v) = serde_json::to_string(&out) {
             if let Err(e) = s.set_setting(LAST_SWEEP_KEY, &v) {
@@ -268,6 +297,65 @@ mod tests {
         assert_eq!(swept, [5, 5, 3, 0], "at most the cap per sweep");
         assert_eq!(swept.iter().sum::<usize>() as i64, dry);
         assert_eq!(status(&st, now).unwrap().tables[0].rows, 0);
+    }
+
+    /// M13.4e: the write-back outbox is swept here, by the journal's window,
+    /// capped per tick like the tables: settled rows go, a pending one never
+    /// does, and `0` keeps them all.
+    #[test]
+    fn the_write_back_outbox_is_swept_capped_and_pending_rows_stay() {
+        let st = store();
+        let t = st
+            .lock()
+            .unwrap()
+            .add_tracker("jira", "J", "https://acme.atlassian.net")
+            .unwrap()
+            .id;
+        for i in 0..5 {
+            let url = format!("https://github.com/o/r/pull/{i}");
+            st.lock()
+                .unwrap()
+                .enqueue_tracker_write(&crate::store::NewTrackerWrite {
+                    tracker_id: t,
+                    item_key: "ABC-1",
+                    op: crate::store::WRITE_OP_PR_REMOTE_LINK,
+                    url: &url,
+                    title: "PR",
+                    link_id: None,
+                    claude_session_id: None,
+                    session_org_id: None,
+                })
+                .unwrap();
+        }
+        {
+            let s = st.lock().unwrap();
+            let due = s
+                .due_tracker_writes(t, crate::service::catalog::now_secs() + 1, 10)
+                .unwrap();
+            // Four settled, one left pending.
+            for w in &due[..4] {
+                s.finish_tracker_write(w.id).unwrap();
+            }
+        }
+        let now = crate::service::catalog::now_secs() + 400 * 86_400;
+        assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 3, "the cap");
+        assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 1);
+        assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 0);
+        let left = st.lock().unwrap().due_tracker_writes(t, now, 10).unwrap();
+        assert_eq!(left.len(), 1, "the pending write is never swept");
+
+        settings::set(
+            &st.lock().unwrap(),
+            settings::WORK_RETENTION_JOURNAL_DAYS,
+            "0",
+        )
+        .unwrap();
+        st.lock().unwrap().finish_tracker_write(left[0].id).unwrap();
+        assert_eq!(
+            sweep(&st, now + 4_000 * 86_400).tracker_writes,
+            0,
+            "0 keeps forever"
+        );
     }
 
     #[test]

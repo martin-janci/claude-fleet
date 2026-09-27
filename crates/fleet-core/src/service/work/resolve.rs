@@ -21,7 +21,7 @@
 //! | R7 | a state signal's value changes | the auto link it made ENDS; suggestions it made go |
 //! | R8 | a key two trackers claim | never automatic: a suggestion |
 //! | R9 | a rejected (participant, target) pair | never proposed again, from any signal |
-//! | R9u | a person cleared (unlinked) a link a state signal named, and that signal's value is unchanged | the state candidate is dropped before resolving (`detect`, not here; migration 066): not re-made from the same branch / PR; events still count |
+//! | R9u | a person cleared (unlinked) a link a state signal named, and that signal's value is unchanged | the state candidate is dropped before resolving (`detect`, not here; migration 070): not re-made from the same branch / PR; events still count |
 //!
 //! | R11 | an agent's inference, answering the classification nudge (`agent_inferred`, M4.6) | a pre-selected suggestion, never confirmed; decays at the next conversation boundary |
 //!

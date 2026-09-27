@@ -187,14 +187,20 @@ impl Store {
         Ok(n.max(0) as u64)
     }
 
-    /// Drop settled rows (`done` / `failed`) last touched before `cutoff`.
-    /// A done row that goes lets the same PR queue again; the tracker then
-    /// upserts the same remote link, so that costs one call and changes
-    /// nothing. Returns how many went.
-    pub fn sweep_tracker_writes(&self, cutoff: i64) -> Result<usize, IpcError> {
+    /// Drop at most `limit` settled rows (`done` / `failed`) last touched
+    /// before `cutoff`; `pending` rows are never swept. A done row that goes
+    /// lets the same PR queue again; the tracker then upserts the same
+    /// remote link, so that costs one call and changes nothing. A failed row
+    /// is kept for the whole window, so `fleet_health`'s `write_failures`
+    /// still counts it. Returns how many went. Run by the GC retention sweep
+    /// (M12.3), one batch per store lock.
+    pub fn sweep_tracker_writes(&self, cutoff: i64, limit: usize) -> Result<usize, IpcError> {
         Ok(self.conn.execute(
-            "DELETE FROM tracker_writes WHERE state IN ('done', 'failed') AND updated_at < ?1",
-            [cutoff],
+            "DELETE FROM tracker_writes WHERE id IN (\
+               SELECT id FROM tracker_writes \
+               WHERE state IN ('done', 'failed') AND updated_at < ?1 \
+               ORDER BY id LIMIT ?2)",
+            rusqlite::params![cutoff, limit as i64],
         )?)
     }
 }
@@ -297,7 +303,8 @@ mod tests {
         let due = s.due_tracker_writes(t, now_unix() + 1, 10).unwrap();
         s.finish_tracker_write(due[0].id).unwrap();
         s.retry_tracker_write(due[1].id, "no", None, true).unwrap();
-        assert_eq!(s.sweep_tracker_writes(now_unix() + 10).unwrap(), 2);
+        assert_eq!(s.sweep_tracker_writes(now_unix() + 10, 1).unwrap(), 1);
+        assert_eq!(s.sweep_tracker_writes(now_unix() + 10, 100).unwrap(), 1);
         assert_eq!(
             s.due_tracker_writes(t, now_unix() + 1, 10).unwrap().len(),
             1

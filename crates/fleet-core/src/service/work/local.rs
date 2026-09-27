@@ -52,8 +52,20 @@ fn visible_links(
     scope: &OrgScope,
     links: Vec<LocalItemLink>,
 ) -> Result<Vec<LocalItemLink>, IpcError> {
-    let Some(h) = scope.host() else {
+    if scope.is_all() {
         return Ok(links);
+    }
+    let Some(h) = scope.host() else {
+        // A bound client (work graph M14): links inside its orgs whose
+        // session it may see; no host fence.
+        let mut out = Vec::with_capacity(links.len());
+        for mut l in links {
+            l.link.org_id = s.link_org(&l.link)?;
+            if scope.sees_link(&l.link) && orgs::link_session_visible(s, scope, &l.link)? {
+                out.push(l);
+            }
+        }
+        return Ok(out);
     };
     let mut out = Vec::with_capacity(links.len());
     for mut l in links {
@@ -140,7 +152,7 @@ pub fn name_session_work_as(
     let visible = s
         .get_session_by_id(sid)?
         .is_some_and(|r| match scope.host() {
-            None => true,
+            None => scope.sees_row(&r) && scope.sees_org(r.org_id),
             Some(h) => r.host_alias == h && scope.sees_org(r.org_id),
         });
     if !visible {

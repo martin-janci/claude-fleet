@@ -157,7 +157,7 @@ Each item starts only when the user writes "yes" in the decisions table. Each on
 | M13.4c | D10: summarise a dead session, on demand | claude-fleet (+ phone via D15) | `work_link { action: summarize }`, run by `claude -p --resume --fork-session` with **no tools allowed** (a test proves it), fleet's hooks off, `logging::redact` plus the untrusted fence, and the M11.2 transcript probe first. A new `work.summary_model` setting. The operator is confirm-gated; a hub refuses it. |
 | M13.4d | D15: multi-start on the phone | fleet-mobile only | A project multi-select with a confirm sheet (count and org label). Cross-org is refused in words; the app never silently retries with `force_cross_org`. |
 | M13.4e | D3: PR remote link to Jira | claude-fleet | Only the idempotent remote link (`globalId`), only for `manual` / `started` links, only to the link's own org's tracker. An outbox table (**migration 061**, with a retention rule under M12.3), a per-tracker opt-in, and every write refused for per-host tokens. |
-| M13.4f | D13: webhook nudges on a public hub | claude-fleet | `POST /hooks/tracker/<id>`, 404 unless `hub.public_url` and the tracker's webhook secret are set; HMAC per provider (GitHub, Jira Cloud, Linear, D28), a body cap and a rate limit; the payload is read only for an id / key of that tracker and triggers a coalesced `fetch_one`. Polling stays. Minted by `fleet-hub tracker webhook`. |
+| M13.4f | D13: webhook nudges on a public hub (**removed 2026-09-27: D13 stays no**) | claude-fleet | `POST /hooks/tracker/<id>`, 404 unless `hub.public_url` and the tracker's webhook secret are set; HMAC per provider (GitHub, Jira Cloud, Linear, D28), a body cap and a rate limit; the payload is read only for an id / key of that tracker and triggers a coalesced `fetch_one`. Polling stays. Minted by `fleet-hub tracker webhook`. |
 
 The review's scope, isolation, M9.7, budget, contract and phone notes for each decision are binding. Anything wider needs a new decision.
 
@@ -219,3 +219,18 @@ M13.5   last
   `2026-09-26-work-graph-m13-decided-yes.md`, written in a session that
   planned them before this plan reached `main`; its defaults are D27–D30 in
   the roadmap. **M13.4c (D10) is built** on `claude/cloud-fleet-work-graph-m13`.
+- 2026-09-27: **M13.4f removed.** The owner keeps D13 at no; the webhook
+  build that reached `main` with #327 is reverted (062 kept, 064 drops the
+  table). M13.4c and M13.4e stay; they are reviewed against this plan and
+  the M12.6 smallest safe versions.
+- 2026-09-27: **D15 and D5 answered.** The owner said yes to D15
+  (multi-start on the phone, M13.4d, martin-janci/fleet-mobile#50) and
+  keeps D5 off until the remote numbers are in. D3, D10 and D20 stand as
+  recorded above; D13 goes back to no with M13.4f's removal (#330).
+- 2026-09-27: **M13.5 done.** The roadmap marks the work graph operating
+  (D26) and carries two items as open work: the acceptance triage (M13.3,
+  which waits on the owner's run) and D5 (M13.4b, which waits on the remote
+  numbers). `CHANGELOG.md`'s `[Unreleased]` section names what M13 changed
+  for users. `scripts/release.sh` folds that section into the next
+  release's own; a release without one behaves as before, byte for byte.
+  Cutting the release stays the owner's step.

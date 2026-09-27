@@ -350,33 +350,42 @@ fn parse_trailing_number(s: &str) -> Option<f64> {
     num.parse::<f64>().ok()
 }
 
-/// True iff `needle` occurs in `haystack` delimited by non-alphanumeric
-/// boundaries — so "oom" matches "(oom)" or "killed: oom" but NOT "zoom",
-/// "room", or "boom". Used to keep the bare OOM acronym from false-matching
-/// innocent words.
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    haystack.match_indices(needle).any(|(i, _)| {
-        let before_ok = haystack[..i]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric());
-        let after_ok = haystack[i + needle.len()..]
-            .chars()
-            .next()
-            .is_none_or(|c| !c.is_alphanumeric());
-        before_ok && after_ok
-    })
-}
+/// How far up the tail the OOM rule looks. The reconcile capture is 8 lines
+/// (`PANE_TAIL_LINES`); `session_activity` reads more, and a crash block
+/// older than a screen is history, not the state of the pane.
+const OOM_TAIL_LINES: usize = 12;
 
-/// An OOM / allocation-failure signal on one lower-cased line. The acronym is
-/// matched only as a whole word (plus the explicit "oomkilled") so prose like
-/// "zoom"/"room" can't trip it.
-fn is_oom_line(lower: &str) -> bool {
-    lower.contains("out of memory")
-        || lower.contains("cannot allocate memory")
-        || lower.contains("fatal error: reached heap limit")
-        || lower.contains("oomkilled")
-        || contains_word(lower, "oom")
+/// Node's fatal heap block: the process that printed it is dead.
+static OOM_HEAP: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"fatal error: reached heap limit|javascript heap out of memory|<--- last few gcs --->|allocation failed - javascript heap",
+    )
+    .expect("OOM_HEAP is a valid regex")
+});
+
+/// A kill verdict from the kernel, a container runtime or the shell. On its
+/// own it is scrollback; followed by a shell prompt it is the foreground
+/// process gone.
+static OOM_KILLED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"oomkilled|out of memory: killed process \d+|killed process \d+.*\b(oom|out of memory)\b|^\s*(zsh: )?killed\b|\bsigkill\b",
+    )
+    .expect("OOM_KILLED is a valid regex")
+});
+
+/// A shell prompt line: `me@host:~/proj$ `, `$ `, `% `. The shell is back,
+/// so whatever ran in the foreground is gone.
+static SHELL_PROMPT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^(?:[\w.-]+@[\w.-]+[: ].*)?[$#%]\s*$")
+        .expect("SHELL_PROMPT is a valid regex")
+});
+
+/// An OOM signal on one lower-cased line: the heap block or a kill verdict.
+/// Prose (`out of memory`, `cannot allocate memory`, the bare acronym) is
+/// deliberately NOT one: the fleet's own source, docs and MCP instructions
+/// carry those words, and a session reading them was recreated twice (F1).
+fn is_oom_signal(lower: &str) -> bool {
+    OOM_HEAP.is_match(lower) || OOM_KILLED.is_match(lower)
 }
 
 /// One lower-cased line of a live Claude REPL's chrome: the input prompt
@@ -397,13 +406,19 @@ fn is_live_repl_line(lower: &str) -> bool {
 fn detect_stuck(text: &str) -> Option<StuckKind> {
     let lower = text.to_lowercase();
 
-    // OOM / allocation failure: Claude died. Only the LAST signal counts, and
-    // only when no live REPL chrome is drawn below it — an input box or
-    // footer under the text means Claude is still running and the text is
-    // scrollback (its own prose about another session, a tool's output).
+    // OOM: Claude died. Only the LAST signal within the tail window counts,
+    // only when no live REPL chrome is drawn below it (an input box or
+    // footer under the text means Claude outlived it), and only when the
+    // signal is Node's own heap block or a kill verdict with the shell's
+    // prompt back underneath — a process-level fact, not a word.
     let lines: Vec<&str> = lower.lines().collect();
-    if let Some(at) = lines.iter().rposition(|l| is_oom_line(l)) {
-        if !lines[at + 1..].iter().any(|l| is_live_repl_line(l)) {
+    let tail = &lines[lines.len().saturating_sub(OOM_TAIL_LINES)..];
+    if let Some(at) = tail.iter().rposition(|l| is_oom_signal(l)) {
+        let below = &tail[at + 1..];
+        let alive = below.iter().any(|l| is_live_repl_line(l));
+        let heap = OOM_HEAP.is_match(tail[at]);
+        let gone = below.iter().any(|l| SHELL_PROMPT.is_match(l.trim_end()));
+        if !alive && (heap || gone) {
             return Some(StuckKind::Oom);
         }
     }
@@ -974,20 +989,73 @@ mod tests {
     }
 
     #[test]
-    fn oom_matches_real_signals_not_innocent_words() {
-        // Real OOM signals are still detected.
+    fn oom_needs_a_kill_verdict_and_a_dead_process() {
+        // A verdict followed by the shell's prompt: the process is gone.
         assert_eq!(
-            analyze("Killed process 123 (OOM)").stuck,
+            analyze("Killed process 123 (OOM)\nme@host:~$ ").stuck,
             Some(StuckKind::Oom)
         );
         assert_eq!(
-            analyze("container terminated reason=OOMKilled").stuck,
+            analyze("container terminated reason=OOMKilled\n$ ").stuck,
             Some(StuckKind::Oom)
         );
-        // Innocent words that merely contain the letters "oom" must NOT trip it
-        // (this was the false-positive: e.g. a session discussing Zoom).
+        // The verdict alone is scrollback of unknown age.
+        assert_eq!(analyze("Killed process 123 (OOM)").stuck, None);
+        // Prose about memory is never a signal, whatever the words.
+        assert_eq!(
+            analyze("out of memory\ncannot allocate memory\noom\n$ ").stuck,
+            None
+        );
         assert_eq!(analyze("Let's zoom into the room — boom!").stuck, None);
         assert_eq!(analyze("⏺ Joining the Zoom meeting room").stuck, None);
+    }
+
+    /// F1: sessions 21480 / 21340 were flagged `oom` for reading the fleet's
+    /// own stuck vocabulary, and the playbook recreated 21480 mid-turn twice.
+    #[test]
+    fn oom_never_fires_on_the_fleets_own_vocabulary() {
+        for (fixture, status) in [
+            (
+                include_str!("testdata/pane_intel/oom_vocabulary_prose_idle.txt"),
+                ClaudeStatus::Idle,
+            ),
+            (
+                include_str!("testdata/pane_intel/oom_vocabulary_prose_working.txt"),
+                ClaudeStatus::Working,
+            ),
+        ] {
+            let intel = analyze(fixture);
+            assert_eq!(intel.stuck, None, "{fixture}");
+            assert_eq!(intel.derived_status, Some(status), "{fixture}");
+        }
+    }
+
+    #[test]
+    fn oom_fires_on_a_heap_block_or_a_kill_verdict_followed_by_the_shell() {
+        for fixture in [
+            include_str!("testdata/pane_intel/oom_heap_crash_to_shell.txt"),
+            include_str!("testdata/pane_intel/oom_killed_to_shell.txt"),
+        ] {
+            let intel = analyze(fixture);
+            assert_eq!(intel.stuck, Some(StuckKind::Oom), "{fixture}");
+            assert_eq!(
+                intel.derived_status,
+                Some(ClaudeStatus::Blocked),
+                "{fixture}"
+            );
+        }
+    }
+
+    #[test]
+    fn oom_looks_only_at_the_last_twelve_lines() {
+        let mut old = String::from(
+            "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n",
+        );
+        for i in 0..12 {
+            old.push_str(&format!("line {i} of a long build log\n"));
+        }
+        old.push_str("$ ");
+        assert_eq!(analyze(&old).stuck, None);
     }
 
     #[test]

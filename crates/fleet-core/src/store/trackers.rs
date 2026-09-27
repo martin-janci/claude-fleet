@@ -1034,10 +1034,6 @@ impl Store {
                 rusqlite::params![id],
             )?;
             tx.execute(
-                "DELETE FROM tracker_webhooks WHERE tracker_id = ?1",
-                rusqlite::params![id],
-            )?;
-            tx.execute(
                 "UPDATE work_items SET unavailable_at = COALESCE(unavailable_at, ?2), \
                         unavailable_reason = 'tracker_removed' WHERE tracker_id = ?1",
                 rusqlite::params![id, now_unix()],
@@ -1179,82 +1175,7 @@ impl Store {
                 out.extend(c.literals());
             }
         }
-        // Webhook secrets (M13.4f) are masked in diagnostics the same way.
-        let hooks: Vec<i64> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT tracker_id FROM tracker_webhooks")?;
-            let rows = stmt.query_map([], |r| r.get(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        for id in hooks {
-            if let Some(secret) = self.resolve_tracker_webhook_secret(id)? {
-                out.push(secret.expose().to_string());
-            }
-        }
         Ok(out)
-    }
-
-    /// The webhook secret of tracker `id` (work graph M13.4f), for verifying
-    /// a delivery's signature. The only read of `tracker_webhooks.secret`.
-    pub fn resolve_tracker_webhook_secret(&self, id: i64) -> Result<Option<Secret>, IpcError> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT secret FROM tracker_webhooks WHERE tracker_id = ?1",
-                [id],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .map(Secret::new))
-    }
-
-    /// Whether tracker `id` takes webhook nudges (a secret is set), and
-    /// since when. Never the secret.
-    pub fn tracker_webhook_since(&self, id: i64) -> Result<Option<i64>, IpcError> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT COALESCE(rotated_at, created_at) FROM tracker_webhooks WHERE tracker_id = ?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
-
-    /// Set (or rotate) tracker `id`'s webhook secret. Only a Jira Cloud,
-    /// GitHub or Linear tracker takes one (decision D28).
-    pub fn set_tracker_webhook_secret(&self, id: i64, secret: &Secret) -> Result<(), IpcError> {
-        let t = self.require_tracker(id)?;
-        if !matches!(t.provider.as_str(), "jira" | "github" | "linear") {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                format!(
-                    "{} trackers take no webhook: nudges are for Jira Cloud, GitHub and Linear",
-                    t.provider
-                ),
-            ));
-        }
-        if secret.expose().len() < 32 {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                "a webhook secret is at least 32 characters",
-            ));
-        }
-        let now = now_unix();
-        self.conn.execute(
-            "INSERT INTO tracker_webhooks (tracker_id, secret, created_at) VALUES (?1, ?2, ?3)              ON CONFLICT(tracker_id) DO UPDATE SET secret = excluded.secret, rotated_at = ?3",
-            rusqlite::params![id, secret.expose(), now],
-        )?;
-        Ok(())
-    }
-
-    /// Turn tracker `id`'s webhook nudges off. `true` when one was on.
-    pub fn clear_tracker_webhook_secret(&self, id: i64) -> Result<bool, IpcError> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM tracker_webhooks WHERE tracker_id = ?1", [id])?
-            > 0)
     }
 
     /// Record a tracker's state and error (redacted, capped). `true` when
@@ -1850,54 +1771,6 @@ mod tests {
              tracker_secret_literals and deleted by remove_tracker and \
              set_tracker_transport (a via_cli tracker holds none) only"
         );
-        // Work graph M13.4f: the webhook secret has one reader.
-        assert_eq!(
-            src.matches("SELECT secret FROM tracker_webhooks").count(),
-            1,
-            "tracker_webhooks.secret is read by resolve_tracker_webhook_secret only"
-        );
-        assert_eq!(src.matches("secret FROM tracker_webhooks").count(), 1);
-    }
-
-    #[test]
-    fn a_webhook_secret_is_for_jira_cloud_github_and_linear_and_rotates() {
-        let (s, id) = with_tracker();
-        let secret = Secret::new("0123456789abcdef0123456789abcdef");
-        assert!(s.resolve_tracker_webhook_secret(id).unwrap().is_none());
-        assert!(s
-            .set_tracker_webhook_secret(id, &Secret::new("short"))
-            .is_err());
-        s.set_tracker_webhook_secret(id, &secret).unwrap();
-        assert_eq!(
-            s.resolve_tracker_webhook_secret(id)
-                .unwrap()
-                .unwrap()
-                .expose(),
-            secret.expose()
-        );
-        assert!(s.tracker_webhook_since(id).unwrap().is_some());
-        let rotated = Secret::new("fedcba9876543210fedcba9876543210");
-        s.set_tracker_webhook_secret(id, &rotated).unwrap();
-        assert_eq!(
-            s.resolve_tracker_webhook_secret(id)
-                .unwrap()
-                .unwrap()
-                .expose(),
-            rotated.expose()
-        );
-        assert!(s
-            .tracker_secret_literals()
-            .unwrap()
-            .contains(&rotated.expose().to_string()));
-        // Never in a tracker row.
-        let row = serde_json::to_string(&s.require_tracker(id).unwrap()).unwrap();
-        assert!(!row.contains(rotated.expose()));
-        assert!(s.clear_tracker_webhook_secret(id).unwrap());
-        assert!(s.resolve_tracker_webhook_secret(id).unwrap().is_none());
-        let dc = s
-            .add_tracker("jira_dc", "DC", "https://jira.corp.example")
-            .unwrap();
-        assert!(s.set_tracker_webhook_secret(dc.id, &secret).is_err());
     }
 
     #[test]

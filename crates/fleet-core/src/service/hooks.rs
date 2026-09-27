@@ -1187,11 +1187,28 @@ fn apply_session_end_hook(
     })
 }
 
+/// The class of a `StopFailure`'s `error` for the timeline and the
+/// attention row: `rate_limit` (429, overloaded), `auth` (401/403,
+/// authentication) or `other`. The CLI's own names (`rate_limit`,
+/// `authentication_error`, `server_error`, …) sort by substring so a
+/// renamed variant still lands in the right class.
+pub(crate) fn stop_failure_class(error: &str) -> &'static str {
+    let e = error.to_ascii_lowercase();
+    if e.contains("rate") || e.contains("429") || e.contains("overload") {
+        "rate_limit"
+    } else if e.contains("auth") || e.contains("401") || e.contains("403") {
+        "auth"
+    } else {
+        "other"
+    }
+}
+
 /// The StopFailure hook: the turn ended in an API error (rate limit, auth,
 /// overloaded, …). Counts the turn on the conversation it names; for the
-/// current conversation it ends the turn exactly like `Stop` — waiters
-/// return and read the error from the transcript — records `stop_failure`
-/// with the error type (and detail when present) and refreshes the context.
+/// current conversation it ends the turn like `Stop` — waiters return and
+/// read the error from the transcript — but the row reads `failed` (F3),
+/// records `stop_failure` as `<class> (<error>)[: <details>]` and refreshes
+/// the context.
 fn apply_stop_failure_hook(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
@@ -1217,9 +1234,15 @@ fn apply_stop_failure_hook(
             remember_transcript_path(s, row.id, payload, session_id)?;
             if let Some(row) = s.record_stop_failure_hook_for_row(row.id)? {
                 let error = payload.error.as_deref().unwrap_or("unknown");
+                let class = stop_failure_class(error);
+                let head = if class == error {
+                    error.to_string()
+                } else {
+                    format!("{class} ({error})")
+                };
                 let detail = match payload.error_details.as_deref() {
-                    Some(d) if !d.trim().is_empty() => format!("{error}: {}", d.trim()),
-                    _ => error.to_string(),
+                    Some(d) if !d.trim().is_empty() => format!("{head}: {}", d.trim()),
+                    _ => head,
                 };
                 best_effort_event_for(s, row.id, Some(session_id), "stop_failure", Some(&detail))?;
             }
@@ -2634,13 +2657,95 @@ mod tests {
         p.error_details = Some("429 Too Many Requests".into());
         apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
         let row = status_of(&store, id);
-        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        assert_eq!(row.claude_status.as_deref(), Some("failed"));
         assert_eq!(row.turn_seq, 1);
         assert!(row.last_stop_at.is_some());
         assert!(events(&store, id).contains(&(
             "stop_failure".to_string(),
             Some("rate_limit: 429 Too Many Requests".to_string())
         )));
+    }
+
+    /// F3: 20773's 429 was recorded as plain `idle`; the user re-prompted
+    /// by hand eleven times. A failed turn reads as failed until Claude is
+    /// asked again.
+    #[test]
+    fn a_failed_turn_stays_failed_until_the_next_prompt() {
+        let store = make_store();
+        let id = hooked(&store);
+        let master = Caller::master();
+        let c = ctx(&master, None);
+        let mut p = make_payload("StopFailure", "uuid-1");
+        p.error = Some("authentication_error".into());
+        apply_hook(&store, &make_ssh(), &p, &c).unwrap();
+        assert_eq!(
+            status_of(&store, id).claude_status.as_deref(),
+            Some("failed")
+        );
+        assert!(events(&store, id).contains(&(
+            "stop_failure".to_string(),
+            Some("auth (authentication_error)".to_string())
+        )));
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-1"),
+            &c,
+        )
+        .unwrap();
+        assert_eq!(
+            status_of(&store, id).claude_status.as_deref(),
+            Some("working")
+        );
+        apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1"), &c).unwrap();
+        assert_eq!(status_of(&store, id).claude_status.as_deref(), Some("idle"));
+    }
+
+    /// F10 (the two-writer gap): the hooks set status without recording
+    /// it; reconcile recorded only what IT changed. Now each transition is
+    /// on the timeline exactly once, whoever wrote it.
+    #[test]
+    fn hook_transitions_land_on_the_timeline_once() {
+        let store = make_store();
+        let id = hooked(&store);
+        let master = Caller::master();
+        let c = ctx(&master, None);
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-1"),
+            &c,
+        )
+        .unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-1"),
+            &c,
+        )
+        .unwrap();
+        apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1"), &c).unwrap();
+        let changes: Vec<Option<String>> = events(&store, id)
+            .into_iter()
+            .filter(|(k, _)| k == "status_change")
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(
+            changes,
+            vec![Some("idle".into()), Some("working".into())],
+            "newest first; the repeated prompt wrote nothing"
+        );
+    }
+
+    #[test]
+    fn stop_failure_class_sorts_the_cli_error_names() {
+        assert_eq!(stop_failure_class("rate_limit"), "rate_limit");
+        assert_eq!(stop_failure_class("429 Too Many Requests"), "rate_limit");
+        assert_eq!(stop_failure_class("overloaded_error"), "rate_limit");
+        assert_eq!(stop_failure_class("authentication_error"), "auth");
+        assert_eq!(stop_failure_class("401 Unauthorized"), "auth");
+        assert_eq!(stop_failure_class("server_error"), "other");
+        assert_eq!(stop_failure_class(""), "other");
     }
 
     #[test]

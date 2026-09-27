@@ -6,4 +6,4 @@
 -- ADD COLUMN cannot be re-run.
 ALTER TABLE orgs ADD COLUMN jev_allowed INTEGER NOT NULL DEFAULT 0;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (64);
+INSERT OR IGNORE INTO schema_version (version) VALUES (68);

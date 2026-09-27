@@ -41,4 +41,4 @@ BEGIN
   DELETE FROM work_unlinks WHERE participant_id = OLD.id;
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (66);
+INSERT OR IGNORE INTO schema_version (version) VALUES (70);

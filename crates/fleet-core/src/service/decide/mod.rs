@@ -412,15 +412,24 @@ pub fn canonical_json(v: &serde_json::Value) -> String {
     sorted(v).to_string()
 }
 
+/// PURE: lower-case hex HMAC-SHA256 of `msg` under `key` (any key length).
+/// The decision record's fingerprints ([`fingerprint`],
+/// `status_map::section_id`) are keyed hashes on purpose: without the local
+/// key, a guessed input cannot be confirmed from the record.
+pub(crate) fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(msg);
+    hex::encode(mac.finalize().into_bytes())
+}
+
 /// PURE: the run's `input_fp` — HMAC-SHA256 under the local fingerprint key
 /// of the canonical redacted request (state and question). Not a plain
 /// hash: without the key, a guessed prompt cannot be confirmed from it.
 pub fn fingerprint(fp_key: &Secret, redacted: &JevRequest) -> String {
     let v = serde_json::json!({ "state": redacted.state, "question": redacted.question });
-    crate::service::trackers::webhook::hmac_sha256_hex(
-        fp_key.expose().as_bytes(),
-        canonical_json(&v).as_bytes(),
-    )
+    hmac_sha256_hex(fp_key.expose().as_bytes(), canonical_json(&v).as_bytes())
 }
 
 /// What an adapter asks the envelope.
