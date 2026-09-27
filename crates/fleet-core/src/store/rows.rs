@@ -207,6 +207,12 @@ pub struct SessionRow {
     /// reconcile pass's pane observation wins over the pane heuristic).
     #[serde(default)]
     pub last_stop_at: Option<i64>,
+    /// When the tick demoted this row from a stale `working` to `idle`
+    /// (migration 065, lifecycle F2); `None` otherwise. Cleared by the next
+    /// hook or a pane that shows a live turn. `#[serde(default)]`: a hub
+    /// older than the column sends none.
+    #[serde(default)]
+    pub stale_working_at: Option<i64>,
     /// The requester session that dispatched the task this row is working
     /// on; NULL for top-level sessions.
     #[serde(default)]
@@ -368,7 +374,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id, prompt_submit_seq"
+    " AS org_id, prompt_submit_seq, stale_working_at"
 );
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
@@ -460,6 +466,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         work_suggested: decode_work(row.get(56)?),
         org_id: row.get(57)?,
         prompt_submit_seq: row.get(58)?,
+        stale_working_at: row.get(59)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).

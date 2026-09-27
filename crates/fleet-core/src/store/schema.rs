@@ -105,6 +105,18 @@ fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 065: `sessions` already has its
+/// `stale_working_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
+/// again. See [`Migration`].
+fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'stale_working_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 043: `session_messages` already has
 /// its `to_participant_id` column, and `ALTER TABLE ... ADD COLUMN` would
 /// fail again. See [`Migration`].
@@ -608,6 +620,14 @@ const MIGRATIONS: &[Migration] = &[
         64,
         include_str!("../../migrations/064_drop_tracker_webhooks.sql"),
     ),
+    // Lifecycle F2: `sessions.stale_working_at` (one ADD COLUMN, its own
+    // guard) and 063's `sessions_row_version_bump` rebuilt to watch it —
+    // it is a `SessionRow` field, so a change to it must bump `row_version`.
+    Migration {
+        version: 65,
+        sql: include_str!("../../migrations/065_stale_working.sql"),
+        already_applied: Some(sessions_has_stale_working_at),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -3136,6 +3156,53 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1, "the re-run touched no rows");
+    }
+
+    #[test]
+    fn migration_065_adds_stale_working_at_and_is_safe_to_rerun() {
+        let s = store_at_version(64);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('a', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(sessions_has_stale_working_at(&s.conn).unwrap());
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE stale_working_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "an existing row starts unstamped");
+        // The rebuilt trigger watches the new column: stamping it is a
+        // client-visible change, so `row_version` moves once.
+        let v = || -> i64 {
+            s.conn
+                .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+                .unwrap()
+        };
+        let v0 = v();
+        s.conn
+            .execute("UPDATE sessions SET stale_working_at = 5", [])
+            .unwrap();
+        assert_eq!(v(), v0 + 1, "a stale_working_at change bumps row_version");
+        s.conn
+            .execute("UPDATE sessions SET stale_working_at = 5", [])
+            .unwrap();
+        assert_eq!(v(), v0 + 1, "a same-value write does not");
+        // Rolling the recorded version back re-runs 065 (the idiom of the
+        // 024–026 tests): the guard skips the ADD COLUMN.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 65;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 }
 
