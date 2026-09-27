@@ -621,6 +621,10 @@ const MIGRATIONS: &[Migration] = &[
     // Jev evaluation (D35 / D37): `decision_runs` and `decision_secrets`.
     // New tables and indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(65, include_str!("../../migrations/065_decision_runs.sql")),
+    // D34 label hygiene: `work_unlinks`, a person's "Clear work" held
+    // against the unchanged state signal (R9u). A new table, index and
+    // trigger, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(66, include_str!("../../migrations/066_work_unlinks.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

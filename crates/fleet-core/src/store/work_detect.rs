@@ -44,6 +44,8 @@ pub struct DetectionState {
     pub pr_signals: Option<String>,
     /// The probe has run for this session at least once.
     pub pr_probed: bool,
+    /// `sessions.pr_url`: which pull request the PR signals are of (R9u).
+    pub pr_url: Option<String>,
     /// The last prompt fleet itself sent (the loop guard).
     pub last_prompt: Option<String>,
 }
@@ -114,6 +116,7 @@ impl Store {
                         branch: r.get(4)?,
                         pr_signals: r.get(5)?,
                         pr_probed: r.get(6)?,
+                        pr_url: r.get(3)?,
                         last_prompt: r.get(7)?,
                     })
                 },
@@ -487,6 +490,25 @@ impl Store {
             WORK_SUGGESTION_WITHDRAWN,
             Some(&detail),
         )
+    }
+
+    /// What a person's unlinks hold for `participant` (R9u, migration
+    /// 066): `(target, signal, value)`, the target labelled as
+    /// [`Self::detection_links`] labels a link (the item's current key, the
+    /// bare key, or `item:<id>`).
+    pub fn work_unlink_holds(
+        &self,
+        participant: i64,
+    ) -> Result<Vec<(String, String, String)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(i.key, u.ref_key, 'item:' || u.item_id), u.signal, u.value \
+             FROM work_unlinks u LEFT JOIN work_items i ON i.id = u.item_id \
+             WHERE u.participant_id = ?1 ORDER BY u.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![participant], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn link_evidence(&self, link_id: i64) -> Result<Vec<serde_json::Value>, IpcError> {

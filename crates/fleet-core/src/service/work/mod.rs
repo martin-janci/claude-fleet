@@ -742,7 +742,15 @@ pub fn work_link_as<'a>(
             if !scope.is_all() {
                 visible_link(link_id)?;
             }
-            if !s.unlink_session_work(session_id, link_id)? {
+            // A person's "Clear work" holds against the unchanged branch /
+            // PR that named the target, or the re-resolve below would make
+            // the same link again (R9u). An agent's unlink stays a plain
+            // unlink: it never writes a hold a person did not ask for.
+            let holds = match decider {
+                Decider::Person => detect::unlink_holds(&s, session_id, link_id)?,
+                Decider::Agent => Vec::new(),
+            };
+            if !s.unlink_session_work_held(session_id, link_id, &holds)? {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
                     format!("session {session_id} has no live work link {link_id}"),

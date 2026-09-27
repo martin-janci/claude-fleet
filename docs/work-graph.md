@@ -74,6 +74,19 @@ project group's header also has **Name this work…**, for its sessions that
 have no work. An explicit link always wins over anything fleet recognised,
 and a rejection is sticky: fleet never suggests that pair again.
 
+**Clear** removes the link without rejecting the key: fleet may propose it
+again later. But not from the same evidence. When the session's branch,
+its pull request's head branch or a closing reference of its pull request
+is what named the key, fleet remembers that you cleared it and does not
+link or suggest the key again from that branch or that pull request while
+it stays the same (rule R9u). A different branch or pull request is new
+evidence and is detected as usual; going back to the very branch you
+cleared keeps it cleared. A mention in a prompt, a ticket URL or the pull
+request's text can still suggest it. Use **Not KEY** when the key is never
+this session's work. Only your *Clear* is remembered: when Claude or the
+operator unlinks a key (a per-host token, `work_link { action: unlink }`),
+it is a plain unlink.
+
 Claude in the session can link its own work too (`work_link`, source
 `agent`), which is how the friendly-name skill records "I'm working on
 ABC-123". An agent cannot overturn your rejection: once you said *Not

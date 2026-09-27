@@ -974,3 +974,249 @@ fn a_session_with_confirmed_work_surfaces_only_strong_suggestions() {
     let sg = sg.expect("a strong suggestion still asks");
     assert_eq!((sg.key.as_deref(), sg.suggestions), (Some("ABC-7"), 1));
 }
+
+// ── R9u: a person's "Clear work" holds against the unchanged state ──────
+
+/// `work_link { action: unlink }` as `decider`, through the service entry
+/// the MCP tool and the desktop share; the session's row after it.
+fn unlink_as(
+    st: &std::sync::Mutex<Store>,
+    sid: i64,
+    link_id: i64,
+    decider: Decider,
+) -> crate::store::SessionRow {
+    crate::service::work::work_link_as(
+        &crate::service::work::WorkLinkArgs {
+            action: "unlink".into(),
+            session_id: Some(sid),
+            link_id: Some(link_id),
+            ..Default::default()
+        },
+        st,
+        &crate::service::orgs::OrgScope::All,
+        decider,
+    )
+    .unwrap()
+}
+
+fn live(st: &std::sync::Mutex<Store>, sid: i64) -> Vec<(String, String, String, Option<String>)> {
+    links(&st.lock().unwrap(), sid)
+}
+
+fn holds(st: &std::sync::Mutex<Store>) -> i64 {
+    st.lock()
+        .unwrap()
+        .conn_for_test()
+        .query_row("SELECT COUNT(*) FROM work_unlinks", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// D34 / R9u: in a trusted project, a person clearing the link a branch
+/// made (R3) is not undone by the next resolve while the branch is the
+/// same; another branch detects normally; the same branch again stays
+/// cleared; a branch of the same key but another name links again. An
+/// agent's unlink writes no hold, so the branch links it again. Prompt
+/// events are never held, and the hold goes with the participant.
+#[test]
+fn clearing_a_branch_link_holds_while_the_branch_is_unchanged() {
+    let f = fx();
+    trust(&f);
+    let sid = session(&f, "dev", "c1");
+    f.s.set_current_branch(sid, "abc-1-login").unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let link = f.s.session_work_links(sid).unwrap()[0].clone();
+    assert_eq!(
+        (
+            link.state.as_str(),
+            link.source.as_str(),
+            link.rule.as_deref()
+        ),
+        ("confirmed", "branch", Some("R3"))
+    );
+    let st = std::sync::Mutex::new(f.s);
+
+    // The person clears it: gone, and the decision's own re-resolve did
+    // not make it again.
+    let row = unlink_as(&st, sid, link.id, Decider::Person);
+    assert_eq!(row.work, None);
+    assert!(live(&st, sid).is_empty());
+    assert_eq!(holds(&st), 1);
+    // Nor does a later run on the same branch — not even as a suggestion.
+    resolve_session(&st.lock().unwrap(), sid).unwrap();
+    assert!(live(&st, sid).is_empty());
+    let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(row.work_suggested, None);
+
+    // Another branch: normal detection.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-2-other").unwrap();
+        resolve_session(&s, sid).unwrap();
+    }
+    assert_eq!(
+        live(&st, sid),
+        vec![(
+            "ABC-2".into(),
+            "confirmed".into(),
+            "branch".into(),
+            Some("R3".into())
+        )]
+    );
+    // Back to the cleared branch: ABC-2's automatic link ends (R7), and
+    // ABC-1 stays cleared — the same value is held.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-1-login").unwrap();
+        resolve_session(&s, sid).unwrap();
+    }
+    assert!(live(&st, sid).is_empty(), "{:?}", live(&st, sid));
+    // A branch of the same key under another name is another value.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-1-login-v2").unwrap();
+        resolve_session(&s, sid).unwrap();
+    }
+    let again = st.lock().unwrap().session_work_links(sid).unwrap();
+    assert_eq!(
+        again
+            .iter()
+            .map(|l| (l.ref_key.as_deref(), l.state.as_str(), l.source.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Some("ABC-1"), "confirmed", "branch")]
+    );
+
+    // An agent's unlink stays a plain unlink: no hold, and the unchanged
+    // branch links it again at once.
+    let row = unlink_as(&st, sid, again[0].id, Decider::Agent);
+    assert_eq!(holds(&st), 1, "an agent writes no hold");
+    assert_eq!(
+        row.work.and_then(|w| w.key).as_deref(),
+        Some("ABC-1"),
+        "relinked by the branch"
+    );
+
+    // Event candidates are never held: a prompt naming ABC-1 on the held
+    // branch still proposes it.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-1-login").unwrap();
+        resolve_session(&s, sid).unwrap();
+        assert!(links(&s, sid).is_empty(), "the -v2 link ended (R7)");
+        on_prompt(&s, sid, "see ABC-1 again", false).unwrap();
+    }
+    assert_eq!(
+        live(&st, sid),
+        vec![(
+            "ABC-1".into(),
+            "suggested".into(),
+            "prompt".into(),
+            Some("R6".into())
+        )]
+    );
+
+    // The hold goes when the participant retires.
+    {
+        let s = st.lock().unwrap();
+        let p = s.participant_for_session(sid).unwrap().unwrap().id;
+        s.retire_participant(p).unwrap();
+    }
+    assert_eq!(holds(&st), 0);
+}
+
+/// R9u in an untrusted project: the branch's suggestion (R3b), confirmed
+/// by the person and then cleared, is not proposed again from that branch.
+#[test]
+fn clearing_a_confirmed_branch_suggestion_does_not_bring_it_back() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    f.s.set_current_branch(sid, "abc-3-fix").unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let sg = f.s.session_work_links(sid).unwrap()[0].clone();
+    assert_eq!(
+        (sg.state.as_str(), sg.rule.as_deref()),
+        ("suggested", Some("R3b"))
+    );
+    decide(&f.s, sid, sg.id, true, Decider::Person).unwrap();
+    let st = std::sync::Mutex::new(f.s);
+    unlink_as(&st, sid, sg.id, Decider::Person);
+    assert!(live(&st, sid).is_empty(), "{:?}", live(&st, sid));
+    resolve_session(&st.lock().unwrap(), sid).unwrap();
+    assert!(live(&st, sid).is_empty());
+}
+
+/// R9u for a pull request: a link its closing reference made is held while
+/// it is the same PR; another PR closing the same ticket links it again.
+/// Clearing a link no state signal names (a person's own) holds nothing.
+#[test]
+fn clearing_a_pr_link_holds_for_that_pr_only() {
+    let f = fx();
+    trust(&f);
+    let sid = session(&f, "dev", "c1");
+    let pr = |s: &Store, url: &str| {
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET pr_url = ?1 WHERE id = ?2",
+                rusqlite::params![url, sid],
+            )
+            .unwrap();
+        s.set_pr_signals("h", "dev", Some(r#"{"closing":["ABC-5"]}"#))
+            .unwrap();
+        resolve_session(s, sid).unwrap();
+    };
+    pr(&f.s, "https://github.com/acme/api/pull/1");
+    let link = f.s.session_work_links(sid).unwrap()[0].clone();
+    assert_eq!(
+        (link.source.as_str(), link.rule.as_deref()),
+        ("pr", Some("R3"))
+    );
+    let project = f.project;
+    let st = std::sync::Mutex::new(f.s);
+    unlink_as(&st, sid, link.id, Decider::Person);
+    assert!(live(&st, sid).is_empty());
+    let (signal, value): (String, String) = st
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .query_row("SELECT signal, value FROM work_unlinks", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(
+        (signal.as_str(), value.as_str()),
+        ("pr", "https://github.com/acme/api/pull/1")
+    );
+    resolve_session(&st.lock().unwrap(), sid).unwrap();
+    assert!(live(&st, sid).is_empty(), "the same PR stays cleared");
+    // Another PR closing the same ticket is another value.
+    pr(&st.lock().unwrap(), "https://github.com/acme/api/pull/2");
+    assert_eq!(
+        live(&st, sid),
+        vec![(
+            "ABC-5".into(),
+            "confirmed".into(),
+            "pr".into(),
+            Some("R3".into())
+        )]
+    );
+
+    // A person's own link on a session no signal names: a plain unlink.
+    let other = {
+        let s = st.lock().unwrap();
+        let id = s
+            .upsert_session("other", "h", Some(project), None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(id, WorkTarget::Key("ABC-9"), "manual")
+            .unwrap()
+            .id
+    };
+    let other_sid = st
+        .lock()
+        .unwrap()
+        .get_session("other", "h")
+        .unwrap()
+        .unwrap()
+        .id;
+    unlink_as(&st, other_sid, other, Decider::Person);
+    assert!(live(&st, other_sid).is_empty());
+    assert_eq!(holds(&st), 1, "only the PR's");
+}

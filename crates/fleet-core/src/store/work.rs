@@ -31,6 +31,14 @@ pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent", "agent_st
 /// only these count as a person's in usage, auto-trust and write-back.
 pub const PERSON_SOURCES: &[&str] = &["manual", "started"];
 
+/// The state signals a person's unlink holds a target against (R9u,
+/// migration 066): `branch` (a branch name: the session's, or its pull
+/// request's head) and `pr` (a pull request, for its closing references).
+pub const WORK_UNLINK_SIGNALS: &[&str] = &["branch", "pr"];
+
+/// The most `work_unlinks` rows one participant keeps (the newest).
+pub const WORK_UNLINKS_MAX: i64 = 50;
+
 /// Who makes a link decision. The decider, not what a caller claims,
 /// decides the `source` a decision records: work-link labels must say
 /// whether a person or an agent decided. The default is a person: the
@@ -823,13 +831,69 @@ impl Store {
     /// Remove one live link of `session_id` (a mistaken link, not a
     /// rejection: the target may be proposed again). `false` when the link
     /// does not exist, is not this session's, or has already ended — ended
-    /// links are history and are never removed here.
+    /// links are history and are never removed here. An agent's unlink; a
+    /// person's goes through [`Self::unlink_session_work_held`].
     pub fn unlink_session_work(&self, session_id: i64, link_id: i64) -> Result<bool, IpcError> {
-        let n = self.conn.execute(
-            "DELETE FROM work_links WHERE id = ?1 AND ended_at IS NULL AND participant_id = \
-               (SELECT id FROM participants WHERE session_id = ?2 AND retired_at IS NULL)",
-            rusqlite::params![link_id, session_id],
-        )?;
+        self.unlink_session_work_held(session_id, link_id, &[])
+    }
+
+    /// [`Self::unlink_session_work`] by a PERSON whose correction must hold
+    /// against the unchanged state signal that named the link's target
+    /// (R9u, D34): with the delete, in one savepoint, write one
+    /// `work_unlinks` row per `(signal, value)` in `holds` (`branch` or
+    /// `pr`, see [`WORK_UNLINK_SIGNALS`]) for the link's target. Detection
+    /// then drops a state candidate for that target while the signal's
+    /// value is the same. Nothing is written when the link is not removed.
+    /// A participant keeps its newest [`WORK_UNLINKS_MAX`] rows.
+    pub fn unlink_session_work_held(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        holds: &[(&str, String)],
+    ) -> Result<bool, IpcError> {
+        if let Some((signal, _)) = holds.iter().find(|(s, _)| !WORK_UNLINK_SIGNALS.contains(s)) {
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!("unknown unlink signal {signal:?}"),
+            ));
+        }
+        let n = self.in_savepoint("unlink_session_work", |c| -> Result<usize, IpcError> {
+            let link: Option<(i64, Option<i64>, Option<String>)> = c
+                .query_row(
+                    "SELECT participant_id, item_id, ref_key FROM work_links \
+                     WHERE id = ?1 AND ended_at IS NULL AND participant_id = \
+                       (SELECT id FROM participants WHERE session_id = ?2 \
+                          AND retired_at IS NULL)",
+                    rusqlite::params![link_id, session_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((participant, item_id, ref_key)) = link else {
+                return Ok(0);
+            };
+            let now = now_unix();
+            for (signal, value) in holds {
+                c.execute(
+                    "INSERT INTO work_unlinks (participant_id, item_id, ref_key, signal, value, at) \
+                     SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE NOT EXISTS ( \
+                       SELECT 1 FROM work_unlinks WHERE participant_id = ?1 \
+                         AND item_id IS ?2 AND ref_key IS ?3 AND signal = ?4 AND value = ?5)",
+                    rusqlite::params![participant, item_id, ref_key, signal, value, now],
+                )?;
+            }
+            if !holds.is_empty() {
+                c.execute(
+                    "DELETE FROM work_unlinks WHERE participant_id = ?1 AND id NOT IN \
+                       (SELECT id FROM work_unlinks WHERE participant_id = ?1 \
+                         ORDER BY id DESC LIMIT ?2)",
+                    rusqlite::params![participant, WORK_UNLINKS_MAX],
+                )?;
+            }
+            Ok(c.execute(
+                "DELETE FROM work_links WHERE id = ?1",
+                rusqlite::params![link_id],
+            )?)
+        })?;
         if n > 0 {
             self.bump_session_for_work(session_id)?;
             self.emit_session(session_id)?;

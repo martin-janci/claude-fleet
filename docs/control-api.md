@@ -350,7 +350,10 @@ Index by area (names only; see the reference for details):
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
   or `item_id` — it becomes the session's primary work, `source` `manual` by
   default or `agent` from the in-session agent; `reject` — a sticky "not
-  this"; `unlink` a `link_id`). Returns the updated row; a session row's
+  this"; `unlink` a `link_id` — a person's unlink (the master, a paired
+  person's client) also keeps the unchanged branch / PR that named the key
+  from linking it again, rule R9u; a per-host token's or the operator's is a
+  plain unlink). Returns the updated row; a session row's
   `work` carries its primary link. A per-host token reads and decides only
   its own host's sessions. With neither `session_id` nor `key`, `work`
   lists the links that ended within `work.recent_days`.

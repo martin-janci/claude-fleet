@@ -575,6 +575,137 @@ pub fn resolve_with(s: &Store, session_id: i64, events: Vec<Candidate>) -> Resul
     run(s, &st, &tv, events)
 }
 
+/// One spelling per target: a candidate naming a tracker item by an alias
+/// (a moved issue) reads as the item's current key, the same key
+/// `detection_links` labels its links with.
+fn canonicalize<'a>(
+    s: &Store,
+    cands: impl Iterator<Item = &'a mut Candidate>,
+) -> Result<(), IpcError> {
+    for c in cands {
+        let canonical = s.canonical_work_target(&c.target, c.tracker_id)?;
+        if canonical != c.target {
+            c.target = canonical;
+        }
+    }
+    Ok(())
+}
+
+/// The raw values of a session's state signals, which a person's unlink
+/// is held against (R9u): the branch, the PR's head branch, and the PR
+/// itself (its URL, else `head:<branch>`; `None` when never probed or no
+/// PR). Full values, not the evidence's capped text.
+struct StateValues {
+    branch: Option<String>,
+    head: Option<String>,
+    pr: Option<String>,
+}
+
+impl StateValues {
+    fn of(st: &DetectionState) -> StateValues {
+        let sig: Option<PrSignals> = st
+            .pr_probed
+            .then_some(st.pr_signals.as_deref())
+            .flatten()
+            .and_then(|j| serde_json::from_str(j).ok());
+        let head = sig.as_ref().and_then(|p| p.head.clone());
+        let pr = sig.as_ref().and_then(|_| {
+            st.pr_url
+                .clone()
+                .or_else(|| head.as_ref().map(|h| format!("head:{h}")))
+        });
+        StateValues {
+            branch: st.branch.clone(),
+            head,
+            pr,
+        }
+    }
+
+    /// The `(signal, value)` a state candidate is held by, `None` for an
+    /// event candidate.
+    fn hold_of(&self, c: &Candidate) -> Option<(&'static str, &str)> {
+        match c.signal {
+            Signal::Branch => self.branch.as_deref().map(|v| ("branch", v)),
+            // A PR's head IS a branch: holding the branch name holds it.
+            Signal::PrHead => self.head.as_deref().map(|v| ("branch", v)),
+            Signal::PrClosing => self.pr.as_deref().map(|v| ("pr", v)),
+            _ => None,
+        }
+    }
+}
+
+/// R9u: drop the state candidates a person's unlink holds — the same
+/// target from the same signal with the same value as when they cleared
+/// it. Another value (the branch moved on, another PR) is not held; the
+/// same value again is. Event candidates are never held.
+fn drop_held(
+    s: &Store,
+    st: &DetectionState,
+    branch: &mut Option<Vec<Candidate>>,
+    pr: &mut Option<Vec<Candidate>>,
+) -> Result<(), IpcError> {
+    let holds = s.work_unlink_holds(st.participant)?;
+    if holds.is_empty() {
+        return Ok(());
+    }
+    let vals = StateValues::of(st);
+    let held = |c: &Candidate| {
+        vals.hold_of(c).is_some_and(|(signal, value)| {
+            holds
+                .iter()
+                .any(|(t, sg, v)| *t == c.target && sg == signal && v == value)
+        })
+    };
+    for v in branch.iter_mut().chain(pr.iter_mut()) {
+        v.retain(|c| !held(c));
+    }
+    Ok(())
+}
+
+/// What a PERSON's unlink of `link_id` must hold (R9u): one `(signal,
+/// value)` per current state signal that names the link's target — the
+/// signals the next resolver run would make the same link again from (R3,
+/// R3b). Empty when no state signal names it (a link from a prompt, or
+/// one whose branch already moved on): a plain unlink then.
+pub fn unlink_holds(
+    s: &Store,
+    session_id: i64,
+    link_id: i64,
+) -> Result<Vec<(&'static str, String)>, IpcError> {
+    let Some(st) = s.detection_state(session_id)? else {
+        return Ok(Vec::new());
+    };
+    let Some(target) = s
+        .detection_links(st.participant)?
+        .into_iter()
+        .find(|(l, _)| l.id == link_id)
+        .map(|(_, t)| t)
+    else {
+        return Ok(Vec::new());
+    };
+    let tv = tracker_view(s, st.repo.clone())?;
+    let now = crate::service::catalog::now_secs();
+    let (mut branch, mut pr, _) = state_candidates(&st, &tv, now);
+    canonicalize(
+        s,
+        branch.iter_mut().flatten().chain(pr.iter_mut().flatten()),
+    )?;
+    let vals = StateValues::of(&st);
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for c in branch.iter().flatten().chain(pr.iter().flatten()) {
+        if c.target != target {
+            continue;
+        }
+        if let Some((signal, value)) = vals.hold_of(c) {
+            let hold = (signal, value.to_string());
+            if !out.contains(&hold) {
+                out.push(hold);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn run(
     s: &Store,
     st: &DetectionState,
@@ -584,20 +715,16 @@ fn run(
     let now = crate::service::catalog::now_secs();
     let (mut branch, mut pr, pr_events) = state_candidates(st, tv, now);
     events.extend(pr_events);
-    // One spelling per target: a candidate naming a tracker item by an
-    // alias (a moved issue) reads as the item's current key, the same key
-    // `detection_links` labels its links with.
-    for c in branch
-        .iter_mut()
-        .flatten()
-        .chain(pr.iter_mut().flatten())
-        .chain(events.iter_mut())
-    {
-        let canonical = s.canonical_work_target(&c.target, c.tracker_id)?;
-        if canonical != c.target {
-            c.target = canonical;
-        }
-    }
+    canonicalize(
+        s,
+        branch
+            .iter_mut()
+            .flatten()
+            .chain(pr.iter_mut().flatten())
+            .chain(events.iter_mut()),
+    )?;
+    // A person's "Clear work" holds against the unchanged state (R9u).
+    drop_held(s, st, &mut branch, &mut pr)?;
     let links = s
         .detection_links(st.participant)?
         .into_iter()
