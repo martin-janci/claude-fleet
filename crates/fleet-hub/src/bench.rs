@@ -13,6 +13,13 @@
 //! recorded in `decision_runs` (which is why that run opens the database
 //! for writing). `--export-unlinked` writes the D39 hand-label file: new
 //! only, `0600`, and it holds prompt and title text.
+//!
+//! `--provider haiku` (D33, both benches) asks the same request of `claude
+//! -p` on the host named by `--haiku-host` (required): each case's redacted
+//! state and options leave the hub over SSH for that host and reach
+//! Anthropic through its Claude account. A note on stderr (and in the
+//! report) names the host before anything is sent; nothing is recorded in
+//! `decision_runs`.
 
 use crate::census::create_private;
 use crate::config::{self, HubOptions};
@@ -23,6 +30,7 @@ use fleet_core::service::decide::bench::status_map as sm;
 use fleet_core::service::decide::bench::work_link::{
     self as wl, BenchOptions, Provider, Shape, Split,
 };
+use fleet_core::service::decide::haiku::{Haiku, HaikuConfig};
 use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::nl::Detector;
 use fleet_core::store::Store;
@@ -40,18 +48,23 @@ pub enum BenchCmd {
     /// coverage at precision 0.9, abstention, latency and cost per
     /// provider, by org, tracker, language, code and candidate-set size.
     ///
-    /// Read-only and offline unless --provider jev is given. No prompt or
-    /// title is printed; counts under 5 show as <5.
+    /// Read-only and offline unless --provider jev (writes decision_runs)
+    /// or --provider haiku (claude -p on --haiku-host; the database stays
+    /// read-only) is given. No prompt or title is printed; counts under 5
+    /// show as <5.
     WorkLink {
         /// Which cases to report: dev (oldest 60%), test (newest 40%) or
         /// all. Thresholds are always chosen on dev. [default: test]
         #[arg(long, value_parser = ["dev", "test", "all"])]
         split: Option<String>,
-        /// A provider to run: none, bm25, jev (repeat it). [default: none
-        /// and bm25]. jev sends each case's redacted prompt and candidate
-        /// titles to TypeSafe, only for orgs that consented.
-        #[arg(long = "provider", value_parser = ["none", "bm25", "jev"])]
+        /// A provider to run: none, bm25, jev, haiku (repeat it). [default:
+        /// none and bm25]. jev sends each case's redacted prompt and
+        /// candidate titles to TypeSafe, only for orgs that consented;
+        /// haiku sends the same to claude -p on --haiku-host.
+        #[arg(long = "provider", value_parser = ["none", "bm25", "jev", "haiku"])]
         providers: Vec<String>,
+        #[command(flatten)]
+        haiku: HaikuArgs,
         /// The window in days (1-730). [default: 365]
         #[arg(long)]
         days: Option<u32>,
@@ -97,8 +110,9 @@ pub enum BenchCmd {
     /// confusion matrix and calibration per provider, by language and
     /// ambiguous / clear, and card J3's acceptance.
     ///
-    /// Offline unless --provider jev is given: without it no database is
-    /// opened. No section name is printed.
+    /// Offline unless --provider jev or --provider haiku (claude -p on
+    /// --haiku-host) is given; only jev opens a database. No section name
+    /// is printed.
     StatusMap {
         /// The labeled sections (JSON lines).
         #[arg(long, value_name = "FILE", conflicts_with = "fixture")]
@@ -108,11 +122,14 @@ pub enum BenchCmd {
         /// decide.jev.unassigned.
         #[arg(long)]
         fixture: bool,
-        /// A provider to run: none, todo, rule, jev (repeat it). [default:
-        /// todo and rule]. jev sends each section's name and its board's
-        /// names to TypeSafe through the envelope's gate.
-        #[arg(long = "provider", value_parser = ["none", "todo", "rule", "jev"])]
+        /// A provider to run: none, todo, rule, jev, haiku (repeat it).
+        /// [default: todo and rule]. jev sends each section's name and its
+        /// board's names to TypeSafe through the envelope's gate; haiku
+        /// sends the same to claude -p on --haiku-host.
+        #[arg(long = "provider", value_parser = ["none", "todo", "rule", "jev", "haiku"])]
         providers: Vec<String>,
+        #[command(flatten)]
+        haiku: HaikuArgs,
         /// Jev calls at most in this run; later cases are skipped. [default: 500]
         #[arg(long)]
         max_calls: Option<usize>,
@@ -124,6 +141,57 @@ pub enum BenchCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// The `claude -p haiku` baseline's flags (D33), shared by both benches.
+#[derive(clap::Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct HaikuArgs {
+    /// The host whose `claude -p` answers for --provider haiku (required
+    /// with it): each case's redacted state and options go over SSH to
+    /// this host and on to Anthropic through its Claude account.
+    #[arg(long, value_name = "ALIAS")]
+    pub haiku_host: Option<String>,
+    /// The model claude -p runs. [default: haiku]
+    #[arg(long, value_parser = ["haiku", "sonnet", "opus"])]
+    pub haiku_model: Option<String>,
+    /// One call's wall clock in seconds (10-600). [default: 120]
+    #[arg(long, value_name = "SECS")]
+    pub haiku_timeout: Option<u64>,
+}
+
+impl HaikuArgs {
+    /// The checked configuration when `wanted` (`--provider haiku`), which
+    /// needs `--haiku-host`; the haiku flags without it are an error.
+    fn config(&self, wanted: bool) -> Result<Option<HaikuConfig>, String> {
+        match (&self.haiku_host, wanted) {
+            (Some(host), true) => HaikuConfig::new(
+                host,
+                self.haiku_model.as_deref(),
+                self.haiku_timeout,
+            )
+            .map(Some)
+            .map_err(|e| format!("--haiku-*: {e}")),
+            (None, true) => Err(
+                "--provider haiku needs --haiku-host ALIAS: the host whose claude -p answers                  (each case's redacted state and options are sent there, and on to Anthropic                  through its Claude account)"
+                    .into(),
+            ),
+            (_, false)
+                if self.haiku_host.is_some()
+                    || self.haiku_model.is_some()
+                    || self.haiku_timeout.is_some() =>
+            {
+                Err("--haiku-host, --haiku-model and --haiku-timeout go with --provider haiku".into())
+            }
+            (_, false) => Ok(None),
+        }
+    }
+}
+
+/// Say where the data goes before any of it is sent.
+fn haiku_note(cfg: &HaikuConfig) -> String {
+    let n = cfg.consent_note();
+    out::error(&n);
+    n
 }
 
 fn now() -> i64 {
@@ -161,6 +229,7 @@ pub async fn run(
         BenchCmd::WorkLink {
             split,
             providers,
+            haiku: haiku_args,
             days,
             org,
             max_cases,
@@ -203,6 +272,9 @@ pub async fn run(
                 return Ok(ExitCode::SUCCESS);
             }
 
+            let haiku_cfg = haiku_args.config(o.providers.contains(&Provider::Haiku))?;
+            let ssh = fleet_core::ssh::SshClient::new();
+            let haiku = haiku_cfg.map(|cfg| Haiku { exec: &ssh, cfg });
             let labeled = match &labels {
                 Some(file) => {
                     let raw = std::fs::read_to_string(file)
@@ -228,15 +300,21 @@ pub async fn run(
                     o.max_calls
                 ));
                 let ctx = DecideCtx::jev(Arc::clone(&store));
-                let outs = wl::run_providers(&loaded, &o, Some(&ctx)).await;
-                wl::report(&loaded, &o, &outs)
+                let note = haiku.as_ref().map(|h| haiku_note(&h.cfg));
+                let outs = wl::run_providers_with(&loaded, &o, Some(&ctx), haiku.as_ref()).await;
+                let mut r = wl::report(&loaded, &o, &outs);
+                r.notes.extend(note);
+                r
             } else {
                 let store = Store::open_read_only(&path)
                     .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
                 let loaded =
                     wl::load(&store, &detector, &o, labeled.as_deref()).map_err(|e| e.message)?;
-                let outs = wl::run_providers(&loaded, &o, None).await;
-                wl::report(&loaded, &o, &outs)
+                let note = haiku.as_ref().map(|h| haiku_note(&h.cfg));
+                let outs = wl::run_providers_with(&loaded, &o, None, haiku.as_ref()).await;
+                let mut r = wl::report(&loaded, &o, &outs);
+                r.notes.extend(note);
+                r
             };
             if json {
                 out::line(&serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
@@ -251,14 +329,18 @@ pub async fn run(
             labels,
             fixture,
             providers,
+            haiku,
             max_calls,
             db,
             json,
         } => {
+            let ssh = fleet_core::ssh::SshClient::new();
             let report = status_map(
                 labels.as_deref(),
                 fixture,
                 &providers,
+                &haiku,
+                &ssh,
                 max_calls,
                 db.as_deref(),
                 opts,
@@ -292,11 +374,15 @@ fn parse_sm_providers(v: &[String]) -> Result<Vec<sm::Provider>, String> {
 
 /// `decide bench status-map`: the labeled sections (or the built-in set)
 /// through the providers. Only `--provider jev` opens a database — for
-/// writing, as the envelope records every call.
+/// writing, as the envelope records every call. `--provider haiku` runs on
+/// `ssh` against `--haiku-host`.
+#[allow(clippy::too_many_arguments)]
 async fn status_map(
     labels: Option<&Path>,
     fixture: bool,
     providers: &[String],
+    haiku_args: &HaikuArgs,
+    ssh: &dyn fleet_core::ssh::SshExec,
     max_calls: Option<usize>,
     db: Option<&Path>,
     opts: &HubOptions,
@@ -322,6 +408,10 @@ async fn status_map(
     let (cases, dropped) = sm::cases(&rows);
     let providers = parse_sm_providers(providers)?;
     let max_calls = max_calls.unwrap_or(sm::DEFAULT_MAX_CALLS);
+    let haiku = haiku_args
+        .config(providers.contains(&sm::Provider::Haiku))?
+        .map(|cfg| Haiku { exec: ssh, cfg });
+    let note = haiku.as_ref().map(|h| haiku_note(&h.cfg));
     let outs = if providers.contains(&sm::Provider::Jev) {
         let path = db_path(db, opts, env)?;
         let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
@@ -331,17 +421,13 @@ async fn status_map(
              the gate, at most {max_calls} calls; each call is recorded in decision_runs"
         ));
         let ctx = DecideCtx::jev(Arc::new(Mutex::new(store)));
-        sm::run_providers(&cases, &providers, Some(&ctx), max_calls).await
+        sm::run_providers_with(&cases, &providers, Some(&ctx), haiku.as_ref(), max_calls).await
     } else {
-        sm::run_providers(&cases, &providers, None, max_calls).await
+        sm::run_providers_with(&cases, &providers, None, haiku.as_ref(), max_calls).await
     };
-    Ok(sm::report(
-        &cases,
-        &outs,
-        rows.len(),
-        dropped,
-        labels.is_none(),
-    ))
+    let mut r = sm::report(&cases, &outs, rows.len(), dropped, labels.is_none());
+    r.notes.extend(note);
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -403,7 +489,8 @@ mod tests {
     #[test]
     fn unknown_values_are_refused() {
         assert!(parse(&["work-link", "--split", "train"]).is_err());
-        assert!(parse(&["work-link", "--provider", "haiku"]).is_err());
+        assert!(parse(&["work-link", "--provider", "sonnet"]).is_err());
+        assert!(parse(&["status-map", "--haiku-model", "claude-opus-5-5"]).is_err());
         assert!(parse(&["work-link", "--shape", "noul"]).is_err());
         assert!(parse(&["status-map", "--provider", "bm25"]).is_err());
         assert!(parse(&["status-map", "--fixture", "--labels", "x.jsonl"]).is_err());
@@ -418,6 +505,223 @@ mod tests {
         };
         assert_eq!(shape.as_deref(), Some("choice+noul"));
         assert_eq!(Shape::parse("choice+noul"), Some(Shape::ChoiceNoul));
+    }
+
+    /// A transport that answers every command with `stdout` and records
+    /// the host of each call.
+    #[derive(Default)]
+    struct Canned {
+        stdout: String,
+        hosts: Mutex<Vec<String>>,
+    }
+
+    impl Canned {
+        fn hosts(&self) -> Vec<String> {
+            self.hosts.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl fleet_core::ssh::SshExec for Canned {
+        async fn run(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: std::time::Duration,
+        ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
+            unreachable!("haiku runs bounded")
+        }
+        async fn run_bounded(
+            &self,
+            host: &str,
+            _: &[&str],
+            _: std::time::Duration,
+            _: std::time::Duration,
+        ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
+            use std::os::unix::process::ExitStatusExt;
+            self.hosts.lock().unwrap().push(host.to_string());
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: self.stdout.clone().into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+        async fn run_cancellable(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: std::time::Duration,
+            _: tokio_util::sync::CancellationToken,
+        ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
+            unreachable!()
+        }
+        async fn run_bounded_cancellable(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: std::time::Duration,
+            _: std::time::Duration,
+            _: tokio_util::sync::CancellationToken,
+        ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
+            unreachable!()
+        }
+        async fn upload_file(
+            &self,
+            _: &str,
+            _: &Path,
+            _: &str,
+            _: std::time::Duration,
+        ) -> Result<(), fleet_core::ipc_error::IpcError> {
+            unreachable!()
+        }
+        async fn remote_home(&self, _: &str) -> Result<String, fleet_core::ipc_error::IpcError> {
+            unreachable!()
+        }
+    }
+
+    /// `status_map` without the haiku baseline (its flags unset, a
+    /// transport that must never be used).
+    async fn status_map(
+        labels: Option<&Path>,
+        fixture: bool,
+        providers: &[String],
+        max_calls: Option<usize>,
+        db: Option<&Path>,
+        opts: &HubOptions,
+        env: &HashMap<String, String>,
+    ) -> Result<sm::Report, String> {
+        let never = Canned::default();
+        let r = super::status_map(
+            labels,
+            fixture,
+            providers,
+            &HaikuArgs::default(),
+            &never,
+            max_calls,
+            db,
+            opts,
+            env,
+        )
+        .await;
+        assert!(never.hosts().is_empty());
+        r
+    }
+
+    #[test]
+    fn haiku_needs_its_host_and_its_flags_need_it() {
+        let Ok(BenchCmd::StatusMap {
+            haiku, providers, ..
+        }) = parse(&[
+            "status-map",
+            "--fixture",
+            "--provider",
+            "haiku",
+            "--haiku-host",
+            "gpu1",
+            "--haiku-model",
+            "sonnet",
+            "--haiku-timeout",
+            "30",
+        ])
+        else {
+            panic!("status-map");
+        };
+        assert_eq!(providers, vec!["haiku"]);
+        let cfg = haiku.config(true).unwrap().unwrap();
+        assert_eq!(
+            (cfg.host.as_str(), cfg.model.as_str(), cfg.timeout.as_secs()),
+            ("gpu1", "sonnet", 30)
+        );
+        // The flags without the provider, and the provider without a host.
+        assert!(haiku
+            .config(false)
+            .unwrap_err()
+            .contains("--provider haiku"));
+        let e = HaikuArgs::default().config(true).unwrap_err();
+        assert!(e.contains("--haiku-host") && e.contains("Anthropic"), "{e}");
+        assert_eq!(HaikuArgs::default().config(false), Ok(None));
+        let bad = |host: &str, timeout: Option<u64>| HaikuArgs {
+            haiku_host: Some(host.into()),
+            haiku_timeout: timeout,
+            ..Default::default()
+        };
+        assert!(bad("-oProxyCommand=id", None).config(true).is_err());
+        assert!(bad("gpu1", Some(5)).config(true).is_err());
+        assert!(bad("gpu1", None).config(true).is_ok());
+        let Ok(BenchCmd::WorkLink { haiku, .. }) =
+            parse(&["work-link", "--provider", "haiku", "--haiku-host", "gpu1"])
+        else {
+            panic!("work-link");
+        };
+        assert_eq!(haiku.haiku_host.as_deref(), Some("gpu1"));
+    }
+
+    #[tokio::test]
+    async fn status_map_with_haiku_asks_the_named_host_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sections.jsonl");
+        std::fs::write(
+            &file,
+            "{\"section\":\"Hotovo\",\"project_sections\":[\"Nové\",\"Hotovo\"],\"expect\":\"done\",\"lang\":\"sk\"}\n\
+             {\"section\":\"Nové\",\"project_sections\":[\"Nové\",\"Hotovo\"],\"expect\":\"todo\",\"lang\":\"sk\"}\n",
+        )
+        .unwrap();
+        let envelope = serde_json::json!({
+            "type": "result",
+            "result": "{\"choice\": \"done\", \"confidence\": 0.9}",
+            "usage": { "input_tokens": 50, "output_tokens": 5 },
+            "total_cost_usd": 0.001,
+        });
+        let fake = Canned {
+            stdout: format!("fleet-haiku=run\n{envelope}\n"),
+            ..Default::default()
+        };
+        let args = HaikuArgs {
+            haiku_host: Some("gpu1".into()),
+            ..Default::default()
+        };
+        let providers = ["rule".to_string(), "haiku".to_string()];
+        let r = super::status_map(
+            Some(&file),
+            false,
+            &providers,
+            &args,
+            &fake,
+            None,
+            None,
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fake.hosts(), vec!["gpu1", "gpu1"]);
+        let m = r.metrics.iter().find(|m| m.provider == "haiku").unwrap();
+        assert_eq!((m.calls, m.all.answered, m.all.correct), (2, 2, 1));
+        assert_eq!((m.input_tokens, m.cost_microusd), (100, 2000));
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.contains("host gpu1") && n.contains("Anthropic")),
+            "{:?}",
+            r.notes
+        );
+        // Without the host nothing is sent.
+        let fake = Canned::default();
+        let e = super::status_map(
+            Some(&file),
+            false,
+            &providers,
+            &HaikuArgs::default(),
+            &fake,
+            None,
+            None,
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("--haiku-host"), "{e}");
+        assert!(fake.hosts().is_empty());
     }
 
     #[tokio::test]
@@ -591,6 +895,23 @@ mod tests {
         )
         .await
         .unwrap();
+        // haiku without its host: refused before anything is read or sent.
+        let e = run(
+            parse(&["work-link", "--db", db_s, "--provider", "haiku"]).unwrap(),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("--haiku-host"), "{e}");
+        let e = run(
+            parse(&["work-link", "--db", db_s, "--haiku-host", "gpu1"]).unwrap(),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("--provider haiku"), "{e}");
         let file = dir.path().join("h.jsonl");
         let file_s = file.to_str().unwrap();
         let export = || {
