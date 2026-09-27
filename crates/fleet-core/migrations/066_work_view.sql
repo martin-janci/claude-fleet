@@ -1,7 +1,7 @@
 -- Work graph M14.1b (docs/superpowers/specs/2026-09-27-work-view-design.md):
 -- the Work view's read contract — local placement, placement rules, saved
 -- views, a local item's own org, link versions, a conflict's review ack and
--- org-bound paired clients (D31's per-org switch is 066). Additive only: every
+-- org-bound paired clients (D31's per-org switch is 067). Additive only: every
 -- column has a default, every table is new. The writes that use them
 -- (compare-and-set, placement, rules, views, ack) are M14.1c's; this
 -- migration carries their schema because the reads answer it.
@@ -100,4 +100,4 @@ CREATE TABLE IF NOT EXISTS work_views (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_work_views_name
   ON work_views(COALESCE(owner_org, 0), name);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (65);
+INSERT OR IGNORE INTO schema_version (version) VALUES (66);

@@ -95,6 +95,14 @@ pub fn spawn_reconcile_tick(
                     }
                     Err(e) => tracing::warn!("reconcile tick: reconcile failed: {e}"),
                 }
+                // Lifecycle F2: a `working` row nothing has moved for
+                // `reconcile.stale_working_secs` becomes `idle` (+ the
+                // `stale_working` attention reason), before the playbooks
+                // read the fresh statuses.
+                let stale = service::sessions::age_out_stale_working(store);
+                if stale > 0 {
+                    tracing::info!("reconcile tick: {stale} stale working row(s) demoted");
+                }
                 // Wave 2 Track D: lifecycle automation rides the same tick, after
                 // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
                 // Both are opt-in through settings and cheap when off. Their

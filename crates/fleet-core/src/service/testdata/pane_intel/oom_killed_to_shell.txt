@@ -1,0 +1,5 @@
+⏺ Bash(cargo test --workspace)
+  ⎿  Running unittests src/lib.rs (target/debug/deps/fleet_core-1a2b3c)
+
+Killed
+martin@htz:~/projects/claude-fleet$

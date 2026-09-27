@@ -4,7 +4,7 @@
 //! | kind          | action                                   | gate                       |
 //! |---------------|------------------------------------------|----------------------------|
 //! | press_enter   | send Enter to the pane                   | `playbooks.press_enter`    |
-//! | oom           | recreate (resume by claude_session_id)   | `playbooks.oom_recreate`, ≤1/h |
+//! | oom           | recreate (resume by claude_session_id)   | `playbooks.oom_recreate`, ≤1/h, ≤`playbooks.oom_max_attempts` per 24 h, never while working |
 //! | auth_menu, trust_prompt, reconnect | notify only (row + timeline event) | always |
 //!
 //! Every action runs at most once per stuck *episode*: reconcile stamps
@@ -23,10 +23,19 @@ use std::sync::{Arc, Mutex};
 /// Minimum spacing between two `oom` recreates of the same session.
 pub const OOM_RECREATE_MIN_SPACING_SECS: i64 = 3600;
 
+/// Recreates one session may get per [`OOM_ATTEMPT_WINDOW_SECS`]
+/// (`playbooks.oom_max_attempts`): the F1 loop was one session recreated
+/// twice in 83 minutes on a word it was reading, and a spacing is not a
+/// budget.
+pub const OOM_ATTEMPT_WINDOW_SECS: i64 = 86_400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlaybookConfig {
     pub press_enter: bool,
     pub oom_recreate: bool,
+    /// Recreates one session may get per [`OOM_ATTEMPT_WINDOW_SECS`];
+    /// `0` refuses every recreate (the toggle stays on so refusals are logged).
+    pub oom_max_attempts: u32,
 }
 
 impl PlaybookConfig {
@@ -34,6 +43,9 @@ impl PlaybookConfig {
         Self {
             press_enter: settings::get_bool(s, settings::PLAYBOOK_PRESS_ENTER),
             oom_recreate: settings::get_bool(s, settings::PLAYBOOK_OOM_RECREATE),
+            oom_max_attempts: settings::get_string(s, settings::PLAYBOOK_OOM_MAX_ATTEMPTS)
+                .parse()
+                .unwrap_or(2),
         }
     }
 }
@@ -44,6 +56,13 @@ pub enum PlaybookAction {
     Recreate,
     /// No keystrokes: only the `playbook_applied` timeline entry + row event.
     Notify,
+    /// A keystroke playbook that would have run but was refused. The reason
+    /// goes on the timeline as `<kind>:<action>:skipped:<why>` and the
+    /// episode is stamped, so the refusal is written once, not every tick.
+    Skipped {
+        action: &'static str,
+        why: &'static str,
+    },
 }
 
 impl PlaybookAction {
@@ -52,6 +71,7 @@ impl PlaybookAction {
             PlaybookAction::PressEnter => "press_enter",
             PlaybookAction::Recreate => "recreate",
             PlaybookAction::Notify => "notify",
+            PlaybookAction::Skipped { action, .. } => action,
         }
     }
 }
@@ -66,17 +86,64 @@ pub struct Planned {
     pub action: PlaybookAction,
 }
 
-/// Pure: decide which rows get which playbook this tick.
-///
-/// A row qualifies when it is a live tmux session (`status == running`, not a
-/// pane-less `bg` / `external` sentinel) with a `stuck_kind` AND a `stuck_since` stamp that is newer
-/// than its `last_playbook_at`. Keystroke actions never target the registered
-/// controller session (it would be steering itself); notify still applies.
+/// Pure: decide which rows get which playbook this tick. See
+/// [`plan_with_attempts`]; this shape (no attempt counts) is what every
+/// caller that has no timeline in hand uses.
 pub fn plan(
     rows: &[SessionRow],
     cfg: &PlaybookConfig,
     controller: Option<&(String, String)>,
     now: i64,
+) -> Vec<Planned> {
+    plan_with_attempts(
+        rows,
+        cfg,
+        controller,
+        now,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// Why an `oom` recreate must NOT run on this row right now, or `None` when
+/// it may. `since` is the row's `stuck_since`; `attempts` how many recreates
+/// the session already got in the window.
+///
+/// * `working`: the UserPromptSubmit hook says a turn is in flight — the
+///   OOM text is scrollback, and a recreate destroys the turn (F1).
+/// * `turn_after_stuck`: a Stop hook landed at/after the episode began, so
+///   the REPL outlived whatever printed the text.
+/// * `attempts`: the budget is spent.
+pub fn oom_recreate_refusal(
+    row: &SessionRow,
+    since: i64,
+    attempts: u32,
+    max_attempts: u32,
+) -> Option<&'static str> {
+    if row.claude_status.as_deref() == Some("working") {
+        return Some("working");
+    }
+    if row.last_turn_at.is_some_and(|t| t >= since) {
+        return Some("turn_after_stuck");
+    }
+    if attempts >= max_attempts {
+        return Some("attempts");
+    }
+    None
+}
+
+/// [`plan`] with each session's recreate count over
+/// [`OOM_ATTEMPT_WINDOW_SECS`] (`oom_attempts`, by session id; absent = 0).
+///
+/// A row qualifies when it is a live tmux session (`status == running`, not a
+/// pane-less `bg` / `external` sentinel) with a `stuck_kind` AND a `stuck_since` stamp that is newer
+/// than its `last_playbook_at`. Keystroke actions never target the registered
+/// controller session (it would be steering itself); notify still applies.
+pub fn plan_with_attempts(
+    rows: &[SessionRow],
+    cfg: &PlaybookConfig,
+    controller: Option<&(String, String)>,
+    now: i64,
+    oom_attempts: &std::collections::HashMap<i64, u32>,
 ) -> Vec<Planned> {
     let mut out = Vec::new();
     for r in rows {
@@ -102,7 +169,14 @@ pub fn plan(
                 if recently {
                     continue;
                 }
-                PlaybookAction::Recreate
+                let attempts = oom_attempts.get(&r.id).copied().unwrap_or(0);
+                match oom_recreate_refusal(r, since, attempts, cfg.oom_max_attempts) {
+                    Some(why) => PlaybookAction::Skipped {
+                        action: "recreate",
+                        why,
+                    },
+                    None => PlaybookAction::Recreate,
+                }
             }
             "press_enter" | "oom" => continue, // gated off: leave the episode untouched
             "auth_menu" | "trust_prompt" | "reconnect" => PlaybookAction::Notify,
@@ -230,15 +304,26 @@ pub async fn run_with(
     cfg: &PlaybookConfig,
     now: i64,
 ) -> usize {
-    let (rows, controller) = {
+    let (rows, controller, attempts) = {
         let Ok(s) = store.lock() else {
             return 0;
         };
         let rows = s.list_all_sessions().unwrap_or_default();
         let controller = s.get_controller().ok().flatten();
-        (rows, controller)
+        let attempts: std::collections::HashMap<i64, u32> = rows
+            .iter()
+            .filter(|r| r.stuck_kind.as_deref() == Some("oom"))
+            .map(|r| {
+                (
+                    r.id,
+                    s.count_oom_recreates_since(r.id, now - OOM_ATTEMPT_WINDOW_SECS)
+                        .unwrap_or(0),
+                )
+            })
+            .collect();
+        (rows, controller, attempts)
     };
-    let planned = plan(&rows, cfg, controller.as_ref(), now);
+    let planned = plan_with_attempts(&rows, cfg, controller.as_ref(), now, &attempts);
     let mut applied = 0;
     for p in planned {
         let result = match p.action {
@@ -247,14 +332,17 @@ pub async fn run_with(
                 .recreate(p.session_id)
                 .await
                 .map(|()| PressEnterOutcome::Sent),
-            PlaybookAction::Notify => Ok(PressEnterOutcome::Sent),
+            PlaybookAction::Notify | PlaybookAction::Skipped { .. } => Ok(PressEnterOutcome::Sent),
         };
-        let detail = match &result {
-            Ok(PressEnterOutcome::Sent) => format!("{}:{}", p.stuck_kind, p.action.as_str()),
-            Ok(PressEnterOutcome::SkippedAttached) => {
+        let detail = match (p.action, &result) {
+            (PlaybookAction::Skipped { action, why }, _) => {
+                format!("{}:{action}:skipped:{why}", p.stuck_kind)
+            }
+            (_, Ok(PressEnterOutcome::Sent)) => format!("{}:{}", p.stuck_kind, p.action.as_str()),
+            (_, Ok(PressEnterOutcome::SkippedAttached)) => {
                 format!("{}:{}:skipped:attached", p.stuck_kind, p.action.as_str())
             }
-            Err(e) => format!(
+            (_, Err(e)) => format!(
                 "{}:{}:failed:{}",
                 p.stuck_kind,
                 p.action.as_str(),
@@ -309,6 +397,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn row(
@@ -357,6 +446,7 @@ mod tests {
             ci_status: None,
             turn_seq: 0,
             last_stop_at: None,
+            stale_working_at: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -372,6 +462,7 @@ mod tests {
     const ALL_ON: PlaybookConfig = PlaybookConfig {
         press_enter: true,
         oom_recreate: true,
+        oom_max_attempts: 2,
     };
 
     #[test]
@@ -444,6 +535,106 @@ mod tests {
         let planned = plan(&[due], &ALL_ON, None, 9000);
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].action, PlaybookAction::Recreate);
+    }
+
+    fn oom_row(id: i64, since: i64) -> SessionRow {
+        row(id, "dev-oom", Some("oom"), Some(since), None)
+    }
+
+    #[test]
+    fn oom_recreate_is_refused_while_the_row_is_working_and_says_so() {
+        let mut r = oom_row(1, 100);
+        r.claude_status = Some("working".into());
+        let planned = plan(&[r], &ALL_ON, None, 200);
+        assert_eq!(
+            planned.len(),
+            1,
+            "the refusal is planned so it is written once"
+        );
+        assert_eq!(
+            planned[0].action,
+            PlaybookAction::Skipped {
+                action: "recreate",
+                why: "working"
+            }
+        );
+    }
+
+    #[test]
+    fn oom_recreate_is_refused_when_a_turn_ended_after_the_episode_began() {
+        let mut r = oom_row(1, 100);
+        r.claude_status = Some("idle".into());
+        r.last_turn_at = Some(150);
+        assert_eq!(
+            plan(&[r], &ALL_ON, None, 200)[0].action,
+            PlaybookAction::Skipped {
+                action: "recreate",
+                why: "turn_after_stuck"
+            }
+        );
+        // A turn that ended BEFORE the flag is no evidence of life.
+        let mut r = oom_row(2, 100);
+        r.last_turn_at = Some(50);
+        assert_eq!(
+            plan(&[r], &ALL_ON, None, 200)[0].action,
+            PlaybookAction::Recreate
+        );
+    }
+
+    #[test]
+    fn oom_recreate_stops_at_the_attempt_budget() {
+        let r = oom_row(1, 100);
+        let mut spent = HashMap::new();
+        spent.insert(1, 2);
+        assert_eq!(
+            plan_with_attempts(std::slice::from_ref(&r), &ALL_ON, None, 200, &spent)[0].action,
+            PlaybookAction::Skipped {
+                action: "recreate",
+                why: "attempts"
+            }
+        );
+        spent.insert(1, 1);
+        assert_eq!(
+            plan_with_attempts(&[r], &ALL_ON, None, 200, &spent)[0].action,
+            PlaybookAction::Recreate
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_counts_recreates_over_the_window_and_records_the_refusal() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = seed_stuck(&store, "dev-oom", "oom");
+        let exec = FakeExec {
+            enters: AtomicUsize::new(0),
+            recreates: AtomicUsize::new(0),
+            fail: false,
+            attached: false,
+        };
+        let now = now_unix() + 10;
+        // Two recreates already inside the 24 h window, the last of them
+        // past the 1 h spacing — the spacing alone would let a third run.
+        {
+            let s = store.lock().unwrap();
+            s.mark_playbook_applied(id, now - 7200, "oom:recreate")
+                .unwrap();
+            s.mark_playbook_applied(id, now - 3601, "oom:recreate")
+                .unwrap();
+        }
+        assert_eq!(run_with(&store, &exec, &ALL_ON, now).await, 1);
+        assert_eq!(
+            exec.recreates.load(Ordering::SeqCst),
+            0,
+            "the budget is spent"
+        );
+        assert_eq!(
+            run_with(&store, &exec, &ALL_ON, now + 20).await,
+            0,
+            "written once per episode"
+        );
+        let s = store.lock().unwrap();
+        let events = s.list_session_events(id, 10).unwrap();
+        assert!(events.iter().any(|e| e.kind == "playbook_applied"
+            && e.detail.as_deref() == Some("oom:recreate:skipped:attempts")));
     }
 
     #[test]

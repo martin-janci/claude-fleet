@@ -439,10 +439,11 @@ this design's.
 
 ## Revisions
 
-- 2026-09-27 (M14.1b, the reads): migration `0NN` is two, **065**
-  (`work_view`) and **066** (`orgs.bound_sees_unassigned`, its own
+- 2026-09-27 (M14.1b, the reads): migration `0NN` is two, **066**
+  (`work_view`) and **067** (`orgs.bound_sees_unassigned`, its own
   migration because an `orgs` column is re-added when that table is rebuilt,
-  as 053's `auto_tidy` is). 065 carries `work_links.version` and its trigger
+  as 053's `auto_tidy` is); 065 went to lifecycle F2's `stale_working` on
+  `main` (#343) first. 066 carries `work_links.version` and its trigger
   although only M14.1c writes against it: the reads answer `link_version`.
   Security changes against the backend branch: `org_impact` is refused
   (`E_FORBIDDEN`) to every scoped caller — hosts and bound clients may not

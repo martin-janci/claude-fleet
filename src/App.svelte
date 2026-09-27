@@ -6,6 +6,7 @@
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
+  import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
@@ -214,6 +215,7 @@
     let healthFailure: string | null = null;
     if (hr0.ok) {
       health = hr0.value;
+      setContextRedPct(hr0.value.context_red_pct);
       trackersHealth.set(hr0.value.trackers ?? null);
     } else if (hr0.error.code === 'E_HUB_CONTRACT') {
       healthFailure = `health: ${hr0.error.code}`;
