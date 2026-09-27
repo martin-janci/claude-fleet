@@ -18,6 +18,7 @@ pub mod retention;
 mod scale_tests;
 pub mod tidy;
 pub mod today;
+pub mod usage;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
