@@ -20,6 +20,7 @@ export interface UsageSummary {
     promoted?: number;
     rejected?: number;
     withdrawn?: number;
+    carried?: number;
     expired?: number;
     median_decision_secs?: number | null;
     nudges?: number;
@@ -68,7 +69,8 @@ export function usageRows(u: UsageSummary): [string, string][] {
       'detection',
       `${n(d.suggested)} suggested, ${n(d.confirmed_by_person)} confirmed by a person, ` +
         `${n(d.confirmed_by_agent)} confirmed by an agent, ${n(d.promoted)} promoted, ` +
-        `${n(d.rejected)} rejected, ${n(d.withdrawn)} withdrawn, ${n(d.expired)} expired; ` +
+        `${n(d.rejected)} rejected, ${n(d.withdrawn)} withdrawn, ${n(d.carried)} carried, ` +
+        `${n(d.expired)} expired; ` +
         `median decision ${median}; ${n(d.nudges)} nudges`,
     ],
     [

@@ -93,7 +93,10 @@ pub use work::{
     canonical_key, github_ref, normalize_work_ref, split_github_repo, Decider, WorkItemRow,
     WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
 };
-pub use work_detect::{DetectionState, WORK_SUGGESTION_WITHDRAWN};
+pub use work_detect::{
+    DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
+    WORK_SUGGESTION_WITHDRAWN,
+};
 pub use work_journal::{
     JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };

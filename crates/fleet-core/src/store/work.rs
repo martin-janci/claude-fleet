@@ -897,9 +897,11 @@ impl Store {
     /// unless it already has a live link to that target — a confirmed one
     /// means the work is carried already, a rejected one is sticky. It
     /// becomes primary only when the participant has no primary work yet.
-    /// `true` when a link was written.
+    /// `true` when a link was written. `session_id` is the participant's
+    /// session, which a settled suggestion's timeline event goes to.
     fn carry_link(
         &self,
+        session_id: i64,
         participant: i64,
         item_id: Option<i64>,
         ref_key: Option<&str>,
@@ -909,13 +911,40 @@ impl Store {
         // A carry is a decision fleet makes for the person: it settles a
         // live suggestion of the same target rather than sitting beside it.
         // The same target is the same item however it was spelled (by id,
-        // or by its key), as `decide_session_work` matches it.
-        self.conn.execute(
-            "DELETE FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
-               AND state = 'suggested' \
-               AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2))",
-            rusqlite::params![participant, item_id, ref_key],
-        )?;
+        // or by its key), as `decide_session_work` matches it. The
+        // suggestion's row goes, but its outcome stays as a
+        // `work_suggestion_withdrawn` event, reason `carried` (D34).
+        let settled: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
+                   AND state = 'suggested' \
+                   AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
+                 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![participant, item_id, ref_key], |r| {
+                r.get(0)
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if !settled.is_empty() {
+            let conversation: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT claude_session_id FROM sessions WHERE id = ?1",
+                    rusqlite::params![session_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            for link_id in settled {
+                self.withdraw_suggestion(
+                    session_id,
+                    conversation.as_deref(),
+                    link_id,
+                    super::work_detect::WITHDRAWN_CARRIED,
+                )?;
+            }
+        }
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
                AND ended_at IS NULL \
@@ -980,7 +1009,14 @@ impl Store {
         let participant = self.ensure_participant_for_session(session_id)?;
         let mut n = 0;
         for (item_id, ref_key, role) in targets {
-            if self.carry_link(participant, item_id, ref_key.as_deref(), "resumed", &role)? {
+            if self.carry_link(
+                session_id,
+                participant,
+                item_id,
+                ref_key.as_deref(),
+                "resumed",
+                &role,
+            )? {
                 n += 1;
             }
         }
@@ -1008,6 +1044,7 @@ impl Store {
         // Primary first, so the fork's primary is the source's.
         for l in &links {
             if self.carry_link(
+                to_session,
                 participant,
                 l.item_id,
                 l.ref_key.as_deref(),
@@ -1032,7 +1069,14 @@ impl Store {
     pub fn link_resumed_work(&self, session_id: i64, key: &str) -> Result<bool, IpcError> {
         let (item_id, ref_key) = self.resolve_work_target(WorkTarget::Key(key))?;
         let participant = self.work_participant(session_id)?;
-        let wrote = self.carry_link(participant, item_id, ref_key.as_deref(), "resumed", "work")?;
+        let wrote = self.carry_link(
+            session_id,
+            participant,
+            item_id,
+            ref_key.as_deref(),
+            "resumed",
+            "work",
+        )?;
         if wrote {
             self.bump_session_for_work(session_id)?;
             self.emit_session(session_id)?;
@@ -1077,6 +1121,7 @@ impl Store {
         }
         let participant = self.work_participant(child_session)?;
         let wrote = self.carry_link(
+            child_session,
             participant,
             primary.item_id,
             primary.ref_key.as_deref(),

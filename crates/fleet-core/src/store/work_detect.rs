@@ -12,9 +12,22 @@ use rusqlite::OptionalExtension;
 /// Longest stored branch name.
 const BRANCH_MAX_CHARS: usize = 255;
 
-/// Timeline kind of a suggestion detection withdrew (R7) or let decay (R6):
-/// the row is deleted, this event keeps the outcome (D34).
+/// Timeline kind of a suggestion detection withdrew (R7) or let decay (R6),
+/// or a carry settled: the row is deleted, this event keeps the outcome
+/// (D34). Its `reason` is one of [`WITHDRAWN_REASONS`].
 pub const WORK_SUGGESTION_WITHDRAWN: &str = "work_suggestion_withdrawn";
+
+/// A [`WORK_SUGGESTION_WITHDRAWN`] event's `reason`: detection took the
+/// suggestion back — its state signal moved on (R7).
+pub const WITHDRAWN_WITHDRAW: &str = "withdraw";
+/// … an event suggestion decayed at a conversation boundary (R6).
+pub const WITHDRAWN_DECAY: &str = "decay";
+/// … fleet carried the same work onto the session (a resume, a fork, a
+/// review or worker inheriting its parent's): the suggestion is settled by
+/// the carried link, not taken back.
+pub const WITHDRAWN_CARRIED: &str = "carried";
+/// Every [`WORK_SUGGESTION_WITHDRAWN`] reason.
+pub const WITHDRAWN_REASONS: &[&str] = &[WITHDRAWN_WITHDRAW, WITHDRAWN_DECAY, WITHDRAWN_CARRIED];
 
 /// What the resolver needs to know about a session besides its links.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -272,9 +285,9 @@ impl Store {
                     }
                     LinkChange::Withdraw { link_id } | LinkChange::Decay { link_id } => {
                         let reason = if matches!(c, LinkChange::Withdraw { .. }) {
-                            "withdraw"
+                            WITHDRAWN_WITHDRAW
                         } else {
-                            "decay"
+                            WITHDRAWN_DECAY
                         };
                         self.withdraw_suggestion(
                             session_id,
@@ -425,14 +438,14 @@ impl Store {
         self.resolve_work_key(&key)
     }
 
-    /// Delete the live suggestion `link_id` (R7 withdrew it, or R6 let it
-    /// decay: `reason` is `withdraw` or `decay`), leaving a
-    /// [`WORK_SUGGESTION_WITHDRAWN`] timeline event on `session_id` so the
-    /// negative outcome is not lost with the row (D34). The event's detail
-    /// holds ids and vocabulary words only — `{link_id, item_id, rule,
-    /// reason}` — never a key, title or text. Nothing happens when the link
-    /// is no longer a live suggestion.
-    fn withdraw_suggestion(
+    /// Delete the live suggestion `link_id` (R7 withdrew it, R6 let it
+    /// decay, or a carry settled it: `reason` is one of
+    /// [`WITHDRAWN_REASONS`]), leaving a [`WORK_SUGGESTION_WITHDRAWN`]
+    /// timeline event on `session_id` so the outcome is not lost with the
+    /// row (D34). The event's detail holds ids and vocabulary words only —
+    /// `{link_id, item_id, rule, reason}` — never a key, title or text.
+    /// Nothing happens when the link is no longer a live suggestion.
+    pub(super) fn withdraw_suggestion(
         &self,
         session_id: i64,
         conversation: Option<&str>,

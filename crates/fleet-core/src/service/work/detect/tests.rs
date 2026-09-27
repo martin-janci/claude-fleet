@@ -452,6 +452,70 @@ fn a_withdrawn_or_decayed_suggestion_leaves_an_event_of_ids_only() {
     assert!(f.s.session_work_links(sid).unwrap().is_empty());
 }
 
+/// D34: a carry (resume, fork, inherit) settles a live suggestion of the
+/// same work; its row goes, but it leaves the same ids-only event, reason
+/// `carried`, on the session that gained the carried link.
+#[test]
+fn a_suggestion_a_carry_settles_leaves_a_carried_event() {
+    let carried = |s: &Store, sid: i64| -> Vec<serde_json::Value> {
+        s.list_session_events(sid, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+            .map(|e| {
+                // Tagged with the session's current conversation.
+                assert!(e.claude_session_id.is_some());
+                serde_json::from_str(e.detail.as_deref().unwrap()).unwrap()
+            })
+            .collect()
+    };
+    let suggestion = |s: &Store, sid: i64, key: &str| -> i64 {
+        on_prompt(s, sid, "first task", true).unwrap();
+        on_prompt(s, sid, &format!("see {key} too"), false).unwrap();
+        let l = s.session_work_links(sid).unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(
+            (l[0].state.as_str(), l[0].rule.as_deref()),
+            ("suggested", Some("R6"))
+        );
+        l[0].id
+    };
+    let f = fx();
+
+    // A resume carries ABC-7 onto a session that only had it suggested.
+    let sid = session(&f, "dev", "c1");
+    let id = suggestion(&f.s, sid, "ABC-7");
+    assert!(f.s.link_resumed_work(sid, "ABC-7").unwrap());
+    let l = f.s.session_work_links(sid).unwrap();
+    assert_eq!(
+        l.iter()
+            .map(|l| (l.state.as_str(), l.source.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("confirmed", "resumed")]
+    );
+    assert_eq!(
+        carried(&f.s, sid),
+        vec![serde_json::json!({
+            "link_id": id, "item_id": null, "rule": "R6", "reason": "carried"
+        })]
+    );
+
+    // A fork carries its source's work over the target's suggestion.
+    let target = session(&f, "fork", "c2");
+    let id = suggestion(&f.s, target, "ABC-7");
+    assert_eq!(f.s.copy_work_links(sid, target).unwrap(), 1);
+    assert_eq!(
+        carried(&f.s, target),
+        vec![serde_json::json!({
+            "link_id": id, "item_id": null, "rule": "R6", "reason": "carried"
+        })]
+    );
+    // A carry that finds no suggestion records nothing.
+    let other = session(&f, "other", "c3");
+    assert_eq!(f.s.copy_work_links(sid, other).unwrap(), 1);
+    assert!(carried(&f.s, other).is_empty());
+}
+
 #[test]
 fn after_clear_the_new_tasks_link_is_primary_and_the_old_one_stays() {
     let f = fx();

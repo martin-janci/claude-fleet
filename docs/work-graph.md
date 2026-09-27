@@ -621,7 +621,7 @@ title, key, path or error text.
 | Group | What it counts |
 |---|---|
 | links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, `agent`, `agent_started`, …); a suggestion a person decided reads `manual`, one an agent decided `agent`; a ticket an agent started reads `agent_started` |
-| detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
+| detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), carried (a resume, fork or inherit carried the same work onto the session and settled it), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
 | handover | handovers requested and written, turns that ended without one, requests that could not be sent |
 | resume | resumes, with and without a brief |
 | journal | briefs queued and delivered, compaction summaries harvested |
@@ -636,9 +636,12 @@ A suggestion that detection withdrew (its branch or PR moved on) or let
 decay (an event suggestion not seen again after a conversation boundary)
 loses its row, but leaves a `work_suggestion_withdrawn` event on the
 session's timeline, holding only ids and rule words; `withdrawn` counts
-those, and `suggested` includes them. The counts are bounded by retention
-and by the timeline's cap per session (500 events), so `suggested` and
-`withdrawn` are floors.
+those, and `suggested` includes them. So does a suggestion fleet settled by
+carrying the same work onto the session (a resume, a fork, a review or
+worker inheriting its parent's work): its event's reason is `carried`, and
+`carried` counts it apart from what detection took back. The counts are
+bounded by retention and by the timeline's cap per session (500 events),
+so `suggested`, `withdrawn` and `carried` are floors.
 
 Paste it into an acceptance run's record: that gives the decisions real
 numbers.
@@ -647,7 +650,7 @@ numbers.
 $ fleet-hub work usage --days 30
 work graph usage, last 30 d
 links: 41 made (branch 12, manual 20, resumed 3, started 6)
-detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 2 withdrawn, 1 expired; median decision 12 min; 2 nudges
+detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 2 withdrawn, 0 carried, 1 expired; median decision 12 min; 2 nudges
 handover: 5 requested, 4 written, 1 missing, 0 send failed
 resume: 3 (2 with a brief, 1 without)
 journal: 8 briefs queued, 7 delivered; 11 compaction summaries

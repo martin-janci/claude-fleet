@@ -145,6 +145,25 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// `work_suggestion_withdrawn` events in the window whose `reason` is
+    /// `carried` (a resume, fork or inherit settled the suggestion, D34),
+    /// apart from the ones detection took back.
+    pub fn usage_carried_suggestions(&self, since: i64, until: i64) -> Result<u64, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_events
+              WHERE at >= ?1 AND at < ?2 AND kind = ?3
+                AND json_valid(detail) AND json_extract(detail, '$.reason') = ?4",
+            rusqlite::params![
+                since,
+                until,
+                super::WORK_SUGGESTION_WITHDRAWN,
+                super::WITHDRAWN_CARRIED
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(count(n))
+    }
+
     /// Timeline events of `kinds` in the window, per kind.
     pub fn usage_event_kinds(
         &self,

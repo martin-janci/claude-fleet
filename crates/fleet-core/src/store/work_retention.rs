@@ -43,8 +43,8 @@ use crate::ipc_error::IpcError;
 
 /// Timeline kinds the work graph writes: agent handover (M9.3), the
 /// start-prompt handover of a resume (M2), the classification nudge (M4.6),
-/// tidy (M7), and the one detection event: a suggestion withdrawn or
-/// decayed (D34).
+/// tidy (M7), and the one detection event: a suggestion withdrawn, decayed
+/// or settled by a carry (D34).
 pub const WORK_EVENT_KINDS: &[&str] = &[
     "handover_requested",
     "handover_written",
