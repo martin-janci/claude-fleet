@@ -654,6 +654,133 @@ async fn a_lost_race_does_not_name_an_isolated_orgs_winner() {
     assert!(row.work.is_none(), "the loser is not linked");
 }
 
+fn abc1_plan_args(fx: &Fx) -> StartArgs {
+    StartArgs {
+        reference: Some("ABC-1".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    }
+}
+
+/// M14.1a: two starts of one key at once (desktop and phone, a double
+/// click). Both pass `plan_start`'s guard; the second reaches the spawn
+/// while the first is still spawning, and is refused BEFORE it spawns: one
+/// session, one `E_EXISTS`, and no orphan left running unlinked.
+#[tokio::test]
+async fn two_concurrent_starts_of_one_key_make_one_session_and_one_refusal() {
+    let fx = Fx::new();
+    let args = abc1_plan_args(&fx);
+    let plan_a = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let plan_b = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let store = Arc::clone(&fx.store);
+    let slow = move |a: crate::service::sessions::NewSessionArgs| async move {
+        // The first start is mid-spawn (an SSH round trip) until released.
+        entered_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        let s = store.lock().unwrap();
+        let id = s
+            .upsert_session("first", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        Ok(s.get_session_by_id(id).unwrap().unwrap())
+    };
+    let first = start_with(&fx.store, &plan_a, None, &OrgScope::All, slow);
+    let second = async {
+        entered_rx.await.unwrap();
+        let e = start_with(&fx.store, &plan_b, None, &OrgScope::All, |_| async {
+            panic!("the second start never spawns")
+        })
+        .await
+        .unwrap_err();
+        release_tx.send(()).unwrap();
+        e
+    };
+    let (first, e) = tokio::join!(first, second);
+
+    let (row, _) = first.expect("the first start completes");
+    assert_eq!(e.code, codes::E_EXISTS, "{}", e.message);
+    assert!(e.message.contains("being started"), "{}", e.message);
+    assert!(
+        e.details
+            .as_ref()
+            .and_then(|d| d.get("orphan_session_id"))
+            .is_none(),
+        "nothing was spawned, so nothing is orphaned: {:?}",
+        e.details
+    );
+    let s = fx.store.lock().unwrap();
+    let live = s.live_work_sessions_for_key("ABC-1").unwrap();
+    assert_eq!(
+        live.iter().map(|(_, r)| r.id).collect::<Vec<_>>(),
+        vec![row.id],
+        "one live session on the key"
+    );
+    assert!(!crate::service::work::in_flight::any_held(&s), "released");
+}
+
+/// A start while a resume of the same key is spawning is refused before it
+/// spawns: `start` and `resume` share one registry.
+#[tokio::test]
+async fn a_start_during_a_resume_of_the_key_is_refused_before_it_spawns() {
+    use crate::service::work::in_flight::{Claim, Verb};
+    let fx = Fx::new();
+    let plan = plan_start(&fx.store, &abc1_plan_args(&fx), &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let resume = Claim::take(&fx.store.lock().unwrap(), "ABC-1", None, Verb::Resume).unwrap();
+    let e = start_with(&fx.store, &plan, None, &OrgScope::All, |_| async {
+        panic!("a start never spawns while the key is being resumed")
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    assert!(e.message.contains("being resumed"), "{}", e.message);
+    drop(resume);
+    let (row, _) = start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
+        .await
+        .expect("the key is free once the resume is done");
+    assert!(row.work.is_some());
+}
+
+/// The guard is re-checked before the spawn, not only after it: a key that
+/// gained a live session between the plan and the spawn is refused with the
+/// winner named, and nothing is spawned.
+#[tokio::test]
+async fn a_start_whose_key_went_live_since_its_plan_never_spawns() {
+    let fx = Fx::new();
+    let plan = plan_start(&fx.store, &abc1_plan_args(&fx), &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let winner = {
+        let s = fx.store.lock().unwrap();
+        let id = s
+            .upsert_session("winner", "hosta", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(id, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        id
+    };
+    let e = start_with(&fx.store, &plan, None, &OrgScope::All, |_| async {
+        panic!("a live key never spawns")
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    let d = e.details.unwrap();
+    assert_eq!(d["session_id"], winner);
+    assert!(d.get("orphan_session_id").is_none(), "{d}");
+    assert!(!crate::service::work::in_flight::any_held(
+        &fx.store.lock().unwrap()
+    ));
+}
+
 #[tokio::test]
 async fn a_key_no_tracker_knows_still_starts_work() {
     let fx = Fx::new();

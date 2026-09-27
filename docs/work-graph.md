@@ -295,7 +295,9 @@ dialog. The brief is editable before you start.
 
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
-one.
+one. Two starts or resumes of one key at the same moment (the desktop
+and the phone, a double click) make one session: the second is refused
+before anything is started ("ABC-123 is being started already").
 
 **Multi-start.** For work that spans repositories, the dialog's **Also
 start in** list (the projects the key ran in before) starts one sibling

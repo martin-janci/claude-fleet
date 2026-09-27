@@ -28,6 +28,7 @@ use super::ItemRef;
 use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
+use crate::service::work::in_flight;
 use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -951,10 +952,13 @@ pub struct StartOutcome {
     pub warning: Option<IpcError>,
 }
 
-/// Spawn one session and link it `started`. `Err` only when the spawn
-/// failed: once a session exists, a failure to link it (another start of
-/// the same key won meanwhile, refused for `scope`) or to queue its brief
-/// comes back as the outcome's `warning`, with the session.
+/// Spawn one session and link it `started`. `Err` when nothing was
+/// spawned: the spawn failed, or the key (in this project, for a
+/// multi-repo sibling) gained a live session or an in-flight start or
+/// resume since the plan (`E_EXISTS`, checked and claimed under the store
+/// lock before the spawn, so two starts of one key make one session). Once
+/// a session exists, a failure to link it or to queue its brief comes back
+/// as the outcome's `warning`, with the session.
 pub async fn start_one<F, Fut>(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
@@ -981,6 +985,9 @@ where
             .then(|| plan.name.clone()),
         resume_claude_session_id: None,
     };
+    // Held until the link is written (or the start fails), whatever the
+    // outcome.
+    let _claim = claim_start(store, plan, scope)?;
     let row = spawn(args).await?;
     match link_started(store, plan, brief, scope, &row) {
         Ok((linked, queued)) => Ok(StartOutcome {
@@ -996,6 +1003,50 @@ where
     }
 }
 
+/// A live session on the plan's key (in its project, for a multi-repo
+/// sibling) other than `except`: the start's rival.
+fn live_rival(
+    s: &Store,
+    plan: &StartPlan,
+    except: Option<i64>,
+) -> Result<Option<SessionRow>, IpcError> {
+    let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+    Ok(live_work_on(s, &plan.key, item_org)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .find(|r| {
+            Some(r.id) != except && (!plan.per_project || r.project_id == Some(plan.project_id))
+        }))
+}
+
+/// Before the spawn: re-check, under the store lock, the guard `plan_start`
+/// checked under an earlier one, and claim the key in the registry `resume`
+/// shares (M14.1a). A second start of the key (desktop and phone at once, a
+/// double click) is then refused before it spawns, instead of leaving its
+/// session up unlinked.
+fn claim_start(
+    store: &Arc<Mutex<Store>>,
+    plan: &StartPlan,
+    scope: &OrgScope,
+) -> Result<in_flight::Claim, IpcError> {
+    let s = lock(store)?;
+    if let Some(other) = live_rival(&s, plan, None)? {
+        return Err(already_running(
+            &plan.key,
+            &other,
+            scope,
+            "",
+            "jump to it instead",
+        ));
+    }
+    in_flight::Claim::take(
+        &s,
+        &plan.key,
+        plan.per_project.then_some(plan.project_id),
+        in_flight::Verb::Start,
+    )
+}
+
 /// Link a spawned session `started` and queue its brief. Returns the
 /// re-read row and whether the brief was queued.
 fn link_started(
@@ -1006,16 +1057,10 @@ fn link_started(
     row: &SessionRow,
 ) -> Result<(Option<SessionRow>, bool), IpcError> {
     let s = lock(store)?;
-    // The guard `plan_start` checked under is long gone (the spawn is an
-    // SSH round trip): another start of the same key may have won since.
-    // Re-check under the guard that writes the link.
-    let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
-    if let Some((_, other)) = live_work_on(&s, &plan.key, item_org)?
-        .into_iter()
-        .find(|(_, r)| {
-            r.id != row.id && (!plan.per_project || r.project_id == Some(plan.project_id))
-        })
-    {
+    // The claim fences other starts and resumes of the key, not a link
+    // that takes none (a person's own `link`, a sync promotion) made during
+    // the spawn. Re-check under the guard that writes the link.
+    if let Some(other) = live_rival(&s, plan, Some(row.id))? {
         // The same two-branch refusal as `plan_start`'s (D7): a winner the
         // caller may not see is not named.
         return Err(already_running(

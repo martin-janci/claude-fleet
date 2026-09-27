@@ -15,6 +15,7 @@
 //! never resumed twice, and nothing is deleted.
 
 use super::handover;
+use super::in_flight;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::OrgScope;
@@ -758,48 +759,6 @@ pub fn resume_session_args(
     })
 }
 
-/// Keys with a resume between its re-checked guards and its link, per
-/// store (`Store::instance_id` tells one fleet's registry from another's,
-/// which only matters to tests — and, unlike the store's address, is never
-/// reused by a store built where a dropped one was): a second resume of one
-/// of them meanwhile is refused with `E_EXISTS` (the store lock is not held
-/// across the spawn, so the guards alone would let two callers spawn two
-/// sessions on one conversation).
-static IN_FLIGHT: Mutex<std::collections::BTreeSet<(u64, String)>> =
-    Mutex::new(std::collections::BTreeSet::new());
-
-/// One key's claim; released on drop, whatever the resume's outcome.
-#[derive(Debug)]
-struct InFlight(u64, String);
-
-fn store_key(store: &Store) -> u64 {
-    store.instance_id()
-}
-
-impl InFlight {
-    fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
-        let mut set = IN_FLIGHT
-            .lock()
-            .map_err(|_| IpcError::new(codes::E_LOCK, "the resume registry is poisoned"))?;
-        let id = store_key(store);
-        if !set.insert((id, key.to_string())) {
-            return Err(IpcError::new(
-                codes::E_EXISTS,
-                format!("{key} is being resumed already; wait for that session, then jump to it"),
-            ));
-        }
-        Ok(InFlight(id, key.to_string()))
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        if let Ok(mut set) = IN_FLIGHT.lock() {
-            set.remove(&(self.0, std::mem::take(&mut self.1)));
-        }
-    }
-}
-
 /// `e`, for a resume whose session `row` exists but is not linked: the
 /// message says so and `details.orphan_session_id` names it, the shape
 /// `tickets::start_with` reports a lost start in.
@@ -929,7 +888,7 @@ where
                 ));
             }
         }
-        let claim = InFlight::claim(&s, &plan.key)?;
+        let claim = in_flight::Claim::take(&s, &plan.key, None, in_flight::Verb::Resume)?;
         let new_args = resume_session_args(&s, &plan, &args.mode)?;
         // The resumed session links the work: the same integrity rule as a
         // link, for every caller (M5).
@@ -954,10 +913,10 @@ where
     let orphaned = |e: IpcError| orphaned(e, &row);
     let handover = {
         let s = lock(store).map_err(orphaned)?;
-        // The claim above fences other resumes, not a `start` of the same
-        // key (the phone's Start while the desktop's Resume spawns), which
-        // may have linked its session meanwhile. Re-check under the guard
-        // that writes the link, so the key never ends with two.
+        // The claim above fences other resumes and starts of the key, but
+        // not a link that takes no claim (a person's own `link`, a sync
+        // promotion) made meanwhile. Re-check under the guard that writes
+        // the link, so the key never ends with two.
         let now = plan_resume(
             &s,
             &plan.key,
@@ -1802,13 +1761,12 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.message.contains("jump"), "{}", err.message);
-        let key = store_key(&st.lock().unwrap());
-        assert!(!IN_FLIGHT.lock().unwrap().iter().any(|(id, _)| *id == key));
+        assert!(!in_flight::any_held(&st.lock().unwrap()));
     }
 
-    /// A START of the same key (the phone's Start while the desktop's Resume
-    /// is spawning) takes no resume claim, so it can link its session while
-    /// the resume is mid-spawn. The resume must re-check at its link, or the
+    /// A session linked to the key without a claim (here written straight
+    /// to the store) while the resume is mid-spawn: the resume must
+    /// re-check at its link, or the
     /// key ends with two live confirmed sessions — and the one it made must
     /// be named, not left running unlinked and unreported.
     #[tokio::test]
@@ -1934,30 +1892,6 @@ mod tests {
             err.message,
             err.details
         );
-    }
-
-    /// The registry is keyed by the store's instance id, never its address:
-    /// two stores never alias — not even one built where a dropped one was —
-    /// and a claim is released on drop.
-    #[test]
-    fn the_in_flight_registry_never_aliases_two_stores() {
-        let a = crate::store::Store::open_in_memory().unwrap();
-        let first = InFlight::claim(&a, "ABC-1").unwrap();
-        assert_eq!(
-            InFlight::claim(&a, "ABC-1").unwrap_err().code,
-            codes::E_EXISTS
-        );
-        let b = crate::store::Store::open_in_memory().unwrap();
-        assert_ne!(a.instance_id(), b.instance_id());
-        let _other = InFlight::claim(&b, "ABC-1").expect("another store's key is not this one's");
-        drop(first);
-        let _again = InFlight::claim(&a, "ABC-1").expect("released on drop");
-        let a_id = a.instance_id();
-        drop(_again);
-        drop(a);
-        let c = crate::store::Store::open_in_memory().unwrap();
-        assert_ne!(c.instance_id(), a_id, "an id is never reused");
-        let _fresh = InFlight::claim(&c, "ABC-1").expect("a new store starts clean");
     }
 
     #[test]

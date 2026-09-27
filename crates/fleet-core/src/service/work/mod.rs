@@ -8,6 +8,7 @@ pub mod card;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
+pub mod in_flight;
 pub mod local;
 pub mod nudge;
 pub mod recognize;
