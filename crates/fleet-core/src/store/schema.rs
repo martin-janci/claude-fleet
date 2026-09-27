@@ -584,6 +584,9 @@ const MIGRATIONS: &[Migration] = &[
     // The auth epoch and its triggers on the token tables (hub store
     // latency, task 7): `IF NOT EXISTS` / `OR IGNORE`, safe to re-run.
     Migration::plain(60, include_str!("../../migrations/060_auth_epoch.sql")),
+    // Work graph M13.4e: the tracker write-back outbox. A new table and two
+    // indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(61, include_str!("../../migrations/061_tracker_writes.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -902,6 +902,14 @@ fn write_reachable_host(
                     tracing::debug!(error = %e.message, "[work] PR resolve failed");
                     s.ensure_in_tx()?;
                 }
+                // Write-back (M13.4e): after the links settled, queue the
+                // PR's remote link where an admin allows it. Idempotent.
+                if let Some(url) = info.pr_url.as_deref() {
+                    if let Err(e) = crate::service::trackers::write_back::on_pr(s, sid, url) {
+                        tracing::debug!(error = %e.message, "[work] PR write-back not queued");
+                        s.ensure_in_tx()?;
+                    }
+                }
             }
             Ok(None) => {}
             Err(e) => {

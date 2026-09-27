@@ -33,6 +33,7 @@ mod test_support;
 pub(crate) mod testgen;
 mod timeline;
 mod tracker_items;
+mod tracker_writes;
 mod trackers;
 mod usage;
 mod work;
@@ -66,11 +67,14 @@ pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
+pub use tracker_writes::{
+    NewTrackerWrite, TrackerWriteRow, WRITE_MAX_ATTEMPTS, WRITE_OP_PR_REMOTE_LINK,
+};
 pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
     normalize_provider_site, normalize_site_url, validate_credential_ref, validate_ghes_hostname,
     validate_tracker_settings, validate_tracker_transport, Secret, TrackerConfig,
-    TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, TRACKER_AUTH_KINDS,
+    TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, WriteBack, TRACKER_AUTH_KINDS,
     TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{

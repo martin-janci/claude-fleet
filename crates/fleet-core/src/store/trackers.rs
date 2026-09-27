@@ -124,6 +124,26 @@ pub struct TrackerSettings {
     /// [`validate_ghes_hostname`]; its host part is always the site URL's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Write-back (work graph M13.4e, decision D3 / D29): what fleet may
+    /// write to this tracker. Off unless an admin turns it on; Jira only.
+    #[serde(default, skip_serializing_if = "WriteBack::is_off")]
+    pub write_back: WriteBack,
+}
+
+/// The write-back operations a tracker allows (work graph M13.4e). Every
+/// one is off by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteBack {
+    /// Add the pull request of a session a person linked (`manual` /
+    /// `started`) to the item as a remote link, once per PR.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pr_remote_link: bool,
+}
+
+impl WriteBack {
+    pub fn is_off(&self) -> bool {
+        !self.pr_remote_link
+    }
 }
 
 impl TrackerSettings {
@@ -689,6 +709,12 @@ pub fn validate_tracker_settings(
             "extra_ca and allow_private_network are Jira Data Center settings".into(),
         ));
     }
+    if !s.write_back.is_off() && !matches!(provider, "jira" | "jira_dc") {
+        return Err(bad(
+            "write_back is a Jira setting: only Jira Cloud and Data Center accept a PR remote link"
+                .into(),
+        ));
+    }
     if let Some(h) = &s.hostname {
         if provider != "github" {
             return Err(bad(
@@ -990,6 +1016,10 @@ impl Store {
             )?;
             tx.execute(
                 "DELETE FROM tracker_views WHERE tracker_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM tracker_writes WHERE tracker_id = ?1",
                 rusqlite::params![id],
             )?;
             tx.execute(

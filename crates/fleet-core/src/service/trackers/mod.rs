@@ -25,6 +25,7 @@ mod tests_e2e_override;
 #[path = "tests_isolation_providers.rs"]
 mod tests_isolation_providers;
 pub mod tickets;
+pub mod write_back;
 
 use crate::net::https::{DirectTransport, HostPolicy, HttpTransport};
 use crate::store::{TrackerConfig, TrackerCredential, TrackerRow};
@@ -338,6 +339,26 @@ pub trait TrackerProvider: Send + Sync {
             ..Default::default()
         })
     }
+    /// Write `op` to the tracker (work graph M13.4e, decision D3 / D29).
+    /// Only a provider whose `caps.write` is true implements it; the default
+    /// refuses, so a write can never reach a read-only provider.
+    async fn write(&self, _op: &WriteOp) -> Result<(), TrackerError> {
+        Err(TrackerError::Refused(
+            "this tracker does not accept writes".into(),
+        ))
+    }
+}
+
+/// A write fleet may make to a tracker (work graph M13.4e). Only one today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteOp {
+    /// Add `url` to item `key` as a remote link titled `title`, idempotent
+    /// by a global id derived from the URL.
+    PrRemoteLink {
+        key: String,
+        url: String,
+        title: String,
+    },
 }
 
 /// The provider for `row`, over the transport `net` picks for it. `cred` is

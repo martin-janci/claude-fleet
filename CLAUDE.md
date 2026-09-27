@@ -246,6 +246,11 @@ M13.4c (D10) is built on `claude/cloud-fleet-work-graph-m13`:
 print-mode fork on the session's own host (`service/work/summary.rs`,
 `work.summary_model`), stored as a journal `summary` and fenced in the
 brief.
+M13.4e (D3) is built there too: the PR remote link on Jira only, per
+tracker `settings.write_back.pr_remote_link` (off), queued by the PR probe
+for `manual` / `started` confirmed links in the tracker's own org, through
+the outbox `tracker_writes` (migration 061) drained by the sync pass
+(`service/trackers/write_back.rs`, `TrackerProvider::write`).
 Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
 M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
 and the M5.5 filters (tracker / status / mine / has-session / archived)

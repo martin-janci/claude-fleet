@@ -36,6 +36,9 @@ pub const JOURNAL_KINDS: &[&str] = &[
     // A Claude-written summary of a dead session's conversation, on demand
     // (work graph M13.4c, D10): one per conversation, from `agent`.
     "summary",
+    // Fleet wrote to the item's tracker (work graph M13.4e, D3): the PR as
+    // a remote link, on the session's conversation.
+    "write_back",
 ];
 
 /// `source` values.

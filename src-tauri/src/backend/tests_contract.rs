@@ -299,6 +299,7 @@ fn sample_trackers_health() -> TrackersHealth {
             last_error: Some("token expired".into()),
             last_success_at: Some(1_726_000_000),
             last_pass_at: Some(1_726_000_300),
+            write_failures: 0,
         }],
         failing: 1,
         degraded: 0,

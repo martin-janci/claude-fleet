@@ -425,7 +425,13 @@ Index by area (names only; see the reference for details):
   (`owner/repo` list narrowing the owner scope), Asana `section_map`
   (section → `todo` | `in_progress` | `done`) and `section_map_confirmed`,
   Jira Data Center `extra_ca` (PEM) and `allow_private_network` (the site may
-  resolve to a loopback / link-local address, refused otherwise). Keys are
+  resolve to a loopback / link-local address, refused otherwise), and for
+  Jira (Cloud and Data Center) `write_back: { pr_remote_link }` (work graph
+  M13.4e, D3: off by default; with it on, a PR seen on a session a person
+  linked to one of the tracker's items is added to that item once as a
+  remote link, `globalId` `fleet:pr:<url>`, through an outbox drained by the
+  sync pass; `fleet_health.trackers[].write_failures` counts the writes
+  given up). `update` replaces the whole `settings` object. Keys are
   the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
   (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
   by URL); `lookup` and `start` take any of them, or the item's URL.

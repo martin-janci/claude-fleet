@@ -181,8 +181,9 @@ Trackers give you:
 - ticket cards with acceptance criteria;
 - the "done" signal that tidy-up uses.
 
-Fleet writes nothing back to a tracker (decision D3) and has no inbound
-webhook (D13).
+Fleet writes one thing back, and only where you turn it on (decision D3):
+a session's pull request as a link on its Jira ticket (see *Write-back*
+below). It has no inbound webhook yet (D13).
 
 ### Connecting one
 
@@ -226,6 +227,38 @@ A tracker only one machine can reach (a VPN) is read with `curl` on that
 host: `--via-host <host>`, the token piped on stdin. A key prefix that two
 trackers both claim (`ENG` in Jira and Linear) is never bound automatically.
 The full details are in [hub.md → Trackers](hub.md#trackers).
+
+### Write-back: the PR link (Jira, off by default)
+
+For a Jira tracker (Cloud or Data Center), Settings → Work has **Add a
+session's pull request to its ticket as a link**. With it on, when the PR
+probe sees a pull request on a session, fleet adds that PR to the linked
+ticket once, as a Jira remote link titled `PR: owner/repo#n`. Nothing else
+is ever written: no transition, no worklog, no comment (D29), and nothing a
+transcript or a tracker wrote.
+
+- **Only work a person linked.** The link must be confirmed and made by
+  hand or by *Start* (`manual` / `started`). A detection guess or an agent's
+  suggestion never writes.
+- **Only your own org's tracker.** A session in one org never writes to
+  another org's tracker, even a link made with `force_cross_org`; the org is
+  checked again just before sending.
+- **Once per PR.** The link's global id is the PR's URL, so Jira updates
+  the same link rather than adding a second one, and fleet queues each PR
+  once.
+- **Through the sync.** Writes wait in an outbox and go out with the next
+  sync pass, on the tracker's own credential. A rate limit waits (without
+  counting as a failure); other failures retry with backoff, and after five
+  tries, or at once for a refusal (403, 404), fleet gives up. Given-up
+  writes show in `fleet_health` as `write_failures` and in the footer as
+  "N writes not sent"; they never make the tracker `degraded`.
+- **The token needs write permission** (to edit issues). A read-only token
+  is enough for everything else; with one, the writes are refused and given
+  up.
+
+Turning it off stops sending at once; writes already queued wait, and go
+out if you turn it on again. Settled writes are dropped after the journal's
+retention window (`work.retention.journal_days`).
 
 ### Sync
 
@@ -486,7 +519,8 @@ state and the store. It never calls a tracker or a host. For each tracker:
   skipped), `consecutive_partial` (passes in a row that skipped some),
   `last_error` (redacted, one line, at most 300 characters, fenced as
   untrusted; for skipped items, why the last one failed), `last_success_at`,
-  `last_pass_at`, and its org.
+  `last_pass_at`, its org, and `write_failures` (PR links fleet gave up
+  sending, *Write-back*; never part of `health`).
 
 Fleet-wide it also counts `failing`, `degraded`, and the **detection
 backlog**: link suggestions on live sessions that have waited more than 7

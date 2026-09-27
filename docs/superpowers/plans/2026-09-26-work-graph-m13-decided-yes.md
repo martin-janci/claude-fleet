@@ -274,3 +274,26 @@ M13.4 ── independent (fleet-mobile repository)
 - 2026-09-27: renumbered to fit `main`'s M13 (live use): these are its
   M13.4c, e, f and a, and the defaults are D27–D30. M13.4f is new in that
   plan.
+- 2026-09-27: **M13.4e built** on `claude/cloud-fleet-work-graph-m13`.
+  - `TrackerProvider::write(&WriteOp)`, default `Refused`; Jira Cloud (v3)
+    and Data Center (v2) send `POST …/issue/{key}/remotelink` with
+    `globalId = "fleet:pr:<url>"` and `caps.write = true`. A key that is not
+    a Jira key never reaches the path.
+  - Opt-in is a field of the tracker's existing `settings`
+    (`write_back.pr_remote_link`), validated as Jira-only, not a new
+    `work_admin` action: the same master-only `update` sets it, and the tool
+    surface does not grow.
+  - The trigger is the PR probe's `set_pr_signals` branch in reconcile
+    (`write_back::on_pr`), after the links resolved. An older `gh` that
+    reports no signals triggers nothing.
+  - The outbox is `tracker_writes` (migration 061): unique on `(tracker_id,
+    op, item_key, url)`, drained by the sync pass after a read pass that
+    worked, 20 per pass. A rate limit waits and spends no attempt; a 403,
+    404 or invalid answer gives up at once; anything else backs off (1 min
+    doubling to 6 h) for five attempts. The setting and the org are checked
+    again before sending.
+  - Retention: settled rows go after `work.retention.journal_days`, in the
+    drain, not as a fourth retention table (no new setting, no UI change).
+  - `fleet_health.trackers[].write_failures` (additive; never part of
+    `health`) and the footer's "N writes not sent".
+  - Settings → Work: a checkbox per Jira tracker.

@@ -42,6 +42,9 @@ export interface TrackerHealth {
   last_error?: string | null;
   last_success_at?: number | null;
   last_pass_at?: number | null;
+  /** Writes fleet gave up on (M13.4e: a PR remote link); absent from an
+   *  older hub. Never changes `health`. */
+  write_failures?: number;
 }
 
 /** `Health.trackers` (`service::health::TrackersHealth`); absent from an
@@ -188,5 +191,7 @@ export function trackersSummary(h: TrackersHealth | null | undefined): string {
   if (h.detection_backlog) {
     parts.push(`${h.detection_backlog} suggestion${h.detection_backlog === 1 ? '' : 's'} undecided > ${days} d`);
   }
+  const writes = (h.trackers ?? []).reduce((n, t) => n + (t.write_failures ?? 0), 0);
+  if (writes) parts.push(`${writes} write${writes === 1 ? '' : 's'} not sent`);
   return parts.length > 0 ? `trackers: ${parts.join(' · ')}` : '';
 }
