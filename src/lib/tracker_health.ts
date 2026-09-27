@@ -46,12 +46,6 @@ export interface TrackerHealth {
   /** Writes fleet gave up on (M13.4e: a PR remote link); absent from an
    *  older hub. Never changes `health`. */
   write_failures?: number;
-  /** Webhook nudges are on (M13.4f); absent from an older hub. */
-  webhook_enabled?: boolean;
-  /** The last verified delivery (unix seconds). */
-  webhook_last_delivery_at?: number | null;
-  /** Deliveries refused for their signature since the hub started. */
-  webhook_rejected?: number;
 }
 
 /** `Health.trackers` (`service::health::TrackersHealth`); absent from an
@@ -203,7 +197,5 @@ export function trackersSummary(h: TrackersHealth | null | undefined): string {
   }
   const writes = (h.trackers ?? []).reduce((n, t) => n + (t.write_failures ?? 0), 0);
   if (writes) parts.push(`${writes} write${writes === 1 ? '' : 's'} not sent`);
-  const refused = (h.trackers ?? []).reduce((n, t) => n + (t.webhook_rejected ?? 0), 0);
-  if (refused) parts.push(`${refused} webhook${refused === 1 ? '' : 's'} refused`);
   return parts.length > 0 ? `trackers: ${parts.join(' · ')}` : '';
 }

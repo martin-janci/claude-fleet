@@ -105,7 +105,7 @@ fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 063: `sessions` already has its
+/// `already_applied` guard of migration 065: `sessions` already has its
 /// `stale_working_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
 fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -600,15 +600,32 @@ const MIGRATIONS: &[Migration] = &[
     // indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(61, include_str!("../../migrations/061_tracker_writes.sql")),
     // Work graph M13.4f: a tracker's webhook secret. A new table,
-    // `IF NOT EXISTS`, safe to re-run.
+    // `IF NOT EXISTS`, safe to re-run. The feature was removed again (D13
+    // stays no); the entry stays so a database that ran it is not refused
+    // as newer, and 064 drops the table.
     Migration::plain(
         62,
         include_str!("../../migrations/062_tracker_webhooks.sql"),
     ),
-    // Lifecycle F2: `sessions.stale_working_at`, one ADD COLUMN, its own guard.
+    // `sessions_row_version_bump` rebuilt to bump only on a change to a
+    // watched column (not the reconcile's per-pass `last_reconciled_at`
+    // stamp). DROP + CREATE of a trigger, no row touched: safe to re-run.
+    Migration::plain(
+        63,
+        include_str!("../../migrations/063_row_version_on_visible_change.sql"),
+    ),
+    // Drops 062's `tracker_webhooks`: nothing reads it since the webhook
+    // nudges were removed, and a secret no code can rotate must not stay.
+    Migration::plain(
+        64,
+        include_str!("../../migrations/064_drop_tracker_webhooks.sql"),
+    ),
+    // Lifecycle F2: `sessions.stale_working_at` (one ADD COLUMN, its own
+    // guard) and 063's `sessions_row_version_bump` rebuilt to watch it —
+    // it is a `SessionRow` field, so a change to it must bump `row_version`.
     Migration {
-        version: 63,
-        sql: include_str!("../../migrations/063_stale_working.sql"),
+        version: 65,
+        sql: include_str!("../../migrations/065_stale_working.sql"),
         already_applied: Some(sessions_has_stale_working_at),
     },
 ];
@@ -2985,9 +3002,165 @@ mod tests {
         assert_eq!(n, 1, "the re-run touched no rows");
     }
 
+    /// The `sessions` columns migration 063's `sessions_row_version_bump`
+    /// deliberately does NOT watch: `row_version` itself (an explicit
+    /// `row_version + 1` must not re-trigger), and the reconcile's per-pass
+    /// bookkeeping that is not a `SessionRow` field. Every other column is
+    /// watched, so a write that changes it bumps the counter.
+    const ROW_VERSION_UNWATCHED: [&str; 2] = ["row_version", "last_reconciled_at"];
+
+    /// The SQL of `sessions_row_version_bump`, as the database holds it.
+    fn row_version_trigger_sql(s: &Store) -> String {
+        s.conn
+            .query_row(
+                "SELECT sql FROM sqlite_master \
+                 WHERE type = 'trigger' AND name = 'sessions_row_version_bump'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sessions_row_version_bump is missing")
+    }
+
+    /// Migration 063 on a fresh database: an UPDATE that changes nothing a
+    /// client sees (same values, or only `last_reconciled_at`) leaves
+    /// `row_version` alone; a real change bumps it once; an explicit
+    /// `row_version + 1` bumps it exactly once.
     #[test]
-    fn migration_063_adds_stale_working_at_and_is_safe_to_rerun() {
-        let s = store_at_version(62);
+    fn migration_063_bumps_row_version_only_on_a_watched_change() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('s', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        let v = || -> i64 {
+            s.conn
+                .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+                .unwrap()
+        };
+        let run = |sql: &str| {
+            s.conn.execute(sql, []).unwrap();
+        };
+        assert_eq!(v(), 0);
+        run("UPDATE sessions SET status = 'running', last_activity_at = 1");
+        assert_eq!(v(), 0, "a same-value UPDATE is not a change");
+        run("UPDATE sessions SET last_reconciled_at = 77");
+        assert_eq!(v(), 0, "the reconcile stamp alone is not a change");
+        run("UPDATE sessions SET last_activity_at = 2, last_reconciled_at = 78");
+        assert_eq!(v(), 1, "a changed column bumps once");
+        run("UPDATE sessions SET notes = NULL");
+        assert_eq!(v(), 1, "NULL to NULL is no change (IS NOT, not <>)");
+        run("UPDATE sessions SET notes = 'n'");
+        assert_eq!(v(), 2, "NULL to a value is a change");
+        run("UPDATE sessions SET row_version = row_version + 1");
+        assert_eq!(v(), 3, "an explicit bump counts exactly once");
+    }
+
+    /// Migration 063's trigger names every `sessions` column it watches.
+    /// A new column must be judged against it: this reads the table's
+    /// columns and fails for one the trigger neither watches nor lists in
+    /// [`ROW_VERSION_UNWATCHED`] — and for a table rebuild that dropped the
+    /// trigger.
+    #[test]
+    fn the_sessions_columns_are_the_ones_the_row_version_trigger_knows() {
+        let s = Store::open_in_memory().unwrap();
+        let sql = row_version_trigger_sql(&s);
+        let mut stmt = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('sessions') ORDER BY cid")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for u in ROW_VERSION_UNWATCHED {
+            assert!(cols.iter().any(|c| c == u), "{u} is not a sessions column");
+        }
+        for c in &cols {
+            let watched = sql.contains(&format!("NEW.{c} IS NOT OLD.{c}"));
+            if ROW_VERSION_UNWATCHED.contains(&c.as_str()) {
+                assert!(
+                    !watched,
+                    "{c} is listed as unwatched but the trigger watches it"
+                );
+            } else {
+                assert!(
+                    watched,
+                    "sessions.{c} is not watched by sessions_row_version_bump: add \
+                     `NEW.{c} IS NOT OLD.{c}` to a new migration's trigger (it bumps \
+                     row_version on a client-visible change) or, for per-pass \
+                     bookkeeping that is not a SessionRow field, to ROW_VERSION_UNWATCHED"
+                );
+            }
+        }
+    }
+
+    /// Migration 063 on a populated v62 database: the rows are untouched
+    /// (no `row_version` moves), the new trigger is in place, and running
+    /// the script again (as the tests' roll back and re-migrate does) is
+    /// harmless.
+    #[test]
+    fn migration_063_on_a_populated_v62_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 62;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('s', 'h', 1, 1, 'running');
+                 UPDATE sessions SET claude_status = 'idle';",
+            )
+            .unwrap();
+        let v = |s: &Store| -> i64 {
+            s.conn
+                .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(v(&s), 1, "the v42 trigger bumps on the seeded change");
+        s.conn
+            .execute("UPDATE sessions SET last_reconciled_at = 5", [])
+            .unwrap();
+        assert_eq!(v(&s), 2, "the v42 trigger bumps on any UPDATE");
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(v(&s), 2, "the migration moved no row_version");
+        s.conn
+            .execute("UPDATE sessions SET last_reconciled_at = 6", [])
+            .unwrap();
+        assert_eq!(v(&s), 2, "the new trigger ignores the reconcile stamp");
+        s.conn
+            .execute_batch(include_str!(
+                "../../migrations/063_row_version_on_visible_change.sql"
+            ))
+            .unwrap();
+        let triggers: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'trigger' AND name = 'sessions_row_version_bump'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 1, "the re-run left exactly one bump trigger");
+        s.conn
+            .execute("UPDATE sessions SET claude_status = 'working'", [])
+            .unwrap();
+        assert_eq!(v(&s), 3, "after the re-run a real change still bumps once");
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the re-run touched no rows");
+    }
+
+    #[test]
+    fn migration_065_adds_stale_working_at_and_is_safe_to_rerun() {
+        let s = store_at_version(64);
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias) VALUES ('h');
@@ -3007,10 +3180,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1, "an existing row starts unstamped");
-        // Rolling the recorded version back re-runs 063 (the idiom of the
+        // The rebuilt trigger watches the new column: stamping it is a
+        // client-visible change, so `row_version` moves once.
+        let v = || -> i64 {
+            s.conn
+                .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+                .unwrap()
+        };
+        let v0 = v();
+        s.conn
+            .execute("UPDATE sessions SET stale_working_at = 5", [])
+            .unwrap();
+        assert_eq!(v(), v0 + 1, "a stale_working_at change bumps row_version");
+        s.conn
+            .execute("UPDATE sessions SET stale_working_at = 5", [])
+            .unwrap();
+        assert_eq!(v(), v0 + 1, "a same-value write does not");
+        // Rolling the recorded version back re-runs 065 (the idiom of the
         // 024–026 tests): the guard skips the ADD COLUMN.
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 63;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 65;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

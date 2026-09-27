@@ -910,7 +910,7 @@ fn write_reachable_host(
         // current and the UI can dim rows whose host has gone quiet. It is
         // also the BE-3 ghost guard's evidence (`probe_started_at` above).
         // Carried by the upsert itself (Task 4), not a second UPDATE after
-        // it, so an unchanged pass bumps each row's `row_version` once.
+        // it; an unchanged pass bumps no `row_version` (migration 063).
         reconciled_at: Some(now),
     })?;
     // Work detection (M4.2): the PR probe's signals, written outside

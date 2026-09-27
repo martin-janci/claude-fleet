@@ -116,9 +116,9 @@ pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
 /// `PartialEq` covers every wire field including `row_version`. For the
 /// no-op-reconcile-pass check `upsert_session_in_tx` wants (a real change vs.
 /// a pass that observed exactly what is already stored), use
-/// [`SessionRow::eq_ignoring_row_version`] instead: the migration 042 trigger
-/// bumps `row_version` on every physical UPDATE, no-op or not, so plain `==`
-/// would make every pass look like a change.
+/// [`SessionRow::eq_ignoring_row_version`] instead: `row_version` also moves
+/// for a change the wire row does not show (a non-wire column, or an
+/// explicit bump), so plain `==` can call two equal-content reads different.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionRow {
     pub id: i64,
@@ -208,7 +208,7 @@ pub struct SessionRow {
     #[serde(default)]
     pub last_stop_at: Option<i64>,
     /// When the tick demoted this row from a stale `working` to `idle`
-    /// (migration 063, lifecycle F2); `None` otherwise. Cleared by the next
+    /// (migration 065, lifecycle F2); `None` otherwise. Cleared by the next
     /// hook or a pane that shows a live turn. `#[serde(default)]`: a hub
     /// older than the column sends none.
     #[serde(default)]
@@ -221,9 +221,11 @@ pub struct SessionRow {
     /// (NULL ⇒ empty) and always surfaced as a list on the wire.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Bumped by a trigger on every UPDATE (migration 042). The frontend's
-    /// merge guard orders a command's return value against a row event by
-    /// it. `#[serde(default)]`: a hub older than the column sends none.
+    /// Bumped by a trigger on every UPDATE that changes a column other than
+    /// the reconcile's `last_reconciled_at` stamp (migrations 042 and 063),
+    /// and explicitly for a `work` / org change. The frontend's merge guard
+    /// orders a command's return value against a row event by it.
+    /// `#[serde(default)]`: a hub older than the column sends none.
     #[serde(default)]
     pub row_version: i64,
     /// How many UserPromptSubmit hooks this row has recorded (migration
@@ -280,11 +282,11 @@ impl SessionRow {
     /// this row carry the same user-visible content.
     ///
     /// See the note above the `PartialEq` derive: plain `==` cannot answer
-    /// that question, because migration 042's trigger bumps `row_version` on
-    /// every physical UPDATE regardless of whether any other field changed.
+    /// that question, because `row_version` also moves for a change no wire
+    /// field shows (a non-wire column, an explicit bump).
     ///
-    /// The equal-version case — every no-op reconcile pass, which is what
-    /// calls this — compares in place. Only a genuine version difference
+    /// The equal-version case — every no-op reconcile pass since migration
+    /// 063, which is what calls this — compares in place. Only a genuine version difference
     /// pays for a clone, and then for one row rather than two: this runs
     /// once per session per pass, and a `SessionRow` is some forty fields
     /// with a dozen heap allocations among them.
@@ -1060,9 +1062,10 @@ pub struct HostReconcile<'a> {
     /// Stamp `last_reconciled_at` with this value on every session the
     /// upsert writes (the live set this pass observed): the Task H freshness
     /// marker and the BE-3 ghost guard's evidence. Folded into the upsert
-    /// rather than written by a second UPDATE, so a pass bumps a row's
-    /// `row_version` once, not twice. `None` (the default, store-level
-    /// tests) leaves the stored stamp alone.
+    /// rather than written by a second UPDATE, so a pass is one physical
+    /// UPDATE per row; the stamp alone does not bump `row_version`
+    /// (migration 063). `None` (the default, store-level tests) leaves the
+    /// stored stamp alone.
     pub reconciled_at: Option<i64>,
 }
 

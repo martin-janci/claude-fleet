@@ -142,7 +142,7 @@ impl Store {
     // and (b) collecting a `RowChange` vs emitting via `self.bus` — plus one
     // deliberate SQL divergence: `upsert_session_in_tx` also writes
     // `last_reconciled_at` (the pass's freshness stamp, folded into the
-    // upsert so a pass bumps `row_version` once), which the public
+    // upsert so a pass is one physical UPDATE per row), which the public
     // `upsert_session` never touches. If you change a schema/SQL detail in a
     // public method, change its `_in_tx` twin too.
     // Both paths are test-covered (direct: the `*_emits_*` event tests; tx: the
@@ -477,10 +477,11 @@ impl Store {
                stale_working_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
                                      ELSE stale_working_at END,
                -- The freshness stamp (Task H / the BE-3 guard's evidence),
-               -- folded in here so a pass is ONE physical UPDATE per row —
-               -- one `row_version` bump — instead of this upsert plus a
-               -- second stamping UPDATE. `last_reconciled_at` is not a
-               -- `SessionRow` field, so it never makes a no-op pass emit.
+               -- folded in here so a pass is ONE physical UPDATE per row
+               -- instead of this upsert plus a second stamping UPDATE.
+               -- `last_reconciled_at` is not a `SessionRow` field, so it
+               -- never makes a no-op pass emit, and migration 063's trigger
+               -- does not watch it, so it never bumps `row_version` either.
                last_reconciled_at=COALESCE(?23, last_reconciled_at)
              WHERE {not_stale}",
             new_stuck = NEW_STUCK,
@@ -525,10 +526,9 @@ impl Store {
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
             match prior {
                 None => out.push(RowChange::SessionCreated(row)),
-                // Every wire field identical (modulo `row_version`, which the
-                // migration 042 trigger bumps on every physical UPDATE, no-op
-                // or not — see `eq_ignoring_row_version`) ⇒ a no-op pass;
-                // emit nothing.
+                // Every wire field identical (modulo `row_version` — see
+                // `eq_ignoring_row_version`; since migration 063 a no-op pass
+                // leaves it alone too) ⇒ a no-op pass; emit nothing.
                 Some(ref before) if before.eq_ignoring_row_version(&row) => {}
                 Some(_) => out.push(RowChange::SessionUpdated(row)),
             }
@@ -879,7 +879,7 @@ impl Store {
     ///
     /// Reconcile itself no longer calls this: the stamp rides the upsert
     /// (`HostReconcile::reconciled_at`), so a pass costs each row one
-    /// physical UPDATE — one `row_version` bump — not two. Kept for tests
+    /// physical UPDATE, not two. Kept for tests
     /// that need to place a row's stamp at a chosen instant.
     pub fn mark_sessions_reconciled(
         &self,

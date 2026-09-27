@@ -46,13 +46,13 @@ notes also record the exact commit the bundles were built from.
 
 ### macOS — "claude-fleet.app is damaged and can't be opened"
 
-Expect this dialog on first launch. **The app is not damaged.** Release
-bundles are neither code-signed nor notarized — there is no Apple Developer ID
-for this project, so `release.yml` deliberately omits the signing step (ad-hoc
-signing would only fake provenance; see the
+Expect Gatekeeper to block the first launch (on some macOS versions the
+dialog calls the app "damaged"). **The app is not damaged.** Release bundles
+are signed with the maintainer's *Apple Development* certificate but not
+notarized — there is no Apple Developer ID for this project (see the
 [signing caveat](docs/RELEASING.md#signing-caveat)). Anything you download
-carries the `com.apple.quarantine` flag, Gatekeeper finds no signature to
-check, and macOS reports that as "damaged".
+carries the `com.apple.quarantine` flag, and Gatekeeper will not run an
+un-notarized app from the internet until that flag is cleared.
 
 To install:
 
@@ -69,10 +69,11 @@ Notes:
 
 - Do **not** click *Move to Bin* in the dialog — just Cancel, then run the
   command above.
-- Right-click → **Open**, and the **Open Anyway** button under System Settings
-  → Privacy & Security, are the workarounds for a *signed but un-notarized*
-  app. They are unreliable here, because the binary carries no Developer ID
-  signature at all. Use `xattr`.
+- The **Open Anyway** button under System Settings → Privacy & Security may
+  also work, but `xattr` is the one route that works on every macOS version.
+- After the first install the app keeps its hub token in your login keychain
+  and asks once for access; click **Always Allow**. Updates are signed with
+  the same Team ID, so they do not ask again.
 - Don't reach for `sudo spctl --master-disable` ("Allow apps from: Anywhere").
   That disables Gatekeeper for every app on the machine; the `xattr` command
   above affects only this one.
@@ -124,7 +125,7 @@ chmod +x claude-fleet_*.AppImage
 ### Requirements
 
 - macOS 13+ (primary) or Linux — CI runs on both (`macos-latest`,
-  `ubuntu-24.04`) and tagged releases ship unsigned macOS `.dmg` (arm64 and
+  `ubuntu-24.04`) and tagged releases ship signed (not notarized) macOS `.dmg` (arm64 and
   x86_64) plus Linux `.AppImage`/`.deb` bundles (see `docs/RELEASING.md`)
 - Rust 1.83+ (`rustup install stable`)
 - Node 20 (`.node-version`) and pnpm 10 via `corepack enable` (or

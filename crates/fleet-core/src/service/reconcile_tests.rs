@@ -360,8 +360,8 @@ async fn status_transitions_emit_session_events_and_stamp_lifecycle_columns() {
     );
 
     // Pass 2 — nothing changed: identical row, zero events of either kind.
-    // `row_version` (migration 042) is excluded: the trigger bumps it on
-    // every physical UPDATE, no-op or not, so it is not part of "identical".
+    // Compared modulo `row_version`, the counter a client orders by (since
+    // migration 063 a no-op pass does not move it either).
     f.pass().await;
     assert!(
         f.row("work", "alpha").eq_ignoring_row_version(&r1),

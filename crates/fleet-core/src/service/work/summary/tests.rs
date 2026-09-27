@@ -39,7 +39,7 @@ fn the_run_is_a_fork_with_no_tools_no_mcp_no_hooks_and_no_transcript() {
     for flag in [
         format!("claude -p --resume '{CID}' --fork-session --no-session-persistence"),
         "--model 'haiku'".to_string(),
-        r#"--settings '{"hooks":{}}'"#.to_string(),
+        r#"--settings '{"disableAllHooks":true}'"#.to_string(),
         "--tools ''".to_string(),
         "--strict-mcp-config".to_string(),
     ] {
@@ -49,6 +49,10 @@ fn the_run_is_a_fork_with_no_tools_no_mcp_no_hooks_and_no_transcript() {
         !sc.contains("--mcp-config "),
         "no MCP server may load: {sc}"
     );
+    assert!(
+        !sc.contains(r#""hooks":{}"#),
+        "an empty hooks object keeps the user's hooks: {sc}"
+    );
     assert!(!sc.contains("--dangerously"), "{sc}");
     assert!(!sc.contains("--permission-mode"), "{sc}");
     // stdin is closed, output is capped, the host-side timeout is used when
@@ -57,6 +61,34 @@ fn the_run_is_a_fork_with_no_tools_no_mcp_no_hooks_and_no_transcript() {
     assert!(sc.contains("timeout 170"), "{sc}");
     // The fixed prompt, quoted as one word.
     assert!(sc.contains(&crate::shell::quote(SUMMARY_PROMPT)), "{sc}");
+}
+
+#[test]
+fn nothing_in_the_run_grants_a_tool_back() {
+    let sc = summary_script(None, CID, "haiku").unwrap();
+    for grant in [
+        "--allowedTools",
+        "--allowed-tools",
+        "--mcp-config",
+        "--dangerously-skip-permissions",
+        "bypassPermissions",
+        "acceptEdits",
+        "--add-dir",
+        "--plugin-dir",
+        "--agents",
+    ] {
+        assert!(!sc.contains(grant), "{grant:?} in {sc}");
+    }
+    // The only `--tools` is the empty one.
+    assert_eq!(sc.matches("--tools").count(), 1, "{sc}");
+    // The prompt is the last word of the command, before the redirect.
+    assert!(
+        sc.contains(&format!(
+            "{} </dev/null",
+            crate::shell::quote(SUMMARY_PROMPT)
+        )),
+        "{sc}"
+    );
 }
 
 #[test]

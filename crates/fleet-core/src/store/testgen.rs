@@ -79,8 +79,8 @@ pub(crate) struct Manifest {
     pub client_participants: usize,
     /// Row count per table, as generated.
     pub counts: Vec<(&'static str, i64)>,
-    /// `SUM(sessions.row_version)`: a migration that UPDATEs a session row
-    /// bumps it (042's trigger).
+    /// `SUM(sessions.row_version)`: a migration that changes a session row
+    /// bumps it (042's trigger; since 063, a change to a watched column).
     pub row_version_sum: i64,
 }
 
