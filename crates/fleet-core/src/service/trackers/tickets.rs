@@ -1033,7 +1033,11 @@ fn link_started(
         Some(id) => WorkTarget::Item(id),
         None => WorkTarget::Key(&plan.key),
     };
-    s.link_session_work(row.id, target, "started")?;
+    let link = s.link_session_work(row.id, target, "started")?;
+    if !scope.is_all() {
+        // A per-host token's start never writes to a tracker (M13.4e).
+        s.mark_link_host_decided(link.id)?;
+    }
     let queued = match brief {
         Some(body) if !body.trim().is_empty() => {
             let body: String = body

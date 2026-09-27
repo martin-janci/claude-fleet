@@ -670,7 +670,12 @@ pub fn work_link<'a>(
                 let (key, tracker) = inferred_target(&s, t)?;
                 detect::on_agent_inference(&s, session_id, &key, tracker)?;
             } else {
-                s.link_session_work(session_id, t, source)?;
+                let link = s.link_session_work(session_id, t, source)?;
+                if !scope.is_all() {
+                    // Every tracker write is refused for per-host tokens
+                    // (M13.4e): a link one made never writes.
+                    s.mark_link_host_decided(link.id)?;
+                }
             }
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
@@ -703,6 +708,9 @@ pub fn work_link<'a>(
                 visible_link(link_id)?;
             }
             detect::decide(&s, session_id, link_id, true)?;
+            if !scope.is_all() {
+                s.mark_link_host_decided(link_id)?;
+            }
         }
         "unlink" => {
             let link_id = args

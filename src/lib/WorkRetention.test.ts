@@ -35,6 +35,19 @@ describe('work_retention lines', () => {
     expect(lastSweepLine(status().last_sweep, NOW)).toBe(
       'last sweep 10 min ago: 4 journal, 1 tickets, 2 events deleted',
     );
+    // Work graph M13.4e: the tracker write outbox, when it swept anything.
+    expect(
+      retentionLine({
+        table: 'tracker_write_outbox',
+        setting: 'work.retention.write_outbox_days',
+        days: 90,
+        rows: 5,
+        would_delete: 2,
+      }),
+    ).toBe('PR links written: 5 rows, 2 older than 90 d with nothing live on them');
+    expect(
+      lastSweepLine({ at: NOW - 600, journal: 0, tracker_items: 0, timeline_work_events: 0, write_outbox: 3 }, NOW),
+    ).toBe('last sweep 10 min ago: 0 journal, 0 tickets, 0 events, 3 PR link records deleted');
   });
 });
 

@@ -171,6 +171,10 @@ pub const WORK_RETENTION_TRACKER_ITEMS_DAYS: &str = "work.retention.tracker_item
 /// kept; the newest of each kind per session always stays. `0` forever.
 pub const WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS: &str =
     "work.retention.timeline_work_events_days";
+/// Retention (work graph M13.4e): days a settled tracker write (the PR
+/// remote link: written, given up or cancelled) is kept once its link is
+/// gone or ended. Pending writes always stay. `0` forever.
+pub const WORK_RETENTION_WRITE_OUTBOX_DAYS: &str = "work.retention.write_outbox_days";
 /// M2's journal window, superseded by [`WORK_RETENTION_JOURNAL_DAYS`] and no
 /// longer writable. While the new key is unset, a stored `0` still keeps
 /// forever and a longer window still stands (`service::work::retention`).
@@ -394,6 +398,11 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
         default: "180",
+        kind: Kind::Int { min: 0, max: 3650 },
+    },
+    Spec {
+        key: WORK_RETENTION_WRITE_OUTBOX_DAYS,
+        default: "90",
         kind: Kind::Int { min: 0, max: 3650 },
     },
     Spec {
@@ -777,6 +786,7 @@ mod tests {
             (WORK_RETENTION_JOURNAL_DAYS, "365"),
             (WORK_RETENTION_TRACKER_ITEMS_DAYS, "180"),
             (WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS, "180"),
+            (WORK_RETENTION_WRITE_OUTBOX_DAYS, "90"),
         ] {
             assert_eq!(resolve(key, None), default, "{key}");
             for ok in ["0", "1", "3650"] {

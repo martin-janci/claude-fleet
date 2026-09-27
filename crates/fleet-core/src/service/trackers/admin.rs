@@ -49,7 +49,7 @@ pub struct WorkAdminArgs {
     /// direct|via_host:HOST|via_cli:HOST
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
-    /// Provider settings object.
+    /// Provider settings object; pr_remote_link (Jira) opts in to PR links.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
     /// For remove.

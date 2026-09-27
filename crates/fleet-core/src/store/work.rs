@@ -634,7 +634,7 @@ impl Store {
             Some(id) => {
                 self.conn.execute(
                     "UPDATE work_links SET state = ?1, source = ?2, is_primary = ?3, \
-                     decided_at = ?4, strength = 'explicit', preselected = 0, \
+                     decided_at = ?4, strength = 'explicit', preselected = 0, host_decided = 0, \
                      claude_session_id = COALESCE((SELECT claude_session_id FROM sessions \
                                                    WHERE id = ?6), claude_session_id) \
                      WHERE id = ?5",
@@ -668,6 +668,17 @@ impl Store {
         self.emit_session(session_id)?;
         self.get_work_link(id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
+    }
+
+    /// The latest decision on live link `link_id` came from a per-host
+    /// token (migration 061): the link never writes to a tracker (work
+    /// graph M13.4e). Every decision clears it; the caller sets it again
+    /// right after a per-host token's link, confirm or start.
+    pub fn mark_link_host_decided(&self, link_id: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.execute(
+            "UPDATE work_links SET host_decided = 1 WHERE id = ?1 AND ended_at IS NULL",
+            rusqlite::params![link_id],
+        )? > 0)
     }
 
     /// Say that `session_id` works on `target`; it becomes the session's

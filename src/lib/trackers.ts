@@ -52,6 +52,18 @@ export interface TrackerSettings {
   /** GitHub Enterprise Server (work graph M11.4): the instance `gh
    *  --hostname` is pointed at, `host[:port]`. Absent: github.com. */
   hostname?: string | null;
+  /** Jira Cloud / Data Center (work graph M13.4e, decision D3): add the
+   *  session's PR to its ticket as a remote link, for work a person linked
+   *  or started. Off by default; fleet's only tracker write. */
+  pr_remote_link?: boolean;
+}
+
+/** The providers that take the PR remote link (`REMOTE_LINK_PROVIDERS`). */
+export const REMOTE_LINK_PROVIDERS: readonly string[] = ['jira', 'jira_dc'];
+
+/** Whether `t` can write the PR remote link at all (M13.4e). */
+export function takesPrRemoteLink(t: Pick<TrackerRow, 'provider'>): boolean {
+  return REMOTE_LINK_PROVIDERS.includes(t.provider);
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */

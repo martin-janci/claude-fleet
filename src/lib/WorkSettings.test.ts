@@ -542,3 +542,41 @@ describe('Settings → Work, GitHub Enterprise Server and sync metrics (work gra
     expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(false);
   });
 });
+
+describe('Settings → Work, the PR remote link (work graph M13.4e)', () => {
+  it('offers the opt-in only on Jira trackers, off by default', async () => {
+    route([
+      row(),
+      row({ id: 6, provider: 'jira_dc', name: 'dc', site_url: 'https://jira.corp.example' }),
+      row({ id: 7, provider: 'linear', name: 'lin', site_url: 'https://linear.app/acme' }),
+    ]);
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(3));
+    const toggles = screen.getAllByTestId('tracker-pr-link-toggle') as HTMLInputElement[];
+    expect(toggles).toHaveLength(2);
+    expect(toggles.every((t) => !t.checked)).toBe(true);
+  });
+
+  it('turning it on saves the setting beside the others', async () => {
+    const inv = route([row({ settings: { extra_ca: null } })], {
+      update_tracker: row({ settings: { pr_remote_link: true } }),
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('tracker-pr-link-toggle')).toBeInTheDocument());
+    await fireEvent.click(screen.getByTestId('tracker-pr-link-toggle'));
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_tracker')).toBe(true));
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toMatchObject({
+      tracker_id: 4,
+      settings: { pr_remote_link: true },
+    });
+  });
+
+  it('on a desktop paired with a hub it is shown, not offered', async () => {
+    hubStatus.set(remote);
+    route([row({ settings: { pr_remote_link: true } })]);
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getByTestId('tracker-pr-link-on')).toBeInTheDocument());
+    expect(screen.queryByTestId('tracker-pr-link-toggle')).toBeNull();
+  });
+});

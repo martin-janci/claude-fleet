@@ -102,6 +102,9 @@ pub struct TrackerPass {
     /// pass stored nothing at all), not a running log — a later item
     /// overwrites it, and it says nothing about which item or view failed.
     pub last_item_error: Option<String>,
+    /// The PR remote links this pass queued and sent (work graph M13.4e);
+    /// all zero unless the tracker opted in.
+    pub write_back: super::write_back::WriteBackPass,
 }
 
 /// One tracker's last sync pass (work graph M11.4), as `work_admin {
@@ -651,18 +654,20 @@ impl TrackerSync {
         }
 
         // 5. bind.
-        let s = self
-            .lock(store)
-            .map_err(|e| TrackerError::Invalid(e.message))?;
-        let bound = s
-            .bind_tracker_refs(t.id)
-            .map_err(|e| TrackerError::Invalid(e.message))?;
-        pass.bound_sessions = bound.len();
-        // A key that became known late re-resolves its sessions (work graph
-        // M4.3); only the sessions this bind touched.
-        for sid in bound {
-            if let Err(e) = crate::service::work::detect::resolve_session(&s, sid) {
-                tracing::debug!(error = %e.message, "[work] resolve after bind failed");
+        {
+            let s = self
+                .lock(store)
+                .map_err(|e| TrackerError::Invalid(e.message))?;
+            let bound = s
+                .bind_tracker_refs(t.id)
+                .map_err(|e| TrackerError::Invalid(e.message))?;
+            pass.bound_sessions = bound.len();
+            // A key that became known late re-resolves its sessions (work
+            // graph M4.3); only the sessions this bind touched.
+            for sid in bound {
+                if let Err(e) = crate::service::work::detect::resolve_session(&s, sid) {
+                    tracing::debug!(error = %e.message, "[work] resolve after bind failed");
+                }
             }
         }
         // The pass-wide visibility rule (see this method's doc comment):
@@ -676,6 +681,9 @@ impl TrackerSync {
                     .unwrap_or_else(|| "every item this pass tried to store failed".to_string()),
             ));
         }
+        // 6. write-back (M13.4e): only after a pass that could read, only
+        // for a tracker that opted in; never fails the pass.
+        pass.write_back = super::write_back::run(t, provider, store, now).await;
         Ok(())
     }
 

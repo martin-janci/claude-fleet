@@ -2349,6 +2349,78 @@ async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
 }
 
+/// Work graph M13.4e (D3): every tracker write is refused for per-host
+/// tokens. The PR remote link's opt-in is the master's alone, and no new
+/// action exists: the write is the sync tick's. A link a per-host token
+/// makes (or re-makes) never becomes a write, while the same link made by
+/// a person — the master, or a paired client — does.
+#[tokio::test]
+async fn per_host_tokens_can_never_cause_a_tracker_write() {
+    let fx = fixture(false);
+    let org_a =
+        fx.t.store
+            .lock()
+            .unwrap()
+            .require_tracker(fx.tracker_a)
+            .unwrap()
+            .org_id;
+    let opted_in = |fx: &Fx| {
+        fx.t.store
+            .lock()
+            .unwrap()
+            .require_tracker(fx.tracker_a)
+            .unwrap()
+            .settings
+            .pr_remote_link
+    };
+    let opt_in = json!({ "action": "update", "tracker_id": fx.tracker_a,
+        "settings": { "pr_remote_link": true } });
+    for who in EVERYONE.iter().copied().filter(|w| *w != Who::Master) {
+        let a = call(&fx, who, "work_admin", opt_in.clone()).await;
+        is_code(who, &a, "E_FORBIDDEN", "the write-back opt-in");
+    }
+    assert!(!opted_in(&fx), "nobody but the master opted in");
+    let a = call(&fx, Who::Master, "work_admin", opt_in).await;
+    is_ok(Who::Master, &a, "the write-back opt-in");
+    assert!(opted_in(&fx));
+
+    let candidates = |fx: &Fx| -> Vec<i64> {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET pr_url = 'https://github.com/acme/api/pull/1' WHERE id = ?1",
+                [fx.s_a],
+            )
+            .unwrap();
+        s.pr_remote_link_candidates(fx.tracker_a, org_a, 1_000)
+            .unwrap()
+            .iter()
+            .map(|c| c.link_id)
+            .collect()
+    };
+    // The fixture's link is a person's: a write.
+    assert_eq!(candidates(&fx).len(), 1);
+    let link = json!({ "action": "link", "session_id": fx.s_a, "item_id": fx.item_a });
+    // Host A links its own session to its own org's ticket: allowed as a
+    // link, never as a write.
+    let a = call(&fx, Who::HostA, "work_link", link.clone()).await;
+    is_ok(Who::HostA, &a, "host A links its own work");
+    assert!(
+        candidates(&fx).is_empty(),
+        "a per-host token's link writes nothing"
+    );
+    // A person on the phone links it again: a write again.
+    let a = call(&fx, Who::ClientFull, "work_link", link.clone()).await;
+    is_ok(Who::ClientFull, &a, "a person's link");
+    assert_eq!(candidates(&fx).len(), 1);
+    let a = call(&fx, Who::HostA, "work_link", link.clone()).await;
+    is_ok(Who::HostA, &a, "again");
+    assert!(candidates(&fx).is_empty());
+    let a = call(&fx, Who::Master, "work_link", link).await;
+    is_ok(Who::Master, &a, "the master's link");
+    assert_eq!(candidates(&fx).len(), 1);
+}
+
 /// A paired client can never reach a Master tool, whatever its mode, and a
 /// host token never reaches org admin.
 #[test]

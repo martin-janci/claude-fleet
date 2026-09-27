@@ -471,6 +471,40 @@ corrected ticket), the next pass stores the item and the tracker is `ok`
 again. If every item a pass tries fails, the pass itself fails as before
 (the tracker's error is set), still with `reason: items_skipped`.
 
+#### The PR link is not on the ticket
+
+The PR link (work graph M13.4e, off by default) is explained in the
+[work guide](work-graph.md#the-pr-link-off-by-default). When a session has
+a PR and its Jira ticket does not show it, check in this order:
+
+1. **The opt-in.** Settings → Work: the tracker's *Add a session's pull
+   request to its ticket as a link* is ticked (on a hub: its settings carry
+   `pr_remote_link: true`). Only Jira Cloud and Data Center have it.
+2. **The link.** The session's work chip: the link must be one a person
+   made (**Link work**, a confirmed suggestion, or **Start work**). A
+   suggestion, a resumed, forked or inherited link, and anything a per-host
+   token linked or confirmed, never writes; link it again by hand.
+3. **The org.** The session's org must be the tracker's (an unassigned
+   session only writes to an unassigned tracker). A link forced across orgs
+   never writes.
+4. **The sync.** The link is added on the next tracker sync pass (every
+   `work.sync_interval_secs`), and only while the tracker's reads work: an
+   `auth_failed` tracker writes nothing either.
+5. **The outbox.** `fleet-hub tracker status` prints, per opted-in tracker,
+   `PR links: N written, N pending, N failed, N cancelled — <newest
+   error>` (`work_admin { action: status }` → `write_back`).
+
+| What status says | Meaning | Fix |
+|---|---|---|
+| `pending` with `not permitted: 403` | the token may read but not edit issues | give the account *Edit issues* / *Link issues* on the project, or a token that has them; it retries with a backoff |
+| `failed` | eight attempts failed; fleet gave up on that PR | fix the cause; a new PR, or the record swept after `work.retention.write_outbox_days`, is tried afresh |
+| `cancelled` | the link changed before the write was sent (unlinked, re-decided by a per-host token, moved to another org) | nothing, or link the work again by hand |
+| `pending` with `rate-limited` | Jira answered 429 | nothing: it waits for `Retry-After` |
+
+The session's work journal also has a `write_back` row for each link
+written and for each one fleet gave up on. Removing the tracker removes its
+queue.
+
 #### `lagged` after a tracker's first sync
 
 The hub keeps the last 512 events in a replay ring so a reconnecting client

@@ -140,6 +140,17 @@ fn conversations_have_nudge_stamp(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 061: `work_links` already has
+/// `host_decided` (the outbox table is `IF NOT EXISTS`). See [`Migration`].
+fn work_links_have_host_decided(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_links') WHERE name = 'host_decided'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 047: `work_links` already has its
 /// `role` column, and `ALTER TABLE ... ADD COLUMN` would fail again. See
 /// [`Migration`].
@@ -584,6 +595,13 @@ const MIGRATIONS: &[Migration] = &[
     // The auth epoch and its triggers on the token tables (hub store
     // latency, task 7): `IF NOT EXISTS` / `OR IGNORE`, safe to re-run.
     Migration::plain(60, include_str!("../../migrations/060_auth_epoch.sql")),
+    // Work graph M13.4e: the tracker write outbox (the PR remote link) and
+    // `work_links.host_decided`; guarded (ALTER TABLE ADD COLUMN).
+    Migration {
+        version: 61,
+        sql: include_str!("../../migrations/061_tracker_write_outbox.sql"),
+        already_applied: Some(work_links_have_host_decided),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

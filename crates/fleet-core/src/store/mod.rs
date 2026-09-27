@@ -42,6 +42,7 @@ mod work_local;
 mod work_retention;
 mod work_tidy;
 mod work_usage;
+mod write_outbox;
 
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
@@ -71,8 +72,8 @@ pub use trackers::{
     ghes_host_ok, ghes_host_part, github_site, is_allowed_tracker_host, normalize_dc_site,
     normalize_provider_site, normalize_site_url, validate_credential_ref, validate_ghes_hostname,
     validate_tracker_settings, validate_tracker_transport, Secret, TrackerConfig,
-    TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, TRACKER_AUTH_KINDS,
-    TRACKER_PROVIDERS, TRACKER_STATES,
+    TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, REMOTE_LINK_PROVIDERS,
+    TRACKER_AUTH_KINDS, TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, split_github_repo, WorkItemRow, WorkLinkRow,
@@ -86,6 +87,10 @@ pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
+pub use write_outbox::{
+    pr_global_id, pr_title, valid_pr_url, RemoteLinkCandidate, WriteOutboxCounts, WriteOutboxRow,
+    ENDED_GRACE_SECS, OP_PR_REMOTE_LINK, OUTBOX_STATES, WRITE_LINK_SOURCES,
+};
 
 /// One number per `Store` ever built in this process, never reused — see
 /// [`Store::instance_id`].

@@ -3455,7 +3455,10 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M13.2 (`work_admin` `usage` and its `days` window, "usage
     // counts" in the description): measured at 56,873 on 2026-09-26
     // (+144); plus 100.
-    const BUDGET_BYTES: usize = 56_973;
+    // Work graph M13.4e (D3: the PR remote link): `work_admin`'s `settings`
+    // doc names the `pr_remote_link` opt-in; no new tool or action.
+    // Measured at 56,916 on 2026-09-27 (+43); plus 100.
+    const BUDGET_BYTES: usize = 57_016;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

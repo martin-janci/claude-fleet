@@ -353,7 +353,7 @@ impl TrackerProvider for JiraDc {
             repo_relative: false,
             multi_container: false,
             incremental: Incremental::Watermark,
-            write: false,
+            write: true,
         }
     }
 
@@ -617,6 +617,12 @@ impl TrackerProvider for JiraDc {
             }
         }
         out
+    }
+
+    /// The PR remote link (M13.4e): one idempotent `POST …/remotelink`.
+    async fn write(&self, op: &super::WriteOp) -> Result<(), TrackerError> {
+        let req = super::jira_common::remote_link_request(&self.site, 2, op)?;
+        self.call(req, CallKind::Other).await.map(|_| ())
     }
 }
 

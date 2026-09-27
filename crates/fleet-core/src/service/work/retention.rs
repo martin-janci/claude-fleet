@@ -5,7 +5,7 @@
 //! * **Bounded.** At most [`RETENTION_TICK_CAP`] rows per table per sweep,
 //!   deleted [`RETENTION_BATCH`] at a time, each batch under its own lock;
 //!   a backlog drains over later ticks.
-//! * **Settings only** (D23): three windows in days, `0` = keep forever; no
+//! * **Settings only** (D23): four windows in days, `0` = keep forever; no
 //!   per-org override.
 //! * **Hub-internal.** The GC tick runs it; the only other trigger is the
 //!   master's `work_admin { action: sweep_now }` (and the standalone
@@ -25,12 +25,14 @@ pub const RETENTION_TICK_CAP: usize = 2_000;
 /// so no settings path can write it.
 pub const LAST_SWEEP_KEY: &str = "internal.work_retention_last_sweep";
 
-/// The three windows, in days (`0` = forever).
+/// The four windows, in days (`0` = forever).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetentionDays {
     pub journal: i64,
     pub tracker_items: i64,
     pub timeline_work_events: i64,
+    /// The tracker write outbox (M13.4e).
+    pub write_outbox: i64,
 }
 
 fn days_of(s: &Store, key: &str) -> i64 {
@@ -64,6 +66,7 @@ impl RetentionDays {
             journal,
             tracker_items: days_of(s, settings::WORK_RETENTION_TRACKER_ITEMS_DAYS),
             timeline_work_events: days_of(s, settings::WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS),
+            write_outbox: days_of(s, settings::WORK_RETENTION_WRITE_OUTBOX_DAYS),
         }
     }
 
@@ -72,6 +75,7 @@ impl RetentionDays {
             RetentionTable::Journal => self.journal,
             RetentionTable::TrackerItems => self.tracker_items,
             RetentionTable::WorkEvents => self.timeline_work_events,
+            RetentionTable::WriteOutbox => self.write_outbox,
         }
     }
 }
@@ -81,6 +85,7 @@ fn setting_of(t: RetentionTable) -> &'static str {
         RetentionTable::Journal => settings::WORK_RETENTION_JOURNAL_DAYS,
         RetentionTable::TrackerItems => settings::WORK_RETENTION_TRACKER_ITEMS_DAYS,
         RetentionTable::WorkEvents => settings::WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
+        RetentionTable::WriteOutbox => settings::WORK_RETENTION_WRITE_OUTBOX_DAYS,
     }
 }
 
@@ -94,6 +99,8 @@ pub struct RetentionSweep {
     pub tracker_items: usize,
     #[serde(default)]
     pub timeline_work_events: usize,
+    #[serde(default)]
+    pub write_outbox: usize,
 }
 
 impl RetentionSweep {
@@ -102,6 +109,7 @@ impl RetentionSweep {
             RetentionTable::Journal => self.journal += n,
             RetentionTable::TrackerItems => self.tracker_items += n,
             RetentionTable::WorkEvents => self.timeline_work_events += n,
+            RetentionTable::WriteOutbox => self.write_outbox += n,
         }
     }
 }
@@ -219,7 +227,8 @@ mod tests {
             RetentionDays {
                 journal: 365,
                 tracker_items: 180,
-                timeline_work_events: 180
+                timeline_work_events: 180,
+                write_outbox: 90
             }
         );
         let legacy = |v: &str| {

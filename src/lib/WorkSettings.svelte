@@ -33,6 +33,7 @@
     trackerStateBadge,
     syncedAgo,
     ghesHostname,
+    takesPrRemoteLink,
     trackerSyncMetrics,
     describeSyncMetrics,
     type ProviderId,
@@ -216,6 +217,21 @@
     await loadTrackers();
   }
 
+  // --- Jira: the PR remote link (work graph M13.4e, decision D3), per
+  // tracker, off by default. The one write fleet makes to a tracker.
+  let savingPrLink = $state<number | null>(null);
+  async function setPrRemoteLink(t: TrackerRow, on: boolean) {
+    savingPrLink = t.id;
+    const u = await updateTracker(t.id, {
+      settings: { ...(t.settings ?? {}), pr_remote_link: on },
+    });
+    savingPrLink = null;
+    if (!u.ok) {
+      pushError(u.error, 'Saving the PR link setting failed');
+    }
+    await loadTrackers();
+  }
+
   // --- Asana: which sections mean what (asked inline, not as a setup step).
   let sectionEdits = $state<Record<number, Record<string, string>>>({});
   function sectionValue(t: TrackerRow, section: string, fallback: string): string {
@@ -309,6 +325,28 @@
           <li class="hint">Log in to {t.site_url} in a browser once, then Test.</li>
         {:else if t.state === 'unreachable' && t.last_error}
           <li class="hint" data-testid="tracker-unreachable">{t.last_error}</li>
+        {/if}
+        {#if takesPrRemoteLink(t) && owns}
+          <li class="hint" data-testid="tracker-pr-link">
+            <label class="section-row">
+              <input
+                type="checkbox"
+                data-testid="tracker-pr-link-toggle"
+                checked={!!t.settings?.pr_remote_link}
+                disabled={savingPrLink === t.id}
+                onchange={(e) => void setPrRemoteLink(t, (e.currentTarget as HTMLInputElement).checked)}
+              />
+              <span>Add a session's pull request to its ticket as a link</span>
+            </label>
+            <span class="hint"
+              >Only for work you linked or started, only on this tracker's own org's tickets.
+              Needs a token that may edit issues; nothing else is ever written.</span
+            >
+          </li>
+        {:else if takesPrRemoteLink(t) && t.settings?.pr_remote_link}
+          <li class="hint" data-testid="tracker-pr-link-on">
+            The hub adds a session's pull request to its ticket as a link.
+          </li>
         {/if}
         {#if t.provider === 'asana' && owns && sectionMapRows(t).length > 0 && !t.settings?.section_map_confirmed}
           <li class="sections" data-testid="asana-sections">

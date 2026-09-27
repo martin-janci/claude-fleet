@@ -171,7 +171,8 @@ hooks are next installed (re-provision the host).
 
 ## Trackers
 
-A tracker is **read-only** and polled. It never gates anything: with a
+A tracker is **read-only** (one opt-in exception: the PR link, below) and
+polled. It never gates anything: with a
 tracker down or its token expired, everything answers from the cache.
 Trackers give you:
 
@@ -182,8 +183,9 @@ Trackers give you:
 - ticket cards with acceptance criteria;
 - the "done" signal that tidy-up uses.
 
-Fleet writes nothing back to a tracker (decision D3) and has no inbound
-webhook (D13).
+Fleet writes nothing back to a tracker unless you turn on the one write
+it knows, the **PR link** (decision D3, below), and has no inbound webhook
+(D13).
 
 ### Connecting one
 
@@ -241,6 +243,55 @@ its links stay. A tracker's state is one of `ok`, `auth_failed`
 once in a browser), `rate_limited` and `unreachable` (both retry on their
 own). See [troubleshooting.md](troubleshooting.md#work-and-trackers) when a
 sync fails.
+
+### The PR link (off by default)
+
+With **Add a session's pull request to its ticket as a link** on for a Jira
+tracker (Cloud or Data Center), fleet adds the session's pull request to
+the ticket's links. That is the only thing fleet ever writes to a tracker:
+no transition, no worklog, no comment. It is off for every tracker until
+the fleet's owner turns it on, per tracker:
+
+- **Standalone desktop:** Settings → **Work**, the checkbox under the
+  tracker.
+- **Hub:** `work_admin { action: update, tracker_id, settings: {
+  pr_remote_link: true } }` with the master token. The settings object
+  replaces the tracker's settings, so send the others with it. A desktop
+  paired with the hub shows the setting, read-only.
+
+What gets written, and when:
+
+- **Only work a person linked or started.** The link's source must be
+  `manual` (linked by hand, or a suggestion you confirmed) or `started`
+  (**Start work** from a ticket). A suggestion, an agent's guess, a resumed,
+  forked or inherited link never writes. Neither does a link a **per-host
+  token** made or confirmed: every write is refused for per-host tokens.
+  When a person links the same work again, it writes.
+- **Only to the tracker of the link's own org.** The session's org (or the
+  org it ended in) must be the tracker's; unassigned counts as an org of its
+  own. A link forced across orgs (`force_cross_org`) never writes.
+- **Once.** The link is added with `globalId = fleet:pr:<url>`, which Jira
+  upserts by, and fleet queues each (ticket, PR) once. A second session on
+  the same ticket with the same PR adds nothing; a new PR adds a second
+  link.
+- **By the sync.** Each tracker sync pass (`work.sync_interval_secs`) adds
+  the links that are due, at most 20 per pass. A PR seen up to a day after
+  its session ended still gets its link. A failed write retries with a
+  backoff (1 min, doubling, at most 1 h) and gives up after 8 attempts; a
+  429 waits for `Retry-After` and does not count. A write never changes the
+  tracker's state.
+- **What Jira sees:** the PR URL and a title fleet makes from it
+  (`Pull request acme/api#12`). Nothing from the session, the prompt or
+  the ticket.
+
+The token must be allowed to edit issues (Jira's *Link issues* / *Edit
+issues* permission); a read-only token keeps reading and every write fails
+with `not permitted: 403`. Each write, and a write that gave up, is a
+`write_back` row in the work journal of the session's conversation.
+`fleet-hub tracker status` (or `work_admin { action: status }`, field
+`write_back`) shows each opted-in tracker's links written, pending, failed
+and cancelled, and the newest failure. Other providers (GitHub, Asana,
+Linear) refuse the setting: not supported.
 
 ## Starting work
 
@@ -413,6 +464,10 @@ it. `0` keeps a table forever.
   kept ticket.
 - `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
   timeline events. The newest of each kind per session stays.
+- `work.retention.write_outbox_days` (90): the PR link queue (see
+  [The PR link](#the-pr-link-off-by-default)). Only settled records
+  (written, given up, cancelled) go, and only once their session's link is
+  gone or ended before the window; a pending one always stays.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
 Settings → Limits → Retention (standalone desktop) shows the row counts, a
@@ -613,6 +668,9 @@ table.
 | `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | work journal retention |
 | `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | retention of done tickets no link names |
 | `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | retention of handover, nudge and tidy timeline events |
+| `work.retention.write_outbox_days` | `90` | 0–3650 days, `0` = forever | retention of settled PR link records (the tracker write queue) |
 
 Per-org overrides: `auto_tidy` (`on` / `off` / `inherit`) and
 `isolate_sessions`, set on the org, not here.
+The PR link's opt-in is per tracker (`pr_remote_link` in its settings),
+not a `work.*` setting.

@@ -124,7 +124,17 @@ pub struct TrackerSettings {
     /// [`validate_ghes_hostname`]; its host part is always the site URL's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Jira Cloud / Data Center (work graph M13.4e, decision D3): add a
+    /// remote link to the ticket when a session linked to it by a person
+    /// (`manual` / `started`) has a pull request. Off by default; the only
+    /// write fleet ever makes to a tracker, and it needs a token that may
+    /// write.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pr_remote_link: bool,
 }
+
+/// The providers that take the PR remote link (M13.4e).
+pub const REMOTE_LINK_PROVIDERS: &[&str] = &["jira", "jira_dc"];
 
 impl TrackerSettings {
     pub fn is_default(&self) -> bool {
@@ -689,6 +699,12 @@ pub fn validate_tracker_settings(
             "extra_ca and allow_private_network are Jira Data Center settings".into(),
         ));
     }
+    if s.pr_remote_link && !REMOTE_LINK_PROVIDERS.contains(&provider) {
+        return Err(bad(format!(
+            "pr_remote_link is not supported for {provider} trackers: only Jira Cloud and \
+             Jira Data Center take the PR remote link"
+        )));
+    }
     if let Some(h) = &s.hostname {
         if provider != "github" {
             return Err(bad(
@@ -1135,6 +1151,20 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// `e` as a tracker error may be stored: redacted by pattern and of
+    /// tracker `id`'s own credential literals, capped (the write outbox's
+    /// `last_error`, M13.4e — the same masking as `last_error` here).
+    pub fn mask_tracker_error(&self, id: i64, e: &str) -> Result<String, IpcError> {
+        let secrets = self
+            .resolve_tracker_credential(id)?
+            .map(|c| c.literals())
+            .unwrap_or_default();
+        Ok(crate::logging::redact_secrets(e, &secrets)
+            .chars()
+            .take(LAST_ERROR_MAX_CHARS)
+            .collect())
     }
 
     /// Record a tracker's state and error (redacted, capped). `true` when

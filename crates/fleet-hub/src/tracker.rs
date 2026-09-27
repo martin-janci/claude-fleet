@@ -175,6 +175,31 @@ fn status_line(m: &Value) -> String {
 
 /// The retention half of `status` (work graph M12.3): one line per swept
 /// table, then the last sweep. Nothing for an older hub.
+/// One line per tracker that writes the PR remote link (work graph
+/// M13.4e): its outbox by state, and the newest failure. Nothing from an
+/// older hub.
+fn write_back_lines(w: &Value) -> Vec<String> {
+    w.as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let n = |k: &str| c[k].as_i64().unwrap_or_default();
+            let mut line = format!(
+                "tracker {} PR links: {} written, {} pending, {} failed, {} cancelled",
+                n("tracker_id"),
+                n("done"),
+                n("pending"),
+                n("failed"),
+                n("cancelled")
+            );
+            if let Some(e) = c["last_error"].as_str() {
+                line.push_str(&format!(" — {e}"));
+            }
+            line
+        })
+        .collect()
+}
+
 fn retention_lines(r: &Value) -> Vec<String> {
     let Some(tables) = r["tables"].as_array() else {
         return Vec::new();
@@ -203,11 +228,12 @@ fn retention_lines(r: &Value) -> Vec<String> {
         "retention: no sweep since the hub started keeping a record".to_string()
     } else {
         format!(
-            "retention: last sweep {} deleted {} journal, {} tickets, {} events",
+            "retention: last sweep {} deleted {} journal, {} tickets, {} events, {} tracker writes",
             fmt_time(s["at"].as_i64()),
             s["journal"].as_u64().unwrap_or_default(),
             s["tracker_items"].as_u64().unwrap_or_default(),
             s["timeline_work_events"].as_u64().unwrap_or_default(),
+            s["write_outbox"].as_u64().unwrap_or_default(),
         )
     });
     out
@@ -382,6 +408,9 @@ pub async fn run(
             for l in retention_lines(&v["retention"]) {
                 out::line(&l);
             }
+            for l in write_back_lines(&v["write_back"]) {
+                out::line(&l);
+            }
         }
         TrackerCmd::Remove { id } => {
             call_tool(
@@ -492,6 +521,22 @@ mod tests {
             "h"
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn write_back_lines_say_what_the_outbox_holds() {
+        assert!(write_back_lines(&Value::Null).is_empty(), "an older hub");
+        assert_eq!(
+            write_back_lines(&json!([
+                {"tracker_id": 2, "done": 3, "pending": 1, "failed": 0, "cancelled": 0},
+                {"tracker_id": 4, "done": 0, "pending": 0, "failed": 1, "cancelled": 2,
+                 "last_error": "not permitted: 403"},
+            ])),
+            [
+                "tracker 2 PR links: 3 written, 1 pending, 0 failed, 0 cancelled",
+                "tracker 4 PR links: 0 written, 0 pending, 1 failed, 2 cancelled — not permitted: 403",
+            ]
+        );
     }
 
     #[test]

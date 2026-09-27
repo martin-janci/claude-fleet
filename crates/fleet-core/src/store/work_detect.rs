@@ -513,7 +513,7 @@ impl Store {
         self.conn.execute(
             "UPDATE work_links SET state = ?2, source = 'manual', is_primary = ?3, \
                decided_at = ?4, claude_session_id = COALESCE(?5, claude_session_id), \
-               strength = 'explicit', preselected = 0 \
+               strength = 'explicit', preselected = 0, host_decided = 0 \
              WHERE id = ?1",
             rusqlite::params![
                 link_id,

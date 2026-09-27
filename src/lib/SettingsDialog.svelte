@@ -1174,6 +1174,16 @@
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTimelineWorkEventsDays, 'Retention: work timeline', e)} />
         <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge and tidy events are kept; the newest of each per session stays (0 = forever)</span>
       </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-retention-write-outbox-days">PR links written</label>
+        <input class="port" id="work-retention-write-outbox-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionWriteOutboxDays)}
+          disabled={limitsBusy}
+          aria-describedby="work-retention-write-outbox-days-desc"
+          data-testid="work-retention-write-outbox-days"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionWriteOutboxDays, 'Retention: PR links written', e)} />
+        <span class="hook-desc" id="work-retention-write-outbox-days-desc">days a settled PR remote link record is kept once its session's link ended; pending ones always stay (0 = forever)</span>
+      </div>
       <WorkRetention />
       <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
       <div class="mcp-field">

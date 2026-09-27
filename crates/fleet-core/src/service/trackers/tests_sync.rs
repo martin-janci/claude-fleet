@@ -1813,3 +1813,59 @@ async fn a_poison_view_does_not_stall_the_rest_of_the_pass() {
     assert_eq!(a.watermark, None, "view A's watermark must not advance");
     assert_eq!(b.watermark, Some(2), "view B's watermark advances normally");
 }
+
+/// Work graph M13.4e: the write-back runs at the end of a good pass of a
+/// tracker that opted in — once per (ticket, PR) — and not at all before
+/// the opt-in.
+#[tokio::test]
+async fn a_good_pass_of_an_opted_in_tracker_writes_the_pr_remote_link_once() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| T0);
+    let empty = || Ok(Response::json(200, &json!({"issues": [], "isLast": true})));
+    fx.fake
+        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"));
+    fx.fake.once(Method::Post, "/search/jql", empty());
+    sync.run_pass(&fx.store).await.unwrap();
+    let sid = fx.session("dev");
+    {
+        let s = fx.store.lock().unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET pr_url = 'https://github.com/acme/api/pull/7' WHERE id = ?1",
+                [sid],
+            )
+            .unwrap();
+        s.link_session_work(sid, WorkTarget::Key("ABC-101"), "manual")
+            .unwrap();
+    }
+    fx.fake.clear_routes();
+    fx.fake
+        .always(Method::Post, "/search/jql", empty())
+        .always(Method::Post, "/issue/bulkfetch", ok("bulkfetch.json"))
+        .always(
+            Method::Post,
+            "/remotelink",
+            Ok(Response::new(201, r#"{"id":1}"#)),
+        );
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert_eq!(p.write_back, Default::default(), "off by default: {p:?}");
+    assert_eq!(fx.fake.count("/remotelink"), 0);
+    fx.store
+        .lock()
+        .unwrap()
+        .set_tracker_settings(
+            fx.tracker,
+            &crate::store::TrackerSettings {
+                pr_remote_link: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert_eq!((p.write_back.queued, p.write_back.written), (1, 1), "{p:?}");
+    let id = fx.item("ABC-101").external_id.unwrap();
+    assert_eq!(fx.fake.count(&format!("/issue/{id}/remotelink")), 1);
+    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
+    assert_eq!(p.write_back, Default::default(), "{p:?}");
+    assert_eq!(fx.fake.count("/remotelink"), 1, "idempotent");
+}

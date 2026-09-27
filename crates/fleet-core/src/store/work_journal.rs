@@ -33,6 +33,9 @@ pub const JOURNAL_KINDS: &[&str] = &[
     "reopened",
     // Tidy-up acted on the session (work graph M7): archive, kill, safe kill.
     "tidy",
+    // Fleet wrote the session's PR to its ticket as a remote link, or gave
+    // up (work graph M13.4e): on the link's conversation.
+    "write_back",
 ];
 
 /// `source` values.

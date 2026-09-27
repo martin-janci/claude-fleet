@@ -871,8 +871,8 @@ impl FleetTools {
         let summary = args.audit_summary();
         audit("work_admin", &summary);
         match AdminAction::parse(&args.action).map_err(to_mcp_err)? {
-            // M11.4's sync metrics and M12.3's retention (rows, dry run,
-            // last sweep), each read under its own short locks.
+            // M11.4's sync metrics, M12.3's retention (rows, dry run, last
+            // sweep) and M13.4e's write outbox, each under short locks.
             AdminAction::Status => {
                 let trackers = a::admin_sync(&args, &self.store).map_err(to_mcp_err)?;
                 let retention = crate::service::work::retention::status(
@@ -880,7 +880,14 @@ impl FleetTools {
                     crate::service::catalog::now_secs(),
                 )
                 .map_err(to_mcp_err)?;
-                ok_json(&serde_json::json!({ "trackers": trackers, "retention": retention }))
+                // M13.4e: the PR remote link outbox, per opted-in tracker.
+                let write_back = crate::service::trackers::write_back::status(&self.store)
+                    .map_err(to_mcp_err)?;
+                ok_json(&serde_json::json!({
+                    "trackers": trackers,
+                    "retention": retention,
+                    "write_back": write_back,
+                }))
             }
             AdminAction::SweepNow => ok_json(&crate::service::work::retention::sweep(
                 &self.store,
