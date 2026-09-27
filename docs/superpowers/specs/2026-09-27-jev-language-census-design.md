@@ -52,6 +52,7 @@ never collide. The roadmap's table points here.
 | D44 | Languages the detector tells apart | **en, sk, cs, de**, with **pl, hu** as controls |
 | D45 | Form of the census | **A `fleet-hub` CLI**, not `work_admin { usage }` |
 | D46 | May the owner's own first prompts validate the detector? | **Yes, locally**: `--export-sample` / `--labels` |
+| D47 | lingua's models grow `fleet-hub` from 30.0 MB to 75.8 MB (release, linux x86_64, measured 2026-09-27): keep them in the hub, ship a separate `fleet-census` binary, or load the models from files at run time? | **Keep them in the hub**: the static router (D41) will need the same detector there |
 
 ## What was built
 

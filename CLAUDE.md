@@ -285,8 +285,8 @@ only on the user's "yes".
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
-only in fleet-hub — the models add ~45 MB). Nothing calls Jev yet; decisions
-D31–D46 and what is still open are in
+only in fleet-hub — the models add ~45 MB, kept there by D47). Nothing calls Jev yet; decisions
+D31–D47 and what is still open are in
 `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
 Conversation event tracking is landed end to end (migration 037
