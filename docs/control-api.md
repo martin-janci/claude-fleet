@@ -350,7 +350,10 @@ Index by area (names only; see the reference for details):
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
   or `item_id` — it becomes the session's primary work, `source` `manual` by
   default or `agent` from the in-session agent; `reject` — a sticky "not
-  this"; `unlink` a `link_id`). Returns the updated row; a session row's
+  this"; `unlink` a `link_id` — a person's unlink (the master, a paired
+  person's client) also keeps the unchanged branch / PR that named the key
+  from linking it again, rule R9u; a per-host token's or the operator's is a
+  plain unlink). Returns the updated row; a session row's
   `work` carries its primary link. A per-host token reads and decides only
   its own host's sessions. With neither `session_id` nor `key`, `work`
   lists the links that ended within `work.recent_days`.
@@ -386,7 +389,7 @@ Index by area (names only; see the reference for details):
   suggestion (with `suggestions`, the count), kept apart so a guess never
   groups a session. A branch or PR change ends the automatic link it made
   (`end_reason` `branch_changed` | `pr_changed`, snapshotted as past work);
-  manual, `started` and `agent` links are never ended by it, and a rejected
+  manual, `started`, `agent` and `agent_started` links are never ended by it, and a rejected
   (session, target) pair is never proposed again. Decide with `work_link
   { session_id, action: "confirm", link_id }` or `{ action: "reject",
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
@@ -452,7 +455,8 @@ Index by area (names only; see the reference for details):
   it — jump, do not start a second); the project defaults to where that key
   prefix last ran (else `E_AMBIGUOUS` with candidates), the host likewise;
   the worktree is `slug(key + title)`, the session's name `KEY title`, and it
-  is linked `started`. With a brief, the ticket's context (its description
+  is linked `started` (`agent_started` for a per-host token or the operator).
+  With a brief, the ticket's context (its description
   fenced as untrusted) rides the first hook's `additionalContext` and a short
   start prompt is typed only into a ready REPL. A per-host token reads,
   looks up and starts only tickets linked to sessions on its own host, and

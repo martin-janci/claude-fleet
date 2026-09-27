@@ -175,6 +175,7 @@ const SOURCE_LABEL: Record<string, string> = {
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
+  agent_started: 'started for it by Claude',
   resumed: 'resumed',
   forked: 'forked',
   inherited: 'inherited',
@@ -247,7 +248,8 @@ export function newAutoLinks(prev: ReadonlyMap<number, number>, rows: readonly S
   return rows.filter((r) => r.work && isAutoLink(r.work) && prev.get(r.id) !== r.work.link_id);
 }
 
-/** Remove a mistaken link (not a rejection: the key may come back). */
+/** Remove a mistaken link (not a rejection: the key may come back — but not
+ *  from the unchanged branch or pull request that named it, rule R9u). */
 export function unlinkSessionWork(sessionId: number, linkId: number): Promise<Result<SessionRow>> {
   return decide('unlink_session_work', { session_id: sessionId, link_id: linkId });
 }

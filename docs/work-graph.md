@@ -74,6 +74,19 @@ project group's header also has **Name this work…**, for its sessions that
 have no work. An explicit link always wins over anything fleet recognised,
 and a rejection is sticky: fleet never suggests that pair again.
 
+**Clear** removes the link without rejecting the key: fleet may propose it
+again later. But not from the same evidence. When the session's branch,
+its pull request's head branch or a closing reference of its pull request
+is what named the key, fleet remembers that you cleared it and does not
+link or suggest the key again from that branch or that pull request while
+it stays the same (rule R9u). A different branch or pull request is new
+evidence and is detected as usual; going back to the very branch you
+cleared keeps it cleared. A mention in a prompt, a ticket URL or the pull
+request's text can still suggest it. Use **Not KEY** when the key is never
+this session's work. Only your *Clear* is remembered: when Claude or the
+operator unlinks a key (a per-host token, `work_link { action: unlink }`),
+it is a plain unlink.
+
 Claude in the session can link its own work too (`work_link`, source
 `agent`), which is how the friendly-name skill records "I'm working on
 ABC-123". An agent cannot overturn your rejection: once you said *Not
@@ -86,9 +99,12 @@ confirmation or rejection made through a per-host token (the host's own
 Claude) or by the operator (the agent panel's session) is recorded with
 source `agent`, even if it passes `source: manual`; one made from the
 desktop, the master token or a paired phone is recorded as yours
-(`manual`). An agent's confirmation therefore never counts as yours: it
-does not count toward a project's automatic trust, it is not written back
-to a tracker, and the usage summary counts it apart. When an agent
+(`manual`). The same holds for **Name this work…** (an agent's naming
+records `agent`) and for a ticket **start** (an agent's start records
+`agent_started`, a person's `started`). An agent's confirmation or start
+therefore never counts as yours: it does not count toward a project's
+automatic trust, it is not written back to a tracker, and the usage
+summary counts it apart. When an agent
 decides the same way you already did, your decision is kept.
 
 ### Detection
@@ -256,8 +272,8 @@ transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
-  suggestion, and a link or confirmation an agent made (`agent`) never
-  write.
+  suggestion, and a link, confirmation or ticket start an agent made
+  (`agent` / `agent_started`) never write.
 - **Only your own org's tracker.** A session in one org never writes to
   another org's tracker, even a link made with `force_cross_org`; the org is
   checked again just before sending.
@@ -335,7 +351,9 @@ knocking).
 
 A ticket start picks the project where that key's prefix last ran (asks
 when it is ambiguous), creates the branch and worktree `slug(key + title)`,
-names the session `KEY title` and links it with source `started`. With
+names the session `KEY title` and links it with source `started`
+(`agent_started` when an agent — a per-host token or the operator —
+started it: the same start, but not your decision). With
 **Brief Claude** on (the default), the ticket's context, its description
 fenced as untrusted, rides the first hook's context, and a short start
 prompt is typed only once Claude's REPL is ready, never into a trust
@@ -615,8 +633,8 @@ title, key, path or error text.
 
 | Group | What it counts |
 |---|---|
-| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, `agent`, …); a suggestion a person decided reads `manual`, one an agent decided `agent` |
-| detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
+| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, `agent`, `agent_started`, …); a suggestion a person decided reads `manual`, one an agent decided `agent`; a ticket an agent started reads `agent_started` |
+| detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), carried (a resume, fork or inherit carried the same work onto the session and settled it), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
 | handover | handovers requested and written, turns that ended without one, requests that could not be sent |
 | resume | resumes, with and without a brief |
 | journal | briefs queued and delivered, compaction summaries harvested |
@@ -631,9 +649,12 @@ A suggestion that detection withdrew (its branch or PR moved on) or let
 decay (an event suggestion not seen again after a conversation boundary)
 loses its row, but leaves a `work_suggestion_withdrawn` event on the
 session's timeline, holding only ids and rule words; `withdrawn` counts
-those, and `suggested` includes them. The counts are bounded by retention
-and by the timeline's cap per session (500 events), so `suggested` and
-`withdrawn` are floors.
+those, and `suggested` includes them. So does a suggestion fleet settled by
+carrying the same work onto the session (a resume, a fork, a review or
+worker inheriting its parent's work): its event's reason is `carried`, and
+`carried` counts it apart from what detection took back. The counts are
+bounded by retention and by the timeline's cap per session (500 events),
+so `suggested`, `withdrawn` and `carried` are floors.
 
 Paste it into an acceptance run's record: that gives the decisions real
 numbers.
@@ -642,7 +663,7 @@ numbers.
 $ fleet-hub work usage --days 30
 work graph usage, last 30 d
 links: 41 made (branch 12, manual 20, resumed 3, started 6)
-detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 2 withdrawn, 1 expired; median decision 12 min; 2 nudges
+detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 2 withdrawn, 0 carried, 1 expired; median decision 12 min; 2 nudges
 handover: 5 requested, 4 written, 1 missing, 0 send failed
 resume: 3 (2 with a brief, 1 without)
 journal: 8 briefs queued, 7 delivered; 11 compaction summaries

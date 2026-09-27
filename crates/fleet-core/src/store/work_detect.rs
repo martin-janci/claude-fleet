@@ -12,9 +12,22 @@ use rusqlite::OptionalExtension;
 /// Longest stored branch name.
 const BRANCH_MAX_CHARS: usize = 255;
 
-/// Timeline kind of a suggestion detection withdrew (R7) or let decay (R6):
-/// the row is deleted, this event keeps the outcome (D34).
+/// Timeline kind of a suggestion detection withdrew (R7) or let decay (R6),
+/// or a carry settled: the row is deleted, this event keeps the outcome
+/// (D34). Its `reason` is one of [`WITHDRAWN_REASONS`].
 pub const WORK_SUGGESTION_WITHDRAWN: &str = "work_suggestion_withdrawn";
+
+/// A [`WORK_SUGGESTION_WITHDRAWN`] event's `reason`: detection took the
+/// suggestion back — its state signal moved on (R7).
+pub const WITHDRAWN_WITHDRAW: &str = "withdraw";
+/// … an event suggestion decayed at a conversation boundary (R6).
+pub const WITHDRAWN_DECAY: &str = "decay";
+/// … fleet carried the same work onto the session (a resume, a fork, a
+/// review or worker inheriting its parent's): the suggestion is settled by
+/// the carried link, not taken back.
+pub const WITHDRAWN_CARRIED: &str = "carried";
+/// Every [`WORK_SUGGESTION_WITHDRAWN`] reason.
+pub const WITHDRAWN_REASONS: &[&str] = &[WITHDRAWN_WITHDRAW, WITHDRAWN_DECAY, WITHDRAWN_CARRIED];
 
 /// What the resolver needs to know about a session besides its links.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,6 +44,8 @@ pub struct DetectionState {
     pub pr_signals: Option<String>,
     /// The probe has run for this session at least once.
     pub pr_probed: bool,
+    /// `sessions.pr_url`: which pull request the PR signals are of (R9u).
+    pub pr_url: Option<String>,
     /// The last prompt fleet itself sent (the loop guard).
     pub last_prompt: Option<String>,
 }
@@ -101,6 +116,7 @@ impl Store {
                         branch: r.get(4)?,
                         pr_signals: r.get(5)?,
                         pr_probed: r.get(6)?,
+                        pr_url: r.get(3)?,
                         last_prompt: r.get(7)?,
                     })
                 },
@@ -272,9 +288,9 @@ impl Store {
                     }
                     LinkChange::Withdraw { link_id } | LinkChange::Decay { link_id } => {
                         let reason = if matches!(c, LinkChange::Withdraw { .. }) {
-                            "withdraw"
+                            WITHDRAWN_WITHDRAW
                         } else {
-                            "decay"
+                            WITHDRAWN_DECAY
                         };
                         self.withdraw_suggestion(
                             session_id,
@@ -425,14 +441,14 @@ impl Store {
         self.resolve_work_key(&key)
     }
 
-    /// Delete the live suggestion `link_id` (R7 withdrew it, or R6 let it
-    /// decay: `reason` is `withdraw` or `decay`), leaving a
-    /// [`WORK_SUGGESTION_WITHDRAWN`] timeline event on `session_id` so the
-    /// negative outcome is not lost with the row (D34). The event's detail
-    /// holds ids and vocabulary words only — `{link_id, item_id, rule,
-    /// reason}` — never a key, title or text. Nothing happens when the link
-    /// is no longer a live suggestion.
-    fn withdraw_suggestion(
+    /// Delete the live suggestion `link_id` (R7 withdrew it, R6 let it
+    /// decay, or a carry settled it: `reason` is one of
+    /// [`WITHDRAWN_REASONS`]), leaving a [`WORK_SUGGESTION_WITHDRAWN`]
+    /// timeline event on `session_id` so the outcome is not lost with the
+    /// row (D34). The event's detail holds ids and vocabulary words only —
+    /// `{link_id, item_id, rule, reason}` — never a key, title or text.
+    /// Nothing happens when the link is no longer a live suggestion.
+    pub(super) fn withdraw_suggestion(
         &self,
         session_id: i64,
         conversation: Option<&str>,
@@ -474,6 +490,25 @@ impl Store {
             WORK_SUGGESTION_WITHDRAWN,
             Some(&detail),
         )
+    }
+
+    /// What a person's unlinks hold for `participant` (R9u, migration
+    /// 066): `(target, signal, value)`, the target labelled as
+    /// [`Self::detection_links`] labels a link (the item's current key, the
+    /// bare key, or `item:<id>`).
+    pub fn work_unlink_holds(
+        &self,
+        participant: i64,
+    ) -> Result<Vec<(String, String, String)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(i.key, u.ref_key, 'item:' || u.item_id), u.signal, u.value \
+             FROM work_unlinks u LEFT JOIN work_items i ON i.id = u.item_id \
+             WHERE u.participant_id = ?1 ORDER BY u.id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![participant], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn link_evidence(&self, link_id: i64) -> Result<Vec<serde_json::Value>, IpcError> {

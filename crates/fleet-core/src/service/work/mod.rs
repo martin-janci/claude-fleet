@@ -441,9 +441,20 @@ pub fn lookup_reference(args: &WorkArgs) -> Result<&str, IpcError> {
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "lookup needs key or url"))
 }
 
-/// The start half of [`WorkLinkArgs`] (work graph M3.4).
+/// The start half of [`WorkLinkArgs`] (work graph M3.4): a PERSON's start
+/// (the desktop's); an agent's goes through [`start_args_as`].
 pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::StartArgs {
+    start_args_as(args, Decider::Person)
+}
+
+/// [`start_args`] started by `decider`, which decides the link's source:
+/// `started` for a person, `agent_started` for an agent (D34).
+pub fn start_args_as(
+    args: &WorkLinkArgs,
+    decider: Decider,
+) -> crate::service::trackers::tickets::StartArgs {
     crate::service::trackers::tickets::StartArgs {
+        decider,
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
@@ -731,7 +742,15 @@ pub fn work_link_as<'a>(
             if !scope.is_all() {
                 visible_link(link_id)?;
             }
-            if !s.unlink_session_work(session_id, link_id)? {
+            // A person's "Clear work" holds against the unchanged branch /
+            // PR that named the target, or the re-resolve below would make
+            // the same link again (R9u). An agent's unlink stays a plain
+            // unlink: it never writes a hold a person did not ask for.
+            let holds = match decider {
+                Decider::Person => detect::unlink_holds(&s, session_id, link_id)?,
+                Decider::Agent => Vec::new(),
+            };
+            if !s.unlink_session_work_held(session_id, link_id, &holds)? {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
                     format!("session {session_id} has no live work link {link_id}"),

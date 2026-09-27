@@ -29,6 +29,7 @@ pub const KNOWN_SOURCES: &[&str] = &[
     "manual",
     "started",
     "agent",
+    "agent_started",
     "branch",
     "pr",
     "trailer",
@@ -139,6 +140,11 @@ pub struct DetectionUsage {
     /// Counted from `work_suggestion_withdrawn` timeline events (D34).
     #[serde(default)]
     pub withdrawn: u64,
+    /// Suggestions fleet settled by carrying the same work onto the
+    /// session (a resume, a fork, a review or worker inheriting its
+    /// parent's): `work_suggestion_withdrawn` events with reason `carried`.
+    #[serde(default)]
+    pub carried: u64,
     /// Suggestions whose session ended undecided.
     #[serde(default)]
     pub expired: u64,
@@ -247,16 +253,18 @@ pub fn usage(
         .into_iter()
         .collect();
     let ev = |k: &str| events.get(k).copied().unwrap_or(0);
-    // Withdrawn and decayed suggestions have no row left: their event is
-    // the only trace, so they are made AND taken back here.
-    let withdrawn = ev(WORK_SUGGESTION_WITHDRAWN);
+    // Withdrawn, decayed and carried suggestions have no row left: their
+    // event is the only trace, so they are made AND settled here.
+    let gone = ev(WORK_SUGGESTION_WITHDRAWN);
+    let carried = s.usage_carried_suggestions(since, until)?.min(gone);
     let detection = DetectionUsage {
-        suggested: d.suggested + withdrawn,
+        suggested: d.suggested + gone,
         confirmed_by_person: d.confirmed_by_person,
         confirmed_by_agent: d.confirmed_by_agent,
         promoted: d.promoted,
         rejected: d.rejected,
-        withdrawn,
+        withdrawn: gone - carried,
+        carried,
         expired: d.expired,
         median_decision_secs: median(&secs),
         nudges: ev("work_classify_nudge"),
@@ -363,14 +371,15 @@ impl UsageSummary {
             ),
             format!(
                 "detection: {} suggested, {} confirmed by a person, {} confirmed by an agent, \
-                 {} promoted, {} rejected, {} withdrawn, {} expired; median decision {}; \
-                 {} nudges",
+                 {} promoted, {} rejected, {} withdrawn, {} carried, {} expired; \
+                 median decision {}; {} nudges",
                 d.suggested,
                 d.confirmed_by_person,
                 d.confirmed_by_agent,
                 d.promoted,
                 d.rejected,
                 d.withdrawn,
+                d.carried,
                 d.expired,
                 d.median_decision_secs.map_or("n/a".into(), duration),
                 d.nudges
@@ -537,6 +546,12 @@ mod tests {
                 Some(r#"{"link_id":91,"item_id":4,"rule":"R6","reason":"decay"}"#),
                 in_window,
             ),
+            // One a resume's carry settled (not taken back).
+            (
+                "work_suggestion_withdrawn",
+                Some(r#"{"link_id":92,"item_id":4,"rule":"R6","reason":"carried"}"#),
+                in_window,
+            ),
             ("work_suggestion_withdrawn", None, old),
             ("handover_requested", None, old),
         ] {
@@ -606,14 +621,15 @@ mod tests {
             u.detection,
             DetectionUsage {
                 // confirmed (by a person and by an agent), promoted,
-                // rejected, expired — not the spot one — and the two
-                // withdrawn.
-                suggested: 7,
+                // rejected, expired — not the spot one — the two
+                // withdrawn and the carried one.
+                suggested: 8,
                 confirmed_by_person: 1,
                 confirmed_by_agent: 1,
                 promoted: 1,
                 rejected: 1,
                 withdrawn: 2,
+                carried: 1,
                 expired: 1,
                 // the person's two decisions: 600 s and 3600 s (the
                 // agent's 7200 s is not a person's).

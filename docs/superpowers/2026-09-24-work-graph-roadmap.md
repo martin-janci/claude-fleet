@@ -344,7 +344,10 @@ acceptance on a real fleet is still to do.
 - **M4.2 + M4.3** (d5f28a9): migration 049; the live branch from the
   transcript, PR fields and commit trailers from the probe, prompt matches
   behind the loop and dump guards; the pure resolver (R1–R9), applied only
-  on a real change; `SessionRow.work_suggested`.
+  on a real change; `SessionRow.work_suggested`. (Label hygiene, D34, later
+  added R9u: a person's *Clear work* holds against the unchanged branch /
+  PR that named the target — migration 066 `work_unlinks`, applied when
+  `detect` builds the resolver's input; see the design's rule table.)
 - **M4.4** (ea1dc5e): `work_link` confirm / reject by `link_id` /
   `trust_project` (+172 B), two Routed commands; chip states, the evidence
   popover, `y` / `n` / `l`, the batch review sheet, the Undo toast.
