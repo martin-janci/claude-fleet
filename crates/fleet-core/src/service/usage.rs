@@ -1848,10 +1848,19 @@ mod tests {
             sc = sid(2),
         );
         fake.on(Match::script_contains("tail -c +"), Reply::ok(&script));
-        let row_version_before = {
-            let s = store.lock().unwrap();
-            s.get_session_by_id(ids[2]).unwrap().unwrap().row_version
-        };
+        // Count every UPDATE of a sessions row, whatever it sets: since
+        // migration 063 a same-value UPDATE no longer moves `row_version`,
+        // so that cannot prove a row was never written.
+        store
+            .lock()
+            .unwrap()
+            .conn_for_test()
+            .execute_batch(
+                "CREATE TEMP TABLE session_writes (id INTEGER);
+                 CREATE TEMP TRIGGER count_session_writes AFTER UPDATE ON main.sessions
+                 BEGIN INSERT INTO session_writes VALUES (NEW.id); END;",
+            )
+            .unwrap();
         let changed = collect_host(&store, &fake, "vps", &BTreeMap::new(), 5_000)
             .await
             .unwrap();
@@ -1868,11 +1877,17 @@ mod tests {
         assert_eq!(row2.usage.usage_updated_at, None, "session 2 never wrote");
         assert_eq!(s.list_usage_cursors("vps").unwrap().len(), 3);
         // Exactly 2 rows updated means the third is never written at all —
-        // not even a no-op UPDATE that sets the same values back (the
-        // `sessions_row_version_bump` trigger fires on ANY UPDATE, so an
-        // untouched row's row_version proves no UPDATE ran for it).
+        // not even a no-op UPDATE that sets the same values back.
+        let row2_writes: i64 = s
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM temp.session_writes WHERE id = ?1",
+                [ids[2]],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
-            row2.row_version, row_version_before,
+            row2_writes, 0,
             "session 2's row must not be written at all, not even a no-op UPDATE"
         );
     }
