@@ -294,7 +294,7 @@ runs. Changing one after seeing results needs a new decision row.
 
 ## 10. What is still open
 
-- **D32 sequencing:** J3 first (built as a shadow/assist adapter), J1 offline.
+- **D32 is decided:** J3 first (built as a shadow/assist adapter), J1 offline only (phase 0 built; no live adapter until its acceptance lines pass).
 - **J2's consent for reply text** (a new decision before phase 0).
 - **The owner's census run and D46 labels:** they decide the language
   cells.
