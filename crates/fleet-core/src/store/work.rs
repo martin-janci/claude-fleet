@@ -22,6 +22,35 @@ use std::collections::HashMap;
 /// (branch, pr, url, prompt …) arrive with roadmap M4.
 pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent"];
 
+/// The sources that record a PERSON's decision: `manual` (a person linked,
+/// confirmed or rejected it) and `started` (a person started the session
+/// for it). Every other source is fleet's or an agent's. Only a person may
+/// overturn a person's rejection.
+pub const PERSON_SOURCES: &[&str] = &["manual", "started"];
+
+/// `E_FORBIDDEN` when the live link `link_id` is a rejection a PERSON made
+/// (its source is not `agent`): an agent's decision must not turn a
+/// person's "Not this" into a link. The one guard both decision paths share
+/// (`decide_session_work`, `decide_work_link`).
+pub(super) fn refuse_overturning_rejection(
+    session_id: i64,
+    link_id: i64,
+    state: &str,
+    source: &str,
+) -> Result<(), IpcError> {
+    if state != "rejected" || source == "agent" {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "a person rejected this work for session {session_id} (work link {link_id}); \
+             an agent cannot overturn a person's rejection — ask the person to link it"
+        ),
+    )
+    .with_details(serde_json::json!({ "link_id": link_id, "reason": "rejected_by_person" })))
+}
+
 /// Longest accepted work key / free-form work reference.
 pub const WORK_REF_MAX_CHARS: usize = 64;
 
@@ -103,7 +132,7 @@ pub struct WorkLinkRow {
     pub ref_key: Option<String>,
     #[serde(default)]
     pub participant_id: Option<i64>,
-    /// `confirmed` | `rejected`.
+    /// `confirmed` | `suggested` | `rejected`.
     pub state: String,
     pub source: String,
     #[serde(default)]
@@ -588,6 +617,11 @@ impl Store {
     /// primary). Idempotent per (session, target): re-deciding updates the
     /// one live link instead of adding another. Emits `session_updated`, so
     /// the row's `work` follows.
+    ///
+    /// A person's rejection is overturned only by a person: confirming a
+    /// target whose live link a person rejected, with a source outside
+    /// [`PERSON_SOURCES`] (an agent's `link`), is `E_FORBIDDEN` and writes
+    /// nothing.
     fn decide_session_work(
         &self,
         session_id: i64,
@@ -610,17 +644,23 @@ impl Store {
         let primary = state == "confirmed";
 
         let tx = self.conn.unchecked_transaction()?;
-        let existing: Option<i64> = self
+        let existing: Option<(i64, String, String)> = self
             .conn
             .query_row(
-                "SELECT id FROM work_links \
+                "SELECT id, state, source FROM work_links \
                  WHERE participant_id = ?1 AND ended_at IS NULL \
                    AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
                  ORDER BY id LIMIT 1",
                 rusqlite::params![participant, item_id, ref_key],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        if let Some((id, old_state, old_source)) = &existing {
+            if primary && !PERSON_SOURCES.contains(&source) {
+                refuse_overturning_rejection(session_id, *id, old_state, old_source)?;
+            }
+        }
+        let existing = existing.map(|(id, _, _)| id);
         if primary {
             self.conn.execute(
                 "UPDATE work_links SET is_primary = 0 \
@@ -672,7 +712,9 @@ impl Store {
 
     /// Say that `session_id` works on `target`; it becomes the session's
     /// primary work. `source`: `manual` (a person), `started` (the session
-    /// was created for it), `agent` (the in-session agent declared it).
+    /// was created for it), `agent` (the in-session agent declared it). An
+    /// `agent` link never overturns a person's rejection of the same target
+    /// (`E_FORBIDDEN`).
     pub fn link_session_work(
         &self,
         session_id: i64,
@@ -1204,6 +1246,53 @@ mod tests {
             .unwrap();
         assert_eq!(back.id, r.id);
         assert_eq!(back.state, "confirmed");
+    }
+
+    /// D34 label hygiene: an in-session agent's `link` must not turn a
+    /// person's "Not this" into the session's primary work. A person (and
+    /// only a person) may still correct their own rejection.
+    #[test]
+    fn an_agent_cannot_overturn_a_persons_rejection() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "dev");
+        let r = s
+            .reject_session_work(sid, WorkTarget::Key("ABC-1"))
+            .unwrap();
+
+        let err = s
+            .link_session_work(sid, WorkTarget::Key("abc-1"), "agent")
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN, "{}", err.message);
+        assert!(err.message.contains("person rejected"), "{}", err.message);
+        let links = s.session_work_links(sid).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            (
+                links[0].id,
+                links[0].state.as_str(),
+                links[0].source.as_str()
+            ),
+            (r.id, "rejected", "manual"),
+            "nothing written"
+        );
+        assert!(!links[0].is_primary);
+
+        // An agent's link to OTHER work is unaffected, and its refusal left
+        // no primary cleared behind it.
+        let other = s
+            .link_session_work(sid, WorkTarget::Key("DEF-2"), "agent")
+            .unwrap();
+        assert!(other.is_primary);
+        assert!(s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "agent")
+            .is_err());
+        assert!(s.get_work_link(other.id).unwrap().unwrap().is_primary);
+
+        // The person's correction still wins.
+        let back = s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        assert_eq!((back.id, back.state.as_str()), (r.id, "confirmed"));
     }
 
     #[test]

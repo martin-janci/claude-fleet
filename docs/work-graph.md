@@ -76,7 +76,9 @@ and a rejection is sticky: fleet never suggests that pair again.
 
 Claude in the session can link its own work too (`work_link`, source
 `agent`), which is how the friendly-name skill records "I'm working on
-ABC-123".
+ABC-123". An agent cannot overturn your rejection: once you said *Not
+this* to a key for a session, Claude linking that key is refused
+(`E_FORBIDDEN`) and your rejection stands. Only you can link it again.
 
 ### Detection
 
