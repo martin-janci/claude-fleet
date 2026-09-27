@@ -58,7 +58,7 @@
 use super::bm25::{self, Bm25};
 use super::{bootstrap_acc_diff, mix, percentile, Calibration, Criterion, Paired, Verdict};
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::service::decide::haiku::Haiku;
+use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::{
     decide, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
 };
@@ -1338,12 +1338,19 @@ pub async fn run_jev(
 /// state, the candidates' ids and titles, and `none`). Its pick is the
 /// answer (`none` abstains) and its confidence the score; an answer outside
 /// the options is an abstention counted as `invalid`, a failed call
-/// (timeout, SSH, `claude`) is skipped with its reason. At most
-/// `max_calls` calls; nothing is recorded in `decision_runs`.
+/// (timeout, SSH, `claude`) is skipped with its reason. A case whose org
+/// is not the host's is skipped as `other_org` and nothing is sent for it.
+/// At most `max_calls` calls; nothing is recorded in `decision_runs`.
 pub async fn run_haiku(h: &Haiku<'_>, cases: &[&BenchCase], max_calls: usize) -> Vec<Outcome> {
     let mut out = Vec::with_capacity(cases.len());
     let mut calls = 0usize;
     for case in cases {
+        // Never across the org boundary: a case goes only to a host of its
+        // own org (no org on both sides is the same).
+        if !h.may_ask(case.org_id) {
+            out.push(Outcome::skipped(OTHER_ORG));
+            continue;
+        }
         if case.candidates.is_empty() {
             out.push(Outcome::skipped("no_candidates"));
             continue;

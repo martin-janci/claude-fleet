@@ -14,18 +14,28 @@
 //!   Only a Choice is rendered.
 //! * **A run that cannot act.** `claude -p --model <m> --output-format json
 //!   --settings '{"disableAllHooks":true}' --tools '' --strict-mcp-config
-//!   --no-session-persistence '<prompt>'` (the flags of
+//!   --no-session-persistence` (the flags of
 //!   [`crate::service::work::summary`]'s fork, without a conversation): no
 //!   tool, no MCP server, none of fleet's hooks, no transcript left on the
 //!   host. It runs in a fresh temporary directory (no project `CLAUDE.md`),
-//!   stdin closed, output capped. [`haiku_script`] builds exactly this; the
-//!   prompt is one word quoted with [`crate::shell::quote`], and a test pins
-//!   both.
+//!   output capped. [`haiku_script`] builds exactly this, and a test pins it.
+//! * **The prompt is on stdin, never in argv.** The command line holds only
+//!   fixed words and the validated model (so `ps` on the host shows no case
+//!   data); the prompt is written to the SSH command's stdin
+//!   ([`SshExec::run_with_stdin`]), which `claude -p` reads when it is given
+//!   no prompt argument. A test runs the script through real bash with a
+//!   fake `claude` and checks the prompt arrives verbatim on stdin and in
+//!   no argument.
 //! * **Where the data goes.** The prompt leaves the hub for the named host
 //!   over SSH and, from there, reaches Anthropic through that host's Claude
 //!   account — the processor the host's sessions already use, which is why
 //!   D33 chose it. Nothing runs without an explicit host; the benchmark
 //!   prints which one.
+//! * **Never across the org boundary.** A case goes to the host only when
+//!   its org is the host's org (`hosts.org_id`, [`resolve_host_org`]; no org
+//!   on both sides counts as the same). Any other case is skipped as
+//!   `other_org` ([`Haiku::may_ask`]); the benchmarks check it before every
+//!   call.
 //! * **Bounded.** One call at a time per host (a second waits), each under
 //!   [`HaikuConfig::timeout`] (the host-side `timeout` stops the model a
 //!   little earlier), and the caller counts calls against `--max-calls`.
@@ -64,23 +74,25 @@ pub const HAIKU_TAG: &str = "fleet-haiku=";
 const CONNECT: Duration = Duration::from_secs(10);
 /// Bytes of stdout the script lets through.
 pub const OUTPUT_CAP_BYTES: usize = 65_536;
-/// The longest command (the script, quoted for `bash -lc`) sent: under the
-/// kernel's 128 KiB limit on one argument, which the remote shell's `-c`
-/// string is.
-pub const MAX_COMMAND_BYTES: usize = 120_000;
+/// The longest prompt sent (on stdin). Jev's own request cap is 110 KB; the
+/// rendered text adds little to it.
+pub const MAX_PROMPT_BYTES: usize = 256 * 1024;
 
 /// Why a call gave no answer (a word, as the benchmarks' `skipped` shows).
 pub mod reason {
     /// The call ran past its wall clock (or the host-side `timeout`).
     pub const TIMEOUT: &str = "timeout";
-    /// SSH failed (unreachable host, spawn failure).
+    /// SSH failed (unreachable host, spawn failure, or a transport that
+    /// cannot pipe stdin: a host reached only through fleet-agent).
     pub const SSH_ERROR: &str = "ssh_error";
     /// `claude` is not on the host's login PATH.
     pub const NO_CLAUDE: &str = "noclaude";
     /// `claude` ran and failed, or said nothing readable.
     pub const CALL_FAILED: &str = "call_failed";
-    /// The prompt does not fit one command.
+    /// The prompt is over [`super::MAX_PROMPT_BYTES`].
     pub const TOO_LONG: &str = "too_long";
+    /// The case's org is not the host's org: never sent.
+    pub const OTHER_ORG: &str = "other_org";
     /// The request is not a Choice.
     pub const UNSUPPORTED: &str = "unsupported";
     /// The caller's `--max-calls` was reached.
@@ -212,8 +224,9 @@ pub fn prompt_for(req: &JevRequest) -> Result<(String, Vec<String>), String> {
 // --- the command ---------------------------------------------------------------
 
 /// PURE: the one command a call runs on the host. The model must be one of
-/// [`MODELS`]; the prompt is one word, quoted with [`crate::shell::quote`].
-pub fn haiku_script(prompt: &str, model: &str, host_timeout_secs: u64) -> Result<String, String> {
+/// [`MODELS`] (quoted with [`crate::shell::quote`]). It holds no case data:
+/// `claude` reads the prompt from the command's stdin.
+pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, String> {
     use crate::shell::quote;
     if !MODELS.contains(&model) {
         return Err(format!("refusing model {model:?}"));
@@ -233,7 +246,6 @@ pub fn haiku_script(prompt: &str, model: &str, host_timeout_secs: u64) -> Result
         &quote(""),
         "--strict-mcp-config",
         "--no-session-persistence",
-        &quote(prompt),
     ]
     .join(" ");
     let t = HAIKU_TAG;
@@ -244,7 +256,7 @@ pub fn haiku_script(prompt: &str, model: &str, host_timeout_secs: u64) -> Result
          if [ -n \"$d\" ]; then cd -- \"$d\" || exit 1; else cd / || exit 1; fi; \
          t=''; if command -v timeout >/dev/null 2>&1; then t='timeout {host_timeout_secs}'; fi; \
          echo {t}run; \
-         $t {claude} </dev/null | head -c {OUTPUT_CAP_BYTES}; s=$?; \
+         $t {claude} | head -c {OUTPUT_CAP_BYTES}; s=$?; \
          if [ -n \"$d\" ]; then cd / && rmdir -- \"$d\" 2>/dev/null; fi; \
          exit $s"
     ))
@@ -469,37 +481,79 @@ fn slot(host: &str) -> Arc<tokio::sync::Mutex<()>> {
     Arc::clone(m.entry(host.to_string()).or_default())
 }
 
-/// The baseline, bound to a transport.
+/// The org of `host` in `s` (`hosts.org_id`; `None`: no org). A host the
+/// database does not know is an error: its org, and so which cases may go
+/// to it, cannot be told.
+pub fn resolve_host_org(s: &crate::store::Store, host: &str) -> Result<Option<i64>, String> {
+    match s.get_host_row(host) {
+        Ok(Some(_)) => s.host_org(host).map_err(|e| e.message),
+        Ok(None) => Err(format!(
+            "{host} is not a host in this database, so its org cannot be told; the haiku \
+             baseline only sends a case to a host of the case's own org"
+        )),
+        Err(e) => Err(format!("read host {host}: {e}")),
+    }
+}
+
+/// The baseline, bound to a transport and to the host's org.
 pub struct Haiku<'a> {
     pub exec: &'a dyn SshExec,
     pub cfg: HaikuConfig,
+    /// The host's org ([`resolve_host_org`]); `None`: no org.
+    pub host_org: Option<i64>,
 }
 
 impl Haiku<'_> {
+    /// Whether a case of `case_org` may go to this host: only when its org
+    /// is the host's (no org on both sides counts as the same). The
+    /// benchmarks skip any other case as [`reason::OTHER_ORG`].
+    pub fn may_ask(&self, case_org: Option<i64>) -> bool {
+        case_org == self.host_org
+    }
+
+    /// The note the benchmark prints before it asks anything: the host,
+    /// where the data goes, and the org fence.
+    pub fn consent_note(&self) -> String {
+        let org = match self.host_org {
+            Some(id) => format!("org #{id}"),
+            None => "no org".to_string(),
+        };
+        format!(
+            "{}; the host has {org}: only cases of {org} are sent, every other case is skipped \
+             as other_org",
+            self.cfg.consent_note()
+        )
+    }
+
     /// Ask `req` once on the configured host (waiting for the host's slot).
+    /// The caller checks [`Self::may_ask`] first.
     pub async fn ask(&self, req: &JevRequest) -> HaikuReply {
         let (prompt, options) = match prompt_for(req) {
             Ok(p) => p,
             Err(_) => return HaikuReply::failed(reason::UNSUPPORTED),
         };
-        let script = match haiku_script(&prompt, &self.cfg.model, self.cfg.host_timeout_secs()) {
+        if prompt.len() > MAX_PROMPT_BYTES {
+            return HaikuReply::failed(reason::TOO_LONG);
+        }
+        let script = match haiku_script(&self.cfg.model, self.cfg.host_timeout_secs()) {
             Ok(s) => s,
             Err(_) => return HaikuReply::failed(reason::UNSUPPORTED),
         };
-        if crate::shell::quote(&script).len() > MAX_COMMAND_BYTES {
-            return HaikuReply::failed(reason::TOO_LONG);
-        }
+        let quoted = crate::shell::quote(&script);
         let slot = slot(&self.cfg.host);
         let _held = slot.lock().await;
         let started = Instant::now();
-        let res = crate::ssh::run_shell_bounded(
-            self.exec,
-            &self.cfg.host,
-            &script,
-            CONNECT,
-            self.cfg.timeout,
-        )
-        .await;
+        let res = self
+            .exec
+            .run_with_stdin(
+                &self.cfg.host,
+                &["bash", "-lc", &quoted],
+                prompt.into_bytes(),
+                CONNECT,
+                self.cfg.timeout,
+                OUTPUT_CAP_BYTES + 4096,
+            )
+            .await;
         let latency = Some(started.elapsed().as_millis() as i64);
         let mut reply = HaikuReply {
             ran: true,

@@ -37,7 +37,7 @@
 
 use super::{bootstrap_acc_diff, f3, percentile, Calibration, Criterion, Paired, Verdict};
 use crate::ipc_error::lock;
-use crate::service::decide::haiku::Haiku;
+use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
 use crate::service::decide::{decide, gate_at, DecideCtx, DecideRequest, Fallback, Feature};
 use crate::service::trackers::asana::{infer_section, section_key};
@@ -353,12 +353,20 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[SectionCase], max_calls: usize) -
 /// an answer under the floor and an answer outside the options
 /// (`invalid`) are abstentions; a failed call (timeout, SSH, `claude`) is
 /// skipped with its reason. An answer without a confidence stands (no
-/// floor to apply) and is left out of calibration. At most `max_calls`
-/// calls; nothing is recorded in `decision_runs`.
+/// floor to apply) and is left out of calibration. A case whose org is not
+/// the host's is skipped as `other_org` and nothing is sent for it (the
+/// built-in set has no org: it needs a host with no org). At most
+/// `max_calls` calls; nothing is recorded in `decision_runs`.
 pub async fn run_haiku(h: &Haiku<'_>, cases: &[SectionCase], max_calls: usize) -> Vec<Outcome> {
     let mut out = Vec::with_capacity(cases.len());
     let mut calls = 0usize;
     for c in cases {
+        // Never across the org boundary: a case goes only to a host of its
+        // own org (no org on both sides is the same).
+        if !h.may_ask(c.org_id) {
+            out.push(Outcome::skipped(OTHER_ORG));
+            continue;
+        }
         if calls >= max_calls {
             out.push(Outcome::skipped("max_calls"));
             continue;

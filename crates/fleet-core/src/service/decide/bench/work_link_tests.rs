@@ -1376,9 +1376,12 @@ async fn haiku_is_asked_jevs_choice_on_the_named_host_and_nothing_leaks() {
         .into_iter()
         .collect();
     let ssh = haiku_for(&loaded, odd);
+    // A host of the cases' own org.
+    assert!(loaded.cases.iter().all(|c| c.org_id == Some(w.acme)));
     let h = Haiku {
         exec: &ssh,
         cfg: HaikuConfig::new("bench-host", Some("haiku"), Some(60)).unwrap(),
+        host_org: Some(w.acme),
     };
     let outs = run_providers_with(&loaded, &o, None, Some(&h)).await;
     assert_eq!(ssh.calls(), loaded.cases.len());
@@ -1495,6 +1498,88 @@ async fn haiku_is_asked_jevs_choice_on_the_named_host_and_nothing_leaks() {
     assert!(outs[&Provider::Haiku]
         .values()
         .all(|x| x.reason.as_deref() == Some("no_backend")));
+}
+
+#[tokio::test]
+async fn haiku_never_sends_a_work_link_case_across_the_org_boundary() {
+    let mut w = leaky_world();
+    // A second org with one case, and a case with no org at all.
+    let other = w.s.add_org("Other", None, false).unwrap().id;
+    let t2 =
+        w.s.add_tracker("jira", "Other Jira", "https://other.atlassian.net")
+            .unwrap()
+            .id;
+    w.s.set_tracker_org(t2, Some(other)).unwrap();
+    w.s.upsert_host("h2").unwrap();
+    w.s.set_host_org("h2", Some(other)).unwrap();
+    let oi = w.item_in(t2, "OTH-1", "Other org work", *NOW - 30 * DAY, false);
+    w.case_on(
+        "h2",
+        "fix the other org thing",
+        oi,
+        "manual",
+        *NOW - DAY,
+        None,
+    );
+    w.s.upsert_host("h3").unwrap();
+    let local =
+        w.s.create_local_work_item(Some("LOC-1"), "Loose local thing")
+            .unwrap()
+            .id;
+    w.case_on(
+        "h3",
+        "the loose local thing",
+        local,
+        "manual",
+        *NOW - DAY,
+        None,
+    );
+    let o = opts(Split::All, vec![Provider::Haiku]);
+    let loaded = load(&w.s, &Words, &o, None).unwrap();
+    let org_of = |id: &str| loaded.cases.iter().find(|c| c.id == id).unwrap().org_id;
+    let orgs: std::collections::BTreeSet<Option<i64>> =
+        loaded.cases.iter().map(|c| c.org_id).collect();
+    assert!(
+        orgs.contains(&Some(w.acme)) && orgs.contains(&Some(other)) && orgs.contains(&None),
+        "{orgs:?}"
+    );
+    let ssh = ScriptedSsh::new(|_| "{\"choice\": \"none\", \"confidence\": 0.5}".into());
+    for host_org in [Some(w.acme), Some(other), None] {
+        let h = Haiku {
+            exec: &ssh,
+            cfg: HaikuConfig::new("bench-host", None, None).unwrap(),
+            host_org,
+        };
+        let before = ssh.calls();
+        let outs = run_providers_with(&loaded, &o, None, Some(&h)).await;
+        let ho = &outs[&Provider::Haiku];
+        let same = loaded
+            .cases
+            .iter()
+            .filter(|c| c.org_id == host_org && !c.candidates.is_empty())
+            .count();
+        assert_eq!(ssh.calls() - before, same, "{host_org:?}");
+        for (id, x) in ho {
+            if org_of(id) == host_org {
+                assert_ne!(x.reason.as_deref(), Some("other_org"), "{id}");
+            } else {
+                assert!(!x.ran, "{id} sent across orgs");
+                assert_eq!(x.reason.as_deref(), Some("other_org"), "{id}");
+            }
+        }
+        // Counted and shown like any skip.
+        let r = report(&loaded, &o, &outs);
+        let m = &r.datasets[0].providers[0];
+        let crossed = loaded.cases.iter().filter(|c| c.org_id != host_org).count() as u64;
+        assert_eq!(m.skipped.get("other_org").map(|n| n.0), Some(crossed));
+    }
+    // What was sent never named another org's work.
+    assert!(ssh
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|p| !(p.contains("Other org work") && p.contains("Login redirect"))));
 }
 
 /// Haiku outcomes for [`judged_world`]: every truth case answered `i1`

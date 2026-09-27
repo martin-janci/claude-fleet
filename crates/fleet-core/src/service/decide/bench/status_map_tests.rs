@@ -436,11 +436,67 @@ fn haiku_oracle(cases: &[SectionCase]) -> ScriptedSsh {
     })
 }
 
+/// Haiku on a host with no org (the fixture's rows have none).
 fn haiku_on(exec: &ScriptedSsh) -> Haiku<'_> {
+    haiku_in(exec, None)
+}
+
+fn haiku_in(exec: &ScriptedSsh, host_org: Option<i64>) -> Haiku<'_> {
     Haiku {
         exec,
         cfg: HaikuConfig::new("bench-host", None, None).unwrap(),
+        host_org,
     }
+}
+
+#[tokio::test]
+async fn haiku_never_sends_a_case_across_the_org_boundary() {
+    let (labels, mut cases) = fixture();
+    let ssh = haiku_oracle(&cases);
+    let run = |cases: Vec<SectionCase>, host_org: Option<i64>| {
+        let ssh = &ssh;
+        async move {
+            let before = ssh.calls();
+            let outs = run_haiku(&haiku_in(ssh, host_org), &cases, DEFAULT_MAX_CALLS).await;
+            (ssh.calls() - before, outs)
+        }
+    };
+    // The fixture has no org: a host of an org gets none of it.
+    let (sent, outs) = run(cases.clone(), Some(7)).await;
+    assert_eq!(sent, 0);
+    assert!(outs
+        .iter()
+        .all(|o| !o.ran && o.reason.as_deref() == Some("other_org")));
+    // Three rows of org 7, two of org 8, the rest with none.
+    for c in cases.iter_mut().take(3) {
+        c.org_id = Some(7);
+    }
+    for c in cases.iter_mut().skip(3).take(2) {
+        c.org_id = Some(8);
+    }
+    // To org 7's host: only org 7's rows.
+    let (sent, outs) = run(cases.clone(), Some(7)).await;
+    assert_eq!(sent, 3);
+    for (c, o) in cases.iter().zip(&outs) {
+        if c.org_id == Some(7) {
+            assert!(o.ran && o.usable(), "{o:?}");
+        } else {
+            assert_eq!(o.reason.as_deref(), Some("other_org"), "{c:?}");
+        }
+    }
+    // To a host with no org: only the rows with none (no org on both
+    // sides is the same).
+    let (sent, outs) = run(cases.clone(), None).await;
+    assert_eq!(sent, cases.len() - 5);
+    for (c, o) in cases.iter().zip(&outs) {
+        assert_eq!(o.ran, c.org_id.is_none(), "{c:?}");
+    }
+    // The skips are counted and shown like any other.
+    let outcomes: Outcomes = [(Provider::Haiku, outs)].into_iter().collect();
+    let r = report(&cases, &outcomes, labels.len(), 0, false);
+    let m = metric(&r, "haiku");
+    assert_eq!(m.skipped.get("other_org").copied(), Some(5));
+    assert!(r.lines().join("\n").contains("other_org 5"));
 }
 
 #[tokio::test]

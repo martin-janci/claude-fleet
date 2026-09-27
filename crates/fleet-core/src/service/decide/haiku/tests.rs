@@ -144,15 +144,13 @@ fn only_a_choice_is_asked() {
 
 #[test]
 fn the_run_has_no_tools_no_mcp_no_hooks_and_no_transcript() {
-    let sc = haiku_script("the prompt", "haiku", 110).unwrap();
+    let sc = haiku_script("haiku", 110).unwrap();
     for flag in [
         "claude -p --model 'haiku' --output-format json",
         r#"--settings '{"disableAllHooks":true}'"#,
         "--tools ''",
         "--strict-mcp-config",
-        "--no-session-persistence",
-        "'the prompt'",
-        "</dev/null | head -c 65536",
+        "--no-session-persistence | head -c 65536",
         "timeout 110",
         "mktemp -d",
     ] {
@@ -164,65 +162,89 @@ fn the_run_has_no_tools_no_mcp_no_hooks_and_no_transcript() {
         "--dangerously",
         "--permission-mode",
         r#""hooks":{}"#,
+        // stdin carries the prompt: it must not be closed or redirected.
+        "</dev/null",
+        "<&-",
     ] {
         assert!(!sc.contains(never), "{never:?} in {sc}");
     }
     let at = |t: &str| sc.find(&format!("{HAIKU_TAG}{t}")).unwrap();
     assert!(at("noclaude") < at("run"));
-    assert!(haiku_script("p", "claude-opus-5-5", 110).is_err());
-    assert!(haiku_script("p", "haiku'; id; '", 110).is_err());
+    assert!(haiku_script("claude-opus-5-5", 110).is_err());
+    assert!(haiku_script("haiku'; id; '", 110).is_err());
 }
 
 const NASTY: &str = "it's \"quoted\" $(touch pwned) `id` $HOME \\ back\nslash ; && | > x '\\'' end";
 
-#[test]
-fn the_prompt_is_one_quoted_word() {
-    let sc = haiku_script(NASTY, "haiku", 110).unwrap();
-    assert!(sc.contains(&crate::shell::quote(NASTY)), "{sc}");
-    // The quoted word, read back by a real shell through both layers (the
-    // script's own quoting, then `bash -lc '<script>'`'s), is the prompt.
-    let inner = format!("printf '%s' {}", crate::shell::quote(NASTY));
-    let outer = ["bash", "-c", &crate::shell::quote(&inner)].join(" ");
-    let out = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(outer)
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), NASTY);
-}
-
-/// The whole script, run by a real bash through the same two quoting layers
-/// ssh applies, against a fake `claude` that records its last argument.
+/// The whole script, run by a real bash through the same two layers ssh
+/// applies (`bash -lc '<script>'` re-read by a shell) with the prompt on
+/// stdin, against a fake `claude` that records its stdin and its argv.
 #[cfg(unix)]
 #[test]
-fn the_script_hands_claude_the_prompt_verbatim() {
+fn the_script_hands_claude_the_prompt_verbatim_on_stdin_and_never_in_argv() {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let got = dir.path().join("got");
+    let argv = dir.path().join("argv");
     let fake = dir.path().join("claude");
     std::fs::write(
         &fake,
         format!(
-            "#!/bin/sh\nfor a; do last=$a; done\nprintf '%s' \"$last\" > '{}'\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\ncat > '{}'\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{}'\n",
             got.display(),
+            argv.display(),
             envelope("{\"choice\":\"i1\",\"confidence\":0.7}")
         ),
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let sc = haiku_script(NASTY, "haiku", 30).unwrap();
+    let sc = haiku_script("haiku", 30).unwrap();
     let full = format!(
         "export PATH={}:\"$PATH\"; {sc}",
         crate::shell::quote(&dir.path().display().to_string())
     );
     let outer = ["bash", "-c", &crate::shell::quote(&full)].join(" ");
-    let out = std::process::Command::new("bash")
+    let mut child = std::process::Command::new("bash")
         .arg("-c")
         .arg(outer)
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(NASTY.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "{out:?}");
     assert_eq!(std::fs::read_to_string(&got).unwrap(), NASTY);
+    // claude's argv is the fixed flags alone: no word of the prompt.
+    let args: Vec<String> = std::fs::read_to_string(&argv)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "-p",
+            "--model",
+            "haiku",
+            "--output-format",
+            "json",
+            "--settings",
+            r#"{"disableAllHooks":true}"#,
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--no-session-persistence"
+        ]
+    );
+    assert!(!dir.path().join("pwned").exists());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let ScriptAnswer::Ran(text) = parse_script_output(&stdout) else {
         panic!("{stdout}");
@@ -360,6 +382,7 @@ async fn one_call_runs_the_script_on_the_named_host_and_reads_its_answer() {
     let h = Haiku {
         exec: &fake,
         cfg: cfg("hq"),
+        host_org: None,
     };
     let r = h.ask(&sm_request()).await;
     assert_eq!(r.error, None);
@@ -371,9 +394,51 @@ async fn one_call_runs_the_script_on_the_named_host_and_reads_its_answer() {
     let calls = fake.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].host, "hq");
-    let sc = calls[0].script().unwrap();
+    // The prompt went on stdin; the command line holds none of it.
     let (prompt, _) = prompt_for(&sm_request()).unwrap();
-    assert!(sc.contains(&crate::shell::quote(&prompt)), "{sc}");
+    assert_eq!(calls[0].stdin_str().as_deref(), Some(prompt.as_str()));
+    let cmd = calls[0].command();
+    for piece in [
+        PREAMBLE,
+        "čaká na klienta",
+        status_map::INSTRUCTIONS,
+        "<state>",
+    ] {
+        assert!(!cmd.contains(piece), "{piece:?} on the command line: {cmd}");
+    }
+    let sc = calls[0].script().unwrap();
+    assert_eq!(sc, haiku_script("haiku", 110).unwrap());
+}
+
+#[test]
+fn a_case_goes_only_to_a_host_of_its_own_org() {
+    let fake = FakeSsh::new();
+    let h = |host_org| Haiku {
+        exec: &fake,
+        cfg: cfg("h1"),
+        host_org,
+    };
+    assert!(h(Some(3)).may_ask(Some(3)));
+    assert!(!h(Some(3)).may_ask(Some(4)));
+    assert!(!h(Some(3)).may_ask(None));
+    assert!(!h(None).may_ask(Some(3)));
+    assert!(h(None).may_ask(None));
+    assert!(h(Some(3)).consent_note().contains("org #3"));
+    assert!(h(None).consent_note().contains("no org"));
+    assert!(h(None).consent_note().contains("other_org"));
+}
+
+#[test]
+fn the_hosts_org_is_read_from_the_database_and_an_unknown_host_is_refused() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let acme = s.add_org("Acme", None, false).unwrap().id;
+    s.upsert_host("plain").unwrap();
+    s.upsert_host("acme-box").unwrap();
+    s.set_host_org("acme-box", Some(acme)).unwrap();
+    assert_eq!(resolve_host_org(&s, "plain"), Ok(None));
+    assert_eq!(resolve_host_org(&s, "acme-box"), Ok(Some(acme)));
+    let e = resolve_host_org(&s, "stranger").unwrap_err();
+    assert!(e.contains("stranger") && e.contains("org"), "{e}");
 }
 
 #[tokio::test]
@@ -386,6 +451,7 @@ async fn an_answer_outside_the_options_is_invalid_and_usage_may_be_unknown() {
     let r = Haiku {
         exec: &fake,
         cfg: cfg("h1"),
+        host_org: None,
     }
     .ask(&sm_request())
     .await;
@@ -403,6 +469,7 @@ async fn failures_are_named() {
         Haiku {
             exec: &fake,
             cfg: cfg("h1"),
+            host_org: None,
         }
         .ask(&sm_request())
         .await
@@ -434,13 +501,13 @@ async fn failures_are_named() {
 }
 
 #[tokio::test]
-async fn a_prompt_that_does_not_fit_one_command_is_not_sent() {
+async fn a_prompt_over_the_cap_is_not_sent() {
     let fake = FakeSsh::new();
     let mut criteria = BTreeMap::new();
     criteria.insert("a".to_string(), Some(json!("x")));
     criteria.insert("b".to_string(), Some(json!("y")));
     let req = JevRequest {
-        state: json!("'".repeat(40_000)),
+        state: json!("x".repeat(MAX_PROMPT_BYTES + 1)),
         question: Question::Choice {
             instructions: json!("which?"),
             criteria,
@@ -449,6 +516,7 @@ async fn a_prompt_that_does_not_fit_one_command_is_not_sent() {
     let r = Haiku {
         exec: &fake,
         cfg: cfg("h1"),
+        host_org: None,
     }
     .ask(&req)
     .await;
@@ -476,10 +544,21 @@ async fn calls_to_one_host_run_one_at_a_time() {
         }
         async fn run_bounded(
             &self,
+            _: &str,
+            _: &[&str],
+            _: Duration,
+            _: Duration,
+        ) -> Result<std::process::Output, crate::ipc_error::IpcError> {
+            unreachable!("the prompt goes on stdin")
+        }
+        async fn run_with_stdin(
+            &self,
             _host: &str,
             _args: &[&str],
+            _stdin: Vec<u8>,
             _c: Duration,
             _w: Duration,
+            _max: usize,
         ) -> Result<std::process::Output, crate::ipc_error::IpcError> {
             let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
             self.most.fetch_max(n, Ordering::SeqCst);
@@ -532,6 +611,7 @@ async fn calls_to_one_host_run_one_at_a_time() {
     let h = Haiku {
         exec: &slow,
         cfg: cfg("one-at-a-time-host"),
+        host_org: None,
     };
     let req = sm_request();
     let (a, b, c) = tokio::join!(h.ask(&req), h.ask(&req), h.ask(&req));

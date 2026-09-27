@@ -17,9 +17,13 @@
 //! `--provider haiku` (D33, both benches) asks the same request of `claude
 //! -p` on the host named by `--haiku-host` (required): each case's redacted
 //! state and options leave the hub over SSH for that host and reach
-//! Anthropic through its Claude account. A note on stderr (and in the
-//! report) names the host before anything is sent; nothing is recorded in
-//! `decision_runs`.
+//! Anthropic through its Claude account. The host's org is read from the
+//! database (read-only) and a case goes only to a host of its own org (no
+//! org on both sides is the same; anything else is skipped as
+//! `other_org`), so the built-in status-map set, which has no org, needs a
+//! host with no org. The prompt goes on stdin, never in argv. A note on
+//! stderr (and in the report) names the host and its org before anything is
+//! sent; nothing is recorded in `decision_runs`.
 
 use crate::census::create_private;
 use crate::config::{self, HubOptions};
@@ -30,7 +34,7 @@ use fleet_core::service::decide::bench::status_map as sm;
 use fleet_core::service::decide::bench::work_link::{
     self as wl, BenchOptions, Provider, Shape, Split,
 };
-use fleet_core::service::decide::haiku::{Haiku, HaikuConfig};
+use fleet_core::service::decide::haiku::{self, Haiku, HaikuConfig};
 use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::nl::Detector;
 use fleet_core::store::Store;
@@ -187,11 +191,26 @@ impl HaikuArgs {
     }
 }
 
-/// Say where the data goes before any of it is sent.
-fn haiku_note(cfg: &HaikuConfig) -> String {
-    let n = cfg.consent_note();
-    out::error(&n);
-    n
+/// Bind the haiku baseline (when asked for) to `ssh` and to its host's org,
+/// read from `s` — a host the database does not know is refused, since no
+/// case may cross the org boundary — and say where the data goes before any
+/// of it is sent.
+fn bind_haiku<'a>(
+    ssh: &'a dyn fleet_core::ssh::SshExec,
+    cfg: Option<HaikuConfig>,
+    s: &Store,
+) -> Result<Option<Haiku<'a>>, String> {
+    let Some(cfg) = cfg else {
+        return Ok(None);
+    };
+    let host_org = haiku::resolve_host_org(s, &cfg.host)?;
+    let h = Haiku {
+        exec: ssh,
+        cfg,
+        host_org,
+    };
+    out::error(&h.consent_note());
+    Ok(Some(h))
 }
 
 fn now() -> i64 {
@@ -274,7 +293,6 @@ pub async fn run(
 
             let haiku_cfg = haiku_args.config(o.providers.contains(&Provider::Haiku))?;
             let ssh = fleet_core::ssh::SshClient::new();
-            let haiku = haiku_cfg.map(|cfg| Haiku { exec: &ssh, cfg });
             let labeled = match &labels {
                 Some(file) => {
                     let raw = std::fs::read_to_string(file)
@@ -290,9 +308,11 @@ pub async fn run(
                 let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
                     .map_err(|e| format!("open {}: {e}", path.display()))?;
                 let store = Arc::new(Mutex::new(store));
-                let loaded = {
+                let (loaded, haiku) = {
                     let s = store.lock().map_err(|_| "store lock poisoned")?;
-                    wl::load(&s, &detector, &o, labeled.as_deref()).map_err(|e| e.message)?
+                    let loaded =
+                        wl::load(&s, &detector, &o, labeled.as_deref()).map_err(|e| e.message)?;
+                    (loaded, bind_haiku(&ssh, haiku_cfg, &s)?)
                 };
                 out::error(&format!(
                     "jev: asking only for cases whose org passes the gate (at most {} calls); \
@@ -300,7 +320,7 @@ pub async fn run(
                     o.max_calls
                 ));
                 let ctx = DecideCtx::jev(Arc::clone(&store));
-                let note = haiku.as_ref().map(|h| haiku_note(&h.cfg));
+                let note = haiku.as_ref().map(Haiku::consent_note);
                 let outs = wl::run_providers_with(&loaded, &o, Some(&ctx), haiku.as_ref()).await;
                 let mut r = wl::report(&loaded, &o, &outs);
                 r.notes.extend(note);
@@ -310,7 +330,8 @@ pub async fn run(
                     .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
                 let loaded =
                     wl::load(&store, &detector, &o, labeled.as_deref()).map_err(|e| e.message)?;
-                let note = haiku.as_ref().map(|h| haiku_note(&h.cfg));
+                let haiku = bind_haiku(&ssh, haiku_cfg, &store)?;
+                let note = haiku.as_ref().map(Haiku::consent_note);
                 let outs = wl::run_providers_with(&loaded, &o, None, haiku.as_ref()).await;
                 let mut r = wl::report(&loaded, &o, &outs);
                 r.notes.extend(note);
@@ -375,7 +396,8 @@ fn parse_sm_providers(v: &[String]) -> Result<Vec<sm::Provider>, String> {
 /// `decide bench status-map`: the labeled sections (or the built-in set)
 /// through the providers. Only `--provider jev` opens a database — for
 /// writing, as the envelope records every call. `--provider haiku` runs on
-/// `ssh` against `--haiku-host`.
+/// `ssh` against `--haiku-host`, whose org it reads from the database
+/// (read-only).
 #[allow(clippy::too_many_arguments)]
 async fn status_map(
     labels: Option<&Path>,
@@ -408,10 +430,16 @@ async fn status_map(
     let (cases, dropped) = sm::cases(&rows);
     let providers = parse_sm_providers(providers)?;
     let max_calls = max_calls.unwrap_or(sm::DEFAULT_MAX_CALLS);
-    let haiku = haiku_args
-        .config(providers.contains(&sm::Provider::Haiku))?
-        .map(|cfg| Haiku { exec: ssh, cfg });
-    let note = haiku.as_ref().map(|h| haiku_note(&h.cfg));
+    let haiku = match haiku_args.config(providers.contains(&sm::Provider::Haiku))? {
+        Some(cfg) => {
+            let path = db_path(db, opts, env)?;
+            let s = Store::open_read_only(&path)
+                .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+            bind_haiku(ssh, Some(cfg), &s)?
+        }
+        None => None,
+    };
+    let note = haiku.as_ref().map(Haiku::consent_note);
     let outs = if providers.contains(&sm::Provider::Jev) {
         let path = db_path(db, opts, env)?;
         let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
@@ -508,11 +536,13 @@ mod tests {
     }
 
     /// A transport that answers every command with `stdout` and records
-    /// the host of each call.
+    /// the host, the command line and the stdin of each call.
     #[derive(Default)]
     struct Canned {
         stdout: String,
         hosts: Mutex<Vec<String>>,
+        commands: Mutex<Vec<String>>,
+        stdins: Mutex<Vec<String>>,
     }
 
     impl Canned {
@@ -529,17 +559,33 @@ mod tests {
             _: &[&str],
             _: std::time::Duration,
         ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
-            unreachable!("haiku runs bounded")
+            unreachable!("haiku sends its prompt on stdin")
         }
         async fn run_bounded(
             &self,
-            host: &str,
+            _: &str,
             _: &[&str],
             _: std::time::Duration,
             _: std::time::Duration,
         ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
+            unreachable!("haiku sends its prompt on stdin")
+        }
+        async fn run_with_stdin(
+            &self,
+            host: &str,
+            args: &[&str],
+            stdin: Vec<u8>,
+            _: std::time::Duration,
+            _: std::time::Duration,
+            _: usize,
+        ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
             use std::os::unix::process::ExitStatusExt;
             self.hosts.lock().unwrap().push(host.to_string());
+            self.commands.lock().unwrap().push(args.join(" "));
+            self.stdins
+                .lock()
+                .unwrap()
+                .push(String::from_utf8(stdin).unwrap());
             Ok(std::process::Output {
                 status: std::process::ExitStatus::from_raw(0),
                 stdout: self.stdout.clone().into_bytes(),
@@ -672,39 +718,94 @@ mod tests {
             "usage": { "input_tokens": 50, "output_tokens": 5 },
             "total_cost_usd": 0.001,
         });
-        let fake = Canned {
+        // The hub's database: gpu1 has no org (like the rows), acme-box
+        // has one.
+        let db = dir.path().join("state.db");
+        {
+            let s = Store::open_with_bus(&db, Arc::new(fleet_core::events::NoopEventBus)).unwrap();
+            s.upsert_host("gpu1").unwrap();
+            s.upsert_host("acme-box").unwrap();
+            let acme = s.add_org("Acme", None, false).unwrap().id;
+            s.set_host_org("acme-box", Some(acme)).unwrap();
+        }
+        let canned = || Canned {
             stdout: format!("fleet-haiku=run\n{envelope}\n"),
             ..Default::default()
         };
-        let args = HaikuArgs {
-            haiku_host: Some("gpu1".into()),
+        let on = |host: &str| HaikuArgs {
+            haiku_host: Some(host.into()),
             ..Default::default()
         };
         let providers = ["rule".to_string(), "haiku".to_string()];
+        let fake = canned();
         let r = super::status_map(
             Some(&file),
             false,
             &providers,
-            &args,
+            &on("gpu1"),
             &fake,
             None,
-            None,
+            Some(&db),
             &HubOptions::default(),
             &HashMap::new(),
         )
         .await
         .unwrap();
         assert_eq!(fake.hosts(), vec!["gpu1", "gpu1"]);
+        // The prompt went on stdin; no command line carries it.
+        let stdins = fake.stdins.lock().unwrap().clone();
+        assert!(stdins.iter().all(|p| p.contains("hotovo")), "{stdins:?}");
+        assert!(fake
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| !c.contains("hotovo") && !c.contains("<state>")));
         let m = r.metrics.iter().find(|m| m.provider == "haiku").unwrap();
         assert_eq!((m.calls, m.all.answered, m.all.correct), (2, 2, 1));
         assert_eq!((m.input_tokens, m.cost_microusd), (100, 2000));
         assert!(
-            r.notes
-                .iter()
-                .any(|n| n.contains("host gpu1") && n.contains("Anthropic")),
+            r.notes.iter().any(|n| n.contains("host gpu1")
+                && n.contains("Anthropic")
+                && n.contains("no org")),
             "{:?}",
             r.notes
         );
+        // A host of an org gets none of these org-less rows.
+        let fake = canned();
+        let r = super::status_map(
+            Some(&file),
+            false,
+            &providers,
+            &on("acme-box"),
+            &fake,
+            None,
+            Some(&db),
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(fake.hosts().is_empty());
+        let m = r.metrics.iter().find(|m| m.provider == "haiku").unwrap();
+        assert_eq!((m.calls, m.skipped.get("other_org").copied()), (0, Some(2)));
+        // A host the database does not know: refused, nothing sent.
+        let fake = canned();
+        let e = super::status_map(
+            Some(&file),
+            false,
+            &providers,
+            &on("stranger"),
+            &fake,
+            None,
+            Some(&db),
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("stranger"), "{e}");
+        assert!(fake.hosts().is_empty());
         // Without the host nothing is sent.
         let fake = Canned::default();
         let e = super::status_map(

@@ -1,20 +1,13 @@
 //! A scripted transport for the benchmarks' haiku tests: it reads the
-//! prompt out of each command, as the host's `claude` would receive it, and
-//! answers with whatever the test's function returns.
+//! prompt from each call's stdin, as the host's `claude` would receive it,
+//! checks the command line holds none of it, and answers with whatever the
+//! test's function returns.
 
 use super::*;
 use crate::ipc_error::IpcError;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// The prompt a haiku command hands `claude`: its last word, unquoted.
-pub fn prompt_of(script: &str) -> Option<String> {
-    let flag = "--no-session-persistence ";
-    let start = script.find(flag)? + flag.len();
-    let end = script[start..].find(" </dev/null")? + start;
-    crate::ssh_fake::unquote(&script[start..end])
-}
 
 /// The state JSON in a prompt.
 pub fn state_of(prompt: &str) -> Option<Value> {
@@ -65,15 +58,27 @@ impl ScriptedSsh {
 #[async_trait::async_trait]
 impl SshExec for ScriptedSsh {
     async fn run(&self, _: &str, _: &[&str], _: Duration) -> Result<Output, IpcError> {
-        unreachable!("haiku runs bounded")
+        unreachable!("haiku sends its prompt on stdin")
     }
 
     async fn run_bounded(
         &self,
+        _: &str,
+        _: &[&str],
+        _: Duration,
+        _: Duration,
+    ) -> Result<Output, IpcError> {
+        unreachable!("haiku sends its prompt on stdin")
+    }
+
+    async fn run_with_stdin(
+        &self,
         host: &str,
         args: &[&str],
+        stdin: Vec<u8>,
         _connect: Duration,
         _wall: Duration,
+        _max_output: usize,
     ) -> Result<Output, IpcError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.hosts.lock().unwrap().push(host.to_string());
@@ -81,7 +86,16 @@ impl SshExec for ScriptedSsh {
             ["bash", "-lc", s] => crate::ssh_fake::unquote(s).expect("a quoted script"),
             _ => panic!("not a bash -lc call: {args:?}"),
         };
-        let prompt = prompt_of(&script).expect("a prompt in the script");
+        let prompt = String::from_utf8(stdin).expect("a UTF-8 prompt");
+        let state = prompt
+            .split("<state>\n")
+            .nth(1)
+            .and_then(|x| x.split("\n</state>").next())
+            .expect("a state in the prompt");
+        assert!(
+            !script.contains(state) && !script.contains(PREAMBLE),
+            "the prompt is on the command line: {script}"
+        );
         let text = (self.answer)(&prompt);
         self.prompts.lock().unwrap().push(prompt);
         Ok(Output {
