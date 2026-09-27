@@ -73,13 +73,15 @@ runs. Changing one after seeing results needs a new decision row.
 - Split by time, not at random: train or dev is older, test is newer.
 - The test split is looked at once per registered experiment.
 
-**Leakage guard [built for census, proposed for the benchmark].**
+**Leakage guard [built for census and for the J1 benchmark: `bench::work_link::redact_prompt`].**
 - The input is redacted with the recogniser before any model sees it:
   - every ticket key and URL it finds;
   - the branch name;
   - for `started` links, the `{key}-{slug}` branch slug, which is the ticket
     title.
-- A test fails if any label's key, title or slug survives in the state sent.
+- A test fails if any label's key, title or slug survives in the state sent
+  (`no_case_leaks_its_truth`). The J1 guard also removes the truth's exact
+  title and, for `started` links, every slug word by stem (inflections too).
 
 **Language axis (D38, D41, D42, D44).**
 - Every case carries:
@@ -156,7 +158,7 @@ runs. Changing one after seeing results needs a new decision row.
 | Acceptance (assist) | accuracy on answered ≥ 0.90 at coverage ≥ 0.40; ≥ 10 points above BM25 at equal coverage; not worse than haiku by more than 3 points; abstention quality ≥ 0.85; a language cell more than 10 points below English at equal coverage falls back |
 | Auto (pre-selection only) | accuracy on answered ≥ 0.97 at coverage ≥ 0.25, correction rate ≤ 3% over 200 assisted suggestions in that cell |
 | Rollback | mode `off`; suggestions made by it decay like any R6 suggestion |
-| Components | envelope; `work_link` adapter (after detection, off the hook path); `fleet-hub decide bench work-link` (offline); desktop chip / popover and the phone sheet show source `model`, confidence and the reason |
+| Components | envelope; `work_link` adapter (after detection, off the hook path) **[proposed]**; the offline benchmark **[built]**: `fleet-core::service::decide::bench::work_link` (dataset A from `store::bench_work_link` — person-decided `manual`/`started` links; none-cases; the leakage guard `redact_prompt`; candidate recall incl. the nudge fence; time split; providers `none`, `bm25` (`bench::bm25`) and `jev` through `decide()` (`work_link.bench.v1`, subject `bench`); metrics, breakdown and bootstrap CIs), `fleet-hub decide bench work-link` with `--export-unlinked` / `--labels` for D39 (dataset H); the haiku baseline (D33) **[proposed]**; desktop chip / popover and the phone sheet show source `model`, confidence and the reason **[proposed]** |
 | Kill | correction rate > 10% over 100 in a cell; any cross-org candidate reaching the model (a test and a runtime assertion) |
 
 ### J2 — outcome of a turn after Stop (hypothesis)
@@ -294,4 +296,8 @@ runs. Changing one after seeing results needs a new decision row.
 - **J2's consent for reply text** (a new decision before phase 0).
 - **The owner's census run and D46 labels:** they decide the language
   cells.
-- **The owner's D39 hand labels:** needed for J1's "none" cases.
+- **The owner's D39 hand labels:** needed for J1's "none" cases
+  (`fleet-hub decide bench work-link --export-unlinked 150 --out FILE`, then
+  `--labels FILE`).
+- **The owner's J1 phase-0 run** on the real hub: recall first, then `bm25`,
+  then `jev` for consenting orgs; the haiku baseline is still to build.

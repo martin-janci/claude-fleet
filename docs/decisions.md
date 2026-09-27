@@ -164,3 +164,82 @@ reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the breaker, today's tokens and cost, and runs per
 feature, provider, fallback and org.
+
+## Benchmarking work_link
+
+Before `work_link` asks anything live, it is measured offline (the test
+map's card J1, phase 0):
+
+```bash
+fleet-hub decide bench work-link [--split dev|test|all] [--provider none|bm25|jev ...]
+                                 [--days 365] [--org ID] [--max-cases N] [--max-calls 500]
+                                 [--labels FILE] [--db FILE] [--json]
+fleet-hub decide bench work-link --export-unlinked 150 --out FILE
+```
+
+**Nothing runs by itself and nothing changes what fleet does.** Without
+`--provider jev` the database is opened read-only and nothing is sent.
+
+**The cases (dataset A)** are the links a *person* confirmed — source
+`manual` or `started`; never `agent`, `agent_inferred` or a detection
+rule's — whose conversation kept its first prompt. The right answer is the
+linked item. Prompts fleet typed itself (a start, a resume, a quick reply)
+are left out. Each case also becomes a **none-case**: the same prompt, the
+candidates without the right item, and "abstain" as the right answer.
+
+**What a provider sees** is the first prompt with the answer taken out
+(the leakage guard): every ticket key and ticket link the recogniser finds,
+every URL, the session's branch name, the right item's key and exact title,
+and — for a `started` link — every word of its `{key}-{slug}` branch slug
+(the slug is the ticket's title), inflections included. A test fails if
+any of these survives.
+
+**The candidates** approximate what fleet could have offered at the
+decision: the items of the case's org (its tracker's, or local items linked
+in it) updated at most a day after the decision and not unavailable then,
+newest first, at most 50, the right one always among them. The store keeps
+an item's latest `updated_at` only, so this is an approximation; the report
+says so, and lists every other one.
+
+**Recall first.** Before any model is judged, the report shows how often
+the right item would have been in the candidates anyway (without being
+added), and how often it was in the set the M4.6 nudge offers — "mine"
+tickets inside the host's fence and org, plus recent local items — and
+whether that set was small enough for the nudge to fire (1–5). A model
+cannot choose an item the candidates never held.
+
+**Split by time.** Cases are ordered by decision time: the oldest 60% are
+*dev*, the newest 40% *test* (`--split`, default `test`). Every threshold is
+chosen on dev and applied to what is reported.
+
+**Providers.**
+
+| Provider | What it does |
+|---|---|
+| `none` | Always abstains: what fleet does today when nothing links a session. |
+| `bm25` | BM25 over each candidate's title (counted twice) and cached description, against the redacted prompt; lower-cased, diacritics folded (`č` → `c`, `ß` → `ss`), split on anything not a letter or digit, cut to a 6-character stem. Abstains under a score threshold chosen on dev (the one that maximises right answers plus right abstentions); the report names it. |
+| `jev` | One Choice over the candidates (option keys are item ids like `i123`, each described by its title) plus `none`, through the envelope: question version `work_link.bench.v1`, subject `bench:<case>`, recorded in `decision_runs` like any call. A case whose org the gate refuses — flag off, mode `off`, no consent, no key, breaker, budget — is **skipped with that fallback** and nothing is sent for it. At most `--max-calls` calls a run. |
+
+The `claude -p haiku` baseline (D33) is not built yet.
+
+**Metrics** (test map §4), per provider and dataset: accuracy on answered,
+coverage, coverage at precision 0.9 (the lowest threshold whose dev
+accuracy reaches 0.9 over at least 5 answers, applied to the reported
+cases), abstention quality on none-cases, p50/p95 latency, input tokens and
+cost (Jev), and what was skipped and why. Differences in accuracy on
+answered between two providers come with a bootstrap 95% interval (1000
+resamples, fixed seed); an interval across 0 is "no difference". The
+breakdown is by org, tracker, language of the prompt × language of the
+right item's title (`service::nl`), code density and candidate-set size. A
+cell under 5 cases shows as `<5` with no rates; a cell under 200 cases is
+marked *not judged* (test map §3).
+
+**Hand labels (D39, dataset H).** `--export-unlinked N --out FILE` writes N
+sessions with a first prompt and no confirmed or suggested link, spread over
+the window, one JSON line each: the redacted prompt, the candidates (ids and
+titles) and `"label": null`. A person sets `label` to a candidate's id or to
+`"none"`; `--labels FILE` adds the labeled rows as dataset H, reported on
+its own (a label naming an item outside the row's candidates is counted as a
+recall miss). **The file holds prompt and title text**: it is created
+`0600`, never over an existing file, and stays on the machine. The report
+itself never holds a prompt or a title.
