@@ -576,6 +576,20 @@ impl Store {
         confirm: bool,
         decider: Decider,
     ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_work_link_as(session_id, link_id, confirm, true, decider)
+    }
+
+    /// [`Self::decide_work_link`], confirming as a secondary link when
+    /// `take_primary` is false (work graph M14.1c) — still primary when the
+    /// session has no other primary.
+    pub fn decide_work_link_as(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        confirm: bool,
+        take_primary: bool,
+        decider: Decider,
+    ) -> Result<WorkLinkRow, IpcError> {
         let found: Option<(i64, String, String)> = self
             .conn
             .query_row(
@@ -615,8 +629,15 @@ impl Store {
             .optional()?
             .flatten();
         let now = now_unix();
+        let has_primary: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 AND id <> ?2 \
+               AND ended_at IS NULL AND is_primary = 1 AND state = 'confirmed')",
+            rusqlite::params![participant, link_id],
+            |r| r.get(0),
+        )?;
+        let primary = confirm && (take_primary || !has_primary);
         let tx = self.conn.unchecked_transaction()?;
-        if confirm {
+        if primary {
             self.conn.execute(
                 "UPDATE work_links SET is_primary = 0 \
                  WHERE participant_id = ?1 AND ended_at IS NULL",
@@ -624,11 +645,14 @@ impl Store {
             )?;
         }
         if keep == AgentOver::KeepPersons {
-            // A person confirmed it already: primary again, still theirs.
-            self.conn.execute(
-                "UPDATE work_links SET is_primary = 1 WHERE id = ?1",
-                rusqlite::params![link_id],
-            )?;
+            // A person confirmed it already: primary again when this confirm
+            // takes the primary, still theirs.
+            if primary {
+                self.conn.execute(
+                    "UPDATE work_links SET is_primary = 1 WHERE id = ?1",
+                    rusqlite::params![link_id],
+                )?;
+            }
         } else {
             // A decision keeps the evidence and the rule that proposed it,
             // so "why" still reads after the decider agreed.
@@ -640,7 +664,7 @@ impl Store {
                 rusqlite::params![
                     link_id,
                     new_state,
-                    confirm as i64,
+                    primary as i64,
                     now,
                     conv,
                     decider.source()

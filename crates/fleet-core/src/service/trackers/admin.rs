@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|sweep_now|usage
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,6 +85,9 @@ pub struct WorkAdminArgs {
     /// Org Jev consent: on|off
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev: Option<String>,
+    /// D31: bound clients see unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_sees_unassigned: Option<bool>,
     /// usage window, 1-365 (30)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<i64>,
@@ -117,6 +120,7 @@ impl fmt::Debug for WorkAdminArgs {
             .field("rule_id", &self.rule_id)
             .field("auto_tidy", &self.auto_tidy)
             .field("jev", &self.jev)
+            .field("bound_sees_unassigned", &self.bound_sees_unassigned)
             .field("days", &self.days)
             .finish()
     }
@@ -129,7 +133,7 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?} auto_tidy={:?} jev={:?} days={:?}",
+             isolate_sessions={:?} auto_tidy={:?} jev={:?} bound_sees_unassigned={:?} days={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -156,6 +160,7 @@ impl WorkAdminArgs {
             self.isolate_sessions,
             self.auto_tidy,
             self.jev,
+            self.bound_sees_unassigned,
             self.days,
         )
     }
@@ -212,6 +217,7 @@ impl AdminAction {
         "assign_host",
         "unassign_host",
         "assign_tracker",
+        "assign_client",
         "sweep_now",
         "usage",
     ];

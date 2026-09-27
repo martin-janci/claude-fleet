@@ -849,6 +849,9 @@ pub struct PairClientParams {
     /// A device you vouch for: its prompts reach agents unmarked.
     #[serde(default)]
     pub trusted: bool,
+    /// Bind to this org: it reads only that org's and unassigned work.
+    #[serde(default)]
+    pub org_id: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

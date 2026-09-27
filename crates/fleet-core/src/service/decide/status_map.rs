@@ -154,7 +154,7 @@ pub fn applied_category(answer: &str) -> Option<&'static str> {
 /// (lower-case) name under the local fingerprint key. Stable across probes;
 /// without the key a guessed name cannot be confirmed from the record.
 pub fn section_id(fp_key: &Secret, tracker_id: i64, name: &str) -> String {
-    let mac = crate::service::trackers::webhook::hmac_sha256_hex(
+    let mac = super::hmac_sha256_hex(
         fp_key.expose().as_bytes(),
         format!("status_map.section\n{tracker_id}\n{name}").as_bytes(),
     );

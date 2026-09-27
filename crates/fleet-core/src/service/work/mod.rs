@@ -16,10 +16,12 @@ pub mod resume;
 pub mod retention;
 #[cfg(test)]
 mod scale_tests;
+pub mod structure;
 pub mod summary;
 pub mod tidy;
 pub mod today;
 pub mod usage;
+pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -73,6 +75,26 @@ pub struct WorkArgs {
     /// Today: unix start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// item:<id> or ref:<KEY>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Tree filters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub filters: Option<view::WorkTreeFilters>,
+    /// Next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Sessions per task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_task: Option<usize>,
+    /// Draft rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub rule: Option<structure::RuleInput>,
+    /// Org id; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -141,6 +163,48 @@ pub struct WorkLinkArgs {
     /// Name: the work's title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// item:<id> or ref:<KEY>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Version seen (0 none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<i64>,
+    /// Primary link seen; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_primary: Option<i64>,
+    /// false: secondary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<bool>,
+    /// decide_batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub decisions: Option<Vec<structure::LinkDecision>>,
+    /// Group label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Placement note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// From org_impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact_token: Option<String>,
+    /// Org id; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    /// rule_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub rule: Option<structure::RuleInput>,
+    /// rule_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
+    /// view_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub view: Option<structure::ViewInput>,
+    /// view_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<i64>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -229,6 +293,22 @@ pub enum WorkAction {
     Reopened,
     /// Local work items: named work with no ticket (work graph M11.1).
     LocalItems,
+    /// The Work view (work graph M14): a page of tasks with their sessions.
+    Tree,
+    /// One task with every session, its provenance and last outcome.
+    Task,
+    /// Every link of one session, with its task.
+    SessionTasks,
+    /// Suggestions and conflicts to decide.
+    Review,
+    /// Placement rules.
+    Rules,
+    /// What a drafted rule would move.
+    RulePreview,
+    /// Saved views.
+    Views,
+    /// What moving a local task to another org changes.
+    OrgImpact,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -250,6 +330,14 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
     ("local_items", WorkAction::LocalItems),
+    ("tree", WorkAction::Tree),
+    ("task", WorkAction::Task),
+    ("session_tasks", WorkAction::SessionTasks),
+    ("review", WorkAction::Review),
+    ("rules", WorkAction::Rules),
+    ("rule_preview", WorkAction::RulePreview),
+    ("views", WorkAction::Views),
+    ("org_impact", WorkAction::OrgImpact),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -272,6 +360,16 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "tidy_apply",
     "name",
     "summarize",
+    "set_primary",
+    "reconsider",
+    "ack",
+    "decide_batch",
+    "place",
+    "assign_org",
+    "rule_save",
+    "rule_delete",
+    "view_save",
+    "view_delete",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -327,6 +425,19 @@ fn work_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars
 
 fn work_link_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
     action_schema(WORK_LINK_ACTIONS.iter().copied())
+}
+
+/// The Work view's nested parameters (work graph M14) are served as a bare
+/// `object` / `array`: their shape is in `docs/control-api.md` and the
+/// spec, and a typed schema per nested struct would cost the tool budget
+/// (C21) several kilobytes. The server still deserialises them strictly — a
+/// malformed one is refused, never ignored.
+fn object_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({ "type": "object" })
+}
+
+fn array_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({ "type": "array", "items": { "type": "object" } })
 }
 
 impl WorkArgs {
@@ -559,7 +670,20 @@ pub fn work_link_as<'a>(
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply" | "name"
+        "resume"
+            | "start"
+            | "trust_project"
+            | "handover"
+            | "dismiss"
+            | "tidy_apply"
+            | "name"
+            | "decide_batch"
+            | "place"
+            | "assign_org"
+            | "rule_save"
+            | "rule_delete"
+            | "view_save"
+            | "view_delete"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -573,6 +697,20 @@ pub fn work_link_as<'a>(
         )
     })?;
     let s = lock(store)?;
+    // A client bound to an org never reaches another org's session (the
+    // transport's session gate says so first; this keeps the service's own
+    // answer the same — the unknown session's — for every entry point, the
+    // batch's included).
+    if matches!(scope, OrgScope::Org { .. })
+        && !s
+            .get_session_by_id(session_id)?
+            .is_some_and(|row| scope.sees_row(&row))
+    {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {session_id} not found"),
+        ));
+    }
     let force = args.force_cross_org.unwrap_or(false);
     // The target's org, checked against the scope (visibility) before
     // anything is written.
@@ -680,6 +818,63 @@ pub fn work_link_as<'a>(
         }
         _ => {}
     }
+    // Work graph M14.1c: a decision on a link by id names the version the
+    // person saw; someone else's change meanwhile is `E_CONFLICT` with the
+    // link's current state. Checked only AFTER the link is known to be one
+    // the caller may name (this session's live link, in its scope): a
+    // version or state is never an oracle for a link out of scope. The
+    // store lock is held from here to the write, so the check and the
+    // write are one step.
+    let checked_link = |link_id: i64| -> Result<(), IpcError> {
+        visible_link(link_id)?;
+        s.check_link_version(link_id, args.expected_version)
+    };
+    let take_primary = args.primary.unwrap_or(true);
+    match args.action.as_str() {
+        // Move the primary (compare-and-set), keep a conflict, undo a
+        // decision.
+        "set_primary" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_primary needs link_id"))?;
+            checked_link(link_id)?;
+            // The compare-and-set is on the primary the CALLER can see: a
+            // scoped caller whose session's primary is another org's (a
+            // forced link) saw "none", and must neither be refused forever
+            // nor be told that link's id. The store's own check then runs
+            // on the actual primary, under this same lock.
+            let actual = s.current_primary_link(session_id)?;
+            let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
+            if let Some(expected) = args.expected_primary {
+                if seen.unwrap_or(0) != expected {
+                    return Err(crate::store::primary_conflict(session_id, seen));
+                }
+            }
+            s.set_primary_work_link(session_id, link_id, Some(actual.unwrap_or(0)))?;
+            return lifecycle_row(&s, session_id);
+        }
+        // D32: a person keeps a conflict (a forced cross-org link, a link
+        // to an unavailable ticket); the review inbox stops listing it.
+        "ack" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "ack needs link_id"))?;
+            checked_link(link_id)?;
+            s.ack_work_link(session_id, link_id)?;
+            return lifecycle_row(&s, session_id);
+        }
+        // Undo: a person's confirm / reject goes back to a suggestion. A
+        // reconsidered primary frees the primary: the resolver below picks
+        // the next one.
+        "reconsider" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "reconsider needs link_id"))?;
+            checked_link(link_id)?;
+            s.reconsider_work_link(session_id, link_id)?;
+        }
+        _ => {}
+    }
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
             (Some(id), None) => Ok(WorkTarget::Item(id)),
@@ -701,21 +896,21 @@ pub fn work_link_as<'a>(
                 let (key, tracker) = inferred_target(&s, t)?;
                 detect::on_agent_inference(&s, session_id, &key, tracker)?;
             } else {
-                s.link_session_work(session_id, t, source)?;
+                s.link_session_work_as(session_id, t, source, take_primary, args.expected_version)?;
             }
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
         // `reject { key | item_id }` any target.
         "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
             let link_id = args.link_id.unwrap_or_default();
-            if !scope.is_all() {
-                visible_link(link_id)?;
+            if !scope.is_all() || args.expected_version.is_some() {
+                checked_link(link_id)?;
             }
             detect::decide(&s, session_id, link_id, false, decider)?;
         }
         "reject" => {
             let (t, _) = visible_target(target()?)?;
-            s.reject_session_work_by(session_id, t, decider)?;
+            s.reject_session_work_as(session_id, t, decider, args.expected_version)?;
         }
         "confirm" => {
             let link_id = args
@@ -733,14 +928,17 @@ pub fn work_link_as<'a>(
             } else if !scope.is_all() {
                 visible_link(link_id)?;
             }
-            detect::decide(&s, session_id, link_id, true, decider)?;
+            if args.expected_version.is_some() {
+                checked_link(link_id)?;
+            }
+            detect::decide_as(&s, session_id, link_id, true, take_primary, decider)?;
         }
         "unlink" => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
-            if !scope.is_all() {
-                visible_link(link_id)?;
+            if !scope.is_all() || args.expected_version.is_some() {
+                checked_link(link_id)?;
             }
             // A person's "Clear work" holds against the unchanged branch /
             // PR that named the target, or the re-resolve below would make
@@ -757,6 +955,8 @@ pub fn work_link_as<'a>(
                 ));
             }
         }
+        // Applied above; the resolver below runs after it.
+        "reconsider" => {}
         other => {
             return Err(IpcError::new(
                 codes::E_INVALID,

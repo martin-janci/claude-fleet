@@ -77,21 +77,6 @@ pub enum TrackerCmd {
         #[arg(long = "ref")]
         reference: Option<String>,
     },
-    /// Turn webhook nudges on for a tracker (work graph M13.4f): prints the
-    /// URL to register on the tracker and a new secret, once. Jira Cloud,
-    /// GitHub and Linear only, and only on a hub with --public-url. A
-    /// delivery only makes fleet refresh an item it already has; polling
-    /// stays.
-    Webhook {
-        /// The tracker's id, from `tracker list`.
-        id: i64,
-        /// Replace the secret (the old one stops working at once).
-        #[arg(long)]
-        rotate: bool,
-        /// Turn webhook nudges off and forget the secret.
-        #[arg(long, conflicts_with = "rotate")]
-        off: bool,
-    },
     /// Probe the site with the stored credential and record what it found.
     Test {
         /// The tracker's id, from `tracker list`.
@@ -269,8 +254,12 @@ fn retention_lines(r: &Value) -> Vec<String> {
     out.push(if s.is_null() {
         "retention: no sweep since the hub started keeping a record".to_string()
     } else {
+        let outbox = match s["tracker_writes"].as_u64().unwrap_or_default() {
+            0 => String::new(),
+            n => format!(", {n} PR links"),
+        };
         format!(
-            "retention: last sweep {} deleted {} journal, {} tickets, {} events",
+            "retention: last sweep {} deleted {} journal, {} tickets, {} events{outbox}",
             fmt_time(s["at"].as_i64()),
             s["journal"].as_u64().unwrap_or_default(),
             s["tracker_items"].as_u64().unwrap_or_default(),
@@ -358,13 +347,8 @@ pub async fn run(
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
-    if let TrackerCmd::Webhook { id, rotate, off } = cmd {
-        return webhook(id, rotate, off, opts, env);
-    }
     let conn = hub_conn(opts, env)?;
     match cmd {
-        // Handled above, before a connection is opened.
-        TrackerCmd::Webhook { .. } => unreachable!("handled before connecting"),
         TrackerCmd::List => {
             let v = call_tool(&conn, "work_admin", json!({ "action": "list" })).await?;
             let rows = v.as_array().cloned().unwrap_or_default();
@@ -489,74 +473,6 @@ pub async fn run(
             out::line(&format!("section map confirmed: {map}"));
         }
     }
-    Ok(ExitCode::SUCCESS)
-}
-
-/// `fleet-hub tracker webhook`: writes the store directly, like `peer add`,
-/// so the secret never travels through a tool reply. The running hub reads
-/// it on the next delivery.
-fn webhook(
-    id: i64,
-    rotate: bool,
-    off: bool,
-    opts: &HubOptions,
-    env: &HashMap<String, String>,
-) -> Result<ExitCode, String> {
-    crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
-    let store = crate::serve::open_store(opts, env)?;
-    let t = store.require_tracker(id).map_err(|e| e.message)?;
-    if off {
-        let was = store
-            .clear_tracker_webhook_secret(id)
-            .map_err(|e| e.message)?;
-        out::line(&if was {
-            format!(
-                "webhook nudges are off for {} ({id}); remove the webhook on the tracker too",
-                t.name
-            )
-        } else {
-            format!("webhook nudges were not on for {} ({id})", t.name)
-        });
-        return Ok(ExitCode::SUCCESS);
-    }
-    let base = fleet_core::service::hub::HubBase::read(&store).map_err(|e| e.message)?;
-    if !base.public {
-        return Err(
-            "this hub has no public URL: a tracker can only call a hub it can reach \
-             (start it with --public-url)"
-                .into(),
-        );
-    }
-    let url = format!("{}/hooks/tracker/{id}", base.url);
-    let on = store
-        .tracker_webhook_since(id)
-        .map_err(|e| e.message)?
-        .is_some();
-    if on && !rotate {
-        out::line(&format!(
-            "webhook nudges are already on for {} ({id})",
-            t.name
-        ));
-        out::line(&format!("url:    {url}"));
-        out::line("secret: not shown again; use --rotate for a new one");
-        return Ok(ExitCode::SUCCESS);
-    }
-    let secret = fleet_core::store::Secret::new(fleet_core::mcp::generate_token());
-    store
-        .set_tracker_webhook_secret(id, &secret)
-        .map_err(|e| e.message)?;
-    out::line(&format!(
-        "webhook nudges are on for {} ({id}); register this on the tracker:",
-        t.name
-    ));
-    out::line(&format!("url:    {url}"));
-    out::line(&format!("secret: {}", secret.expose()));
-    out::line(match t.provider.as_str() {
-        "jira" => "Jira: System → WebHooks → Create, with this URL and secret; events: issue updated",
-        "github" => "GitHub: repository or organisation Settings → Webhooks, content type JSON; events: Issues",
-        _ => "Linear: Settings → API → Webhooks, with this URL and secret; data: Issues",
-    });
-    out::line("the secret is shown once; the hub keeps it and never prints it again");
     Ok(ExitCode::SUCCESS)
 }
 

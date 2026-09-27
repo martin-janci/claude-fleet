@@ -23,9 +23,9 @@ pnpm tauri dev
 
 The app drives the `claude` CLI and `tmux`, so both must be on your local `PATH` (`claude --version`, `tmux -V`).
 
-Once releases are published (see [RELEASING.md](RELEASING.md)), you will be able to download a build from the [releases page](https://github.com/martin-janci/claude-fleet/releases) instead: `.dmg` or `.app.tar.gz` on macOS, `.AppImage` or `.deb` on Linux. Those builds are not code-signed:
+Once releases are published (see [RELEASING.md](RELEASING.md)), you will be able to download a build from the [releases page](https://github.com/martin-janci/claude-fleet/releases) instead: `.dmg` or `.app.tar.gz` on macOS, `.AppImage` or `.deb` on Linux. The macOS builds are signed but not notarized, and the Linux ones are unsigned:
 
-- **macOS:** Gatekeeper blocks the first launch, reporting the app as *"damaged"*. Drag it to `/Applications`, then clear the quarantine flag with `xattr -dr com.apple.quarantine /Applications/claude-fleet.app`. Full instructions — and why right-click → **Open** doesn't help here — are in the README's [Installing a release build](../README.md#installing-a-release-build) section.
+- **macOS:** Gatekeeper blocks the first launch of a download (some macOS versions call the app *"damaged"*). Drag it to `/Applications`, then clear the quarantine flag with `xattr -dr com.apple.quarantine /Applications/claude-fleet.app`. Full instructions are in the README's [Installing a release build](../README.md#installing-a-release-build) section.
 - **Linux:** mark the AppImage executable (`chmod +x`) before running it, or install the `.deb` with `sudo apt install ./claude-fleet_*.deb`.
 
 ### 2. Add one host

@@ -1,5 +1,5 @@
 //! The decision record and the decision model's credential (Jev evaluation,
-//! decisions D35 / D37; migration 065). The envelope that writes these rows
+//! decisions D35 / D37; migration 069). The envelope that writes these rows
 //! is `service::decide`; the guide is `docs/decisions.md`.
 //!
 //! The rules that matter here:

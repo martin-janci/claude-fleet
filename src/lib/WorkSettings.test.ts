@@ -222,6 +222,15 @@ describe('Settings → Work, paired with a hub', () => {
     expect(screen.queryByTestId('work-usage')).toBeNull();
     expect(inv.mock.calls.some((c) => c[0] === 'work_usage')).toBe(false);
   });
+
+  it('offers no PR write-back toggle, even on a Jira tracker that has it on (M13.4e)', async () => {
+    hubStatus.set(remote);
+    const inv = route([row({ settings: { write_back: { pr_remote_link: true } } })]);
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    expect(screen.queryByTestId('tracker-write-back-pr')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'update_tracker')).toBe(false);
+  });
 });
 
 describe('Settings → Work, other providers (work graph M6)', () => {

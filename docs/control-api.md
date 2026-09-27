@@ -434,10 +434,7 @@ Index by area (names only; see the reference for details):
   linked to one of the tracker's items is added to that item once as a
   remote link, `globalId` `fleet:pr:<url>`, through an outbox drained by the
   sync pass; `fleet_health.trackers[].write_failures` counts the writes
-  given up). `update` replaces the whole `settings` object. Webhook nudges
-  (M13.4f) are not a tool: `fleet-hub tracker webhook <id>` mints the secret
-  on the hub, and `fleet_health.trackers[]` reports `webhook_enabled`,
-  `webhook_last_delivery_at` and `webhook_rejected`. Keys are
+  given up). `update` replaces the whole `settings` object. Keys are
   the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
   (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
   by URL); `lookup` and `start` take any of them, or the item's URL.

@@ -35,6 +35,9 @@ describe('work_retention lines', () => {
     expect(lastSweepLine(status().last_sweep, NOW)).toBe(
       'last sweep 10 min ago: 4 journal, 1 tickets, 2 events deleted',
     );
+    expect(lastSweepLine({ ...status().last_sweep!, tracker_writes: 3 }, NOW)).toBe(
+      'last sweep 10 min ago: 4 journal, 1 tickets, 2 events, 3 PR links deleted',
+    );
   });
 });
 

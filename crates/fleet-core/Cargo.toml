@@ -90,7 +90,8 @@ lingua = { version = "1.8", optional = true, default-features = false, features 
   "polish",
   "hungarian",
 ] }
-# HMAC-SHA256 for tracker webhook signatures (work graph M13.4f).
+# HMAC-SHA256 for the decision record's fingerprints (`service::decide`,
+# D37): `decision_runs.input_fp` and status_map section ids.
 hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"

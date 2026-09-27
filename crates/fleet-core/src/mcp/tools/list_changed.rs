@@ -17,16 +17,17 @@
 //!   between `full` and `readonly` while it was connected.
 //!
 //! Both are covered by one record per caller: the fingerprint of the tool
-//! names it last listed, or was last told about. A `tools/list` writes it;
-//! a `tools/call` whose caller's record differs from the current fingerprint
-//! is told once and the record updated, so a client that ignores the
-//! notification is not told again on every call.
+//! names it last listed. A `tools/list` writes it; a `tools/call` whose
+//! caller's record differs from the current fingerprint is told, and keeps
+//! being told until it re-lists.
 //!
 //! A fresh client pays nothing: it lists before it calls. A client left over
-//! from before a restart gets one notification on its first call and
-//! re-lists. The record is per caller LABEL, not per connection (there is no
-//! connection), so two clients sharing one token share one record: the first
-//! to re-list clears it for both.
+//! from before a restart is told on its first call and re-lists. The record
+//! is per caller LABEL, not per connection (there is no connection), so many
+//! sessions sharing one token share one record — which is why only a real
+//! `tools/list` may clear it. Clearing it when the notification was merely
+//! sent meant the first session to call a tool consumed the only notice its
+//! siblings would ever get.
 
 use super::super::auth::{Caller, TokenMode};
 use std::collections::HashMap;
@@ -35,7 +36,8 @@ use std::sync::Mutex;
 
 /// Bound on remembered callers. Labels come from tokens, so the real count is
 /// the number of hosts plus paired clients; clearing past this costs, at
-/// worst, one extra notification per caller.
+/// worst, one extra notification per caller. Only `listed` inserts, so the
+/// map grows once per caller that actually lists.
 const MAX_CALLERS: usize = 4096;
 
 /// Who may be sent the notification.
@@ -74,15 +76,21 @@ impl ToolListTracker {
     }
 
     /// `label` is about to call a tool while the list it may call has this
-    /// fingerprint. True when it should be told the list changed — at most
-    /// once per change, since the answer records the new fingerprint.
+    /// fingerprint. True when it should be told the list changed.
+    ///
+    /// Sending the notification deliberately does NOT record the fingerprint:
+    /// only [`Self::listed`] clears the mark, so a caller keeps being told
+    /// until it actually re-lists. The record is per caller LABEL and a label
+    /// is coarse — `master` for every master-token caller, `host:<alias>` for
+    /// every session on a host — so one label stands for many long-lived
+    /// sessions, each holding its own cached list. Recording on send let
+    /// whichever session called a tool first absorb the notification for all
+    /// of them, leaving its siblings on a stale surface with nothing left to
+    /// tell them. A client that ignores the notification now gets it once per
+    /// `tools/call`; that is a small frame on a response stream that already
+    /// exists, and far cheaper than silently serving the wrong tool list.
     pub(super) fn needs_notice(&self, label: &str, current: u64) -> bool {
-        let mut seen = self.lock();
-        if seen.get(label) == Some(&current) {
-            return false;
-        }
-        Self::insert(&mut seen, label, current);
-        true
+        self.lock().get(label) != Some(&current)
     }
 
     fn insert(seen: &mut HashMap<String, u64>, label: &str, current: u64) {
@@ -107,10 +115,18 @@ mod tests {
     use crate::mcp::auth::ClientRef;
 
     #[test]
-    fn a_caller_never_seen_is_told_once() {
+    fn a_caller_never_seen_is_told_until_it_relists() {
         let t = ToolListTracker::default();
         assert!(t.needs_notice("master", 1));
-        assert!(!t.needs_notice("master", 1), "told once, not every call");
+        assert!(
+            t.needs_notice("master", 1),
+            "still holding the stale list: telling it once is not proof it listened"
+        );
+        t.listed("master", 1);
+        assert!(
+            !t.needs_notice("master", 1),
+            "it re-listed, so it is current"
+        );
     }
 
     #[test]
@@ -121,11 +137,34 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_list_is_told_again() {
+    fn a_changed_list_is_told_until_the_caller_relists() {
         let t = ToolListTracker::default();
         t.listed("host:a", 7);
         assert!(t.needs_notice("host:a", 8), "the visible set moved");
+        assert!(t.needs_notice("host:a", 8), "and it has not re-listed yet");
+        t.listed("host:a", 8);
         assert!(!t.needs_notice("host:a", 8));
+    }
+
+    /// The bug this stickiness exists for. `label()` is coarse — every
+    /// master-token caller is `master`, every session on a host is
+    /// `host:<alias>` — so one label covers many long-lived sessions, each
+    /// with its own cached `tools/list`. Recording the fingerprint when the
+    /// notification was merely SENT let the first session to call a tool
+    /// absorb it for all of them: the rest kept serving a stale surface with
+    /// no way to learn otherwise. Only a real `tools/list` clears the mark.
+    #[test]
+    fn one_session_being_told_does_not_silence_its_siblings() {
+        let t = ToolListTracker::default();
+        // Three sessions share one token, hence one label. The hub restarted,
+        // so it has never seen the label and every session is presumed stale.
+        assert!(t.needs_notice("master", 42), "first session told");
+        assert!(t.needs_notice("master", 42), "second session still told");
+        assert!(t.needs_notice("master", 42), "third session still told");
+        // One of them acts on it and re-lists; that is the only thing that
+        // clears the label.
+        t.listed("master", 42);
+        assert!(!t.needs_notice("master", 42));
     }
 
     #[test]
@@ -156,6 +195,7 @@ mod tests {
                 id: 1,
                 name: "phone".into(),
                 trusted: false,
+                org_id: None,
             }),
             mode,
         };

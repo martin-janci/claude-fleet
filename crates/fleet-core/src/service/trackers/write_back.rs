@@ -141,9 +141,9 @@ pub struct DrainReport {
 
 /// Send `t`'s due writes through `provider` (the sync pass's own). Every
 /// write re-checks the setting and the org; a rate limit stops the drain
-/// and spends no attempt. Settled rows older than the journal's retention
-/// window are dropped at the end. Errors are per row: nothing here fails
-/// the read pass.
+/// and spends no attempt. Errors are per row: nothing here fails the read
+/// pass. Settled rows are dropped by the GC retention sweep (M12.3), which
+/// runs whether or not this tracker's pass succeeds.
 pub async fn drain(
     t: &TrackerRow,
     provider: &dyn TrackerProvider,
@@ -230,13 +230,6 @@ pub async fn drain(
             }
         }
     }
-    let _ = lock(store).and_then(|s| {
-        let days = crate::service::work::retention::RetentionDays::from_store(&s).journal;
-        if days > 0 {
-            s.sweep_tracker_writes(now - days * 86_400)?;
-        }
-        Ok(())
-    });
     report
 }
 

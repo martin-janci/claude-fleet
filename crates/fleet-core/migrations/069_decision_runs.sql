@@ -61,4 +61,4 @@ CREATE TABLE IF NOT EXISTS decision_secrets (
   updated_at     INTEGER
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (65);
+INSERT OR IGNORE INTO schema_version (version) VALUES (69);

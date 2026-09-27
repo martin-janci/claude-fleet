@@ -900,7 +900,7 @@ fn the_fallback_vocabulary_is_the_stores() {
         assert_eq!(Fallback::parse(f.as_str()), Some(f));
         assert_eq!(serde_json::to_value(f).unwrap(), json!(f.as_str()));
     }
-    let migration = include_str!("../../../migrations/065_decision_runs.sql");
+    let migration = include_str!("../../../migrations/069_decision_runs.sql");
     for f in crate::store::DECISION_FALLBACKS {
         assert!(
             migration.contains(&format!("'{f}'")),
