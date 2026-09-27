@@ -460,7 +460,11 @@ Index by area (names only; see the reference for details):
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
   changed; a session's `work` carries its item's `status_category`,
-  `status_name`, `url` and `unavailable`.
+  `status_name`, `url` and `unavailable`. `work:changed` (work graph M14)
+  carries ids only — `{ what: placement | rule | view | org, task_id?,
+  rule_id?, view_id? }` — after a Work view structure write; a client
+  re-reads what it shows. Like every `work:*` frame it never reaches a
+  per-host token or an org-bound client.
   Organisations (roadmap M5): `work { action: "scopes" }` lists the scope
   selector's entries (named orgs, then GitHub owners no org covers, then
   the unassigned rest, each with `session_count` and `needs_you`), `work
