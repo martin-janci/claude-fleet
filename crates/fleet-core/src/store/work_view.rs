@@ -1,14 +1,15 @@
-//! Work view storage (work graph M14.1b, migration 066): what the Work view
-//! reads in one pass (every item, every link with its live session), and the
-//! three things a person keeps there — placements, placement rules and saved
-//! views — as they are read. Writing them is M14.1c's.
+//! Work view storage (work graph M14.1b / M14.1c, migration 066): what the
+//! Work view reads in one pass (every item, every link with its live
+//! session), and the three things a person keeps there — placements,
+//! placement rules and saved views — each with a `version` a write must name
+//! to replace it (M14.1c's compare-and-set), plus a local item's own org.
 //!
-//! Nothing here decides visibility: `service::work::view` and
-//! `service::work::structure` filter by the caller's `OrgScope`.
+//! Nothing here decides visibility: `service::work::view` filters by the
+//! caller's `OrgScope`, and `service::work::structure` gates the writes.
 
 use super::work::{link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, LINK_COLUMN_COUNT};
-use super::{ItemMeta, Store, WorkItemRow, WorkLinkRow};
-use crate::ipc_error::IpcError;
+use super::{now_unix, ItemMeta, Store, WorkItemRow, WorkLinkRow};
+use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +109,23 @@ pub struct WorkView {
     pub owner_org: Option<i64>,
     pub version: i64,
     pub updated_at: i64,
+}
+
+/// `E_CONFLICT` for a write that named a version the row no longer has
+/// (work graph M14.1c); `details` carry the current value.
+pub fn version_conflict(what: &str, current: i64, details: serde_json::Value) -> IpcError {
+    IpcError::new(
+        codes::E_CONFLICT,
+        format!(
+            "{what} was changed by someone else meanwhile (now version {current}); \
+             reload it and decide again"
+        ),
+    )
+    .with_details(details)
+}
+
+fn not_found(what: &str, id: i64) -> IpcError {
+    IpcError::new(codes::E_NOTFOUND, format!("{what} {id} not found"))
 }
 
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -215,6 +233,62 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Set a local item's own org (work graph M14.1c, `assign_org`).
+    /// Refused for a tracker item, whose org is its tracker's. Re-announces
+    /// the row of every live session linked to it (their `work.org_id`
+    /// moved), so a reader outside the new org stops receiving the task
+    /// from its next frame.
+    pub fn set_local_item_org(&self, item_id: i64, org: Option<i64>) -> Result<(), IpcError> {
+        let tracker: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT tracker_id FROM work_items WHERE id = ?1",
+                rusqlite::params![item_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match tracker {
+            None => return Err(not_found("work item", item_id)),
+            Some(Some(_)) => {
+                return Err(IpcError::new(
+                    codes::E_FORBIDDEN,
+                    format!(
+                        "work item {item_id} is a tracker item: its org is its tracker's \
+                         (work_admin assign_tracker)"
+                    ),
+                ))
+            }
+            Some(None) => {}
+        }
+        if let Some(o) = org {
+            if self.get_org(o)?.is_none() {
+                return Err(not_found("org", o));
+            }
+        }
+        let sessions: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT p.session_id FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE l.item_id = ?1 AND l.ended_at IS NULL AND p.session_id IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![item_id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        self.conn.execute(
+            "UPDATE work_items SET org_id = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![item_id, org, now_unix()],
+        )?;
+        for sid in &sessions {
+            self.bump_session_for_work(*sid)?;
+        }
+        tx.commit()?;
+        for sid in sessions {
+            self.emit_session(sid)?;
+        }
+        Ok(())
+    }
+
     // --- placements ---------------------------------------------------------
 
     pub fn work_placements(&self) -> Result<Vec<Placement>, IpcError> {
@@ -238,6 +312,50 @@ impl Store {
             .optional()?)
     }
 
+    /// Place `task_id` in `group` with `note` — both `None` removes the
+    /// placement — if its placement is still at `expected` (`0`: there is
+    /// none). A compare-and-set (work graph M14.1c): a concurrent placement
+    /// from another device answers `E_CONFLICT` instead of being
+    /// overwritten. Returns the placement, if one remains.
+    pub fn set_work_placement(
+        &self,
+        task_id: &str,
+        group: Option<&str>,
+        note: Option<&str>,
+        expected: i64,
+        by: &str,
+    ) -> Result<Option<Placement>, IpcError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let current = self.work_placement(task_id)?;
+        let have = current.as_ref().map_or(0, |p| p.version);
+        if have != expected {
+            return Err(version_conflict(
+                &format!("the placement of {task_id}"),
+                have,
+                serde_json::json!({
+                    "task_id": task_id, "version": have,
+                    "group": current.as_ref().and_then(|p| p.group.clone()),
+                }),
+            ));
+        }
+        if group.is_none() && note.is_none() {
+            self.conn.execute(
+                "DELETE FROM work_placements WHERE task_id = ?1",
+                rusqlite::params![task_id],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO work_placements (task_id, group_label, note, version, updated_at, updated_by) \
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5) \
+                 ON CONFLICT(task_id) DO UPDATE SET group_label = ?2, note = ?3, \
+                   version = version + 1, updated_at = ?4, updated_by = ?5",
+                rusqlite::params![task_id, group, note, now_unix(), by],
+            )?;
+        }
+        tx.commit()?;
+        self.work_placement(task_id)
+    }
+
     // --- rules --------------------------------------------------------------
 
     /// Every placement rule, oldest first (the order they apply in).
@@ -258,6 +376,90 @@ impl Store {
                 map_rule,
             )
             .optional()?)
+    }
+
+    /// Create a rule (`id` `None`) or replace rule `id` if it is still at
+    /// `expected` (`None`: any). The caller validated the fields.
+    pub fn save_work_rule(
+        &self,
+        id: Option<i64>,
+        name: &str,
+        enabled: bool,
+        c: &RuleConditions,
+        group: &str,
+        expected: Option<i64>,
+    ) -> Result<WorkRule, IpcError> {
+        let now = now_unix();
+        let id = match id {
+            None => {
+                self.conn.execute(
+                    "INSERT INTO work_rules (name, enabled, tracker_id, container, key_prefix, \
+                       title_contains, repo, group_label, version, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)",
+                    rusqlite::params![
+                        name,
+                        enabled as i64,
+                        c.tracker_id,
+                        c.container,
+                        c.key_prefix,
+                        c.title_contains,
+                        c.repo,
+                        group,
+                        now
+                    ],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+            Some(id) => {
+                let tx = self.conn.unchecked_transaction()?;
+                let cur = self.work_rule(id)?.ok_or_else(|| not_found("rule", id))?;
+                if expected.is_some_and(|e| e != cur.version) {
+                    return Err(version_conflict(
+                        &format!("rule {id}"),
+                        cur.version,
+                        serde_json::json!({ "rule_id": id, "version": cur.version }),
+                    ));
+                }
+                self.conn.execute(
+                    "UPDATE work_rules SET name = ?2, enabled = ?3, tracker_id = ?4, container = ?5, \
+                       key_prefix = ?6, title_contains = ?7, repo = ?8, group_label = ?9, \
+                       version = version + 1, updated_at = ?10 WHERE id = ?1",
+                    rusqlite::params![
+                        id,
+                        name,
+                        enabled as i64,
+                        c.tracker_id,
+                        c.container,
+                        c.key_prefix,
+                        c.title_contains,
+                        c.repo,
+                        group,
+                        now
+                    ],
+                )?;
+                tx.commit()?;
+                id
+            }
+        };
+        self.work_rule(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "rule vanished after write"))
+    }
+
+    /// Delete rule `id` if it is still at `expected` (`None`: any).
+    pub fn delete_work_rule(&self, id: i64, expected: Option<i64>) -> Result<(), IpcError> {
+        let cur = self.work_rule(id)?.ok_or_else(|| not_found("rule", id))?;
+        if expected.is_some_and(|e| e != cur.version) {
+            return Err(version_conflict(
+                &format!("rule {id}"),
+                cur.version,
+                serde_json::json!({ "rule_id": id, "version": cur.version }),
+            ));
+        }
+        self.conn.execute(
+            "DELETE FROM work_rules WHERE id = ?1 AND version = ?2",
+            rusqlite::params![id, cur.version],
+        )?;
+        Ok(())
     }
 
     // --- saved views --------------------------------------------------------
@@ -287,6 +489,105 @@ impl Store {
                 map_view,
             )
             .optional()?)
+    }
+}
+
+impl Store {
+    /// Create a saved view kept by `owner_org` (`None`: an unrestricted
+    /// caller's), or replace view `id` when `owner` may reach it and it is
+    /// still at `expected` (`None`: any). `owner` is whose views the caller
+    /// keeps (`None`: every view, `Some(o)`: only those with `owner_org`
+    /// `o`) — a view out of reach answers as one that does not exist. A
+    /// replaced view keeps its owner. A name another view of the same owner
+    /// has is refused (`E_EXISTS`).
+    pub fn save_work_view(
+        &self,
+        id: Option<i64>,
+        name: &str,
+        filters: &serde_json::Value,
+        owner: Option<Option<i64>>,
+        expected: Option<i64>,
+    ) -> Result<WorkView, IpcError> {
+        let now = now_unix();
+        let raw = filters.to_string();
+        let dup = |e: rusqlite::Error| -> IpcError {
+            if matches!(
+                &e,
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            ) {
+                IpcError::new(
+                    codes::E_EXISTS,
+                    format!("a view named {name:?} already exists"),
+                )
+            } else {
+                IpcError::from(e)
+            }
+        };
+        let id = match id {
+            None => {
+                self.conn
+                    .execute(
+                        "INSERT INTO work_views (name, filters, owner_org, version, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, 1, ?4, ?4)",
+                        rusqlite::params![name, raw, owner.flatten(), now],
+                    )
+                    .map_err(dup)?;
+                self.conn.last_insert_rowid()
+            }
+            Some(id) => {
+                let tx = self.conn.unchecked_transaction()?;
+                let cur = self
+                    .work_view(id)?
+                    .filter(|v| owner.is_none_or(|o| v.owner_org == o))
+                    .ok_or_else(|| not_found("view", id))?;
+                if expected.is_some_and(|e| e != cur.version) {
+                    return Err(version_conflict(
+                        &format!("view {id}"),
+                        cur.version,
+                        serde_json::json!({ "view_id": id, "version": cur.version }),
+                    ));
+                }
+                self.conn
+                    .execute(
+                        "UPDATE work_views SET name = ?2, filters = ?3, version = version + 1, \
+                           updated_at = ?4 WHERE id = ?1",
+                        rusqlite::params![id, name, raw, now],
+                    )
+                    .map_err(dup)?;
+                tx.commit()?;
+                id
+            }
+        };
+        self.work_view(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "view vanished after write"))
+    }
+
+    /// Delete saved view `id` when `owner` may reach it (as in
+    /// [`Self::save_work_view`]) and it is still at `expected` (`None`:
+    /// any).
+    pub fn delete_work_view(
+        &self,
+        id: i64,
+        owner: Option<Option<i64>>,
+        expected: Option<i64>,
+    ) -> Result<(), IpcError> {
+        let cur = self
+            .work_view(id)?
+            .filter(|v| owner.is_none_or(|o| v.owner_org == o))
+            .ok_or_else(|| not_found("view", id))?;
+        if expected.is_some_and(|e| e != cur.version) {
+            return Err(version_conflict(
+                &format!("view {id}"),
+                cur.version,
+                serde_json::json!({ "view_id": id, "version": cur.version }),
+            ));
+        }
+        self.conn.execute(
+            "DELETE FROM work_views WHERE id = ?1 AND version = ?2",
+            rusqlite::params![id, cur.version],
+        )?;
+        Ok(())
     }
 }
 

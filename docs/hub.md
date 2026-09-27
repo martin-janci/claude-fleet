@@ -779,8 +779,10 @@ What a client may do:
   asked to be restricted, so the session fence is always on for it), and
   `work` frames are not sent to it at all (it re-reads through `work { … }`).
   It cannot start or resume a session in another org's project or host, read
-  what moving a task between orgs would change (`org_impact`), or change
-  trust or reopened work. The binding and the switch take effect from its
+  what moving a task between orgs would change (`org_impact`) or move one
+  (`assign_org`), write placement rules (`rule_save` / `rule_delete`), or
+  change trust or reopened work; it may decide links and place tasks it
+  sees, and keep its own org's saved views (M14.1c). The binding and the switch take effect from its
   next request (re-binding invalidates the token cache; an open event
   stream re-reads its scope and ends at its next beat when re-bound).
   Deleting the org leaves the client bound to an org that no longer

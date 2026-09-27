@@ -439,6 +439,21 @@ this design's.
 
 ## Revisions
 
+- 2026-09-27 (M14.1c, the writes): no migration (066's columns carry every
+  version). `E_CONFLICT` is a new `IpcError` code. A link's version is
+  compared only after the link is known to be the caller's to name (this
+  session's live link, in scope), so neither a version nor a state is an
+  oracle for a hidden link. `link { expected_version }` compares against
+  the session's live link to that work (`0`: none). `set_primary`'s
+  compare-and-set is on the primary the caller sees, so a scoped caller
+  whose session's primary is another org's (a forced link) expects `0`
+  and is never told that link's id. `view_delete` also takes an optional
+  `expected_version`; the master reaches every view (a replaced view keeps
+  its owner); a bound client's view may name only an org or tracker it
+  sees (`E_NOTFOUND` otherwise). A batch does not carry `force_cross_org`.
+  The service refuses a bound client another org's session itself, not
+  only at the transport's gate. `work:changed` and the Tauri commands are
+  M14.1d's: the writes here emit only the existing `session:updated`.
 - 2026-09-27 (M14.1b, the reads): migration `0NN` is two, **066**
   (`work_view`) and **067** (`orgs.bound_sees_unassigned`, its own
   migration because an `orgs` column is re-added when that table is rebuilt,

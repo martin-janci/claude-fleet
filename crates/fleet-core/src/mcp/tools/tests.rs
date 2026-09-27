@@ -3471,7 +3471,11 @@ fn the_served_definition_budget_stays_bounded() {
     // parameters (the nested `filters` / `rule` served as a bare object),
     // `pair_client`'s `org_id` and `work_admin`'s `bound_sees_unassigned`
     // (D31); no new tool. Measured at 57,859 on 2026-09-27; plus 100.
-    const BUDGET_BYTES: usize = 57_959;
+    // Work graph M14.1c (the Work view's writes): 10 `work_link` actions,
+    // 14 optional parameters (the nested `rule` / `view` / `decisions`
+    // served as a bare object / array) and one description clause; no new
+    // tool. Measured at 58,977 on 2026-09-27; plus 100.
+    const BUDGET_BYTES: usize = 59_077;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

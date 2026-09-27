@@ -716,7 +716,19 @@ pub fn on_agent_inference(
 /// ([`AUTO_TRUST_AFTER`]). Re-resolves afterwards (a rejection can leave a
 /// sole candidate). Returns whether the project became trusted.
 pub fn decide(s: &Store, session_id: i64, link_id: i64, confirm: bool) -> Result<bool, IpcError> {
-    let link = s.decide_work_link(session_id, link_id, confirm)?;
+    decide_as(s, session_id, link_id, confirm, true)
+}
+
+/// [`decide`], confirming as a secondary link when `take_primary` is false
+/// (work graph M14.1c).
+pub fn decide_as(
+    s: &Store,
+    session_id: i64,
+    link_id: i64,
+    confirm: bool,
+    take_primary: bool,
+) -> Result<bool, IpcError> {
+    let link = s.decide_work_link_as(session_id, link_id, confirm, take_primary)?;
     let mut trusted_now = false;
     if confirm && matches!(link.rule.as_deref(), Some("R3b" | "R4")) {
         if let Some(pid) = s.detection_state(session_id)?.and_then(|st| st.project_id) {
