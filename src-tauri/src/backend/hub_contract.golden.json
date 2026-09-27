@@ -166,6 +166,7 @@
     "Health": [
       "by_status",
       "context_red",
+      "context_red_pct",
       "db_ready",
       "ghosts",
       "hosts_reachable",

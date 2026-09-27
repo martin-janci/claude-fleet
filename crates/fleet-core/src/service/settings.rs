@@ -174,6 +174,12 @@ pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
 /// Rows older than this are swept on the tick; `0` disables the age sweep.
 pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
 
+/// Percent of the context window at or past which a session counts as
+/// `context_red` in `fleet_health`, reads `context_full` in
+/// `needs_attention`, and draws red on the desktop. One number for all
+/// three (ux F-09: the hub said 85 while the desktop said 70/90).
+pub const HEALTH_CONTEXT_RED_PCT: &str = "health.context_red_pct";
+
 /// Retention (work graph M12.3, `store::work_retention`): days a work
 /// journal row is kept once nothing live points at it. `0` keeps forever.
 pub const WORK_RETENTION_JOURNAL_DAYS: &str = "work.retention.journal_days";
@@ -413,6 +419,11 @@ pub const SPECS: &[Spec] = &[
         key: REPORTS_MAX_AGE_SECS,
         default: "604800",
         kind: Kind::Secs,
+    },
+    Spec {
+        key: HEALTH_CONTEXT_RED_PCT,
+        default: "85",
+        kind: Kind::Int { min: 1, max: 100 },
     },
     Spec {
         key: WORK_RETENTION_JOURNAL_DAYS,

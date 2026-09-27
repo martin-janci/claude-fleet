@@ -121,6 +121,10 @@ describe('severity', () => {
       row({ claude_status: 'blocked' }),
       row({ stuck_kind: 'press_enter' }),
       row({ claude_status: 'failed' }),
+      row({ kind: 'bg', claude_status: 'failed' }),
+      row({ context_pct: 90 }),
+      row({ claude_status: 'idle', stale_working_at: 5 }),
+      row({ claude_status: 'idle', ci_status: 'failing' }),
       row({ status: 'ghost' }),
       row({ claude_status: 'working' }),
       row({ claude_status: 'idle' }),
@@ -220,7 +224,14 @@ describe('triage rank', () => {
   it('classifies every bucket reachable from today\'s fields', () => {
     expect(classify(row({ claude_status: 'blocked' }), opts)).toBe('waiting');
     expect(classify(row({ stuck_kind: 'oom' }), opts)).toBe('stuck');
-    expect(classify(row({ claude_status: 'failed' }), opts)).toBe('failed');
+    expect(classify(row({ claude_status: 'failed' }), opts)).toBe('stop_failed');
+    expect(classify(row({ kind: 'bg', claude_status: 'failed' }), opts)).toBe('failed');
+    expect(classify(row({ context_pct: 90 }), opts)).toBe('context_full');
+    expect(classify(row({ context_pct: 89.9 }), opts)).toBe('idle');
+    expect(classify(row({ claude_status: 'idle', stale_working_at: 5 }), opts)).toBe('stale_working');
+    expect(classify(row({ claude_status: 'idle', ci_status: 'failing' }), opts)).toBe('ci_failing');
+    expect(classify(row({ claude_status: 'working', ci_status: 'failing' }), opts)).toBe('working');
+    expect(classify(row({ kind: 'shell', claude_status: 'idle', context_pct: 99 }), opts)).toBe('idle');
     expect(classify(row({ safe_kill_state: 'requested' }), opts)).toBe('lifecycle');
     expect(classify(row({ safe_kill_state: 'failed' }), opts)).toBe('lifecycle');
     expect(classify(row({ status: 'ghost' }), opts)).toBe('lifecycle');
@@ -249,7 +260,7 @@ describe('triage rank', () => {
   });
 
   it('needsYou covers every bucket above working, and nothing below', () => {
-    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 6));
+    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 10));
     expect(needsYou(row({ claude_status: 'blocked' }), opts)).toBe(true);
     expect(needsYou(row({ stuck_kind: 'oom' }), opts)).toBe(true);
     expect(needsYou(row({ idle_since: 0 }), opts)).toBe(true);
@@ -264,7 +275,7 @@ describe('triage rank', () => {
   // different buckets. If this test ever "fails" because the two were made to
   // agree, read NEEDS_YOU_COUNTED_BUCKETS before changing it.
   it('counts one bucket narrower than it filters: idle_long is shown, not counted', () => {
-    expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 5));
+    expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 9));
     const idleRows = Array.from({ length: 6 }, () => row({ idle_since: 0 }));
     const blocked = row({ claude_status: 'blocked' });
     const rows = [...idleRows, blocked];

@@ -255,6 +255,7 @@ fn sample_health() -> Health {
         by_status: BTreeMap::from([("working".to_string(), 1u32)]),
         ghosts: 1,
         context_red: 1,
+        context_red_pct: 85,
         stuck: 1,
         usage_by_host: BTreeMap::from([("trn".to_string(), sample_totals())]),
         usage_by_day: vec![DayUsage {

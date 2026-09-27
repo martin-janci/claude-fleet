@@ -39,8 +39,13 @@ pub struct Health {
     /// vanished from a reachable host). Ghost is a `status` value, never a
     /// `claude_status` one, so this must not be derived from `by_status`.
     pub ghosts: u32,
-    /// Sessions whose `context_pct >= 85.0`.
+    /// Sessions whose `context_pct >= context_red_pct`.
     pub context_red: u32,
+    /// The percent `context_red` counts from (`health.context_red_pct`), so a
+    /// client draws its context chip at the hub's line, not its own. Per-field
+    /// default: an older hub omits it (reads `0`; a client then keeps its own).
+    #[serde(default)]
+    pub context_red_pct: u32,
     /// Sessions with a `stuck_kind` set.
     pub stuck: u32,
     /// Estimated token usage and cost (micro-USD) per host, summed over the
@@ -72,6 +77,16 @@ pub struct Health {
     /// older hub omits it.
     #[serde(default)]
     pub trackers: TrackersHealth,
+}
+
+/// The context threshold in force (`health.context_red_pct`; the
+/// registry default is [`crate::service::attention::DEFAULT_CONTEXT_RED_PCT`]).
+/// `context_red` here, `needs_attention`'s `context_full` and — exported on
+/// [`Health::context_red_pct`] — the desktop's chip all read this one number.
+pub fn context_red_pct(s: &Store) -> f64 {
+    crate::service::settings::get_string(s, crate::service::settings::HEALTH_CONTEXT_RED_PCT)
+        .parse::<f64>()
+        .unwrap_or(crate::service::attention::DEFAULT_CONTEXT_RED_PCT)
 }
 
 /// Consecutive failed sync passes — or, decision D25, consecutive passes
@@ -378,10 +393,6 @@ impl Health {
     }
 }
 
-/// Threshold (percent) at or above which a session's context window counts as
-/// "red".
-const CONTEXT_RED_THRESHOLD: f64 = 85.0;
-
 /// Roll cached session + host rows into fleet aggregates. Pure: no I/O.
 ///
 /// `kind='external'` rows (interactive Claude sessions running outside fleet,
@@ -391,7 +402,7 @@ const CONTEXT_RED_THRESHOLD: f64 = 85.0;
 /// (a plain shell in tmux) are left out the same way: they have no Claude
 /// status, and a pane heuristic that reads their prompt as `idle` would
 /// count them (F8).
-pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
+pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow], context_red_pct: f64) -> FleetSummary {
     let mut summary = FleetSummary {
         hosts_total: hosts.len() as u32,
         ..Default::default()
@@ -414,7 +425,7 @@ pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
         if s.status == "ghost" {
             summary.ghosts += 1;
         }
-        if s.context_pct.is_some_and(|p| p >= CONTEXT_RED_THRESHOLD) {
+        if s.context_pct.is_some_and(|p| p >= context_red_pct) {
             summary.context_red += 1;
         }
         if s.stuck_kind.is_some() {
@@ -434,7 +445,8 @@ pub fn health_from_store(s: &Store) -> Health {
     // error, fall back to empty slices so health still reports core fields.
     let sessions = s.list_all_sessions().unwrap_or_default();
     let hosts = s.list_hosts().unwrap_or_default();
-    let summary = summarize(&sessions, &hosts);
+    let red = context_red_pct(s);
+    let summary = summarize(&sessions, &hosts, red);
     Health {
         version: crate::app_version::get().to_string(),
         tunnels: Default::default(),
@@ -447,6 +459,7 @@ pub fn health_from_store(s: &Store) -> Health {
         by_status: summary.by_status,
         ghosts: summary.ghosts,
         context_red: summary.context_red,
+        context_red_pct: red as u32,
         stuck: summary.stuck,
         usage_by_host: summary.usage_by_host,
         usage_by_day: usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, None),
@@ -499,6 +512,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             by_status: BTreeMap::new(),
             ghosts: 0,
             context_red: 0,
+            context_red_pct: crate::service::attention::DEFAULT_CONTEXT_RED_PCT as u32,
             stuck: 0,
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
@@ -601,7 +615,7 @@ mod tests {
         sh.kind = "shell".to_string();
         let mut sh2 = session(None, None, None);
         sh2.kind = "shell".to_string();
-        let s = summarize(&[sh, sh2, session(Some("working"), None, None)], &[]);
+        let s = summarize(&[sh, sh2, session(Some("working"), None, None)], &[], 85.0);
         assert_eq!(s.sessions_total, 1);
         assert_eq!(s.by_status.get("unknown"), None);
         assert_eq!(s.by_status.get("idle"), None);
@@ -629,7 +643,7 @@ mod tests {
             host("gamma", true),
         ];
 
-        let s = summarize(&sessions, &hosts);
+        let s = summarize(&sessions, &hosts, 85.0);
 
         assert_eq!(s.hosts_total, 3);
         assert_eq!(s.hosts_reachable, 2);
@@ -656,7 +670,7 @@ mod tests {
             // A stray "ghost" in claude_status is not a ghost session.
             session(Some("ghost"), None, None),
         ];
-        let s = summarize(&sessions, &[]);
+        let s = summarize(&sessions, &[], 85.0);
         assert_eq!(s.ghosts, 2);
         assert_eq!(s.sessions_total, 4);
     }
@@ -714,7 +728,7 @@ mod tests {
         let mut ext = session(Some("blocked"), Some(99.0), Some("press_enter"));
         ext.kind = "external".to_string();
         let sessions = vec![ext, session(Some("blocked"), None, None)];
-        let s = summarize(&sessions, &[]);
+        let s = summarize(&sessions, &[], 85.0);
         assert_eq!(s.sessions_total, 1);
         assert_eq!(s.by_status.get("blocked"), Some(&1));
         assert_eq!(s.context_red, 0);
@@ -727,15 +741,20 @@ mod tests {
             session(Some("working"), Some(84.9), None),
             session(Some("working"), Some(85.0), None),
         ];
-        let s = summarize(&sessions, &[]);
+        let s = summarize(&sessions, &[], 85.0);
         assert_eq!(s.context_red, 1);
         assert_eq!(s.hosts_total, 0);
         assert_eq!(s.hosts_reachable, 0);
+        assert_eq!(
+            summarize(&sessions, &[], 90.0).context_red,
+            0,
+            "one threshold, the setting's"
+        );
     }
 
     #[test]
     fn summarize_empty_is_all_zero() {
-        let s = summarize(&[], &[]);
+        let s = summarize(&[], &[], 85.0);
         assert_eq!(s, FleetSummary::default());
     }
 
@@ -749,7 +768,7 @@ mod tests {
         b.usage.usage_cost_micros = 100;
         let mut c = session(None, None, None);
         c.host_alias = "beta".into();
-        let s = summarize(&[a, b, c], &[]);
+        let s = summarize(&[a, b, c], &[], 85.0);
         assert_eq!(s.usage_by_host.len(), 1, "beta counted nothing");
         let alpha = s.usage_by_host["alpha"];
         assert_eq!(alpha.input_tokens, 10);
@@ -866,6 +885,7 @@ mod tests {
             by_status: BTreeMap::new(),
             ghosts: 4,
             context_red: 5,
+            context_red_pct: 85,
             stuck: 6,
             usage_by_host: BTreeMap::new(),
             usage_by_day: Vec::new(),
@@ -947,6 +967,20 @@ mod tests {
             "usage_by_host":{},"usage_by_day":[]}"#;
         let h: Health = serde_json::from_str(body).expect("an older Health still parses");
         assert_eq!(h.peer_links_down, 0);
+        assert_eq!(
+            h.context_red_pct, 0,
+            "an older hub sends none; the desktop keeps its default"
+        );
+    }
+
+    #[test]
+    fn health_from_store_exports_the_context_threshold_it_counts_with() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(health_from_store(&store).context_red_pct, 85);
+        store
+            .set_setting(crate::service::settings::HEALTH_CONTEXT_RED_PCT, "95")
+            .unwrap();
+        assert_eq!(health_from_store(&store).context_red_pct, 95);
     }
 
     #[test]

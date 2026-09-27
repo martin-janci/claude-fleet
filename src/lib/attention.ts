@@ -123,7 +123,11 @@ export const DEFAULT_ATTENTION_IDLE_MINUTES = 30;
 export const TRIAGE_BUCKETS = [
   'waiting',
   'stuck',
+  'stop_failed',
   'failed',
+  'context_full',
+  'stale_working',
+  'ci_failing',
   'done_unread',
   'lifecycle',
   'idle_long',
@@ -137,7 +141,7 @@ export type TriageBucket = (typeof TRIAGE_BUCKETS)[number];
  *  only surface for the operator-configured idle nudge, so leaving it out
  *  would delete that reach and reduce `attentionIdleMinutes` to a sort knob.
  *  `working` and `idle` are never in it. */
-export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 6);
+export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 10);
 
 /** Buckets the "Needs you" COUNTER reports — deliberately one narrower than
  *  the filter, excluding `idle_long`.
@@ -147,7 +151,7 @@ export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0
  *  counting them would read "Needs you (34)" and the number would stop
  *  meaning anything. The rows are still one toggle away, because the filter
  *  above does include them. Do not "reconcile" these two sets. */
-export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 5);
+export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 9);
 
 const NEEDS_YOU = new Set<TriageBucket>(NEEDS_YOU_BUCKETS);
 const NEEDS_YOU_COUNTED = new Set<TriageBucket>(NEEDS_YOU_COUNTED_BUCKETS);
@@ -194,9 +198,13 @@ function isIdleLong(s: SessionRow, opts: AttentionOptions): boolean {
  *  it is `working` or `idle`, whatever its fields say. */
 export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (s.kind === 'external') return s.claude_status === 'working' ? 'working' : 'idle';
+  if (s.kind === 'shell') return 'idle';
   if (isWaiting(s)) return 'waiting';
   if (s.stuck_kind) return 'stuck';
-  if (s.claude_status === 'failed') return 'failed';
+  if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
+  if (contextLevel(s.context_pct) === 'crit') return 'context_full';
+  if ((s.stale_working_at ?? null) !== null) return 'stale_working';
+  if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
   if (isDoneUnread(s)) return 'done_unread';
   if (isLifecycleBroken(s)) return 'lifecycle';
   if (isIdleLong(s, opts)) return 'idle_long';
@@ -204,11 +212,21 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   return 'idle';
 }
 
+function isIdleStatus(status: ClaudeStatus | null): boolean {
+  return status === 'idle' || status === 'completed' || status === 'stopped';
+}
+
 /** When the row entered the state its bucket describes, best effort. */
 function bucketSince(s: SessionRow, bucket: TriageBucket): number {
   switch (bucket) {
     case 'stuck':
       return s.stuck_since ?? s.last_activity_at;
+    case 'stop_failed':
+      return s.last_stop_at ?? s.last_activity_at;
+    case 'stale_working':
+      return s.stale_working_at ?? s.last_activity_at;
+    case 'ci_failing':
+      return s.idle_since ?? s.last_activity_at;
     case 'lifecycle':
       return s.lost_at ?? s.safe_kill_requested_at ?? s.last_activity_at;
     case 'done_unread':

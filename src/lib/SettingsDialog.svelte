@@ -1015,6 +1015,16 @@
         <span class="hook-desc" id="restore-stagger-ms-desc">Pause between starting each resumed session</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="limit-context-red-pct">context red</label>
+        <input class="port" id="limit-context-red-pct" type="number" min="1" max="100" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthContextRedPct)}
+          disabled={limitsBusy}
+          aria-describedby="limit-context-red-pct-desc"
+          data-testid="health-context-red-pct"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthContextRedPct, 'Context red threshold (%)', e)} />
+        <span class="hook-desc" id="limit-context-red-pct-desc">percent of the context window at which a session needs you (the chip turns red here, amber 15 points below)</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
         <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}
