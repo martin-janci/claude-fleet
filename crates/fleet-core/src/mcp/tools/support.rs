@@ -25,7 +25,7 @@ pub(super) fn audit(tool: &str, detail: &str) {
 /// Key under which [`mcp_err`] stores the `E_*` code in `McpError::data`.
 /// `ServerHandler::call_tool` reads it back to tell a tool-execution error
 /// (→ `CallToolResult { is_error: true }`) from an rmcp protocol error.
-const ERR_CODE_KEY: &str = "code";
+pub(super) const ERR_CODE_KEY: &str = "code";
 
 /// Map a backend `IpcError` to an MCP tool error, preserving the `E_*` code.
 /// Structured `details` (e.g. `E_AMBIGUOUS` candidates) ride along as the

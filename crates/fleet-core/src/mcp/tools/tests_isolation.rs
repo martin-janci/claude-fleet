@@ -2621,6 +2621,632 @@ async fn run_matrix(isolate: bool) {
         .await;
         assert_eq!(seen, unseen, "{who:?}");
     }
+    // ── the Work view's writes (work graph M14.1c) ──────────────────────
+    // Every write re-checks the caller's scope; a link, task or view out of
+    // scope answers exactly as an unknown one, a version is compared only
+    // after that, and readonly is refused by its mode.
+    let primary_of = |fx: &Fx, sid: i64| -> i64 {
+        fx.t.store
+            .lock()
+            .unwrap()
+            .current_primary_link(sid)
+            .unwrap()
+            .unwrap_or(0)
+    };
+    let version_of = |fx: &Fx, link: i64| -> i64 {
+        fx.t.store
+            .lock()
+            .unwrap()
+            .work_link_version(link)
+            .unwrap()
+            .unwrap_or(0)
+    };
+    // The session a caller may act on but must not reach: s_x (A's session
+    // carrying B's forced BB-1) for everyone but its own host's token and
+    // the unrestricted callers.
+    let s_x_refused = |who: Who, a: &Answer, ctx: &str| match who {
+        Who::Master | Who::ClientFull => unreachable!(),
+        // B's link on A's session: not A's to see; s_x not B's to reach.
+        Who::HostA | Who::BoundA | Who::BoundB => is_code(who, a, "E_NOTFOUND", ctx),
+        // Another host's session: the host fence.
+        _ => is_code(who, a, "E_FORBIDDEN", ctx),
+    };
+    // Own primary, named as seen: an idempotent success for every writer.
+    m.row(
+        "work_link",
+        "set_primary",
+        move |fx, who| {
+            let sid = own(fx, who);
+            let p = primary_of(fx, sid);
+            json!({ "action": "set_primary", "session_id": sid, "link_id": p, "expected_primary": p })
+        },
+        |_, who, a| {
+            if !readonly_refused(who, a) {
+                is_ok(who, a, "own primary");
+            }
+        },
+    )
+    .await;
+    // A stale expectation is a conflict for every writer, naming only the
+    // primary the caller sees.
+    m.row(
+        "work_link",
+        "set_primary",
+        move |fx, who| {
+            let sid = own(fx, who);
+            let p = primary_of(fx, sid);
+            json!({ "action": "set_primary", "session_id": sid, "link_id": p,
+                    "expected_primary": p + 1000 })
+        },
+        |_, who, a| {
+            if !readonly_refused(who, a) {
+                is_code(who, a, "E_CONFLICT", "stale primary");
+                assert!(text(a).contains("primary_link_id"), "{who:?}: {a:?}");
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "set_primary",
+        |fx, _| json!({ "action": "set_primary", "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b) }),
+        move |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_ok(who, a, "the forced link is s_x's primary"),
+            _ => s_x_refused(who, a, "set_primary on B's link / A's session"),
+        },
+    )
+    .await;
+    // Undo is for proposed links; the fixture's are made by hand.
+    m.row(
+        "work_link",
+        "reconsider",
+        move |fx, who| {
+            let sid = own(fx, who);
+            json!({ "action": "reconsider", "session_id": sid, "link_id": primary_of(fx, sid) })
+        },
+        |_, who, a| {
+            if !readonly_refused(who, a) {
+                is_code(
+                    who,
+                    a,
+                    "E_INVALID_STATE",
+                    "a link made by hand is removed, not undone",
+                );
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "reconsider",
+        |fx, _| json!({ "action": "reconsider", "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b) }),
+        move |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_code(who, a, "E_INVALID_STATE", "by hand"),
+            _ => s_x_refused(who, a, "reconsider B's link / A's session"),
+        },
+    )
+    .await;
+    // D32: the forced cross-org link is a review item until it is kept.
+    // (Earlier rows unlink and re-make it: `relink` is its live id.)
+    let cross_org_listed = |fx: &Fx| {
+        let link = relink(fx, fx.s_x, fx.item_b);
+        let r =
+            crate::service::work::view::review(&fx.t.store, &OrgScope::All, None, None).unwrap();
+        r.items
+            .iter()
+            .any(|i| i.kind == "cross_org" && i.link_id == link)
+    };
+    assert!(cross_org_listed(&fx), "D32: the forced link is reviewed");
+    m.row(
+        "work_link",
+        "ack",
+        move |fx, _| {
+            let link = relink(fx, fx.s_x, fx.item_b);
+            json!({ "action": "ack", "session_id": fx.s_x, "link_id": link,
+                    "expected_version": version_of(fx, link) })
+        },
+        move |fx, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => {
+                is_ok(who, a, "keep the cross-org link");
+                assert!(!cross_org_listed(fx), "kept: out of the inbox");
+            }
+            _ => s_x_refused(who, a, "ack B's link / A's session"),
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute("UPDATE work_links SET review_ack_at = NULL", [])
+            .unwrap();
+    }
+    // A batch always answers, item by item: the forced link as above, and
+    // the caller's own primary confirmed again (allowed to every writer).
+    m.row(
+        "work_link",
+        "decide_batch",
+        move |fx, who| {
+            let sid = own(fx, who);
+            json!({ "action": "decide_batch", "decisions": [
+                { "session_id": fx.s_x, "link_id": relink(fx, fx.s_x, fx.item_b), "decision": "ack" },
+                { "session_id": sid, "link_id": primary_of(fx, sid), "decision": "confirm" },
+            ] })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            is_ok(who, a, "a batch always answers");
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            let r = v["results"].as_array().unwrap();
+            assert_eq!(r[0]["ok"], who.is_unbound(), "{who:?}: {v}");
+            if !who.is_unbound() {
+                let want = match who {
+                    Who::HostA | Who::BoundA | Who::BoundB => "E_NOTFOUND",
+                    _ => "E_FORBIDDEN",
+                };
+                assert_eq!(r[0]["code"], want, "{who:?}: {v}");
+                assert!(r[0].get("version").is_none(), "{who:?}: {v}");
+            }
+            assert_eq!(r[1]["ok"], true, "{who:?}: one failing never stops the next: {v}");
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute("UPDATE work_links SET review_ack_at = NULL", [])
+            .unwrap();
+    }
+    // A hidden link's version is no oracle: with or without a (wrong)
+    // expected_version, it answers as an unknown link.
+    let link_x = relink(&fx, fx.s_x, fx.item_b);
+    for who in [Who::HostA, Who::BoundA] {
+        for action in [
+            "confirm",
+            "reject",
+            "unlink",
+            "set_primary",
+            "reconsider",
+            "ack",
+        ] {
+            let ask = |link: i64| {
+                json!({ "action": action, "session_id": fx.s_x, "link_id": link,
+                        "expected_version": 99 })
+            };
+            let hidden = call(&fx, who, "work_link", ask(link_x)).await;
+            let unknown = call(&fx, who, "work_link", ask(999_999)).await;
+            is_code(who, &hidden, "E_NOTFOUND", action);
+            same_as_unknown(&hidden, &unknown, &link_x.to_string(), "999999");
+            assert!(
+                link_is_live(&fx, link_x),
+                "{who:?} {action}: nothing changed"
+            );
+        }
+    }
+    // link / confirm { primary: false, expected_version }: the caller's own
+    // work re-linked as a secondary keeps the primary; a stale version is a
+    // conflict.
+    let own_item = |fx: &Fx, who: Who| -> Value {
+        match who {
+            Who::HostB | Who::BoundB => json!({ "item_id": fx.item_b }),
+            Who::HostNone => json!({ "key": "LOC-1" }),
+            _ => json!({ "item_id": fx.item_a }),
+        }
+    };
+    for stale in [false, true] {
+        m.row(
+            "work_link",
+            "link",
+            move |fx, who| {
+                let sid = own(fx, who);
+                let p = primary_of(fx, sid);
+                let v = version_of(fx, p) + if stale { 5 } else { 0 };
+                let mut args = json!({ "action": "link", "session_id": sid, "primary": false,
+                                       "expected_version": v });
+                args.as_object_mut()
+                    .unwrap()
+                    .extend(own_item(fx, who).as_object().unwrap().clone());
+                args
+            },
+            move |fx, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                if stale {
+                    return is_code(who, a, "E_CONFLICT", "a stale link version");
+                }
+                is_ok(who, a, "re-link own work as a secondary");
+                let row: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(
+                    row["work"]["link_id"],
+                    primary_of(fx, own(fx, who)),
+                    "{who:?}"
+                );
+            },
+        )
+        .await;
+        m.row(
+            "work_link",
+            "confirm",
+            move |fx, who| {
+                let sid = own(fx, who);
+                let p = primary_of(fx, sid);
+                let v = version_of(fx, p) + if stale { 5 } else { 0 };
+                json!({ "action": "confirm", "session_id": sid, "link_id": p, "primary": false,
+                        "expected_version": v })
+            },
+            move |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                if stale {
+                    is_code(who, a, "E_CONFLICT", "a stale link version");
+                } else {
+                    is_ok(who, a, "confirm own primary as seen");
+                }
+            },
+        )
+        .await;
+    }
+    // Placement: never a host's; a bound client places only what it sees.
+    let placement_of = |fx: &Fx, task: &str| -> i64 {
+        fx.t.store
+            .lock()
+            .unwrap()
+            .work_placement(task)
+            .unwrap()
+            .map_or(0, |p| p.version)
+    };
+    m.row(
+        "work_link",
+        "place",
+        move |fx, who| {
+            let task = format!("item:{}", fx.item_b);
+            json!({ "action": "place", "task_id": task, "group": format!("Payroll {who:?}"),
+                    "expected_version": placement_of(fx, &task) })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's task"),
+            _ => {
+                is_ok(who, a, "place");
+                assert!(text(a).contains("\"source\":\"manual\""), "{who:?}: {a:?}");
+                assert!(
+                    text(a).contains(&format!("Payroll {who:?}")),
+                    "{who:?}: {a:?}"
+                );
+            }
+        },
+    )
+    .await;
+    // A stale version: a conflict only for a caller who sees the task.
+    m.row(
+        "work_link",
+        "place",
+        move |fx, _| {
+            let task = format!("item:{}", fx.item_b);
+            json!({ "action": "place", "task_id": task, "group": "late",
+                    "expected_version": placement_of(fx, &task) + 3 })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's task: no version oracle"),
+            _ => is_code(who, a, "E_CONFLICT", "a stale placement"),
+        },
+    )
+    .await;
+    let hidden = call(
+        &fx,
+        Who::BoundA,
+        "work_link",
+        json!({ "action": "place", "task_id": format!("item:{}", fx.item_b), "group": "x", "expected_version": 1 }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::BoundA,
+        "work_link",
+        json!({ "action": "place", "task_id": "item:999999", "group": "x", "expected_version": 1 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &fx.item_b.to_string(), "999999");
+    // Unassigned work (the bare key LOC-1): a bound client places it while
+    // D31 is on (the matrix's default; off is below).
+    m.row(
+        "work_link",
+        "place",
+        move |fx, _| {
+            json!({ "action": "place", "task_id": "ref:LOC-1", "group": "Local",
+                    "expected_version": placement_of(fx, "ref:LOC-1") })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not place"),
+            _ => is_ok(who, a, "unassigned work, D31 on"),
+        },
+    )
+    .await;
+    // assign_org (D33): the master and a full unbound client, with a fresh
+    // impact; never a host, never a bound client — refused before the task
+    // is looked at, so no oracle either.
+    m.row(
+        "work_link",
+        "assign_org",
+        move |fx, _| {
+            let task = format!("item:{local_a}");
+            let cur = crate::service::work::view::task(&fx.t.store, &OrgScope::All, &task)
+                .unwrap()
+                .task;
+            let to = if cur.org_source == "item" { 0 } else { ORG_A };
+            let imp = crate::service::work::structure::org_impact(
+                &fx.t.store,
+                &OrgScope::All,
+                &task,
+                Some(to),
+            )
+            .unwrap();
+            json!({ "action": "assign_org", "task_id": task, "org_id": to,
+                    "impact_token": imp.impact_token })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_ok(who, a, "move a local task's org"),
+            _ => is_code(who, a, "E_FORBIDDEN", "hosts and bound clients move no org"),
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "assign_org",
+        |fx, _| json!({ "action": "assign_org", "task_id": format!("item:{}", fx.item_b), "org_id": 0, "impact_token": "stale" }),
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => {
+                is_code(who, a, "E_FORBIDDEN", "a tracker item's org is its tracker's")
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "hosts and bound clients move no org"),
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "assign_org",
+        |_, _| json!({ "action": "assign_org", "task_id": "ref:LOC-1", "org_id": 1, "impact_token": "x" }),
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_code(who, a, "E_INVALID", "a bare key"),
+            _ => is_code(who, a, "E_FORBIDDEN", "hosts and bound clients move no org"),
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.set_local_item_org(local_a, None).unwrap();
+    }
+    // Rules (D34): placement only, and the unrestricted callers' only.
+    m.row(
+        "work_link",
+        "rule_save",
+        |_, who| {
+            json!({ "action": "rule_save",
+                    "rule": { "name": format!("z {who:?}"), "conditions": { "key_prefix": "ZZ" }, "group": "Z" } })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_ok(who, a, "rule"),
+            _ => is_code(who, a, "E_FORBIDDEN", "rules reach every org"),
+        },
+    )
+    .await;
+    let rule_version = move |fx: &Fx| -> i64 {
+        fx.t.store
+            .lock()
+            .unwrap()
+            .work_rule(bravo_rule)
+            .unwrap()
+            .unwrap()
+            .version
+    };
+    m.row(
+        "work_link",
+        "rule_save",
+        move |fx, _| {
+            json!({ "action": "rule_save",
+                    "rule": { "id": bravo_rule, "name": "Bravo rule", "group": "SECRET-B group",
+                              "conditions": { "tracker_id": fx.tracker_b },
+                              "expected_version": rule_version(fx) + 1 } })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_code(who, a, "E_CONFLICT", "a stale rule"),
+            _ => is_code(who, a, "E_FORBIDDEN", "rules reach every org"),
+        },
+    )
+    .await;
+    let fresh_rule = std::cell::Cell::new(0_i64);
+    let fresh_rule = &fresh_rule;
+    m.row(
+        "work_link",
+        "rule_delete",
+        move |fx, _| {
+            let id = fx.t.store.lock().unwrap().seed_rule(
+                "doomed",
+                &crate::store::RuleConditions {
+                    key_prefix: Some("DD".into()),
+                    ..Default::default()
+                },
+                "D",
+            );
+            fresh_rule.set(id);
+            json!({ "action": "rule_delete", "rule_id": id, "expected_version": 1 })
+        },
+        move |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            let gone =
+                fx.t.store
+                    .lock()
+                    .unwrap()
+                    .work_rule(fresh_rule.get())
+                    .unwrap()
+                    .is_none();
+            match who {
+                Who::Master | Who::ClientFull => {
+                    is_ok(who, a, "delete");
+                    assert!(gone, "{who:?}");
+                }
+                _ => {
+                    is_code(who, a, "E_FORBIDDEN", "rules reach every org");
+                    assert!(!gone, "{who:?}: a refusal deletes nothing");
+                }
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "rule_delete",
+        |_, _| json!({ "action": "rule_delete", "rule_id": 987654 }),
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_code(who, a, "E_NOTFOUND", "no such rule"),
+            _ => is_code(who, a, "E_FORBIDDEN", "rules reach every org"),
+        },
+    )
+    .await;
+    // Views (D35): shared on the hub, a bound client's its org's.
+    m.row(
+        "work_link",
+        "view_save",
+        |_, who| {
+            json!({ "action": "view_save",
+                    "view": { "name": format!("open {who:?}"), "filters": { "status": "open" } } })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+            _ => is_ok(who, a, "own view"),
+        },
+    )
+    .await;
+    let listed = call(&fx, Who::BoundA, "work", json!({ "action": "views" })).await;
+    assert!(
+        text(&listed).contains("open BoundA")
+            && !text(&listed).contains("open BoundB")
+            && !text(&listed).contains("open Master"),
+        "{listed:?}"
+    );
+    // Another org's view: replaced only by its org and the unrestricted.
+    let view_b: i64 = serde_json::from_str::<Vec<Value>>(text(
+        &call(&fx, Who::BoundB, "work", json!({ "action": "views" })).await,
+    ))
+    .unwrap()
+    .iter()
+    .find(|v| v["name"] == "SECRET-B view")
+    .and_then(|v| v["id"].as_i64())
+    .unwrap();
+    let unknown_view = &call(
+        &fx,
+        Who::BoundA,
+        "work_link",
+        json!({ "action": "view_save",
+                "view": { "id": 999_999, "name": "SECRET-B view", "filters": { "org": ORG_B } } }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "view_save",
+        move |_, _| {
+            json!({ "action": "view_save",
+                    "view": { "id": view_b, "name": "SECRET-B view", "filters": { "org": ORG_B } } })
+        },
+        move |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+            Who::BoundA => {
+                is_code(who, a, "E_NOTFOUND", "another org's view");
+                same_as_unknown(a, unknown_view, &view_b.to_string(), "999999");
+            }
+            _ => {
+                is_ok(who, a, "the org's own view, or the master's reach");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(v["owner_org"], ORG_B, "{who:?}: the owner stays");
+            }
+        },
+    )
+    .await;
+    // A bound client's view names only what it sees.
+    m.row(
+        "work_link",
+        "view_save",
+        |fx, who| {
+            json!({ "action": "view_save",
+                    "view": { "name": format!("tracker {who:?}"), "filters": { "tracker": fx.tracker_b } } })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "B's tracker"),
+            _ => is_ok(who, a, "a tracker it sees"),
+        },
+    )
+    .await;
+    let doomed_view = std::cell::Cell::new(0_i64);
+    let doomed_view = &doomed_view;
+    m.row(
+        "work_link",
+        "view_delete",
+        move |fx, who| {
+            let id = fx.t.store.lock().unwrap().seed_view(
+                &format!("doomed {who:?}"),
+                &json!({}),
+                Some(ORG_A),
+            );
+            doomed_view.set(id);
+            json!({ "action": "view_delete", "view_id": id, "expected_version": 1 })
+        },
+        move |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            let gone =
+                fx.t.store
+                    .lock()
+                    .unwrap()
+                    .work_view(doomed_view.get())
+                    .unwrap()
+                    .is_none();
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "A's view"),
+                _ => {
+                    is_ok(who, a, "delete");
+                    assert!(gone, "{who:?}");
+                    return;
+                }
+            }
+            assert!(!gone, "{who:?}: a refusal deletes nothing");
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "view_delete",
+        |_, _| json!({ "action": "view_delete", "view_id": 987654 }),
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts keep no views"),
+            _ => is_code(who, a, "E_NOTFOUND", "no such view"),
+        },
+    )
+    .await;
     // D31's switch is org administration: the master's, and nobody else's.
     m.row(
         "work_admin",
@@ -2858,6 +3484,113 @@ async fn the_work_view_reads_follow_d31_off() {
 /// Every Routed work command of the desktop maps to an action the matrix
 /// covers (src-tauri's routing tests hold `ROUTED_WORK_COMMANDS` to its
 /// verdict table).
+/// D31's second value for the writes (work graph M14.1c): with an org's
+/// `bound_sees_unassigned` off, its bound clients cannot write to
+/// unassigned work or sessions either — placing the bare key LOC-1,
+/// deciding on s_n's link, alone or in a batch, or naming the unassigned
+/// work in a view all answer as unknown. Their own org's writes, the
+/// master's and the hosts' are unchanged. The matrix above covers D31 on.
+#[tokio::test]
+async fn the_work_view_writes_follow_d31_off() {
+    let fx = fixture(false);
+    for org in [ORG_A, ORG_B] {
+        let a = call(
+            &fx,
+            Who::Master,
+            "work_admin",
+            json!({ "action": "update_org", "org_id": org, "bound_sees_unassigned": false }),
+        )
+        .await;
+        is_ok(Who::Master, &a, "D31 off");
+    }
+    let s_n_link =
+        fx.t.store
+            .lock()
+            .unwrap()
+            .current_primary_link(fx.s_n)
+            .unwrap()
+            .unwrap();
+    let writes = |fx: &Fx| -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "place",
+                json!({ "action": "place", "task_id": "ref:LOC-1", "group": "x", "expected_version": 0 }),
+            ),
+            (
+                "set_primary",
+                json!({ "action": "set_primary", "session_id": fx.s_n, "link_id": s_n_link }),
+            ),
+            (
+                "ack",
+                json!({ "action": "ack", "session_id": fx.s_n, "link_id": s_n_link }),
+            ),
+            (
+                "reconsider",
+                json!({ "action": "reconsider", "session_id": fx.s_n, "link_id": s_n_link }),
+            ),
+            (
+                "unlink",
+                json!({ "action": "unlink", "session_id": fx.s_n, "link_id": s_n_link,
+                        "expected_version": 1 }),
+            ),
+        ]
+    };
+    for who in [Who::BoundA, Who::BoundB] {
+        for (action, args) in writes(&fx) {
+            let a = call(&fx, who, "work_link", args).await;
+            is_code(who, &a, "E_NOTFOUND", action);
+        }
+        let batch = call(
+            &fx,
+            who,
+            "work_link",
+            json!({ "action": "decide_batch", "decisions": [
+                { "session_id": fx.s_n, "link_id": s_n_link, "decision": "confirm" },
+            ] }),
+        )
+        .await;
+        is_ok(who, &batch, "a batch always answers");
+        let v: Value = serde_json::from_str(text(&batch)).unwrap();
+        assert_eq!(v["results"][0]["code"], "E_NOTFOUND", "{who:?}: {v}");
+        // Its own org's work is still its to place.
+        let own = if who == Who::BoundA {
+            fx.item_a
+        } else {
+            fx.item_b
+        };
+        let placed = call(
+            &fx,
+            who,
+            "work_link",
+            json!({ "action": "place", "task_id": format!("item:{own}"), "group": format!("{who:?}"),
+                    "expected_version": 0 }),
+        )
+        .await;
+        is_ok(who, &placed, "own org's task");
+    }
+    assert!(link_is_live(&fx, s_n_link), "a refusal changes nothing");
+    // The master, the no-org host and an unbound client: as before.
+    for who in [Who::Master, Who::ClientFull, Who::HostNone] {
+        let p = call(
+            &fx,
+            who,
+            "work_link",
+            json!({ "action": "set_primary", "session_id": fx.s_n, "link_id": s_n_link,
+                    "expected_primary": s_n_link }),
+        )
+        .await;
+        is_ok(who, &p, "D31 is a bound client's switch only");
+    }
+    let placed = call(
+        &fx,
+        Who::Master,
+        "work_link",
+        json!({ "action": "place", "task_id": "ref:LOC-1", "group": "x", "expected_version": 0 }),
+    )
+    .await;
+    is_ok(Who::Master, &placed, "unassigned work, the master");
+}
+
 #[test]
 fn every_routed_work_command_names_a_covered_action() {
     for (cmd, tool, action) in crate::service::work::ROUTED_WORK_COMMANDS {
