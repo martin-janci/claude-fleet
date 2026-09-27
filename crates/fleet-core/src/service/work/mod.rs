@@ -16,10 +16,12 @@ pub mod resume;
 pub mod retention;
 #[cfg(test)]
 mod scale_tests;
+pub mod structure;
 pub mod summary;
 pub mod tidy;
 pub mod today;
 pub mod usage;
+pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -73,6 +75,26 @@ pub struct WorkArgs {
     /// Today: unix start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// item:<id> or ref:<KEY>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Tree filters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub filters: Option<view::WorkTreeFilters>,
+    /// Next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Sessions per task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_task: Option<usize>,
+    /// Draft rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub rule: Option<structure::RuleInput>,
+    /// Org id; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -141,6 +163,48 @@ pub struct WorkLinkArgs {
     /// Name: the work's title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// item:<id> or ref:<KEY>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Link version seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<i64>,
+    /// Primary link seen; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_primary: Option<i64>,
+    /// false: secondary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<bool>,
+    /// decide_batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub decisions: Option<Vec<structure::LinkDecision>>,
+    /// Group label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Placement note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// From org_impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact_token: Option<String>,
+    /// Org id; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    /// rule_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub rule: Option<structure::RuleInput>,
+    /// rule_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
+    /// view_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub view: Option<structure::ViewInput>,
+    /// view_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<i64>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -229,6 +293,22 @@ pub enum WorkAction {
     Reopened,
     /// Local work items: named work with no ticket (work graph M11.1).
     LocalItems,
+    /// The Work view (work graph M14): a page of tasks with their sessions.
+    Tree,
+    /// One task with every session, its provenance and last outcome.
+    Task,
+    /// Every link of one session, with its task.
+    SessionTasks,
+    /// Suggestions and conflicts to decide.
+    Review,
+    /// Placement rules.
+    Rules,
+    /// What a drafted rule would move.
+    RulePreview,
+    /// Saved views.
+    Views,
+    /// What moving a local task to another org changes.
+    OrgImpact,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -250,6 +330,14 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
     ("local_items", WorkAction::LocalItems),
+    ("tree", WorkAction::Tree),
+    ("task", WorkAction::Task),
+    ("session_tasks", WorkAction::SessionTasks),
+    ("review", WorkAction::Review),
+    ("rules", WorkAction::Rules),
+    ("rule_preview", WorkAction::RulePreview),
+    ("views", WorkAction::Views),
+    ("org_impact", WorkAction::OrgImpact),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -272,6 +360,16 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "tidy_apply",
     "name",
     "summarize",
+    "set_primary",
+    "reconsider",
+    "ack",
+    "decide_batch",
+    "place",
+    "assign_org",
+    "rule_save",
+    "rule_delete",
+    "view_save",
+    "view_delete",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -310,6 +408,24 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
     ("summarize_past_work", "work_link", "summarize"),
+    ("work_tree", "work", "tree"),
+    ("work_task", "work", "task"),
+    ("work_session_tasks", "work", "session_tasks"),
+    ("work_review", "work", "review"),
+    ("work_rules", "work", "rules"),
+    ("work_rule_preview", "work", "rule_preview"),
+    ("work_views", "work", "views"),
+    ("work_org_impact", "work", "org_impact"),
+    ("set_primary_work", "work_link", "set_primary"),
+    ("reconsider_work_link", "work_link", "reconsider"),
+    ("ack_work_link", "work_link", "ack"),
+    ("decide_work_batch", "work_link", "decide_batch"),
+    ("place_work", "work_link", "place"),
+    ("assign_work_org", "work_link", "assign_org"),
+    ("save_work_rule", "work_link", "rule_save"),
+    ("delete_work_rule", "work_link", "rule_delete"),
+    ("save_work_view", "work_link", "view_save"),
+    ("delete_work_view", "work_link", "view_delete"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -327,6 +443,19 @@ fn work_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars
 
 fn work_link_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
     action_schema(WORK_LINK_ACTIONS.iter().copied())
+}
+
+/// The Work view's nested parameters (work graph M14) are served as a bare
+/// `object` / `array`: their shape is in `docs/control-api.md` and the spec,
+/// and a typed schema per nested struct would cost the tool budget (C21)
+/// several kilobytes. The server still deserialises them strictly — a
+/// malformed one is refused, never ignored.
+fn object_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({ "type": "object" })
+}
+
+fn array_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({ "type": "array", "items": { "type": "object" } })
 }
 
 impl WorkArgs {
@@ -531,7 +660,20 @@ pub fn work_link<'a>(
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply" | "name"
+        "resume"
+            | "start"
+            | "trust_project"
+            | "handover"
+            | "dismiss"
+            | "tidy_apply"
+            | "name"
+            | "decide_batch"
+            | "place"
+            | "assign_org"
+            | "rule_save"
+            | "rule_delete"
+            | "view_save"
+            | "view_delete"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -650,8 +792,63 @@ pub fn work_link<'a>(
             s.never_tidy(session_id, Some(link_id))?;
             return lifecycle_row(&s, session_id);
         }
+        // Work graph M14: move the primary (compare-and-set), keep a
+        // conflict, undo a decision. The link must be one the caller sees.
+        "set_primary" | "reconsider" | "ack" => {
+            let link_id = args.link_id.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, format!("{} needs link_id", args.action))
+            })?;
+            if !scope.is_all() {
+                visible_link(link_id)?;
+            }
+            s.check_link_version(link_id, args.expected_version)?;
+            match args.action.as_str() {
+                "set_primary" => {
+                    // The compare-and-set is on the primary the CALLER can
+                    // see (work graph M14): a scoped caller whose session's
+                    // primary is another org's (a forced link) saw "none",
+                    // and must neither be refused forever nor be told that
+                    // link's id. The store's own check then runs on the
+                    // actual primary, under this same lock.
+                    let actual = s.current_primary_link(session_id)?;
+                    let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
+                    if let Some(expected) = args.expected_primary {
+                        if seen.unwrap_or(0) != expected {
+                            return Err(IpcError::new(
+                                codes::E_CONFLICT,
+                                format!(
+                                    "session {session_id}'s primary work changed meanwhile (now {}); \
+                                     reload it and decide again",
+                                    seen.map_or("none".to_string(), |c| format!("link {c}"))
+                                ),
+                            )
+                            .with_details(serde_json::json!({
+                                "session_id": session_id, "primary_link_id": seen,
+                            })));
+                        }
+                    }
+                    s.set_primary_work_link(session_id, link_id, Some(actual.unwrap_or(0)))?;
+                    return lifecycle_row(&s, session_id);
+                }
+                "ack" => {
+                    s.ack_work_link(session_id, link_id)?;
+                    return lifecycle_row(&s, session_id);
+                }
+                // A reconsidered primary frees the primary: the resolver
+                // below picks the next one.
+                _ => s.reconsider_work_link(session_id, link_id)?,
+            }
+        }
         _ => {}
     }
+    // A decision on a link by id names the version the person saw
+    // (work graph M14): someone else's change meanwhile is a conflict.
+    if matches!(args.action.as_str(), "confirm" | "reject" | "unlink") {
+        if let Some(link_id) = args.link_id {
+            s.check_link_version(link_id, args.expected_version)?;
+        }
+    }
+    let take_primary = args.primary.unwrap_or(true);
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
             (Some(id), None) => Ok(WorkTarget::Item(id)),
@@ -673,7 +870,7 @@ pub fn work_link<'a>(
                 let (key, tracker) = inferred_target(&s, t)?;
                 detect::on_agent_inference(&s, session_id, &key, tracker)?;
             } else {
-                s.link_session_work(session_id, t, source)?;
+                s.link_session_work_as(session_id, t, source, take_primary)?;
             }
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
@@ -705,7 +902,7 @@ pub fn work_link<'a>(
             } else if !scope.is_all() {
                 visible_link(link_id)?;
             }
-            detect::decide(&s, session_id, link_id, true)?;
+            detect::decide_as(&s, session_id, link_id, true, take_primary)?;
         }
         "unlink" => {
             let link_id = args
@@ -721,6 +918,8 @@ pub fn work_link<'a>(
                 ));
             }
         }
+        // Applied above; the resolver below runs after it.
+        "reconsider" => {}
         other => {
             return Err(IpcError::new(
                 codes::E_INVALID,

@@ -132,10 +132,10 @@ impl Store {
         include_revoked: bool,
     ) -> Result<Vec<ClientTokenRow>, crate::ipc_error::IpcError> {
         let sql = if include_revoked {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
              FROM client_tokens ORDER BY id DESC"
         } else {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
              FROM client_tokens WHERE revoked_at IS NULL ORDER BY id DESC"
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -273,12 +273,84 @@ impl Store {
         }
         self.conn
             .query_row(
-                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
                  FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
                 rusqlite::params![name],
                 map_client_token_row,
             )
             .map_err(crate::ipc_error::IpcError::from)
+    }
+}
+
+impl Store {
+    /// Bind the live client named `name` to `org` (work graph M14), or
+    /// unbind it (`None`). A bound client reads only that org's and
+    /// unassigned work and sessions (`OrgScope::Org`). The auth epoch
+    /// trigger of migration 063 invalidates every cached caller, so the new
+    /// binding holds from the client's next request on. A peer hub link is
+    /// never bound (it is not a reader of work). `E_NOTFOUND` when no live
+    /// client holds the name, or the org does not exist.
+    pub fn set_client_org(
+        &self,
+        name: &str,
+        org: Option<i64>,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        let name = name.trim();
+        if let Some(o) = org {
+            if self.get_org(o)?.is_none() {
+                return Err(crate::ipc_error::IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("org {o} not found"),
+                ));
+            }
+        }
+        let is_peer: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM client_tokens \
+                 WHERE name = ?1 AND revoked_at IS NULL AND mode = 'peer')",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )?;
+        if is_peer {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_VALIDATE,
+                format!("'{name}' is a peer hub link; a peer is never bound to an org"),
+            ));
+        }
+        let n = self.conn.execute(
+            "UPDATE client_tokens SET org_id = ?2 WHERE name = ?1 AND revoked_at IS NULL",
+            rusqlite::params![name, org],
+        )?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no active client token named '{name}'"),
+            ));
+        }
+        self.conn
+            .query_row(
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
+                 FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name],
+                map_client_token_row,
+            )
+            .map_err(crate::ipc_error::IpcError::from)
+    }
+
+    /// The org live client `id` is bound to: `Some(binding)` while it is
+    /// paired, `None` once it is revoked or gone. An open `/events` stream
+    /// compares it on every beat with the binding it started under.
+    pub fn client_token_org(
+        &self,
+        id: i64,
+    ) -> Result<Option<Option<i64>>, crate::ipc_error::IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT org_id FROM client_tokens WHERE id = ?1 AND revoked_at IS NULL",
+                [id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?)
     }
 }
 
@@ -306,6 +378,7 @@ fn map_client_token_row(row: &rusqlite::Row) -> rusqlite::Result<ClientTokenRow>
         last_seen_at: row.get(5)?,
         revoked_at: row.get(6)?,
         trusted_at: row.get(7)?,
+        org_id: row.get(8)?,
     })
 }
 
@@ -314,7 +387,7 @@ fn get_client_token_by_id(
     id: i64,
 ) -> rusqlite::Result<Option<ClientTokenRow>> {
     conn.query_row(
-        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at \
+        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
          FROM client_tokens WHERE id = ?1",
         rusqlite::params![id],
         map_client_token_row,

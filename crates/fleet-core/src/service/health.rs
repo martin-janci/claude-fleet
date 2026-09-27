@@ -284,6 +284,8 @@ pub fn scope_sees_tracker(scope: &OrgScope, tracker_org: Option<i64>) -> bool {
     match scope {
         OrgScope::All => true,
         OrgScope::Host { org, .. } => tracker_org == *org,
+        // A bound client (work graph M14): its own org's trackers only.
+        OrgScope::Org { org } => tracker_org == Some(*org),
     }
 }
 
@@ -562,6 +564,7 @@ mod tests {
             work_rejected: vec![],
             work_suggested: None,
             org_id: None,
+            work_rev: 0,
         }
     }
 

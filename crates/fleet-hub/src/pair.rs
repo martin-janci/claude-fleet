@@ -332,12 +332,19 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             .to_string()
     };
     let time = |r: &serde_json::Value, k: &str| fmt_time(r.get(k).and_then(|v| v.as_i64()));
-    let cells: Vec<[String; 6]> = rows
+    // The org a client is bound to (work graph M14), a dash when unbound.
+    let org = |r: &serde_json::Value| {
+        r.get("org_id")
+            .and_then(|v| v.as_i64())
+            .map_or_else(|| "-".to_string(), |o| format!("org {o}"))
+    };
+    let cells: Vec<[String; 7]> = rows
         .iter()
         .map(|r| {
             [
                 field(r, "name"),
                 field(r, "mode"),
+                org(r),
                 time(r, "trusted_at"),
                 time(r, "created_at"),
                 time(r, "last_seen_at"),
@@ -345,7 +352,15 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             ]
         })
         .collect();
-    let header = ["NAME", "MODE", "TRUSTED", "CREATED", "LAST SEEN", "REVOKED"];
+    let header = [
+        "NAME",
+        "MODE",
+        "ORG",
+        "TRUSTED",
+        "CREATED",
+        "LAST SEEN",
+        "REVOKED",
+    ];
     let mut width = header.map(str::len);
     for row in &cells {
         for (w, c) in width.iter_mut().zip(row) {
@@ -356,7 +371,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
     // Padding is counted in terminal columns, not `char`s: `{:<w$}` pads to a
     // char count, which would under-pad a CJK or emoji name (two columns per
     // char) and misalign every column after it.
-    let line = |row: &[String; 6]| {
+    let line = |row: &[String; 7]| {
         let mut s = String::new();
         for (i, (cell, w)) in row.iter().zip(width).enumerate() {
             s.push_str(cell);
@@ -377,8 +392,10 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
 
 // --- the commands ------------------------------------------------------------
 
-/// `fleet-hub pair --name <name> [--mode …] [--ttl …] [--trusted]`: mint a
-/// code through the running hub and show the URL as a QR for a phone camera.
+/// `fleet-hub pair --name <name> [--mode …] [--ttl …] [--trusted] [--org
+/// <id>]`: mint a code through the running hub and show the URL as a QR for a
+/// phone camera. `--org` binds the client to one org from its first request
+/// (work graph M14).
 pub async fn pair(
     opts: &HubOptions,
     env: &HashMap<String, String>,
@@ -386,9 +403,13 @@ pub async fn pair(
     mode: Option<&str>,
     ttl: Option<u64>,
     trusted: bool,
+    org: Option<i64>,
 ) -> Result<ExitCode, String> {
     let conn = hub_conn(opts, env)?;
     let mut args = serde_json::json!({ "name": name, "trusted": trusted });
+    if let Some(o) = org {
+        args["org_id"] = serde_json::Value::from(o);
+    }
     if let Some(m) = mode {
         args["mode"] = serde_json::Value::String(m.to_string());
     }
@@ -410,6 +431,11 @@ pub async fn pair(
             ""
         }
     ));
+    if let Some(o) = v["org_id"].as_i64() {
+        out::line(&format!(
+            "org:     {o} — it reads only that org's and unassigned work and sessions"
+        ));
+    }
     out::line(&format!(
         "expires: in {} s — the code works once, and a hub restart voids it",
         v["expires_in_s"].as_u64().unwrap_or(0)
@@ -458,6 +484,32 @@ pub async fn client_trust(
         )
     } else {
         format!("untrusted {shown}; its prompts are marked again from its next call on")
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `fleet-hub client bind <name> <org>` / `client unbind <name>` (work graph
+/// M14): bind a paired client to one org, or lift the binding. Its streams
+/// end at their next beat and it reconnects under the new scope.
+pub async fn client_bind(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    name: &str,
+    org: Option<i64>,
+) -> Result<ExitCode, String> {
+    let conn = hub_conn(opts, env)?;
+    let mut args = serde_json::json!({ "action": "assign_client", "name": name });
+    if let Some(o) = org {
+        args["org_id"] = serde_json::Value::from(o);
+    }
+    let v = call_tool(&conn, "work_admin", args).await?;
+    let shown = v["name"].as_str().unwrap_or(name);
+    out::line(&match v["org_id"].as_i64() {
+        Some(o) => format!(
+            "bound {shown} to org {o}: from its next request it reads only that org's and \
+             unassigned work and sessions"
+        ),
+        None => format!("unbound {shown}: it reads every org again"),
     });
     Ok(ExitCode::SUCCESS)
 }
@@ -796,8 +848,8 @@ mod tests {
         assert!(lines[1].contains("2023-11-14 22:18Z"), "{t}");
         assert_eq!(
             lines[2].split_whitespace().filter(|c| *c == "-").count(),
-            2,
-            "a dash for TRUSTED and one for LAST SEEN:\n{t}"
+            3,
+            "a dash for ORG, TRUSTED and LAST SEEN:\n{t}"
         );
         // A live client's revoked column is a dash, not an empty gap.
         assert!(lines[1].trim_end().ends_with('-'), "{t}");
@@ -921,7 +973,7 @@ mod tests {
 
         let (dir, shutdown, task) = running_hub(Some(tls)).await;
         let opts = opts_for(&dir, None);
-        let result = pair(&opts, &HashMap::new(), "phone", None, None, false).await;
+        let result = pair(&opts, &HashMap::new(), "phone", None, None, false, None).await;
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         assert!(result.is_ok(), "pair over TLS must succeed: {result:?}");
@@ -933,7 +985,7 @@ mod tests {
     async fn pair_reaches_a_plaintext_hub() {
         let (dir, shutdown, task) = running_hub(None).await;
         let opts = opts_for(&dir, None);
-        let result = pair(&opts, &HashMap::new(), "phone", None, None, false).await;
+        let result = pair(&opts, &HashMap::new(), "phone", None, None, false, None).await;
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         assert!(

@@ -586,6 +586,48 @@ Index by area (names only; see the reference for details):
   link on its host's sessions or a past one whose session ran there, inside
   its org; the count is of its host's sessions. The phone names and
   renames work with a full token (D20, fleet-mobile M13.4a).
+  The Work view (work graph M14, `docs/work-graph.md` → *The Work view*;
+  the full shapes are in
+  `docs/superpowers/specs/2026-09-27-work-view-design.md` → *Contracts*).
+  Reads, all of `work`: `tree { filters?, cursor?, limit?, per_task? }` —
+  a page of tasks (`task_id` `item:<id>` | `ref:<KEY>`), each with its org
+  and group and where they come from, its counts and up to `per_task`
+  sessions (`state` `active` | `ended` | `suggested`, `primary`, `why`),
+  plus every section header (`groups`, with counts), the orgs and trackers
+  the caller sees, `total` and an opaque `next_cursor` (bound to the
+  filters: another filter's cursor is `E_INVALID`). `filters` is `{ org:
+  <id>|"none", tracker: <id>|"local"|"ref", status:
+  any|open|todo|in_progress|done, mine, has:
+  any|active|past_only|none|suggested, review, query, group }`; a bad value
+  is refused, never ignored. `task { task_id }` — every session with its
+  evidence, the tracker description, the last outcome, the placement and
+  the rules that match. `session_tasks { session_id }` — every link of a
+  session (active, suggested, rejected, ended), each with its task.
+  `review { cursor?, limit? }` — suggestions and conflicts (`kind`
+  `suggestion` | `cross_org` | `unavailable` | `no_primary`) with their
+  reasons. `rules`; `rule_preview { rule }` — what a drafted rule would
+  move (nothing is saved); `views`; `org_impact { task_id, org_id }` (`0`:
+  no org) — what moving a local task changes, with an `impact_token`.
+  Decisions, all of `work_link`: `link` / `confirm` take `primary: false`
+  (a secondary link; the primary stays unless there is none) and, with
+  `reject` / `unlink`, `expected_version` (the link's `link_version`; a
+  change meanwhile is `E_CONFLICT` with the current state in `details`,
+  and nothing is written). `set_primary { session_id, link_id,
+  expected_primary }` moves the primary as a compare-and-set (`0`: none;
+  idempotent); `reconsider` returns a person's decision on a proposed link
+  to a suggestion (undo); `ack` keeps a conflict on purpose;
+  `decide_batch { decisions: [{ session_id, link_id, decision:
+  confirm|reject|reconsider|ack, expected_version?, primary? }] }` (≤ 100)
+  answers each on its own. `place { task_id, group, note?, expected_version
+  }` puts a task in a group (navigation only; `""` clears), `assign_org {
+  task_id, org_id, impact_token }` moves a **local** task between orgs
+  only while the previewed impact still holds (a tracker item's org is its
+  tracker's: `E_FORBIDDEN`), `rule_save { rule }` / `rule_delete { rule_id,
+  expected_version? }` and `view_save { view }` / `view_delete { view_id }`
+  keep placement rules and saved views. A per-host token writes none of the
+  structure; a client bound to an org places and keeps views in its own org
+  only, and writes no rule and no org move. Every change emits `work:changed
+  { what, task_id?, rule_id?, view_id? }` (ids only) or the session's row.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

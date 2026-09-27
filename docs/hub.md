@@ -706,15 +706,18 @@ fleet-hub client list --include-revoked
 fleet-hub client revoke phone
 fleet-hub client trust mac-desktop
 fleet-hub client untrust mac-desktop
+fleet-hub client bind contractor-phone 2
+fleet-hub client unbind contractor-phone
 ```
 
 `client list` prints one line per client, newest first:
 
 ```
-NAME         MODE      TRUSTED            CREATED            LAST SEEN          REVOKED
-mac-desktop  full      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
-phone        full      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
-kiosk        readonly  -                  2026-09-17 09:12Z  -                  -
+NAME              MODE      ORG    TRUSTED            CREATED            LAST SEEN          REVOKED
+mac-desktop       full      -      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
+contractor-phone  full      org 2  -                  2026-09-27 08:00Z  2026-09-27 09:12Z  -
+phone             full      -      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
+kiosk             readonly  -      -                  2026-09-17 09:12Z  -                  -
 ```
 
 The token itself is never shown again: only its SHA-256 is stored, and the
@@ -758,6 +761,24 @@ What a client may do:
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
   this option keeps marking everything, which is the safe direction.
+- **Bound to an org** (work graph M14). `fleet-hub pair --org <id>`, or
+  `fleet-hub client bind <name> <id>` later (`work_admin { action:
+  "assign_client", name, org_id }`; no `org_id` unbinds), restricts a client
+  to one organisation: it reads that org's and unassigned work **and
+  sessions** only — the tree, a task, a session's tasks, the review inbox,
+  tickets, Today, conversations, `list_sessions`, every session-addressed
+  tool and every `/events` frame. Another org's session answers exactly as
+  one that does not exist, whatever `isolate_sessions` says (a bound client
+  asked to be restricted, so the session fence is always on for it), and
+  `work` frames are not sent to it at all (it re-reads through `work { … }`).
+  It cannot start or resume a session in another org's project or host,
+  move a task between orgs, write placement rules, or change trust or
+  reopened work. The binding takes effect from its next request (re-binding
+  invalidates the token cache) and ends its open event streams at their next
+  beat. Deleting the org leaves the client bound to an org that no longer
+  exists — it then reads unassigned data only, never every org (fail
+  closed). Use it for a device that belongs to one company's work, such as a
+  contractor's second phone.
 
 **Work on a phone** (the work graph, M8). A client token is served `work`
 and — `full` only — `work_link`, and never `work_admin`, so tracker
@@ -1091,7 +1112,8 @@ tracker, or to make it a **boundary** for the hosts you put in it.
 
 An org is two things at once:
 
-- **A view** for people. The master and every paired client read every org;
+- **A view** for people. The master and every unbound paired client read
+  every org (a client bound to an org reads that org only — *Clients* above);
   the sidebar's selector (⌘⇧O / Ctrl+Shift+O) only narrows what is shown,
   and a session waiting on you in another scope still says so ("2 need you
   in Personal →").
@@ -1897,7 +1919,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 183 commands, 78 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 201 commands, 96 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

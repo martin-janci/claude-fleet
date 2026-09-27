@@ -1629,3 +1629,79 @@ fn multi_start_arguments_are_checked_on_their_own() {
     eight.push(1);
     assert_eq!(multi_start_ids(None, &eight).unwrap().len(), 8);
 }
+
+/// Work graph M14 (UC11): two devices start the same ticket at once. The
+/// second start is refused BEFORE it spawns anything — one session, one
+/// `E_EXISTS` — instead of both spawning and the loser being reported as an
+/// orphan afterwards. Deterministic: the first start is held inside its
+/// spawn by a barrier while the second runs to completion.
+#[tokio::test]
+async fn a_concurrent_second_start_of_one_ticket_spawns_nothing() {
+    let fx = Fx::new();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let store = Arc::clone(&fx.store);
+    let first_spawn = move |a: crate::service::sessions::NewSessionArgs| async move {
+        entered_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        let s = store.lock().unwrap();
+        let id = s
+            .upsert_session("first", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        Ok(s.get_session_by_id(id).unwrap().unwrap())
+    };
+    let first = {
+        let store = Arc::clone(&fx.store);
+        let plan = plan.clone();
+        tokio::spawn(
+            async move { start_with(&store, &plan, None, &OrgScope::All, first_spawn).await },
+        )
+    };
+    entered_rx.await.unwrap();
+    // The second device, while the first is mid-spawn.
+    let spawned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&spawned);
+    let second = start_with(&fx.store, &plan, None, &OrgScope::All, move |_a| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(Err(IpcError::new(codes::E_INTERNAL, "must not spawn")))
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(second.code, codes::E_EXISTS, "{}", second.message);
+    assert!(
+        !spawned.load(std::sync::atomic::Ordering::SeqCst),
+        "the second start spawned nothing"
+    );
+    release_tx.send(()).unwrap();
+    let (row, _) = first.await.unwrap().unwrap();
+    assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-1"));
+    // The claim is released: a later start is planned normally (and meets
+    // the live session as the duplicate guard it is).
+    let later = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(later.code, codes::E_EXISTS);
+}

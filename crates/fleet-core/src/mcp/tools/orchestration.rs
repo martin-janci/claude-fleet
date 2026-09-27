@@ -542,7 +542,8 @@ impl FleetTools {
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
         {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
-        tidy; reopened.")]
+        tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; \
+        session_tasks; review; rules; rule_preview {rule}; views; org_impact.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -639,6 +640,66 @@ impl FleetTools {
                 &crate::service::work::local::local_items(&self.store, &scope)
                     .map_err(to_mcp_err)?,
             ),
+            // Work graph M14: the Work view. Its reads build from the read
+            // pool (one pass over every item and link), never the writer.
+            WorkAction::Tree => ok_json_compact(
+                &w::view::tree(
+                    self.reader(),
+                    &scope,
+                    &w::view::TreeArgs {
+                        filters: args.filters.clone().unwrap_or_default(),
+                        cursor: args.cursor.clone(),
+                        limit: args.limit,
+                        per_task: args.per_task,
+                    },
+                )
+                .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Task => {
+                let task_id = args
+                    .task_id
+                    .as_deref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "task needs task_id", None))?;
+                ok_json_compact(&w::view::task(self.reader(), &scope, task_id).map_err(to_mcp_err)?)
+            }
+            WorkAction::SessionTasks => {
+                let id = args
+                    .session_id
+                    .ok_or_else(|| mcp_err("E_INVALID", "session_tasks needs session_id", None))?;
+                self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+                ok_json_compact(
+                    &w::view::session_tasks(self.reader(), &scope, id).map_err(to_mcp_err)?,
+                )
+            }
+            WorkAction::Review => ok_json_compact(
+                &w::view::review(self.reader(), &scope, args.cursor.as_deref(), args.limit)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Rules => {
+                ok_json_compact(&w::structure::rules(&self.store, &scope).map_err(to_mcp_err)?)
+            }
+            WorkAction::RulePreview => {
+                let rule = args
+                    .rule
+                    .as_ref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "rule_preview needs rule", None))?;
+                ok_json_compact(
+                    &w::structure::rule_preview(self.reader(), &scope, rule).map_err(to_mcp_err)?,
+                )
+            }
+            WorkAction::Views => {
+                ok_json_compact(&w::structure::views(&self.store, &scope).map_err(to_mcp_err)?)
+            }
+            WorkAction::OrgImpact => {
+                let task_id = args
+                    .task_id
+                    .as_deref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "org_impact needs task_id", None))?;
+                ok_json_compact(
+                    &w::structure::org_impact(&self.store, &scope, task_id, args.org_id)
+                        .map_err(to_mcp_err)?,
+                )
+            }
         }
     }
 
@@ -651,7 +712,10 @@ impl FleetTools {
         write its hand-off. summarize {key, link_id}: \
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
-        kill when dirty).")]
+        kill when dirty). Work view: primary:false links a secondary; \
+        expected_version guards a link; set_primary {expected_primary}; \
+        reconsider; ack; decide_batch; place; assign_org {impact_token}; \
+        rule_save|rule_delete; view_save|view_delete.")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -768,11 +832,12 @@ impl FleetTools {
             return ok_json(&row);
         }
         if args.action == "trust_project" {
-            // Trust is fleet configuration, not one host's to change.
-            if caller.host_alias.is_some() {
+            // Trust is fleet configuration, not one host's (nor one bound
+            // client's, M14) to change.
+            if caller.is_scoped() {
                 return Err(mcp_err(
                     "E_FORBIDDEN",
-                    "trust_project is not available to a per-host token",
+                    "trust_project is not available to a per-host token or an org-bound client",
                     None,
                 ));
             }
@@ -781,11 +846,12 @@ impl FleetTools {
             );
         }
         if args.action == "dismiss" {
-            // Reopened work is fleet-wide, not one host's to dismiss.
-            if caller.host_alias.is_some() {
+            // Reopened work is fleet-wide, not one host's (nor one bound
+            // client's, M14) to dismiss.
+            if caller.is_scoped() {
                 return Err(mcp_err(
                     "E_FORBIDDEN",
-                    "dismiss is not available to a per-host token",
+                    "dismiss is not available to a per-host token or an org-bound client",
                     None,
                 ));
             }
@@ -879,6 +945,106 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
             return ok_json(&row);
+        }
+        // Work graph M14: the Work view's structure and batch decisions.
+        // Who may write what is inside (`structure`): never a per-host
+        // token; a bound client its own org's views and placements only.
+        {
+            use crate::service::work::structure as st;
+            let need_task = || {
+                args.task_id.as_deref().ok_or_else(|| {
+                    mcp_err("E_INVALID", format!("{} needs task_id", args.action), None)
+                })
+            };
+            match args.action.as_str() {
+                "place" => {
+                    return ok_json(
+                        &st::place(
+                            &self.store,
+                            &scope,
+                            need_task()?,
+                            args.group.as_deref(),
+                            args.note.as_deref(),
+                            args.expected_version,
+                            &caller.label(),
+                        )
+                        .map_err(to_mcp_err)?,
+                    )
+                }
+                "assign_org" => {
+                    return ok_json(
+                        &st::assign_org(
+                            &self.store,
+                            &scope,
+                            need_task()?,
+                            args.org_id,
+                            args.impact_token.as_deref(),
+                        )
+                        .map_err(to_mcp_err)?,
+                    )
+                }
+                "rule_save" => {
+                    let rule = args
+                        .rule
+                        .as_ref()
+                        .ok_or_else(|| mcp_err("E_INVALID", "rule_save needs rule", None))?;
+                    return ok_json(&st::rule_save(&self.store, &scope, rule).map_err(to_mcp_err)?);
+                }
+                "rule_delete" => {
+                    let id = args
+                        .rule_id
+                        .ok_or_else(|| mcp_err("E_INVALID", "rule_delete needs rule_id", None))?;
+                    return ok_json(
+                        &st::rule_delete(&self.store, &scope, id, args.expected_version)
+                            .map_err(to_mcp_err)?,
+                    );
+                }
+                "view_save" => {
+                    let v = args
+                        .view
+                        .as_ref()
+                        .ok_or_else(|| mcp_err("E_INVALID", "view_save needs view", None))?;
+                    return ok_json(&st::view_save(&self.store, &scope, v).map_err(to_mcp_err)?);
+                }
+                "view_delete" => {
+                    let id = args
+                        .view_id
+                        .ok_or_else(|| mcp_err("E_INVALID", "view_delete needs view_id", None))?;
+                    return ok_json(&st::view_delete(&self.store, &scope, id).map_err(to_mcp_err)?);
+                }
+                "decide_batch" => {
+                    let decisions = args.decisions.clone().unwrap_or_default();
+                    // Each decision's session passes the same gate a single
+                    // decision's does (host, bound client), answered as an
+                    // unknown session when it does not.
+                    let gate = |sid: i64| -> Result<(), IpcError> {
+                        self.resolve_target_row(&caller, Some(sid), None, None, "the session")
+                            .map(|_| ())
+                            .map_err(|e| {
+                                let code = e
+                                    .data
+                                    .as_ref()
+                                    .and_then(|d| d.get("code"))
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("E_FORBIDDEN")
+                                    .to_string();
+                                IpcError::new(
+                                    if code == codes::E_NOTFOUND {
+                                        codes::E_NOTFOUND
+                                    } else {
+                                        codes::E_FORBIDDEN
+                                    },
+                                    e.message.to_string(),
+                                )
+                            })
+                    };
+                    return ok_json(
+                        &st::decide_batch(&self.store, &scope, &decisions, &gate)
+                            .map_err(to_mcp_err)?,
+                    );
+                }
+                _ => {}
+            }
         }
         let sid = args.session_id.ok_or_else(|| {
             mcp_err(

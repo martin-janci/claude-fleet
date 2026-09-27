@@ -267,6 +267,18 @@ pub struct SessionRow {
     /// and emitted rows agree. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// A checksum of the session's live links — their ids and versions
+    /// (work graph M14). `work` / `work_suggested` show only the primary and
+    /// the top guess; this moves on every link change, a secondary's too, so
+    /// a client knows when to re-read the session's tasks. Opaque; `0` (and
+    /// absent) when the session has no live link. Never sent to a scoped
+    /// caller (`OrgScope::redact_row`): another org's link would move it.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub work_rev: i64,
+}
+
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
 }
 
 impl SessionRow {
@@ -319,7 +331,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                                                   THEN 'true' ELSE 'false' END), \
                          'state', l.state, 'strength', l.strength, 'rule', l.rule, \
                          'archived_at', l.archived_at, \
-                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
+                         'org_id', COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \
@@ -351,7 +363,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                                                      AND c.ended_at IS NULL \
                                                      AND c.is_primary = 1 \
                                                      AND c.state = 'confirmed'))), \
-                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
+                         'org_id', COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.state = 'suggested' \
@@ -366,7 +378,10 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id, prompt_submit_seq"
+    " AS org_id, prompt_submit_seq, \
+     (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
+        JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev"
 );
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
@@ -458,6 +473,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         work_suggested: decode_work(row.get(56)?),
         org_id: row.get(57)?,
         prompt_submit_seq: row.get(58)?,
+        work_rev: row.get(59)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -821,6 +837,8 @@ pub struct ClientTokenRow {
     pub last_seen_at: Option<i64>,
     pub revoked_at: Option<i64>,
     pub trusted_at: Option<i64>,
+    /// The org the client is bound to (migration 063), `None` unbound.
+    pub org_id: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of

@@ -433,6 +433,7 @@ fn sample_session_row() -> SessionRow {
         work_rejected: vec![],
         work_suggested: None,
         org_id: None,
+        work_rev: 0,
     }
 }
 

@@ -67,6 +67,17 @@ pub struct Ticket {
 /// the host fence alone would let a host read another org's ticket that a
 /// person force-linked on it.
 pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
+    if let OrgScope::Org { .. } = scope {
+        // A bound client (work graph M14): every item inside its orgs; no
+        // host fence (a phone is not a host).
+        return Ok(Some(
+            s.work_item_orgs()?
+                .into_iter()
+                .filter(|(_, org)| scope.sees_org(*org))
+                .map(|(id, _)| id)
+                .collect(),
+        ));
+    }
     let Some(h) = scope.host() else {
         return Ok(None);
     };
@@ -218,6 +229,13 @@ pub(crate) fn tickets_in(
 pub fn trackers(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<TrackerRow>, IpcError> {
     let s = lock(store)?;
     let all = s.list_trackers()?;
+    if let OrgScope::Org { .. } = scope {
+        // A bound client (work graph M14): the trackers of its orgs.
+        return Ok(all
+            .into_iter()
+            .filter(|t| scope.sees_org(t.org_id))
+            .collect());
+    }
     let Some(allowed) = allowed(scope, &s)? else {
         return Ok(all);
     };
@@ -305,9 +323,8 @@ pub async fn lookup(
             Ok(r) => r,
             // Which sites are connected is not a host token's to learn: an
             // unknown site answers as an invisible key does.
-            Err(e) if e.code == codes::E_NOTFOUND && scope.host().is_some() => {
-                let h = scope.host().unwrap_or_default();
-                return Err(orgs::not_visible_key(h, reference.trim()));
+            Err(e) if e.code == codes::E_NOTFOUND && !scope.is_all() => {
+                return Err(orgs::not_visible_to(scope, reference.trim()));
             }
             Err(e) => return Err(e),
         }
@@ -325,6 +342,11 @@ pub async fn lookup(
                 // Nothing cached is linked anywhere, let alone on this host;
                 // do not let a host token make the hub fetch arbitrary keys.
                 return Err(orgs::not_visible_key(h, &key));
+            }
+            // A bound client (M14) may make the hub fetch only from a tracker
+            // of its own orgs.
+            if !scope.is_all() && !tracker.as_ref().is_some_and(|t| scope.sees_org(t.org_id)) {
+                return Err(orgs::not_visible_to(scope, &key));
             }
             let t = tracker.ok_or_else(|| {
                 IpcError::new(
@@ -375,10 +397,7 @@ pub async fn lookup(
     let s = lock(store)?;
     if let Some(allowed) = allowed(scope, &s)? {
         if !allowed.contains(&item_id) {
-            return Err(orgs::not_visible_key(
-                scope.host().unwrap_or_default(),
-                &key,
-            ));
+            return Err(orgs::not_visible_to(scope, &key));
         }
     }
     let item = s
@@ -401,7 +420,8 @@ pub async fn lookup(
         OrgScope::Host { .. } => {
             crate::mcp::guard::fence_untrusted(&d, "a tracker ticket", super::DESCRIPTION_MAX_CHARS)
         }
-        OrgScope::All => d,
+        // A person reads it on a phone or the desktop (bound or not): as is.
+        OrgScope::All | OrgScope::Org { .. } => d,
     });
     Ok(Ticket {
         item,
@@ -737,6 +757,17 @@ pub fn plan_resolved(
     }
     // Data integrity, for every caller (M5): a ticket of one org is not
     // attached to a session of another by mistake.
+    // A client bound to an org (M14) starts work only where the session
+    // would be its org's: never a session it could not see once made.
+    if let Some(bound) = scope.bound_org() {
+        let session_org = s.org_for_new_session(&host_alias, project_id)?;
+        if session_org.is_some_and(|o| o != bound) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "a client bound to an org starts work only in its own org's projects and hosts",
+            ));
+        }
+    }
     if let Some(id) = item_id {
         let session_org = s.org_for_new_session(&host_alias, project_id)?;
         orgs::check_cross_org(s.item_org(id)?, session_org, &key, args.force_cross_org)?;
@@ -929,6 +960,10 @@ where
     F: FnOnce(crate::service::sessions::NewSessionArgs) -> Fut,
     Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
 {
+    // Work graph M14 (UC11): hold the key from before the spawn until the
+    // link is written, so a second device's start of the same ticket is
+    // refused here instead of spawning a session that loses the race.
+    let _claim = crate::service::work::resume::InFlight::claim(&*lock(store)?, &plan.key)?;
     let one = start_one(store, plan, brief, scope, spawn).await?;
     match one.warning {
         Some(e) => {

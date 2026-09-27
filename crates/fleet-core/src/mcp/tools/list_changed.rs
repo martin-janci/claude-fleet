@@ -156,6 +156,7 @@ mod tests {
                 id: 1,
                 name: "phone".into(),
                 trusted: false,
+                org_id: None,
             }),
             mode,
         };

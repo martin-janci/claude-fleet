@@ -313,6 +313,10 @@ impl FleetTools {
         );
         // A per-host token may only spawn on its own host (B1).
         require_host(&caller, &p.host_alias, "the new session")?;
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            require_bound_client_may_create(&s, &caller, &p.host_alias, p.project_id)?;
+        }
         self.confirm_gate(
             "new_session",
             p.confirm_nonce.as_deref(),
@@ -355,6 +359,10 @@ impl FleetTools {
         );
         // A per-host token may only spawn on its own host (B1).
         require_host(&caller, &p.host_alias, "the new session")?;
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            require_bound_client_may_create(&s, &caller, &p.host_alias, p.project_id)?;
+        }
         self.confirm_gate(
             "new_shell_session",
             p.confirm_nonce.as_deref(),

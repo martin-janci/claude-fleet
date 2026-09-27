@@ -474,6 +474,19 @@ impl Store {
         link_id: i64,
         confirm: bool,
     ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_work_link_as(session_id, link_id, confirm, true)
+    }
+
+    /// [`Self::decide_work_link`], confirming as a secondary link when
+    /// `take_primary` is false (work graph M14) — still primary when the
+    /// session has none.
+    pub fn decide_work_link_as(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        confirm: bool,
+        take_primary: bool,
+    ) -> Result<WorkLinkRow, IpcError> {
         let participant: Option<i64> = self
             .conn
             .query_row(
@@ -500,8 +513,15 @@ impl Store {
             .optional()?
             .flatten();
         let now = now_unix();
+        let has_primary: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 AND id <> ?2 \
+               AND ended_at IS NULL AND is_primary = 1 AND state = 'confirmed')",
+            rusqlite::params![participant, link_id],
+            |r| r.get(0),
+        )?;
+        let primary = confirm && (take_primary || !has_primary);
         let tx = self.conn.unchecked_transaction()?;
-        if confirm {
+        if primary {
             self.conn.execute(
                 "UPDATE work_links SET is_primary = 0 \
                  WHERE participant_id = ?1 AND ended_at IS NULL",
@@ -518,7 +538,7 @@ impl Store {
             rusqlite::params![
                 link_id,
                 if confirm { "confirmed" } else { "rejected" },
-                confirm as i64,
+                primary as i64,
                 now,
                 conv
             ],

@@ -282,6 +282,19 @@ M13 (live use) is next: `docs/superpowers/plans/2026-09-26-work-graph-m13-live-u
 open decisions are the roadmap's table, and a decision-gated feature starts
 only on the user's "yes".
 
+Work graph M14 (the Work view) is built on `claude/fleet-dynamic-work-view-kwc3r9`
+(design `docs/superpowers/specs/2026-09-27-work-view-design.md`): org →
+group → task → sessions next to the Sessions view, over the same links.
+`work { tree | task | session_tasks | review | rules | rule_preview | views |
+org_impact }` (`service/work/view.rs`) and `work_link { set_primary |
+reconsider | ack | decide_batch | place | assign_org | rule_save | … }`
+(`service/work/structure.rs`), migration 063 (link `version` + trigger,
+placements, placement-only rules, saved views, local items' org,
+`client_tokens.org_id`). A client paired with `--org` is `OrgScope::Org`
+(`Caller::is_scoped()` covers host- and org-bound); writes carry the
+version they saw (compare-and-set, `E_CONFLICT`), and `SessionRow.work_rev` tells clients a
+secondary link changed. Acceptance Part R waits on the owner.
+
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
 `/clear`, `/resume` and compaction tracked as conversation switches;

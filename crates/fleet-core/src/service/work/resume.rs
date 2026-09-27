@@ -768,16 +768,18 @@ pub fn resume_session_args(
 static IN_FLIGHT: Mutex<std::collections::BTreeSet<(u64, String)>> =
     Mutex::new(std::collections::BTreeSet::new());
 
-/// One key's claim; released on drop, whatever the resume's outcome.
+/// One key's claim; released on drop, whatever the resume's (or start's)
+/// outcome. Shared by `start` (work graph M14): a start and a resume of one
+/// key, or two starts from two devices, never spawn two sessions for it.
 #[derive(Debug)]
-struct InFlight(u64, String);
+pub(crate) struct InFlight(u64, String);
 
 fn store_key(store: &Store) -> u64 {
     store.instance_id()
 }
 
 impl InFlight {
-    fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
+    pub(crate) fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
         let mut set = IN_FLIGHT
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "the resume registry is poisoned"))?;
@@ -785,7 +787,10 @@ impl InFlight {
         if !set.insert((id, key.to_string())) {
             return Err(IpcError::new(
                 codes::E_EXISTS,
-                format!("{key} is being resumed already; wait for that session, then jump to it"),
+                format!(
+                    "{key} is being started or resumed already; wait for that session, then \
+                     jump to it"
+                ),
             ));
         }
         Ok(InFlight(id, key.to_string()))
@@ -865,6 +870,21 @@ where
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
                 format!("the resumed session is on host {target}; this token is bound to {h}"),
+            ));
+        }
+    }
+    // A client bound to an org (M14) resumes only where the new session
+    // would be its org's (the landing host can be overridden).
+    if let (Some(bound), Some(host), Some(pid)) = (
+        scope.bound_org(),
+        plan.host_alias.as_deref(),
+        plan.project_id,
+    ) {
+        let org = lock(store)?.org_for_new_session(host, pid)?;
+        if org.is_some_and(|o| o != bound) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "a client bound to an org resumes work only on its own org's projects and hosts",
             ));
         }
     }
@@ -1743,7 +1763,11 @@ mod tests {
         };
         let (first, err) = tokio::join!(first, second);
         assert_eq!(err.code, codes::E_EXISTS, "{}", err.message);
-        assert!(err.message.contains("being resumed"), "{}", err.message);
+        assert!(
+            err.message.contains("started or resumed"),
+            "{}",
+            err.message
+        );
         let (row, _) = first.expect("the first resume completes");
         assert_eq!(row.tmux_name, "dev-new");
         // Afterwards the key is live: a resume is blocked by the plan (Jump),

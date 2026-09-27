@@ -777,6 +777,40 @@ and every open decision gets an answer backed by usage.
   **M13.4a (D20) built** on fleet-mobile's
   `claude/work-graph-m13-4a-name-work`. D5 and D15 wait on the decisions.
 
+### M14: the Work view
+
+Design: `specs/2026-09-27-work-view-design.md` (capability matrix, contracts,
+security model, stages).
+
+A second, equal way into the same graph: org → project / group → task →
+sessions (active, past, suggested), next to the Sessions view's host → repo
+→ session → tasks. Built on the existing `work_links`; nothing is copied.
+
+- **Read contract:** `work { tree | task | session_tasks | review | rules |
+  rule_preview | views | org_impact }` (`service/work/view.rs`), keyset
+  pages bound to their filters, one graph load per read, every link judged
+  by the caller's `OrgScope`.
+- **Writes:** `work_link { set_primary | reconsider | ack | decide_batch |
+  place | assign_org | rule_save | rule_delete | view_save | view_delete }`
+  (`service/work/structure.rs`) and `primary` / `expected_version` on
+  `link` / `confirm` / `reject` / `unlink`; compare-and-set on the link's
+  `version`, the placement's version and the session's visible primary,
+  `E_CONFLICT` with the current value.
+- **Migration 063:** `work_links.version` (+ trigger) and `review_ack_at`,
+  local items' `org_id`, `client_tokens.org_id` (org-bound paired clients,
+  `OrgScope::Org`, `fleet-hub pair --org` / `client bind|unbind`),
+  `work_placements`, `work_rules` (placement only, D34), `work_views`.
+- **Events:** `work:changed` (ids only), `SessionRow.work_rev` for
+  secondary-link changes.
+- **Desktop:** the Work view (⌘⇧W), task detail, the session's Tasks
+  panel, Review, placement, rules with preview, org change with impact.
+- **Phone:** My work, task, session tasks sheet, Review (fleet-mobile,
+  same branch).
+
+**Status (2026-09-27):** built on `claude/fleet-dynamic-work-view-kwc3r9`
+in both repositories; acceptance Part R (steps 60–72) waits on the owner.
+D31–D35 hold the defaults the build took.
+
 ## Critical path and parallelism
 
 ```
@@ -838,6 +872,11 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | GitHub, Jira Cloud, Linear (Asana needs a handshake; Jira DC later) |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
 | D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
+| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · no | Yes (default, built): assign every host and tracker to an org to fence everything |
+| D32 | Should a forced cross-org link raise a review item until acknowledged? (M14) | yes · no | Yes (default, built): `cross_org` review kind, `ack` clears it |
+| D33 | May a full, unbound phone change a local task's org? (M14) | yes, with the impact preview · desktop only | Yes (default, built); bound clients and hosts may not |
+| D34 | Placement rules only, or also link rules ("sessions in repo X are task Y")? (M14) | placement only · also links | Placement only (default, built): link rules would bypass detection's evidence and R9 |
+| D35 | Saved views: shared on the hub, or per device? (M14) | shared on the hub · per device | Shared (default, built); a bound client's views are its org's |
 
 ## Risks to watch
 
@@ -984,3 +1023,9 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   hold the defaults for their details. M13.4c (D10) is built; M13.4e (D3)
   is next. D13 had no slot in M13.4 ("M13 does not reopen it"), so it gets
   **M13.4f**. D5 and D15 are unchanged.
+- 2026-09-27: **M14, the Work view**, added and built on
+  `claude/fleet-dynamic-work-view-kwc3r9` (claude-fleet and fleet-mobile),
+  per `specs/2026-09-27-work-view-design.md`: migration 063, the `work` /
+  `work_link` view actions, org-bound paired clients, the desktop Work view
+  and the phone's My work. D31–D35 added with the defaults it took;
+  acceptance Part R (steps 60–72) added to `work-graph-acceptance.md`.

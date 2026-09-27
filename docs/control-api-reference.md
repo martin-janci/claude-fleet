@@ -197,9 +197,9 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. Master token only. Returns { url, code, expires_in_s, name, mode, trusted }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
 
-Parameters: `mode`, `name`, `trusted`, `ttl_s`
+Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
 
 ### `peer_exchange`
 
@@ -499,9 +499,9 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; tidy; reopened.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact.
 
-Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `project_id`, `query`, `session_id`, `since`, `tracker_id`, `url`, `view`, `with_brief`
+Parameters: `action`, `cursor`, `filters`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
 ### `work_admin`
 
@@ -511,9 +511,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `color`, `confirm_nonce`, `crede
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). Work view: primary:false links a secondary; expected_version guards a link; set_primary {expected_primary}; reconsider; ack; decide_batch; place; assign_org {impact_token}; rule_save|rule_delete; view_save|view_delete.
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `force_cross_org`, `host_alias`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `project_ids`, `session_id`, `source`, `title`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `on`, `org_id`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `task_id`, `title`, `url`, `view`, `view_id`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 

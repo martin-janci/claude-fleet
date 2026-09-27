@@ -595,6 +595,21 @@ impl Store {
         state: &str,
         source: &str,
     ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_session_work_as(session_id, target, state, source, true)
+    }
+
+    /// [`Self::decide_session_work`], choosing whether a confirmed link
+    /// takes the primary (work graph M14): `take_primary: false` adds a
+    /// secondary link, which still becomes primary when the session has
+    /// none. Changing the primary never removes or ends another link.
+    fn decide_session_work_as(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        state: &str,
+        source: &str,
+        take_primary: bool,
+    ) -> Result<WorkLinkRow, IpcError> {
         if !WORK_LINK_SOURCES.contains(&source) {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -607,7 +622,13 @@ impl Store {
         let (item_id, ref_key) = self.resolve_work_target(target)?;
         let participant = self.work_participant(session_id)?;
         let now = now_unix();
-        let primary = state == "confirmed";
+        let has_primary: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
+               AND ended_at IS NULL AND is_primary = 1 AND state = 'confirmed')",
+            rusqlite::params![participant],
+            |r| r.get(0),
+        )?;
+        let primary = state == "confirmed" && (take_primary || !has_primary);
 
         let tx = self.conn.unchecked_transaction()?;
         let existing: Option<i64> = self
@@ -631,6 +652,19 @@ impl Store {
         let id = match existing {
             // A decision over a suggestion keeps its evidence and rule, so
             // the link can still say what proposed it.
+            // Re-linking a secondary link keeps it secondary; re-linking the
+            // primary keeps it primary.
+            Some(id) if state == "confirmed" && !primary => {
+                self.conn.execute(
+                    "UPDATE work_links SET state = ?1, source = ?2, \
+                     decided_at = ?4, strength = 'explicit', preselected = 0, \
+                     claude_session_id = COALESCE((SELECT claude_session_id FROM sessions \
+                                                   WHERE id = ?6), claude_session_id) \
+                     WHERE id = ?5",
+                    rusqlite::params![state, source, 0, now, id, session_id],
+                )?;
+                id
+            }
             Some(id) => {
                 self.conn.execute(
                     "UPDATE work_links SET state = ?1, source = ?2, is_primary = ?3, \
@@ -680,6 +714,186 @@ impl Store {
         source: &str,
     ) -> Result<WorkLinkRow, IpcError> {
         self.decide_session_work(session_id, target, "confirmed", source)
+    }
+
+    /// [`Self::link_session_work`] as a secondary link when `primary` is
+    /// false (work graph M14): the session's primary stays where it is,
+    /// unless it has none.
+    pub fn link_session_work_as(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        source: &str,
+        primary: bool,
+    ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_session_work_as(session_id, target, "confirmed", source, primary)
+    }
+
+    /// The session's current primary link (live, confirmed), if any.
+    pub fn current_primary_link(&self, session_id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT l.id FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE p.session_id = ?1 AND l.ended_at IS NULL AND l.is_primary = 1 \
+                   AND l.state = 'confirmed' ORDER BY l.id LIMIT 1",
+                rusqlite::params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Make live confirmed link `link_id` the session's primary work, as a
+    /// compare-and-set (work graph M14): `expected_primary` names the
+    /// primary the caller saw (`Some(0)`: none; `None`: no check). Another
+    /// device's change meanwhile answers `E_CONFLICT` with the current
+    /// primary. Setting the link that is already primary changes nothing.
+    /// Every other link stays as it is (only `is_primary` moves). The link
+    /// becomes `explicit`: a person chose it, so the resolver keeps it (R1).
+    pub fn set_primary_work_link(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        expected_primary: Option<i64>,
+    ) -> Result<(), IpcError> {
+        let participant = self.work_participant(session_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let current: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
+                   AND is_primary = 1 AND state = 'confirmed' ORDER BY id LIMIT 1",
+                rusqlite::params![participant],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(expected) = expected_primary {
+            if current.unwrap_or(0) != expected {
+                return Err(IpcError::new(
+                    codes::E_CONFLICT,
+                    format!(
+                        "session {session_id}'s primary work changed meanwhile (now {}); \
+                         reload it and decide again",
+                        current.map_or("none".to_string(), |c| format!("link {c}"))
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "session_id": session_id, "primary_link_id": current,
+                })));
+            }
+        }
+        let target: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state FROM work_links WHERE id = ?1 AND participant_id = ?2 \
+                   AND ended_at IS NULL",
+                rusqlite::params![link_id, participant],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match target.as_deref() {
+            None => {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {session_id} has no live work link {link_id}"),
+                ))
+            }
+            Some("confirmed") => {}
+            Some(other) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "work link {link_id} is {other}: only a confirmed link can be primary \
+                         (confirm it first)"
+                    ),
+                ))
+            }
+        }
+        if current == Some(link_id) {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE work_links SET is_primary = (id = ?2), \
+               strength = CASE WHEN id = ?2 THEN 'explicit' ELSE strength END \
+             WHERE participant_id = ?1 AND ended_at IS NULL \
+               AND (is_primary = 1 OR id = ?2)",
+            rusqlite::params![participant, link_id],
+        )?;
+        self.bump_session_for_work(session_id)?;
+        tx.commit()?;
+        self.emit_session(session_id)?;
+        Ok(())
+    }
+
+    /// Undo a person's decision (work graph M14): a live confirmed or
+    /// rejected link that detection had proposed goes back to a suggestion,
+    /// keeping its evidence. A link made by hand, with nothing that proposed
+    /// it, is refused — remove it instead (`unlink`).
+    pub fn reconsider_work_link(&self, session_id: i64, link_id: i64) -> Result<(), IpcError> {
+        let participant = self.work_participant(session_id)?;
+        let row: Option<(String, Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT state, rule, evidence FROM work_links \
+                 WHERE id = ?1 AND participant_id = ?2 AND ended_at IS NULL",
+                rusqlite::params![link_id, participant],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((state, rule, evidence)) = row else {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {session_id} has no live work link {link_id}"),
+            ));
+        };
+        if state == "suggested" {
+            return Ok(());
+        }
+        let proposed = rule.is_some() || evidence.as_deref().is_some_and(|e| e != "[]");
+        if !proposed {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!(
+                    "work link {link_id} was made by hand, not proposed: remove it (unlink) \
+                     instead of undoing it"
+                ),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        self.conn.execute(
+            "UPDATE work_links SET state = 'suggested', is_primary = 0, decided_at = NULL, \
+               strength = CASE WHEN rule IS NULL THEN 'weak' ELSE 'strong' END, \
+               preselected = 0, review_ack_at = NULL \
+             WHERE id = ?1",
+            rusqlite::params![link_id],
+        )?;
+        self.bump_session_for_work(session_id)?;
+        tx.commit()?;
+        self.emit_session(session_id)?;
+        Ok(())
+    }
+
+    /// A person keeps a conflict on purpose (work graph M14): a live
+    /// confirmed link to another org's task or to an unavailable ticket
+    /// leaves the review inbox.
+    pub fn ack_work_link(&self, session_id: i64, link_id: i64) -> Result<(), IpcError> {
+        let participant = self.work_participant(session_id)?;
+        let n = self.conn.execute(
+            "UPDATE work_links SET review_ack_at = COALESCE(review_ack_at, ?3) \
+             WHERE id = ?1 AND participant_id = ?2 AND ended_at IS NULL \
+               AND state = 'confirmed'",
+            rusqlite::params![link_id, participant, now_unix()],
+        )?;
+        if n == 0 {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {session_id} has no live confirmed work link {link_id}"),
+            ));
+        }
+        self.bump_session_for_work(session_id)?;
+        self.emit_session(session_id)?;
+        Ok(())
     }
 
     /// Say that `session_id` does NOT work on `target`. Sticky: detection

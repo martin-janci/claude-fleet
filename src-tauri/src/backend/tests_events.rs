@@ -478,7 +478,9 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
         "probe": 1, "id": 1, "session_id": 1, "alias": "trn", "uuid": "u-1", "account_uuid": "u-1",
         "host_alias": "trn", "harness": "claude",
         // `move:progress` is read field by field rather than merged on a key.
-        "to_host": "trn", "step": "git", "state": "done", "index": 4
+        "to_host": "trn", "step": "git", "state": "done", "index": 4,
+        // `work:changed` (work graph M14) says what changed.
+        "what": "rule"
     });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES
         .iter()

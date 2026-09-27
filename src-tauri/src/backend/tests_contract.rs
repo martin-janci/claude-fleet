@@ -80,6 +80,7 @@ pub(crate) fn sample_session() -> SessionRow {
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
         prompt_submit_seq: 4,
+        work_rev: 7,
         usage: sample_usage(),
         context: SessionContext {
             model: Some("claude-opus-5".into()),
@@ -858,12 +859,13 @@ fn a_session_rows_wire_names_are_these_exact_fifty_nine() {
         "usage_updated_at",
         "work",
         "work_rejected",
+        "work_rev",
         "work_suggested",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 59, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 60, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

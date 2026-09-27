@@ -1042,6 +1042,220 @@ Notes:
 
 ---
 
+## Part R: the Work view (M14)
+
+The Work view is a second way into the same graph (see the guide's
+[The Work view](work-graph.md#the-work-view)). It needs the hub, the
+desktop and fleet-mobile from the same release. Use org A and org B from
+Part O and, if you have them, **one Jira and one Asana tracker**, each in
+its own org; with only one tracker, run every step on it and mark the
+second-provider half of step 60 skipped.
+
+For the bound-client steps, pair two extra phones (or re-pair one):
+
+```sh
+fleet-hub pair --name phone-a --org <org A id>     # bound to org A
+fleet-hub pair --name phone-b --org <org B id>     # bound to org B
+fleet-hub client list                              # ORG shows each binding
+```
+
+### Step 60: from a ticket to a session and back (Jira and Asana)
+
+**Action.** For one ticket in each tracker: wait for a sync pass (at most
+`work.sync_interval_secs`), open **Work** (⌘⇧W), find the ticket under its org and
+project, **Start new** a session on it, let it run one turn, then end it
+(kill or finish) and **Continue** it from the task's detail.
+
+**Expected.** Before the start the ticket is a task with *No session*
+(filter *No session* finds it). After the start the task shows one active
+session, primary. After the end the same session is listed under *Past* with
+its host and repo; *Continue* resumes it (it does not start a second
+session, step 16's rule). The session's own **Tasks** panel lists the ticket
+all along. Asana behaves as Jira: its project is the group.
+
+Result: [ ] pass / [ ] fail / [ ] skipped (second provider)
+
+Notes:
+
+### Step 61: one session under two tasks (UC1, UC2, UC8)
+
+**Action.** On a live session linked to T1, open its **Tasks** panel and
+**Add task…** T2. Then make T2 primary.
+
+**Expected.** In Work the session is listed under T1 and under T2 with the
+same name and id (clicking either opens the same session). Exactly one of
+the two rows carries *primary*; making T2 primary moves the mark without
+removing T1's link. The sidebar chip follows the primary.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 62: active, past and suggested sessions of a task (UC3, UC5)
+
+**Action.** Open the detail of a task that has an ended session and a
+suggestion (let detection suggest one as in step 17, or use one from
+Part F).
+
+**Expected.** Three separate lists: *Active*, *Past* (with when it ended),
+*Suggested* (with the reason, e.g. "branch `abc-101-…`"). A suggestion
+never counts as active and never groups the session. The **Review** tab
+lists the same suggestion with Confirm / Change… / Reject;
+Reject then **Undo** restores it; Reject without undo keeps it away after a
+refresh.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 63: where a task sits and why (UC6)
+
+**Action.** Pick a task grouped under its tracker project. **Place in group…** it into
+a new group "Security" with a note. Then create a rule (⚙ → Rules → New)
+"title contains `audit` → Security", read its **preview**, save it; then
+disable it.
+
+**Expected.** The placed task moves to *Security* with "placed by you" and
+the tracker's own value still shown next to it. The rule's preview names
+the tasks it would move before anything is saved; after save they move
+with "rule: …"; after disabling, they return to their tracker group. The
+hand placement beats the rule. Nothing changes in the tracker itself.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 64: a task without a session and a tracker that is down (UC4)
+
+**Action.** Filter *No session*. Then revoke the tracker's token (as in
+step 46) and reload.
+
+**Expected.** Tickets with no session are listed with their tracker status.
+With the token revoked, the tasks stay (from the cache) and the tracker is
+marked as needing attention; no task is shown as deleted.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 65: a local task changes org only after its impact (UC7)
+
+**Action.** On a *local* task (Name this work…, step 22) with a session on
+host A, choose **Assign org…** → org B.
+
+**Expected.** Before anything changes the dialog lists what moves: the
+task, its links that become cross-org, the hosts and clients that stop
+seeing it. Confirm applies it; phone-a (org A) no longer shows the task nor
+its link on the host A session after a refresh. A tracker task offers no
+org change (its tracker decides).
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 66: sessions view and Work view agree (UC9)
+
+**Action.** Rename a linked ticket in the tracker and wait for the sync.
+Then compare the session's Tasks panel with the task's detail.
+
+**Expected.** Both show the new title; the task keeps its placement and its
+sessions. A ticket deleted in the tracker is marked unavailable, never
+moved to another task.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 67: the phone's My work, task and session (UC10)
+
+**Action.** On the full-token phone open **Work** (My work): collapse and
+expand an org and a project, open a task, then a session from it, then its
+**Tasks** sheet; add a task, make it primary, remove it. Turn the phone's
+network off and try the same.
+
+**Expected.** The same groups and counts as the desktop. Each edit shows as
+saved only after the hub answers. Offline, the lists are marked stale with
+their age, and every edit is refused with a message; nothing is queued and
+sent later.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 68: two devices, one decision (UC11)
+
+**Action.** Open the same suggestion on the desktop and the phone. Confirm
+it on the phone, then Reject it on the desktop without refreshing. Then
+**Start new** the same ticket from both at once.
+
+**Expected.** The desktop's reject is refused with "changed meanwhile" and
+shows the current state with *Reload*; nothing is overwritten. Of the two
+starts exactly one spawns a session; the other is told the ticket is being
+started already.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 69: a missed event reloads the view (UC12)
+
+**Action.** With Work open on the desktop, stop the hub for a minute
+(`docker compose stop fleet-hub`), make a change on the phone after it is
+back (or on the hub with `call work_link …`), then watch the desktop.
+
+**Expected.** After the reconnect the desktop reloads the whole view (the
+event stream said it could not resume), and shows the phone's change
+without a manual refresh.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 70: many tasks page by page (UC13)
+
+**Action.** With 200+ tasks (or `work.tree` with `limit: 20` over the API),
+scroll the tree to the end; then change a filter and scroll again.
+
+**Expected.** Every task appears once, in a stable order; section headers
+show the full count; a filter change starts from the top (an old cursor is
+refused, not mixed in).
+
+```sh
+call work '{"action":"tree","limit":20}' | jq '{n: (.tasks|length), next_cursor}'
+```
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 71: an org-bound phone sees only its org
+
+**Action.** On phone-a open My work, Review, a session with a task of
+each org (link one with `force_cross_org` from the desktop first), and try
+to start a ticket of org B by key.
+
+**Expected.** Only org A's tasks, groups and trackers; on the shared
+session only org A's task, and no title, summary, conversation or evidence
+of org B's. Starting org B's ticket is refused. phone-b sees the mirror
+image. `fleet-hub client unbind phone-a` makes it a full client again.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+### Step 72: a readonly token reads the Work view only
+
+**Action.** Pair `phone-ro` (step 59) and open My work, a task, Review.
+
+**Expected.** Everything reads; no edit is offered, and a write sent over
+the API is refused.
+
+Result: [ ] pass / [ ] fail
+
+Notes:
+
+---
+
 ## Evidence for the decisions
 
 The questions of the M12.6 review
@@ -1174,7 +1388,8 @@ bad day? (yes / no) Your D5 answer:
 | O. Orgs and isolation | 49–53 | | | |
 | P. GHES | 54 | | | |
 | Q. Phone | 55–59 | | | |
-| **Total** | **59** | | | |
+| R. Work view | 60–72 | | | |
+| **Total** | **72** | | | |
 
 ## Found issues
 

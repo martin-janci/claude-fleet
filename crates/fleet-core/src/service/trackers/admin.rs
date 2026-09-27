@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|sweep_now|usage
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +207,7 @@ impl AdminAction {
         "assign_host",
         "unassign_host",
         "assign_tracker",
+        "assign_client",
         "sweep_now",
         "usage",
     ];
