@@ -439,6 +439,21 @@ this design's.
 
 ## Revisions
 
+- 2026-09-27 (M14.1b, the reads): migration `0NN` is two, **065**
+  (`work_view`) and **066** (`orgs.bound_sees_unassigned`, its own
+  migration because an `orgs` column is re-added when that table is rebuilt,
+  as 053's `auto_tidy` is). 065 carries `work_links.version` and its trigger
+  although only M14.1c writes against it: the reads answer `link_version`.
+  Security changes against the backend branch: `org_impact` is refused
+  (`E_FORBIDDEN`) to every scoped caller — hosts and bound clients may not
+  move an org (D33), and the impact named other orgs' hosts, bound-client
+  counts and journal counts; a bound client's `rules` are only the rules
+  that place a task it sees and name no tracker outside its org; a task with
+  no work at all is unassigned data, so it follows D31; a bound client whose
+  org was deleted sees no unassigned data either (stricter than *Scopes*
+  above, which said it would). With D31 off, a bound client also may not
+  start or resume a session in an unassigned project or host. `pair --org`
+  takes the org's id.
 - 2026-09-27 (M14.0, brought to `main`): based on `main` `f10d0b92` instead
   of `be0e2bc`; the acceptance section is Part R (Part P is GHES on `main`);
   the migration is `0NN_work_view.sql`, numbered at merge time, not 063
