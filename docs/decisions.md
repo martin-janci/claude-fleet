@@ -299,7 +299,7 @@ chosen on dev and applied to what is reported.
 | `none` | Always abstains: what fleet does today when nothing links a session. |
 | `bm25` | BM25 over each candidate's title (counted twice) and cached description, against the redacted prompt; lower-cased, diacritics folded (`č` → `c`, `ß` → `ss`), split on anything not a letter or digit, cut to a 6-character stem. Abstains under a score threshold chosen on dev (the one that maximises right answers plus right abstentions); the report names it. |
 | `jev` | One Choice over the candidates (option keys are item ids like `i123`, each described by its title) plus `none`, through the envelope: question version `work_link.bench.v1`, subject `bench:<case>`, recorded in `decision_runs` like any call. A case whose org the gate refuses — flag off, mode `off`, no consent, no key, breaker, budget — is **skipped with that fallback** and nothing is sent for it. At most `--max-calls` calls a run. |
-| `haiku` | The same Choice — the same redacted first prompt, candidate ids and titles, and `none` — asked of `claude -p` on `--haiku-host` (below, *The `claude -p haiku` baseline*), on the same cases as Jev. Its pick is the answer (`none` abstains) at its own operating point, its stated confidence the score; an answer outside the options is an abstention counted as `invalid`; a failed call (timeout, SSH, `claude`) is skipped with its reason. Not gated by the envelope and never recorded in `decision_runs`. At most `--max-calls` calls. |
+| `haiku` | The same Choice — the same redacted first prompt, candidate ids and titles, and `none` — asked of `claude -p` on `--haiku-host` (below, *The `claude -p haiku` baseline*), on the same cases as Jev. Its pick is the answer (`none` abstains) at its own operating point, its stated confidence the score; an answer outside the options is an abstention counted as `invalid`; a failed call (timeout, SSH, `claude`) is skipped with its reason. A case whose org is not the host's is skipped as `other_org` and nothing is sent for it. Not gated by the envelope and never recorded in `decision_runs`. At most `--max-calls` calls. |
 
 **Question shape** (`--shape`, Jev only). `choice` (the default) is the one
 Choice above. `choice+noul` is the test map's skill-suggestion pattern as
@@ -415,7 +415,8 @@ section and at most 30 board names), so the benchmark measures what
 > LLM (decision D43) and has not been spot-checked by the owner yet**; 60
 > labels are marked ambiguous. Its verdicts are indicative: the card's gate
 > is the owner's hand set (`--labels`). It has no `org_id`, so a Jev run on
-> it is consented by `decide.jev.unassigned`, not by an org.
+> it is consented by `decide.jev.unassigned`, not by an org, and a haiku
+> run on it needs a `--haiku-host` with no org (below).
 
 **Providers.**
 
@@ -425,9 +426,10 @@ section and at most 30 board names), so the benchmark measures what
 | `todo` | Always `todo`: what fleet does today with a section the rule cannot classify. |
 | `rule` | The keyword rule `infer_section` (progress / doing / review / wip / started / active / testing / qa → in progress; done / shipped / complete / released / closed → done); abstains where it says nothing. |
 | `jev` | One Choice through the envelope — question version `status_map.bench.v1`, subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent. At most `--max-calls` calls. |
-| `haiku` | The adapter's own request — the same redacted section, board and options — asked of `claude -p` on `--haiku-host` (below), at the same floor: `unsure`, an answer under 0.5 and an answer outside the options (counted as `invalid`) are abstentions; an answer that states no confidence stands and is left out of calibration. A failed call is skipped with its reason. No gate, no database, nothing recorded. At most `--max-calls` calls. |
+| `haiku` | The adapter's own request — the same redacted section, board and options — asked of `claude -p` on `--haiku-host` (below), at the same floor: `unsure`, an answer under 0.5 and an answer outside the options (counted as `invalid`) are abstentions; an answer that states no confidence stands and is left out of calibration. A failed call is skipped with its reason. A row whose org is not the host's is skipped as `other_org` (the built-in set has no org: it needs a host with no org). Not gated by the envelope; the database is opened read-only for the host's org; nothing is recorded. At most `--max-calls` calls. |
 
-Without `--provider jev` no database is opened at all. With it, the hub's
+Without `--provider jev` or `--provider haiku` no database is opened at
+all (`haiku` opens it read-only, for the host's org). With `jev`, the hub's
 database (or `--db FILE`) is opened for writing: it holds the gate's
 settings, and every call is recorded in `decision_runs`. No threshold is
 tuned on the set — the rule is fixed and Jev runs at the adapter's floor —
@@ -481,11 +483,22 @@ fleet-hub decide bench work-link --split all --provider bm25 --provider jev --pr
 the host `--haiku-host` names and reaches Anthropic through **that host's
 Claude account** — the processor its sessions already use, which is why D33
 chose it. The host is required (there is no default), and before the first
-call the benchmark prints a note on stderr naming it (kept in the report's
-notes). Nothing about a haiku call is recorded in `decision_runs`: that
-record is the envelope's, for Jev. The call does not pass the envelope's
-gate (flag, mode, org consent): naming the host is the consent; use
-`--org` to keep the work-link cases to one org.
+call the benchmark prints a note on stderr naming it and its org (kept in
+the report's notes). Nothing about a haiku call is recorded in
+`decision_runs`: that record is the envelope's, for Jev. The call does not
+pass the envelope's gate (flag, mode, org consent): naming the host is the
+consent — **but never across the org boundary**.
+
+**The org boundary.** The host's org is read from the database the
+benchmark opened (`hosts.org_id`, read-only; `--db FILE` like the rest; a
+host the database does not know is refused). A case goes to the host only
+when **its org is the host's org**, and a case with no org only to a host
+with no org — no org on both sides counts as the same; nothing else does.
+Every other case is skipped as `other_org`, counted and shown with the
+other skip reasons, and nothing is sent for it. So the built-in status-map
+set (`--fixture`, no `org_id`) needs a host with no org, and a J1 run
+covering several orgs needs one run per org, each on a host of that org
+(`--org ID` keeps the cases to one).
 
 **What it is asked.** The Jev request of the case, **redacted exactly as
 the envelope redacts it** (URLs, emails, secrets), rendered as plain text:
@@ -497,14 +510,16 @@ the J1 leakage guard on what reaches the host.
 
 **How it runs.** One command on the host, `claude -p --model <m>
 --output-format json --settings '{"disableAllHooks":true}' --tools ''
---strict-mcp-config --no-session-persistence '<prompt>'`, in a fresh
-temporary directory with stdin closed and the output capped: no tool, no
-MCP server, none of fleet's hooks, no transcript left behind. The prompt is
-one word quoted with `shell::quote`. One call at a time per host, each
+--strict-mcp-config --no-session-persistence`, in a fresh temporary
+directory with the output capped: no tool, no MCP server, none of fleet's
+hooks, no transcript left behind. **The prompt goes on the command's
+stdin, never in argv** — `claude -p` reads it there — so the command line
+(what `ps` shows on the host) holds only those fixed flags and the
+validated model. One call at a time per host, each
 under `--haiku-timeout` seconds (10–600, default 120; the host-side
 `timeout` stops `claude` 10 s earlier), and `--max-calls` bounds the run.
 The host must be reachable over SSH from where the benchmark runs (an
-agent-only host is not). `--haiku-model` is `haiku` (default), `sonnet` or
+agent-only host is not: its transport cannot pipe stdin). `--haiku-model` is `haiku` (default), `sonnet` or
 `opus`.
 
 **How it is read.** The last JSON object in the model's text that has a
@@ -539,8 +554,9 @@ A checklist for the owner, on the hub, before any feature leaves `off`:
    `--split all`, and once more with `--shape choice+noul`); `--max-calls`
    bounds the spend, `fleet-hub decide status` shows it.
    Add `--provider haiku --haiku-host ALIAS` to the same runs (a host whose
-   Claude account may see these prompts) so the haiku lines are judged on
-   the same cases.
+   Claude account may see these prompts, of the cases' own org — cases of
+   any other org are skipped as `other_org`) so the haiku lines are judged
+   on the same cases.
 5. **Read the acceptance lines** of each report: PASS / FAIL / NOT JUDGED
    against the thresholds registered in the test map, the calibration, and
    the per-language cells (a cell that falls back stays off for that

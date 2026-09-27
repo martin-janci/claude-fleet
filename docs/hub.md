@@ -1314,9 +1314,13 @@ Without `--provider jev` or `--provider haiku` neither sends anything
 D33) asks the same question — the same redacted state and options — of
 `claude -p --model haiku` (no tools, no MCP, no hooks, no transcript) on
 the host `--haiku-host` names, which is required: each case leaves the hub
-over SSH for that host and reaches Anthropic through its Claude account, a
-note on stderr says so before the first call, and nothing is recorded in
-`decision_runs`. One call at a time, `--haiku-timeout` each, `--max-calls`
+over SSH for that host — the prompt on stdin, never in argv — and reaches
+Anthropic through its Claude account, a note on stderr says so before the
+first call, and nothing is recorded in `decision_runs`. It never crosses
+the org boundary: the host's org is read from the database, and a case of
+any other org (a case with no org counts as one, unless the host has none
+either) is skipped as `other_org` — so `--fixture`, which has no org,
+needs a host with no org. One call at a time, `--haiku-timeout` each, `--max-calls`
 at most; with it the haiku lines of the acceptance are judged. With it, each case goes through the envelope's gate
 (so only orgs that consented — or, for a row with no org,
 `decide.jev.unassigned` — with the flag on and `decide.jev.work_link` /
