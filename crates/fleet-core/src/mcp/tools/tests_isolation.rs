@@ -2792,6 +2792,22 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
             };
             assert!(!text(&a).contains(other), "{who:?}: {}", text(&a));
         }
+        // Work graph M14: a bound client is not told the other org's
+        // tracker, nor its host's spend.
+        if who.is_bound() {
+            let (other, other_host) = if *who == Who::BoundA {
+                ("B Jira", "h-b")
+            } else {
+                ("A Jira", "h-a")
+            };
+            assert!(!text(&a).contains(other), "{who:?}: {}", text(&a));
+            let v: Value = serde_json::from_str(text(&a)).unwrap();
+            let hosts: Vec<&str> = v["usage_by_host"]
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            assert!(!hosts.contains(&other_host), "{who:?}: {hosts:?}");
+        }
     }
 }
 

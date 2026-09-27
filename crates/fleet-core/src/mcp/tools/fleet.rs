@@ -40,6 +40,25 @@ impl FleetTools {
                 }
                 Err(_) => h.trackers = Default::default(),
             }
+        } else if caller.is_scoped() {
+            // Work graph M14: a client bound to an org sees its org's
+            // trackers only, as a host token does.
+            match self.reader().lock() {
+                Ok(s) => match caller.org_scope(&s) {
+                    Ok(scope) => {
+                        health::scope_usage_to_org(&mut h, &s, &scope);
+                        health::scope_trackers(&mut h, &s, &scope)
+                    }
+                    Err(_) => {
+                        h.usage_by_host.clear();
+                        h.trackers = Default::default()
+                    }
+                },
+                Err(_) => {
+                    h.usage_by_host.clear();
+                    h.trackers = Default::default()
+                }
+            }
         }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
