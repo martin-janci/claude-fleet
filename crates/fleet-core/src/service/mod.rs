@@ -48,6 +48,7 @@ pub mod repo;
 pub mod repo_mutate;
 pub mod repo_read;
 pub mod reports;
+pub mod rewind;
 pub mod safe_kill;
 pub mod sessions;
 pub mod settings;

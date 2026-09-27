@@ -143,6 +143,7 @@
     "restart_session",
     "restore_host_sessions",
     "resume_work",
+    "rewind_conversation",
     "safe_kill_session",
     "save_work_rule",
     "save_work_view",

@@ -359,6 +359,12 @@ Revoke a paired client's token by name: its next request is refused and the name
 
 Parameters: `name`
 
+### `rewind_conversation`
+
+Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the updated row.
+
+Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
+
 ### `run_prompt`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
@@ -611,6 +617,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
 - `commands::sessions::restart_session`
+- `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`

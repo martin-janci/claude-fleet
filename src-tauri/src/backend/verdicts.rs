@@ -486,6 +486,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "rewind_conversation",
+        Verdict::Routed {
+            tool: "rewind_conversation",
+        },
+    ),
+    (
         "send_prompt",
         Verdict::Routed {
             tool: "send_prompt",
