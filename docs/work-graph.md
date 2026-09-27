@@ -70,7 +70,8 @@ in work mode *any / with session / past only*.
 The hub answers the other way into the work graph — organisation → group →
 task → *every* session of the task (primary, secondary, suggested and past),
 including tasks with no session at all — as reads of the `work` tool
-(work graph M14.1b; the desktop and phone views and the edits come later):
+(work graph M14.1b; the desktop's view is *Desktop* below, the phone's and
+the edits come later):
 
 - `work { action: tree, filters?, cursor?, limit?, per_task? }`: a page of
   tasks with their sessions, the section headers (`groups`, each with its
@@ -101,6 +102,47 @@ what their org may, and a task outside it answers exactly as one that does
 not exist. Each task says where its org and group come from (`org_source`:
 tracker, item, sessions, none; `group.source`: manual, rule, tracker,
 repo, key, none).
+
+### Desktop
+
+The sidebar has a **Sessions | Work** switch at the top (⌘⇧W on macOS,
+Ctrl+Shift+W elsewhere). *Sessions* is the tree it always was, grouping by
+primary work included, and it keeps its place while you look at *Work*.
+
+*Work* shows organisations, then groups, then tasks. Each section header
+carries its count under the current filters, and a section loads its tasks
+a page at a time (**Load more**). A task row shows its key, title, tracker,
+status, `n active / n past`, **needs you**, a **?** when something about it
+waits for review, a struck-through title when the tracker no longer has it,
+and **tracker down** while its tracker is failing (what you see is as of the
+last good sync). Under each task are its sessions: ★ the session's primary
+task, a plain row for a secondary one, a dashed row for a suggestion nobody
+has decided, and a dimmed **ended** row for a past session (never shown as
+active). Click a session to open it; every row of the selected session is
+highlighted, wherever it appears.
+
+Filters above the tree: organisation, tracker, status, sessions (any /
+active / past only / none / suggested), *Mine*, *To review* and a search on
+key or title. **Views ▾** applies a saved view from the hub. Which sections
+are open and the last task you picked are remembered per view.
+
+Click a task for its detail in the center pane: the tracker's title, status,
+link, assignees and description, where its organisation and group come
+from, its repositories, every session with its state and why it is linked,
+and the last outcome. **Open** goes to its live session, **Continue** resumes
+the last conversation (as *Resume* does), and **Start new** opens the
+new-session dialog for the ticket. In a session's details, **Tasks** lists
+every task of the session (primary, secondary, suggested, past), each with
+**Show in Work view**.
+
+A hub older than the Work view answers none of this: the switch then shows
+"The Work view needs a newer hub", and *Sessions* works as before. Making a
+task primary, removing or adding one, placing a task, rules, saving views
+and the review inbox are the next step (M14.3).
+
+> **[Screenshot placeholder]** The sidebar in Work mode: an organisation
+> with two groups open, a task with a ★ primary, a secondary, a dashed
+> suggestion and a dimmed past session, and its detail in the center pane.
 
 ## Work view: edits
 
