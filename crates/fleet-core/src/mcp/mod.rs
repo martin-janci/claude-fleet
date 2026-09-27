@@ -2030,6 +2030,47 @@ mod tests {
         );
     }
 
+    /// A phone away longer than the ring's grace window must be told to
+    /// re-list. The bus stops recording then, and the change it did not record
+    /// used to leave no trace: the ring still reached back to the phone's id,
+    /// `ready` said `resumed: true`, and the killed session stayed on screen.
+    #[tokio::test]
+    async fn a_resume_across_an_unrecorded_gap_is_refused() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut first = SseConn::open(addr, Some("s3cret"), "").await;
+        first.wait_for("event: ready").await;
+        bus.session_killed(1);
+        let seen = first.wait_for("event: session:killed").await.to_string();
+        let id = seen
+            .lines()
+            .find_map(|l| l.strip_prefix("id: "))
+            .expect("a row frame must carry an id")
+            .trim()
+            .to_string();
+        drop(first);
+        // Wait for the server to notice the disconnect, so nothing is
+        // subscribed when the grace window runs out.
+        for _ in 0..100 {
+            if bus.receiver_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(bus.receiver_count(), 0);
+        bus.expire_grace_for_test();
+        bus.session_killed(2);
+
+        let mut again = SseConn::open_resuming(addr, Some("s3cret"), "", Some(&id)).await;
+        let head = again.wait_for("event: ready").await.to_string();
+        assert!(
+            head.contains("\"resumed\":false"),
+            "a gap the ring never recorded must not be resumed across:\n{head}"
+        );
+    }
+
     /// An id this hub never minted — a restarted process, a mangled header —
     /// must not be replayed against the current sequence. Saying so lets the
     /// client re-list; pretending would leave it convinced it was current.
