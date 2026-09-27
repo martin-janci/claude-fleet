@@ -20,6 +20,7 @@
 //! | 8 | recognise | keys, URLs, repo-relative `#n` per caps |
 //! | 9 | errors | 401, 403 on one view, 429 + Retry-After, offline, garbage |
 //! | 10 | no secret | in any `Debug`, request line, snapshot or error |
+//! | 11 | write (M13.4e) | without `caps.write`: refused, nothing sent; with it: one remote link by `globalId`, no secret in the body, a non-key never in the path |
 //!
 //! **Snapshot golden.** Scenario 2 compares the normalised listing with
 //! `testdata/<provider>/golden_list.json`, so a provider API change shows
@@ -31,9 +32,9 @@
 
 use super::{
     list_all, Fetched, ItemRef, RefCtx, TrackerError, TrackerProvider, ViewDef, WorkItemSnapshot,
-    NOT_FOUND_OR_NO_PERMISSION,
+    WriteOp, NOT_FOUND_OR_NO_PERMISSION,
 };
-use crate::net::https::{FakeTransport, Request};
+use crate::net::https::{FakeTransport, Method, Request, Response};
 use serde_json::{json, Value};
 
 /// The error scenarios of row 9.
@@ -512,6 +513,76 @@ pub async fn no_secret<H: Harness>(h: &H) {
     }
 }
 
+/// Row 11 (work graph M13.4e, decision D3): the only write is the PR remote
+/// link. A provider without `caps.write` refuses it without sending a byte;
+/// one with it sends exactly one request, to the item's remote links,
+/// carrying the `globalId` the tracker upserts by, and no secret in it. A
+/// key that is not one of the tracker's never reaches the path.
+pub async fn write<H: Harness>(h: &H) {
+    let f = FakeTransport::new();
+    f.always(
+        Method::Post,
+        "/remotelink",
+        Ok(Response::new(201, r#"{"id":10000}"#)),
+    );
+    let p = h.provider(&f);
+    let url = "https://github.com/acme/api/pull/12";
+    let prefix = h.expect().prefixes.first().copied().unwrap_or("ABC");
+    let key = format!("{prefix}-1");
+    let op = WriteOp::PrRemoteLink {
+        key: key.clone(),
+        url: url.into(),
+        title: "PR: acme/api#12".into(),
+    };
+    let got = p.write(&op).await;
+    if !p.caps().write {
+        assert!(
+            matches!(got, Err(TrackerError::Refused(_))),
+            "{}: a read-only provider refuses every write: {got:?}",
+            h.name()
+        );
+        assert!(f.requests().is_empty(), "{}: nothing sent", h.name());
+        return;
+    }
+    got.unwrap_or_else(|e| panic!("{}: the remote link failed: {e:?}", h.name()));
+    let sent = f.requests();
+    assert_eq!(sent.len(), 1, "{}", h.name());
+    assert!(
+        sent[0].url.ends_with(&format!("/issue/{key}/remotelink")),
+        "{}: {}",
+        h.name(),
+        sent[0].url
+    );
+    let body = String::from_utf8_lossy(sent[0].body.as_deref().unwrap_or_default()).into_owned();
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v["globalId"],
+        json!(format!("fleet:pr:{url}")),
+        "{}",
+        h.name()
+    );
+    assert_eq!(v["object"]["url"], json!(url), "{}", h.name());
+    if let Some(secret) = h.expect().secret {
+        assert!(
+            !body.contains(secret),
+            "{}: the secret in the body",
+            h.name()
+        );
+    }
+    let bad = WriteOp::PrRemoteLink {
+        key: "../../myself".into(),
+        url: url.into(),
+        title: "x".into(),
+    };
+    assert!(p.write(&bad).await.is_err(), "{}", h.name());
+    assert_eq!(
+        f.requests().len(),
+        1,
+        "{}: the bad key sent nothing",
+        h.name()
+    );
+}
+
 /// Expand to one `#[tokio::test]` per scenario for `$harness` (an
 /// expression of a type implementing [`Harness`]).
 #[macro_export]
@@ -559,6 +630,10 @@ macro_rules! conformance_suite {
             #[tokio::test]
             async fn c10_no_secret_anywhere() {
                 c::no_secret(&$harness).await
+            }
+            #[tokio::test]
+            async fn c11_write_only_where_supported() {
+                c::write(&$harness).await
             }
         }
     };
