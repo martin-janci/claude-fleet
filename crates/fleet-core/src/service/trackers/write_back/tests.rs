@@ -1,5 +1,5 @@
 use super::*;
-use crate::net::https::{FakeTransport, Method, Response};
+use crate::net::https::{FakeTransport, Method, Response, TransportError};
 use crate::service::trackers::jira::JiraCloud;
 use crate::service::trackers::jira_dc::JiraDc;
 use crate::store::{
@@ -418,5 +418,216 @@ async fn a_key_that_is_not_a_jira_key_is_never_put_in_the_path() {
         cloud(&fake).write(&op).await,
         Err(TrackerError::Invalid(_))
     ));
+    assert!(fake.requests().is_empty());
+}
+
+// ── ported from the parallel M13.4e build ───────────────────────────────
+
+/// Only a link a person made is written: a confirmed `agent` link (an
+/// agent's own `work_link`) and a `manual` suggestion never queue.
+#[test]
+fn a_link_no_person_made_or_decided_never_queues() {
+    let f = fx("agent", true);
+    let state: String =
+        f.s.conn_ref()
+            .query_row("SELECT state FROM work_links", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(state, "confirmed");
+    assert_eq!(on_pr(&f.s, f.session, PR).unwrap(), 0);
+    let g = fx("manual", true);
+    g.s.conn_ref()
+        .execute("UPDATE work_links SET state = 'suggested'", [])
+        .unwrap();
+    assert_eq!(on_pr(&g.s, g.session, PR).unwrap(), 0);
+    assert!(outbox(&f.s).is_empty() && outbox(&g.s).is_empty());
+}
+
+/// The same PR on the same item from two sessions is one write.
+#[test]
+fn two_sessions_with_the_same_pr_queue_one_write() {
+    let f = fx("manual", true);
+    let item: i64 =
+        f.s.conn_ref()
+            .query_row("SELECT item_id FROM work_links", [], |r| r.get(0))
+            .unwrap();
+    let other =
+        f.s.upsert_session("dev-abc-1-b", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+    f.s.link_session_work(other, WorkTarget::Item(item), "started")
+        .unwrap();
+    assert_eq!(on_pr(&f.s, f.session, PR).unwrap(), 1);
+    assert_eq!(on_pr(&f.s, other, PR).unwrap(), 0);
+    assert_eq!(outbox(&f.s).len(), 1);
+}
+
+/// A write-back flag on a tracker that is not Jira (hand-edited, or the
+/// provider changed under it) queues nothing and sends nothing.
+#[tokio::test]
+async fn a_write_back_flag_on_a_non_jira_tracker_writes_nothing() {
+    let f = fx("manual", true);
+    on_pr(&f.s, f.session, PR).unwrap();
+    f.s.conn_ref()
+        .execute("UPDATE trackers SET provider = 'linear'", [])
+        .unwrap();
+    assert_eq!(
+        on_pr(&f.s, f.session, "https://github.com/acme/api/pull/43").unwrap(),
+        0
+    );
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    assert!(t.settings.write_back.pr_remote_link);
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r, DrainReport::default());
+    assert!(fake.requests().is_empty());
+    assert_eq!(outbox(&store.lock().unwrap()).len(), 1);
+}
+
+/// A failure that may heal (the network) backs off, a minute after the
+/// first, and is sent again once due.
+#[tokio::test]
+async fn a_network_error_backs_off_and_the_write_lands_when_due() {
+    let f = fx("manual", true);
+    on_pr(&f.s, f.session, PR).unwrap();
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.once(
+        Method::Post,
+        "/remotelink",
+        Err(TransportError::Connect("connection reset".into())),
+    );
+    let now = crate::store::now_unix() + 1;
+    let r = drain(&t, &cloud(&fake), &store, now).await;
+    assert_eq!((r.sent, r.retrying, r.given_up), (0, 1, 0));
+    {
+        let s = store.lock().unwrap();
+        let w = &outbox(&s)[0];
+        assert_eq!((w.state.as_str(), w.attempts), ("pending", 1));
+        assert_eq!(w.next_at, now + backoff_secs(0));
+        assert!(w.last_error.is_some());
+    }
+    // Not due yet: nothing is sent.
+    let r = drain(&t, &cloud(&fake), &store, now + backoff_secs(0) - 1).await;
+    assert_eq!(r, DrainReport::default());
+    assert_eq!(fake.requests().len(), 1);
+    fake.once(
+        Method::Post,
+        "/remotelink",
+        Ok(Response::json(201, &serde_json::json!({ "id": 1 }))),
+    );
+    let r = drain(&t, &cloud(&fake), &store, now + backoff_secs(0)).await;
+    assert_eq!(r.sent, 1);
+    let s = store.lock().unwrap();
+    let w = &outbox(&s)[0];
+    assert_eq!((w.state.as_str(), w.last_error.as_deref()), ("done", None));
+}
+
+/// A write that keeps failing gives up at the last allowed attempt, counts
+/// as a failure, and is never sent again.
+#[tokio::test]
+async fn a_write_that_keeps_failing_gives_up_after_the_last_attempt() {
+    let f = fx("manual", true);
+    on_pr(&f.s, f.session, PR).unwrap();
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.always(
+        Method::Post,
+        "/remotelink",
+        Err(TransportError::Connect("no route to host".into())),
+    );
+    let mut now = crate::store::now_unix() + 1;
+    let mut last = DrainReport::default();
+    for _ in 0..crate::store::WRITE_MAX_ATTEMPTS {
+        last = drain(&t, &cloud(&fake), &store, now).await;
+        now += MAX_BACKOFF_SECS;
+    }
+    assert_eq!(last.given_up, 1, "{last:?}");
+    let n = crate::store::WRITE_MAX_ATTEMPTS as usize;
+    assert_eq!(fake.requests().len(), n);
+    {
+        let s = store.lock().unwrap();
+        let w = &outbox(&s)[0];
+        assert_eq!(
+            (w.state.as_str(), w.attempts),
+            ("failed", crate::store::WRITE_MAX_ATTEMPTS)
+        );
+        assert_eq!(s.tracker_write_failures(t.id).unwrap(), 1);
+    }
+    let r = drain(&t, &cloud(&fake), &store, now + MAX_BACKOFF_SECS).await;
+    assert_eq!(r, DrainReport::default());
+    assert_eq!(fake.requests().len(), n);
+}
+
+/// What a failed write stores as its error never carries the credential,
+/// whatever the transport or the tracker echoed.
+#[tokio::test]
+async fn a_stored_error_never_carries_the_credential() {
+    let secret = cred().secret.expose().to_string();
+    let f = fx("manual", true);
+    on_pr(&f.s, f.session, PR).unwrap();
+    on_pr(&f.s, f.session, "https://github.com/acme/api/pull/43").unwrap();
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.once(
+        Method::Post,
+        "/remotelink",
+        Err(TransportError::Connect(format!("proxy said: bad {secret}"))),
+    );
+    fake.once(
+        Method::Post,
+        "/remotelink",
+        Ok(Response::new(500, format!("echo: {secret}"))),
+    );
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r.retrying + r.given_up, 2, "{r:?}");
+    let s = store.lock().unwrap();
+    for w in outbox(&s) {
+        let e = w.last_error.unwrap_or_default();
+        assert!(!e.is_empty());
+        assert!(!e.contains(&secret), "{e}");
+    }
+}
+
+/// Settled writes go once they are older than the journal's retention
+/// window; a pending one stays, and a window of `0` keeps them all.
+#[tokio::test]
+async fn a_drain_sweeps_settled_writes_past_the_journal_window() {
+    let f = fx("manual", true);
+    on_pr(&f.s, f.session, PR).unwrap();
+    on_pr(&f.s, f.session, "https://github.com/acme/api/pull/43").unwrap();
+    let ids: Vec<i64> = outbox(&f.s).iter().map(|w| w.id).collect();
+    f.s.finish_tracker_write(ids[0]).unwrap();
+    let long_ago = crate::store::now_unix() - 5 * 365 * 86_400;
+    f.s.conn_ref()
+        .execute(
+            "UPDATE tracker_writes SET updated_at = ?1, next_at = ?2",
+            rusqlite::params![long_ago, i64::MAX],
+        )
+        .unwrap();
+    crate::service::settings::set(
+        &f.s,
+        crate::service::settings::WORK_RETENTION_JOURNAL_DAYS,
+        "0",
+    )
+    .unwrap();
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    let now = crate::store::now_unix();
+    drain(&t, &cloud(&fake), &store, now).await;
+    assert_eq!(outbox(&store.lock().unwrap()).len(), 2, "0 keeps forever");
+    crate::service::settings::set(
+        &store.lock().unwrap(),
+        crate::service::settings::WORK_RETENTION_JOURNAL_DAYS,
+        "365",
+    )
+    .unwrap();
+    drain(&t, &cloud(&fake), &store, now).await;
+    let left = outbox(&store.lock().unwrap());
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!((left[0].id, left[0].state.as_str()), (ids[1], "pending"));
     assert!(fake.requests().is_empty());
 }
