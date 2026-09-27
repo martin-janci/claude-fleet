@@ -13,8 +13,8 @@ impl FleetTools {
         ok/degraded/failing, failures in a row, last error and success; \
         detection_backlog: suggestions undecided for detection_backlog_days). \
         A per-host token sees its own host's usage and its org's trackers. \
-        hub: this process's uptime and last reconcile pass; tunnels_mode \
-        none|reverse; peer_links_total.")]
+        hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
+        peer_links_total.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -54,7 +54,8 @@ impl FleetTools {
         table (usage.prices_json), not a bill. total and by_host sum live \
         rows over their lifetime; by_day is the durable daily roll-up \
         (killed sessions included). Sessions sorted by cost, at most 200. A \
-        per-host token only sees its own host.")]
+        per-host token only sees its own host. by_day.backfill_cost_micros: \
+        history a first read booked, apart from live cost.")]
     pub(super) async fn usage_report(
         &self,
         Extension(caller): Extension<Caller>,

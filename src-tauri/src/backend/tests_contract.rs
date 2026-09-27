@@ -260,6 +260,7 @@ fn sample_health() -> Health {
         usage_by_day: vec![DayUsage {
             day: "2026-09-18".into(),
             totals: sample_totals(),
+            backfill_cost_micros: 0,
         }],
         // A flapping tunnel is the case worth pinning on the wire: it is how a
         // remote operator learns the Control API is unreachable from a host.
@@ -543,6 +544,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         wire_keys(&DayUsage {
             day: "2026-09-18".into(),
             totals: sample_totals(),
+            backfill_cost_micros: 0,
         }),
     );
     put("Conversation", wire_keys(&sample_conversation()));

@@ -138,6 +138,7 @@
       "turns"
     ],
     "DayUsage": [
+      "backfill_cost_micros",
       "cache_read_tokens",
       "cache_write_tokens",
       "cost_micros",

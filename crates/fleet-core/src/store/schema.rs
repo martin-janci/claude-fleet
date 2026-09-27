@@ -43,6 +43,19 @@ fn worktrees_has_host_alias(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 064: `usage_daily` already has its
+/// `backfill` column. 064 rebuilds the table, and running it again would
+/// collapse backfill rows into live ones, so on such a table a re-run only
+/// records the version. See [`Migration`].
+fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('usage_daily') WHERE name = 'backfill'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 025 (session usage): it adds its
 /// columns in one transaction, so its last column present means the whole
 /// migration is, and a re-run (`ALTER TABLE ... ADD COLUMN` again) would
@@ -600,6 +613,13 @@ const MIGRATIONS: &[Migration] = &[
         63,
         include_str!("../../migrations/063_row_version_on_visible_change.sql"),
     ),
+    // usage_daily keyed by (day, host_alias, backfill): a table rebuild, so
+    // guarded — re-running the INSERT…SELECT would collapse backfill rows.
+    Migration {
+        version: 64,
+        sql: include_str!("../../migrations/064_usage_daily_backfill.sql"),
+        already_applied: Some(usage_daily_has_backfill),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1496,6 +1516,7 @@ mod tests {
                 last_msg_id: None,
                 last_msg_usage: None,
                 now: 86_400,
+                by_day: Vec::new(),
             },
         )
         .unwrap();
@@ -3128,6 +3149,47 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1, "the re-run touched no rows");
+    }
+
+    #[test]
+    fn migration_064_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
+        const SEED_AT: i64 = 63;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT INTO usage_daily (day, host_alias, input_tokens, output_tokens, \
+                 cache_write_tokens, cache_read_tokens, cost_micros) VALUES (20714, 'trn', 1, 2, 3, 4, 5);",
+            )
+            .unwrap();
+        assert!(!usage_daily_has_backfill(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(usage_daily_has_backfill(&s.conn).unwrap());
+        let (backfill, cost): (i64, i64) = s
+            .conn
+            .query_row(
+                "SELECT backfill, cost_micros FROM usage_daily WHERE day = 20714 AND host_alias = 'trn'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((backfill, cost), (0, 5), "existing rows are live rows");
+        // The new key admits a backfill row beside the live one for the same day.
+        s.conn
+            .execute(
+                "INSERT INTO usage_daily (day, host_alias, backfill, cost_micros) VALUES (20714, 'trn', 1, 7)",
+                [],
+            )
+            .unwrap();
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily WHERE day = 20714",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
     }
 }
 

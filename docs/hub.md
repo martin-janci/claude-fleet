@@ -150,6 +150,15 @@ post directly; the `tunnels` map is empty because nothing applies) and
 `reverse` otherwise. `peer_links_total` tells `peer_links_down: 0` from "no
 peers configured".
 
+`usage_by_day` books each token to the UTC day of the transcript line that
+produced it. The first time a transcript is read (a new host, a hub takeover)
+its history before that day lands in `backfill_cost_micros`, apart from the
+day's live `cost_micros`, so a takeover never reads as an $850 day.
+`usage_report` says what each figure counts: `by_host_population: live_rows`
+(session rows that still exist, over their lifetime — ghosts included) and
+`by_day_population: durable` (the daily roll-up, killed sessions included);
+the two need not agree.
+
 The image carries a Docker `HEALTHCHECK` that runs `fleet-hub healthcheck`
 every 30 s, so `docker compose ps` shows the hub as `healthy` (or
 `unhealthy`) in its STATUS column. The check sends one `GET /healthz` to

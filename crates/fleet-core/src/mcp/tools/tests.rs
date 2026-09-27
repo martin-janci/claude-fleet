@@ -3457,7 +3457,11 @@ fn the_served_definition_budget_stays_bounded() {
     // (+144); plus 100.
     // Merged with M13.4c (`work_link` `summarize`): measured at 56,950 on
     // 2026-09-27; plus 100.
-    const BUDGET_BYTES: usize = 57_050;
+    // Hub ops & accounting (plan D): `fleet_health` names `hub`,
+    // `tunnels_mode` and `peer_links_total`; `usage_report` names
+    // `by_day.backfill_cost_micros` — one slim clause each, the prose in
+    // docs/hub.md: measured at 57,112 on 2026-09-27 (+162); plus 100.
+    const BUDGET_BYTES: usize = 57_212;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
