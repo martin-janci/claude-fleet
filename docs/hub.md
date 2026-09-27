@@ -2426,6 +2426,12 @@ deliberately.
   `CLAUDE_FLEET_HUB_REPORTS=0`, the agent's config has
   `report_errors: false`, or the sender's `RUST_LOG` silences `error`.
 
+**One host is slow; everything looks stale.** A reconcile pass probes every
+host in parallel and writes each host's rows the moment its probe answers, so
+a host that takes the full 65 s probe budget delays only its own freshness;
+`fleet_health.hub.reconcile.last_duration_ms` still shows the pass as slow,
+and the host's `[reconcile] host probe exceeded its wall clock` line names it.
+
 ### When a host's SSH key changes
 
 A reinstalled host, or a rotated host key, shows up as `Host key verification

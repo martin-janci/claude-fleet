@@ -2028,6 +2028,59 @@ async fn fleet_reconcile_completes_when_one_host_never_answers() {
     assert_eq!(local[0].tmux_name, "local-live");
 }
 
+/// perf-logs §3: the pass joined EVERY probe before writing any host, so one
+/// 65 s probe timeout froze the freshness of the whole fleet (63 such
+/// timeouts in the log window). A host's rows now land as its probe ends.
+#[tokio::test]
+async fn a_fast_hosts_rows_land_while_a_slow_host_is_still_being_probed() {
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("wedged").unwrap();
+    }
+    let (deps, _probes) = scripted_deps(
+        vec![tmux_session("local-live")],
+        Duration::from_millis(10),
+        Duration::from_millis(600),
+    );
+    let pass = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { reconcile_sessions_with(&store, &deps).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !pass.is_finished(),
+        "the wedged host is still inside its probe budget"
+    );
+    {
+        let s = store.lock().unwrap();
+        let local = s.list_sessions_for_host("local").unwrap();
+        assert_eq!(
+            local
+                .iter()
+                .map(|r| r.tmux_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local-live"],
+            "the healthy host's rows are written before the slow host's probe ends"
+        );
+    }
+    pass.await
+        .unwrap()
+        .expect("the pass completes once the slow host times out");
+    let s = store.lock().unwrap();
+    let wedged = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "wedged")
+        .unwrap();
+    assert!(
+        !wedged.reachable,
+        "the timed-out host is still marked unreachable"
+    );
+}
+
 #[tokio::test]
 async fn reconcile_links_the_local_account_when_it_becomes_known() {
     // The bug: `local` is auto-created by `reconcile_sessions_with`'s
