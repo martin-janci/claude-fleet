@@ -154,7 +154,7 @@ const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias
 /// it does not parse.
 const HOST_PAYLOAD: &str =
     r#"{"alias":"trn","reachable":true,"hidden":false,"provisioned":true,"transport":"ssh"}"#;
-/// A `work_link { summarize }` answer (work graph M13.1).
+/// A `work_link { summarize }` answer (work graph M13.4c).
 const SUMMARY_PAYLOAD: &str = r#"{"key":"ABC-1","link_id":4,"host_alias":"hetzner","claude_session_id":"0f8fad5b-d9cb-469f-a165-70867728950e","model":"haiku","journal_id":9,"at":1,"summary":"fenced"}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
 /// A complete `MoveReport` wrapped as a `MoveOutcome::Moved` — all twelve

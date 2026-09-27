@@ -305,7 +305,7 @@ pub async fn request_work_handover(
     routed::request_work_handover(&backend, args, &store, &ssh).await
 }
 
-/// A Claude-written summary of past work (work graph M13.1, on demand):
+/// A Claude-written summary of past work (work graph M13.4c, on demand):
 /// ended link `link_id` of `key`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SummarizePastWorkArgs {

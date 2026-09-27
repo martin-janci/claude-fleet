@@ -442,7 +442,7 @@ pub fn transcript_probe_script(
 /// transcript may be: the path a conversation row recorded (when it still
 /// validates), then the glob under every project of the host's
 /// `$HOME/.claude/projects`. Shared by the transcript probe and the
-/// summary run (work graph M13.1).
+/// summary run (work graph M13.4c).
 pub fn transcript_candidates(
     stored_path: Option<&str>,
     claude_session_id: &str,

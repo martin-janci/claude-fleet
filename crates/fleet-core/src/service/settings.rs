@@ -200,8 +200,8 @@ pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
 /// (`work_link { source: agent_inferred }` — only ever a suggestion). Off by
 /// default: it spends context on a guess. Read on every prompt.
 pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
-/// The model a dead session's on-demand summary runs on (work graph M13.1,
-/// decisions D10 / D24), on the session's own host and account. A choice of
+/// The model a dead session's on-demand summary runs on (work graph M13.4c,
+/// decisions D10 / D27), on the session's own host and account. A choice of
 /// Claude Code's model aliases, never free text: it ends up in a command.
 pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
 /// The aliases [`WORK_SUMMARY_MODEL`] accepts.

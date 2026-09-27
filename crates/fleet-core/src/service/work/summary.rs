@@ -1,4 +1,4 @@
-//! Summaries of dead sessions (work graph M13.1, decisions D10 / D24 / D27).
+//! Summaries of dead sessions (work graph M13.4c, decisions D10 / D27 / D30).
 //!
 //! A person asks for a Claude-written summary of a past session's last
 //! conversation — the dead-session sibling of the agent handover (M9.3),
@@ -7,7 +7,7 @@
 //! keeps the reply as a work journal `summary` row from the `agent`; the
 //! handover brief shows the newest one inside its untrusted fence.
 //!
-//! * **On demand only (D27).** Only `work_link { action: summarize }` runs
+//! * **On demand only (D30).** Only `work_link { action: summarize }` runs
 //!   one; nothing runs at session end.
 //! * **A fork that cannot act.** `claude -p --resume <id> --fork-session
 //!   --no-session-persistence`: the original transcript is never written and

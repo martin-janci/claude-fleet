@@ -1,8 +1,14 @@
-# Work graph M13: the decided-against list, built (plan)
+# Work graph M13.4: the decision-gated builds the user said yes to (build notes)
 
 **Date:** 2026-09-26
-**Roadmap:** `../2026-09-24-work-graph-roadmap.md` (M13 is new; the D3, D10, D13
-and D20 rows point here)
+**Roadmap:** `../2026-09-24-work-graph-roadmap.md` (the D3, D10, D13 and D20
+rows, and D27–D30 for the defaults below)
+**Plan:** `2026-09-26-work-graph-m13-live-use.md` §M13.4. That plan reached
+`main` while this one was written on a branch, under the same milestone
+number. This file is now its build notes: M13.1 here is **M13.4c**, M13.2
+is **M13.4e**, M13.3 is **M13.4f** (new) and M13.4 is **M13.4a**. The
+decision numbers D24–D27 below are **D27–D30** on `main` (D24–D26 are the
+live-use plan's).
 **Review:** `../reviews/2026-09-26-work-graph-decisions-revisited.md` (M12.6),
 which gives each item's smallest safe version, modules and risks. This plan
 builds exactly those versions and nothing larger.
@@ -71,7 +77,7 @@ builds exactly those versions and nothing larger.
 
 ## Milestones
 
-### M13.1: Summaries of dead sessions (D10)
+### M13.4c (was M13.1): Summaries of dead sessions (D10)
 - **Action.** `work_link { action: summarize, session_id | conversation_id }`,
   on demand only. There is one summary per conversation; asking again replaces
   it.
@@ -123,7 +129,7 @@ builds exactly those versions and nothing larger.
   - isolation;
   - Vitest for the button.
 
-### M13.2: Write-back, PR remote link only (D3)
+### M13.4e (was M13.2): Write-back, PR remote link only (D3)
 - **Trait.** `TrackerProvider::write(&WriteOp) -> Result<WriteOutcome,
   TrackerError>`, with a default of `Unsupported`. `WriteOp::PrRemoteLink {
   item, url, title }` is its only variant.
@@ -163,7 +169,7 @@ builds exactly those versions and nothing larger.
   - the cross-org refusal;
   - host tokens refused.
 
-### M13.3: Webhook nudges (D13)
+### M13.4f (was M13.3): Webhook nudges (D13)
 - **Route.** `POST /hooks/tracker/<tracker_id>`:
   - It is served only when `hub.public_url` is set and the tracker has a
     webhook secret. Otherwise the answer is 404, so the route is invisible.
@@ -194,7 +200,7 @@ builds exactly those versions and nothing larger.
   - the rate limit;
   - an e2e scenario in `scripts/hub-e2e.sh` with the fake Jira.
 
-### M13.4: Naming work on the phone (D20), in fleet-mobile
+### M13.4a (was M13.4): Naming work on the phone (D20), in fleet-mobile
 - **App.** "Name this work…" on the phone's work sheet for a session with no
   work, and rename in the Tickets sheet.
   - Full token only.
@@ -241,10 +247,10 @@ M13.4 ── independent (fleet-mobile repository)
 
 | # | Question | Options | Default |
 |---|---|---|---|
-| D24 | Summary model and quota | a small model · the session's configured model | `haiku` (`work.summary_model`), on the session's own account |
-| D25 | Webhook providers in M13 | GitHub, Jira Cloud, Linear · also Asana, Jira DC | GitHub, Jira Cloud, Linear |
-| D26 | Write-back ops in M13 | PR remote link · also transition on start · also worklog | PR remote link only |
-| D27 | Automatic summaries at session end | off · on | off: on demand only |
+| D27 (was D24) | Summary model and quota | a small model · the session's configured model | `haiku` (`work.summary_model`), on the session's own account |
+| D28 (was D25) | Webhook providers in M13 | GitHub, Jira Cloud, Linear · also Asana, Jira DC | GitHub, Jira Cloud, Linear |
+| D29 (was D26) | Write-back ops in M13 | PR remote link · also transition on start · also worklog | PR remote link only |
+| D30 (was D27) | Automatic summaries at session end | off · on | off: on demand only |
 
 ## Revisions
 - 2026-09-26: first version, after the user said yes to D3, D10, D13 and D20.
@@ -265,3 +271,6 @@ M13.4 ── independent (fleet-mobile repository)
     (`SummarizeButton.svelte`), shows the answer as text below the row, and is
     Routed (`summarize_past_work`).
   - The tool surface is +125 B (56,854); `BUDGET_BYTES` is 56,954.
+- 2026-09-27: renumbered to fit `main`'s M13 (live use): these are its
+  M13.4c, e, f and a, and the defaults are D27–D30. M13.4f is new in that
+  plan.

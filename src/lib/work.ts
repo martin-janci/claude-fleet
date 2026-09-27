@@ -532,7 +532,7 @@ export async function requestWorkHandover(sessionId: number): Promise<Result<Ses
 }
 
 
-/** A past session's summary (work graph M13.1): `work_link { summarize }`. */
+/** A past session's summary (work graph M13.4c): `work_link { summarize }`. */
 export interface SummaryOutcome {
   key: string;
   link_id: number;
@@ -548,7 +548,7 @@ export interface SummaryOutcome {
 
 /**
  * Ask for a Claude-written summary of past work `linkId` of `key` (work
- * graph M13.1, on demand only). One print-mode fork runs on the session's own
+ * graph M13.4c, on demand only). One print-mode fork runs on the session's own
  * host, with no tools; the reply replaces that conversation's earlier
  * summary, and the next resume brief shows it.
  */

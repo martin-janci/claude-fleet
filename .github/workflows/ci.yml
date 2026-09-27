@@ -116,16 +116,31 @@ jobs:
       - run: cargo test -p fleet-core -p fleet-hub --locked
       - run: cargo build -p fleet-agent --locked
       - run: cargo test -p fleet-proto -p fleet-agent --locked
-      # scripts/hub-e2e.sh drives the two binaries just built above as real
+      # The work-graph leg (hub W, M10.2) needs a hub built with the test-only
+      # `e2e` feature (the loopback fake-tracker override). Its own target dir,
+      # so the plain target/debug/fleet-hub the rest of the script tests (and
+      # whose refusal of that override it asserts) is never replaced. No
+      # `cache-directories` above: target/e2e sits inside target/, which
+      # rust-cache already saves, and it cleans a nested target dir like the
+      # top one. The feature is never default and no release path
+      # (release.yml, crates/fleet-hub/Dockerfile) passes --features.
+      - run: cargo build -p fleet-hub --features e2e --locked
+        env:
+          CARGO_TARGET_DIR: target/e2e
+      # scripts/hub-e2e.sh drives the binaries just built above as real
       # processes: three hubs, auth (401/403), /healthz, the local-host guard,
-      # pairing and /events, SIGTERM shutdown, and a fleet-agent dialing a hub
-      # over loopback. It needs tmux, which this runner has (ubuntu-24.04
-      # ships /usr/bin/tmux; the macOS runners in the `rust` job do not, so
-      # this step stays on this job only) and builds nothing itself.
+      # pairing and /events, SIGTERM shutdown, a fleet-agent dialing a hub
+      # over loopback, and hub W's work graph against a fake Jira Cloud
+      # (python3) and a fake Claude. With CI=true (set by Actions) the script
+      # FAILS rather than skips hub W if WBIN is missing. It needs tmux, jq and
+      # python3, which this runner has (ubuntu-24.04 ships all three; the
+      # macOS runners in the `rust` job have no tmux, so this step stays on
+      # this job only) and builds nothing itself.
       - name: Run hub end-to-end script
         env:
           BIN: target/debug/fleet-hub
           ABIN: target/debug/fleet-agent
+          WBIN: target/e2e/debug/fleet-hub
         timeout-minutes: 5
         run: bash scripts/hub-e2e.sh
       # The script's own failure output names which check failed, but the hub

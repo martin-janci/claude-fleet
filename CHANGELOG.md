@@ -8,6 +8,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.3.1] - 2026-09-26
+
+A tracker sync fix, and a release pipeline that keeps releases on their tag.
+No migrations, so upgrading from v0.3.0 is a plain image or app update.
+
+### Fixed
+- **trackers:** before this release, one tracker item that failed to store
+  (bad data, a constraint) rolled back its whole batch and aborted the
+  tracker's sync pass. The view's watermark then never moved, so the same item
+  stalled the tracker on every pass. It could be a single changed item in an
+  incremental listing. Now:
+  - The item is skipped with a warning and the rest of the batch is stored.
+  - The item's view keeps its watermark, so the item is read again on the next
+    pass and nothing is lost.
+  - Every other view, the linked items and the binding still run.
+  - The tracker reports an error only when a whole pass stores nothing.
+  - A transaction SQLite itself rolls back (I/O error, full disk) still aborts
+    the batch.
+- **release:** a published release is kept on its `vX.Y.Z` tag. v0.3.0 went
+  out under an `untagged-…` placeholder until it was re-bound by hand.
+- **ci:** the hub end-to-end check of `fleet_health`'s version now reads the
+  version from `Cargo.toml` rather than assuming `0.2.x`.
+
+### Changed
+- **ci:** the work-graph end-to-end leg (hub W) runs in `hub-headless` on
+  every PR.
+
+### Documentation
+- **work:** the M10.3 manual acceptance run is written down.
+
+## [0.3.0] - 2026-09-26
+
+A faster hub. On a NAS with spinning disks every store write held the one
+database lock for ~200 ms, so even read-only MCP calls queued behind it: 0.4–2 s
+for `whoami` / `list_hosts`, and ~15 s spikes for `list_sessions` /
+`list_worktrees`. Reads now come off the writer, and writes are batched into
+single transactions. The WAL change in v0.2.40 fixed the fsync cost; this
+release fixes the queueing.
+
+**Upgrading:** this release adds migrations 059 and 060. Back up `state.db`,
+together with any `state.db-wal` / `state.db-shm` next to it, before
+upgrading. See `docs/RELEASING.md`.
+
+### Added
+- **hub:** a read-only connection pool on the WAL database serves the listing
+  tools (`list_hosts`, `list_projects`, `list_worktrees`, `whoami`,
+  `fleet_health`, and the final read of `list_sessions`) without waiting on
+  the writer.
+- **hub:** `authorize` checks tokens against an in-memory cache. Migration 060
+  adds triggers that bump an auth epoch on every token change except the
+  `last_seen_at` stamp, and the epoch is re-read on every request. A revoked,
+  rotated or re-scoped client or host token is refused on the very next
+  request, even when another process changed it (the `fleet-hub` CLI via
+  `docker exec`).
+- **release:** releases publish themselves once every asset is verified. The
+  hub image is pinned to the release in `deploy/hub/docker-compose.yml`, and
+  drift is watched (#311).
+
+### Changed
+- **sessions:** `list_sessions` no longer probes every host inline when its
+  cache is stale. It answers from the stored rows and refreshes in the
+  background; only a cold start or `force` waits for the probe.
+- **reconcile:**
+  - `claude agents --json` runs at most once a minute per host, as intended;
+    before, it ran on every pass.
+  - Each host's writes commit in one transaction and unchanged host identity
+    is not rewritten.
+  - The GC sweep no longer runs inside the tick.
+- **hooks:** each hook's writes commit in one transaction, and updates that
+  change nothing are skipped.
+- **audit:** read-only tools no longer write an audit row on every call.
+- **usage / trackers:**
+  - Usage collection commits once per host and skips sessions with no new
+    usage.
+  - Tracker sync commits once per batch and stamps `fetched_at` in one
+    statement.
+- **store:**
+  - Migration 059 indexes live sessions by worktree.
+  - `list_worktrees` no longer queries once per worktree.
+  - `whoami` looks the session up by its name instead of loading every
+    session.
+
+### Fixed
+- **store:** a transaction that SQLite aborts midway (I/O error, full disk, out
+  of memory) no longer half-commits. The writes after the failure stop
+  instead of committing on their own without their events, and a failed
+  savepoint release can no longer leave the connection inside an open
+  transaction.
+- **store:** transactions begin `IMMEDIATE`, so a CLI writer next to the hub
+  makes the transaction wait instead of failing at once.
+- **usage:** a pass with no new usage no longer clears the usage cursor's last
+  message id.
+- **mcp:** `fleet_health` still reports a failed database lock when it reads
+  through the pool.
+
 ## [0.2.42] - 2026-09-26
 
 ### Added
@@ -1721,6 +1816,8 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.3.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.1
+[0.3.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.0
 [0.2.42]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.42
 [0.2.41]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.41
 [0.2.40]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.40

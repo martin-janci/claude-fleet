@@ -10,7 +10,9 @@ on a tracker.
 This page explains the feature. The exact tool parameters are in
 [control-api.md](control-api.md) (`work`, `work_link`, `work_admin`) and the
 generated [control-api-reference.md](control-api-reference.md). The hub's
-side (commands, providers, orgs, retention) is in [hub.md](hub.md).
+side (commands, providers, orgs, retention) is in [hub.md](hub.md). To
+check the whole feature on your own installation, walk through the manual
+acceptance run, [work-graph-acceptance.md](work-graph-acceptance.md).
 
 - [What "work" is](#what-work-is)
 - [Linking and detection](#linking-and-detection)
@@ -333,7 +335,7 @@ There are two kinds:
   a live session's own hand-off. It needs the transcript and the directory
   the conversation ran in to still be on the host; otherwise it says so and
   runs nothing. Only one summary runs per host at a time. It is never
-  automatic (decisions D10, D27).
+  automatic (decisions D10, D30).
 
 ## Today and standup
 
@@ -473,9 +475,18 @@ state and the store. It never calls a tracker or a host. For each tracker:
   them. Three failed passes in a row are `failing` too. A transient state
   (`rate_limited`, `unreachable`) with fewer failures is `degraded`: the sync
   retries it by itself.
-- `state`, `consecutive_failures`, `last_error` (redacted, one line, at most
-  300 characters, fenced as untrusted), `last_success_at`, `last_pass_at`,
-  and its org.
+- A pass that **skipped items** it could not store (the rest of the pass
+  still synced) is `degraded`; three such passes in a row are `failing`,
+  because the same item is stuck (decision D25). A clean pass is `ok`
+  again.
+- `reason`, why it is not `ok`: `credential` (auth_failed, captcha,
+  unconfigured), `sync_failed` (passes fail, or rate limited / unreachable)
+  or `items_skipped`; empty while `ok`.
+- `state`, `consecutive_failures`, `items_failed` (items the last pass
+  skipped), `consecutive_partial` (passes in a row that skipped some),
+  `last_error` (redacted, one line, at most 300 characters, fenced as
+  untrusted; for skipped items, why the last one failed), `last_success_at`,
+  `last_pass_at`, and its org.
 
 Fleet-wide it also counts `failing`, `degraded`, and the **detection
 backlog**: link suggestions on live sessions that have waited more than 7
@@ -492,6 +503,11 @@ On the desktop:
   **⚠ Reconnect Jira (acme) →**, which opens Settings scrolled to Work.
   Hover it for the error, the failure count and the org. A degraded tracker
   raises none.
+- A tracker failing because it keeps **skipping items** raises
+  **⚠ Sync skipping items — Jira (acme) →** instead: reconnecting would not
+  help. It also opens Settings → Work, where the tracker's last pass reads
+  `… · 2 skipped (3 passes in a row)` with the reason. See
+  [troubleshooting.md → Sync skips items](troubleshooting.md#sync-skips-items).
 - The roll-up is read at startup and every 60 seconds. On a paired desktop
   it is the hub's `fleet_health`.
 

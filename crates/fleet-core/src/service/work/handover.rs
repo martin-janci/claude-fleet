@@ -95,7 +95,7 @@ pub struct HandoverInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<(String, i64)>,
     /// The newest summary of a past session, written on demand after it
-    /// ended (work graph M13.1), and when.
+    /// ended (work graph M13.4c), and when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub past_summary: Option<(String, i64)>,
 }
@@ -293,7 +293,7 @@ fn render(input: &HandoverInput, l: &Limits) -> String {
             fenced.push(clean_block(body, l.summary_chars, l.summary_lines));
         }
     }
-    // Then a past session's summary (M13.1): also Claude's words, written
+    // Then a past session's summary (M13.4c): also Claude's words, written
     // after that session ended, so it follows a live session's own hand-off.
     if let Some((body, at)) = input.past_summary.as_ref() {
         if l.summary_chars > 0 {
@@ -933,7 +933,7 @@ mod tests {
         }
     }
 
-    /// Work graph M13.1: a past session's summary sits inside the fence,
+    /// Work graph M13.4c: a past session's summary sits inside the fence,
     /// after a live session's own hand-off, and cannot close the fence.
     #[test]
     fn a_past_summary_follows_the_handover_inside_the_fence() {

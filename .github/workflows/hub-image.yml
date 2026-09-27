@@ -389,5 +389,8 @@ jobs:
               }
               next = `${body.trimEnd()}\n\n${block}\n`;
             }
-            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, body: next });
+            // tag_name restated: PATCHing a DRAFT's body without it left v0.3.0's
+            // draft with an `untagged-…` tag_name, which release.yml then
+            // published under that placeholder instead of the tag.
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, tag_name: tag, body: next });
             core.info(`Recorded ${IMAGE}:${VERSION}@${DIGEST} on release ${release.id} (${tag}).`);

@@ -530,7 +530,7 @@ Index by area (names only; see the reference for details):
   stuck, without work, when a request is already pending (30 min), and for
   the operator's own session. Timeline: `handover_requested`,
   `handover_written`, `handover_missing`, `handover_send_failed`.
-  `work_link { action: "summarize", key, link_id }` (M13.1, on demand only)
+  `work_link { action: "summarize", key, link_id }` (M13.4c, on demand only)
   is the dead-session counterpart: a Claude-written summary of past work
   `link_id` (an ended link of `key`, from `work { links }` or the resume
   plan). One `claude -p --resume <id> --fork-session

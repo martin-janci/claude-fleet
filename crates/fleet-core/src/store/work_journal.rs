@@ -34,7 +34,7 @@ pub const JOURNAL_KINDS: &[&str] = &[
     // Tidy-up acted on the session (work graph M7): archive, kill, safe kill.
     "tidy",
     // A Claude-written summary of a dead session's conversation, on demand
-    // (work graph M13.1, D10): one per conversation, from `agent`.
+    // (work graph M13.4c, D10): one per conversation, from `agent`.
     "summary",
 ];
 
@@ -227,7 +227,7 @@ impl Store {
         })
     }
 
-    /// Store `claude_session_id`'s summary (work graph M13.1): a `summary`
+    /// Store `claude_session_id`'s summary (work graph M13.4c): a `summary`
     /// row from `agent`, replacing any earlier one of that conversation, so
     /// there is at most one per conversation. `body` is already redacted and
     /// capped by the caller; `append_journal` caps it again. Returns the new

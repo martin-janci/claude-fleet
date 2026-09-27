@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Summarise (work graph M13.1, D10): a Claude-written summary of a past
+  // Summarise (work graph M13.4c, D10): a Claude-written summary of a past
   // session, on demand only. One print-mode fork runs on the session's own
   // host with no tools; the reply is kept in the work journal, where the next
   // resume brief shows it. Here it is shown once, below the row, as text.

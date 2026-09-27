@@ -1,4 +1,4 @@
-// Summarise (work graph M13.1): one on-demand model call per click, the
+// Summarise (work graph M13.4c): one on-demand model call per click, the
 // reply shown as plain text with the untrusted fence removed, errors in words.
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';

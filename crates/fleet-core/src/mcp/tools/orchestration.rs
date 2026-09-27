@@ -706,7 +706,7 @@ impl FleetTools {
             )?;
         }
         if args.action == "summarize" {
-            // Work graph M13.1: a Claude-written summary of a dead session
+            // Work graph M13.4c: a Claude-written summary of a dead session
             // (on demand only, D10 / D27). It spends a model call, so the
             // operator's request is confirmed like a start, and refused on a
             // hub, where no one can approve it. The host and org fences are
