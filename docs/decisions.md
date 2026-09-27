@@ -6,8 +6,8 @@ tickets is this session working on, which status category is this Asana
 section. This page is the user guide for that path. It is an **evaluation**
 (decisions D31–D47 in
 `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`): everything
-is **off by default**, and nothing in fleet asks Jev yet. The envelope
-described here is what the use cases will go through when they are built.
+is **off by default**. Every use case goes through the envelope described
+here; the first one built is [`status_map`](#status_map--asana-section-proposals-j3).
 
 **A model answer never grants a permission and never runs a risky action.**
 At most it pre-selects a suggestion a person confirms.
@@ -126,6 +126,79 @@ killer is on.
 - **One feature:** its mode to `off`.
 - **The key:** `fleet-hub decide clear-key`.
 
+## `status_map` — Asana section proposals (J3)
+
+An Asana task's status comes from its section: the map a person confirmed
+(`settings.section_map`), else the map the probe inferred from section names
+with a keyword rule (progress / doing / review → in progress, done / shipped
+→ done), else **to do**. A section the rule cannot classify — "Ideas",
+"Parked", "Čaká na klienta", "🚀 Live" — silently counts as to do. The
+probe now keeps those names (`config.unmapped_sections`) and each board's
+section order (`config.project_sections`), and `status_map` asks Jev which
+category they are. Jira, Linear and GitHub carry exact status categories
+from the tracker itself: `status_map` never looks at them.
+
+**When.** After a clean sync pass of an Asana tracker, at most once a day
+per tracker (sooner when its sections change), in a task of its own — never
+on the sync's path, and a failure never fails the sync. A run asks at most
+40 questions; a section decided in the last 14 days on the same input
+(fingerprint), question version, mode and model is not asked again, and a
+section in your own map is never asked.
+
+**What is sent** (only when the gate above lets it through, and only for a
+tracker whose org consented): the provider (`asana`), the section's name
+(lower case) and the names of the sections on its board in order (at most
+30) — nothing else: no task, no title, no project name. One *choice*
+question per section, version `status_map.v1`, with the options `todo`,
+`in_progress`, `done`, `not_planned` and `unsure`, each described; an answer
+below confidence 0.5 is recorded as `low_confidence` and not used.
+
+**What is recorded.** One run per question, about `tracker_section
+<tracker id>:<section id>`, where the section id is an HMAC of the name
+under the local fingerprint key — never the name. The baseline is the
+keyword rule's answer, or `none` where it abstained.
+
+**The modes.**
+
+- `shadow`: asks about the unmapped sections *and* the ones the rule mapped,
+  so the rule and the model can be compared; nothing is proposed.
+- `assist`: asks about the unmapped sections only; the answers are
+  **proposals**. Nothing is ever written to the tracker by itself.
+
+**Reading and applying proposals** (on the hub; read-only, no running hub
+needed):
+
+```bash
+fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]
+```
+
+```text
+tracker 3 "Company B"  org 1  status_map mode assist
+  proposals (assist):
+    "ideas" → todo (0.91)  run 812
+    "parked" → not_planned (0.85)  (applies as done)  run 813
+    "someday" → unsure (0.70)  (proposes nothing)  run 814
+  apply (a person decides): fleet-hub tracker section-map 3 --set 'ideas=todo' --set 'parked=done'
+```
+
+The section names come from the tracker's stored config (matched through
+the section id), not from the record. A section map takes `todo`,
+`in_progress` or `done`: `not_planned` applies as `done` (the task is not
+live work); `unsure` proposes nothing. The printed command is a
+`work_admin update` (master token) that confirms the section map — the
+inferred one kept under your entries, like Settings → Work's **Confirm** —
+with the proposals you accept; edit it to drop or change any. `--json` also
+carries the same change as `work_admin` arguments. In `shadow` the view
+shows, per section, the rule's and the model's category and how often they
+agree where the rule decided.
+
+**Follow-up.** When your `settings.section_map` later holds a section, its
+latest answered run is marked `confirmed` (the answer applies as your
+category) or `corrected` (to yours) — `fleet-hub decide status` counts them.
+
+**Off.** `decide.jev.status_map` to `off`; your confirmed maps stay (they
+are yours).
+
 ## Settings
 
 | Key | Default | What it does |
@@ -154,12 +227,13 @@ fleet-hub decide set-key --ref file:/run/secrets/jev   # or env:NAME, read at us
 fleet-hub decide clear-key
 fleet-hub decide status [--days 30] [--json]
 fleet-hub decide runs [--feature work_link] [--limit 50] [--json]
+fleet-hub decide proposals [--tracker ID] [--json]   # status_map, above
 ```
 
 The key is never an argument (shell history, `ps`). `set-key` and
 `clear-key` write the hub's database directly, like `fleet-hub tracker
-webhook`; the running hub reads the key at its next call. `status` and
-`runs` open the database read-only (no running hub needed; `--db FILE`
+webhook`; the running hub reads the key at its next call. `status`,
+`runs` and `proposals` open the database read-only (no running hub needed; `--db FILE`
 reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the breaker, today's tokens and cost, and runs per

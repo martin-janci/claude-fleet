@@ -292,7 +292,13 @@ per-org consent `orgs.jev_allowed` (migration 064), the record
 `decision_runs` + key `decision_secrets` (065; the key is read ONLY by
 `Store::resolve_decision_credential`, never raw text in a run), `fleet-hub
 decide`; guide `docs/decisions.md` (every `decide.*` setting must be in its
-table). No use case calls it yet; decisions D31–D47 and what is still open
+table). The first use case, J3 `status_map`, is built (shadow / assist
+only, off): the Asana probe keeps `config.unmapped_sections` /
+`project_sections`, `service/decide/status_map.rs` asks one Choice per
+unclassified section after a clean sync (`StatusMapTrigger`, daily), and
+`fleet-hub decide proposals` lists what a person applies with `fleet-hub
+tracker section-map`; follow-ups are recorded in `work_admin update`.
+Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
 Conversation event tracking is landed end to end (migration 037
