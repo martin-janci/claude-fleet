@@ -223,3 +223,7 @@ M13.5   last
   build that reached `main` with #327 is reverted (062 kept, 064 drops the
   table). M13.4c and M13.4e stay; they are reviewed against this plan and
   the M12.6 smallest safe versions.
+- 2026-09-27: **D15 and D5 answered.** The owner said yes to D15
+  (multi-start on the phone, M13.4d, martin-janci/fleet-mobile#50) and
+  keeps D5 off until the remote numbers are in. D3, D10 and D20 stand as
+  recorded above; D13 goes back to no with M13.4f's removal (#330).

@@ -815,7 +815,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org. **Built** (M7, #267): `work.auto_tidy` off, `orgs.auto_tidy` per org, safe kill only |
 | D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-26: yes, the PR remote link only** (Jira Cloud / DC, opt-in per tracker, through an outbox): M13.4e. Transition on start and worklog stay out (D29) |
 | D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub. **Done** (M5.3, #264) |
-| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95. **Waits on the user** (M10.3 step; M13.4b) |
+| D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95. **2026-09-27: not yet** — the owner keeps it off until the remote numbers are in (M13.4b not started) |
 | D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only. **Built anyway** (M6.5, #266): the M6 brief asked for it |
 | D7 | Isolate sessions (list, message, dispatch) across orgs? (M5 plan) | off per org · on per org | Off per org; the user turns it on per org. **Built** (M5.3, #264): `orgs.isolate_sessions`, off |
 | D8 | — | — | **Unused**: no decision was ever numbered D8 in the work graph |
@@ -825,7 +825,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always.** Built (M9.7, #268) |
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **No.** Recorded yes on 2026-09-26 and built as M13.4f (reached `main` with #327); **the owner reversed it on 2026-09-27 → no** (the M12.6 recommendation), and M13.4f was removed. Migration 062 stays in the chain, 064 drops its table (063 is another change, #333) |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25)**: `work.classify_nudge`. Opened as #273 (closed unmerged); the commit reached `main` with #270 |
-| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | Desktop only. **Waits on the user** after M10.3 (M13.4d) |
+| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | **Decided 2026-09-27 by the owner, before the M10.3 run: also on the phone** (M13.4d: multi-select with a confirm sheet, cross-org refused in words, full token only) |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done.** hub-e2e runs in CI's `hub-headless` job (`.github/workflows/ci.yml`, every PR and `main` push). Since #314 the job also builds an `e2e`-feature hub into `target/e2e` and passes it as `WBIN`, so the M10.2 work-graph leg runs on every PR; with `CI=true` a missing `WBIN` fails instead of skipping (`scripts/hub-e2e.sh`) |
 | D17 | Support `acli` (Atlassian CLI) as a Jira transport? (M11 plan) | yes · decided against | **Decided against:** REST and `via_host` (`gh`, `curl`) cover it. M12.6 keeps it; M13 does not reopen it |
 | D18 | First sync of a new tracker: suppress per-item frames? (M11 plan) | accept the flood · suppress (design change) | **Accept** (the M10.6 report, `reviews/2026-09-25-replay-ring-pressure.md`); nothing suppresses them on `main` |
@@ -995,3 +995,8 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   (webhook nudges), which reached `main` with #327, is removed. Migration 062
   stays in the chain so a database that ran it is not refused as newer, and
   064 drops its `tracker_webhooks` table. D28 is moot.
+- 2026-09-27: The owner confirmed D3, D10 and D20 **yes** in this
+  session, and answered **D15 yes** (multi-start on the phone, M13.4d,
+  martin-janci/fleet-mobile#50). D5 stays off until the remote
+  SessionStart numbers are in. M13.3 still waits on the run. D13 is set
+  back to no with M13.4f's removal (#330).
