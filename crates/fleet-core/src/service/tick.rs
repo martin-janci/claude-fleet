@@ -188,7 +188,11 @@ pub fn spawn_account_usage_tick(
             async move {
                 let hosts: Vec<HostRow> = match store.lock() {
                     Ok(s) => match s.list_hosts() {
-                        Ok(h) => h,
+                        // One hidden/local rule for every host loop (hub-ops F6).
+                        Ok(h) => crate::service::hosts::active_hosts(
+                            h,
+                            crate::service::hub::local_host_enabled(),
+                        ),
                         Err(e) => {
                             tracing::warn!("account usage tick: list_hosts failed: {e}");
                             return;

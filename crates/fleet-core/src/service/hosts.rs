@@ -23,6 +23,21 @@ pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
     s.list_hosts().map_err(IpcError::from)
 }
 
+/// The hosts a fleet-wide loop may touch: every non-hidden row, and `local`
+/// only when this process has a local host (`hub.local_host`). ONE rule for
+/// reconcile, usage collection, the account-usage poll, GC, the worktree
+/// prune and the repair tick (hub-ops F6): before this each loop carried
+/// its own filter, and the copied `local` row on the hub was hidden for
+/// reconcile, skipped by a different gate for usage, and still collected
+/// by GC. Reachability stays with the caller — a probe loop must see an
+/// unreachable host to re-probe it, a kill loop must not.
+pub fn active_hosts(rows: Vec<HostRow>, local_enabled: bool) -> Vec<HostRow> {
+    rows.into_iter()
+        .filter(|h| !h.hidden)
+        .filter(|h| local_enabled || h.alias != crate::service::projects::LOCAL_HOST)
+        .collect()
+}
+
 /// One agent host, as `agent_status` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AgentHostStatus {
@@ -726,6 +741,52 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A visible, reachable ssh host row with nothing else set.
+    fn bare_host(alias: &str) -> HostRow {
+        HostRow {
+            alias: alias.to_string(),
+            ssh_alias: None,
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            hidden: false,
+            last_pinged_at: None,
+            account_uuid: None,
+            provisioned: false,
+            transport: "ssh".to_string(),
+            org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+        }
+    }
+
+    #[test]
+    fn active_hosts_drops_hidden_rows_and_local_when_the_hub_disabled_it() {
+        let mut rows = vec![
+            bare_host("local"),
+            bare_host("mac"),
+            bare_host("stale"),
+            bare_host("trn"),
+        ];
+        rows[2].hidden = true;
+        rows[3].reachable = false;
+        let names = |v: Vec<HostRow>| v.into_iter().map(|h| h.alias).collect::<Vec<_>>();
+        assert_eq!(
+            names(active_hosts(rows.clone(), true)),
+            vec!["local", "mac", "trn"],
+            "reachability is the caller's business, hidden is not"
+        );
+        assert_eq!(names(active_hosts(rows, false)), vec!["mac", "trn"]);
+    }
 
     #[tokio::test]
     async fn agent_status_lists_every_agent_host_connected_or_not() {

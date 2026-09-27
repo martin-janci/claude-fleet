@@ -397,12 +397,16 @@ pub async fn run_with(store: &Mutex<Store>, ssh: &dyn SshExec) -> (usize, usize)
         let Ok(s) = store.lock() else {
             return (0, 0);
         };
-        s.list_hosts()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|h| h.alias != LOCAL_HOST && h.reachable && !h.hidden)
-            .map(|h| h.alias)
-            .collect()
+        // One hidden/local rule for every host loop (hub-ops F6); the prune
+        // never touches `local` even where it is enabled.
+        crate::service::hosts::active_hosts(
+            s.list_hosts().unwrap_or_default(),
+            crate::service::hub::local_host_enabled(),
+        )
+        .into_iter()
+        .filter(|h| h.alias != LOCAL_HOST && h.reachable)
+        .map(|h| h.alias)
+        .collect()
     };
     let (mut answered, mut deleted) = (0, 0);
     for host in hosts {

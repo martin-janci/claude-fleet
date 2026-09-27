@@ -1637,9 +1637,11 @@ pub(crate) async fn reconcile_sessions_with(
         if deps.local_host {
             s.upsert_host("local")?;
         }
-        s.list_hosts()?
+        // One hidden/local rule for every host loop (hub-ops F6): hidden
+        // rows never enter the snapshot now; `reap_hidden_hosts` (step 4)
+        // handles what they still hold.
+        crate::service::hosts::active_hosts(s.list_hosts()?, deps.local_host)
             .into_iter()
-            .filter(|h| deps.local_host || h.alias != "local")
             .map(|h| {
                 let paths = HostPaths::for_host(&s, &h.alias);
                 (h, paths)
@@ -1648,8 +1650,9 @@ pub(crate) async fn reconcile_sessions_with(
     };
 
     // 2. Fan out probes (off-lock) via JoinSet for parallel execution.
-    //    Hidden hosts are skipped here — their last-known sessions are still
-    //    surfaced by the final `list_all_sessions` read, without probing.
+    //    Hidden hosts never reach here (see the snapshot above) — their
+    //    last-known sessions are still surfaced by the final
+    //    `list_all_sessions` read, without probing.
     //    Each task receives owned data so it satisfies 'static + Send.
     //
     //    Each probe is bounded by `deps.probe_timeout` (see `probe_one_host`):
@@ -1660,7 +1663,7 @@ pub(crate) async fn reconcile_sessions_with(
     //    children by itself; the ssh layer's own wall clock
     //    (`SshClient::run_child`) kills and reaps them and resets the master.
     let mut set = tokio::task::JoinSet::new();
-    for (host, paths) in hosts.into_iter().filter(|(h, _)| !h.hidden) {
+    for (host, paths) in hosts {
         let deps = Arc::clone(deps);
         set.spawn(async move { probe_one_host(host, paths, &deps).await });
     }

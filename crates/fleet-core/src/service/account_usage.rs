@@ -618,6 +618,9 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// whose token is in the Keychain, which fleet never reads); the rest
 /// alphabetical. A hidden host is never polled — on a hub that includes a
 /// `local` row copied from a desktop, which would run `bash` on the hub.
+/// The tick already feeds this through `service::hosts::active_hosts` (the
+/// one hidden/local rule, hub-ops F6); the `hidden` test here is kept as
+/// defence in depth for a caller that hands over raw rows.
 pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>) -> Vec<String> {
     let local = crate::service::projects::LOCAL_HOST;
     let mut out: Vec<String> = hosts
