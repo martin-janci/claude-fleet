@@ -469,6 +469,13 @@ this design's.
   above, which said it would). With D31 off, a bound client also may not
   start or resume a session in an unassigned project or host. `pair --org`
   takes the org's id.
+  The inference the PR's threat note listed — a bound client reading
+  fleet-wide daily spend in `fleet_health` and so another org's activity —
+  is closed: for a bound client every roll-up there that sums across hosts
+  (spend by day and by host, host / session / status counts, tunnels, the
+  detection backlog) is taken over the hosts it sees only, its org's and,
+  under D31, unassigned ones (`health::scope_to_org`). The master, unbound
+  clients and host tokens read as before.
 - 2026-09-27 (M14.0, brought to `main`): based on `main` `f10d0b92` instead
   of `be0e2bc`; the acceptance section is Part R (Part P is GHES on `main`);
   the migration is `0NN_work_view.sql`, numbered at merge time, not 063
