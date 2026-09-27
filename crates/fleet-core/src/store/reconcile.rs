@@ -570,7 +570,10 @@ impl Store {
     /// session can still be resumed, so it survives past the usual one-cycle
     /// grace until it ages out of the TTL. A `missing` row (a single session
     /// that dropped out while its neighbours stayed live) is never exempt,
-    /// so it keeps today's one-cycle reap regardless of this cutoff. `None`
+    /// so it keeps today's one-cycle reap regardless of this cutoff. Nor is
+    /// an `external` row: fleet did not start that session and restore never
+    /// resumes one, so keeping it to the TTL only piles dead rows into the
+    /// "Outside fleet" group. `None`
     /// disables the exemption entirely — today's behaviour, byte-identical
     /// SQL and bindings.
     #[allow(clippy::too_many_arguments)]
@@ -611,6 +614,7 @@ impl Store {
             // one-cycle reap for every pre-migration row after an upgrade.
             let exempt = if lost_ttl_cutoff.is_some() {
                 " AND NOT COALESCE((claude_session_id IS NOT NULL \
+                                    AND kind != 'external' \
                                     AND lost_reason IN ('host_reboot','tmux_server_gone') \
                                     AND lost_at >= ?2), 0)"
             } else {

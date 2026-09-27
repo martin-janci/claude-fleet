@@ -1805,6 +1805,37 @@ mod tests {
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
     }
 
+    #[test]
+    fn a_rebooted_external_row_is_reaped_inside_the_lost_ttl() {
+        // A `host_reboot` verdict marks every kind lost, and a lost row with
+        // a claude id is kept to the TTL so it can be resumed. Restore never
+        // resumes an `external` row (fleet did not start it), so keeping one
+        // only piles dead rows into the "Outside fleet" group. A `bg` row in
+        // the same state keeps the exemption.
+        let s = store();
+        s.upsert_host("h").unwrap();
+        s.upsert_bg_session("h", "bg:e1", None, "e1", Some("idle"), 1, "external", 1)
+            .unwrap();
+        s.upsert_bg_session("h", "bg:b1", None, "b1", Some("idle"), 1, "bg", 1)
+            .unwrap();
+        let lost = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        assert_eq!(lost.marked.len(), 2);
+
+        let cutoff = Some(100); // lost_at 500 is well inside the TTL
+        s.ghost_and_clean_bg_sessions("h", &[], 600, cutoff)
+            .unwrap();
+        assert!(
+            s.get_session("bg:e1", "h").unwrap().is_none(),
+            "a lost external row must be reaped, not kept to the TTL"
+        );
+        assert!(
+            s.get_session("bg:b1", "h").unwrap().is_some(),
+            "a lost bg row keeps the TTL exemption"
+        );
+    }
+
     /// `lost_reason` is also on `SessionRow` now, but most of these tests
     /// predate that and read it straight off the connection; kept as a
     /// terser assertion helper than `get_session_by_id(id)...lost_reason`.
