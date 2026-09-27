@@ -154,16 +154,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "add_project",
-        Verdict::LocalOnly {
-            instead: "it clones or adopts a checkout using this machine's SSH and GitHub \
-                      credentials; add the project on the hub, then it appears here",
+        Verdict::Routed {
+            tool: "add_project",
         },
     ),
     (
         "list_github_repos",
-        Verdict::LocalOnly {
-            instead: "it runs `gh` over this machine's SSH connection to the host; browse \
-                      repositories from the hub or a standalone app",
+        Verdict::Routed {
+            tool: "list_github_repos",
         },
     ),
     // ── sessions ────────────────────────────────────────────────────────────

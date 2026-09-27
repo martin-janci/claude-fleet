@@ -1886,14 +1886,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 183 commands, 78 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 183 commands, 80 route to a hub tool, 1 routes except for one argument shape, 81 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `add_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
@@ -1937,7 +1936,6 @@ Of the 183 commands, 78 route to a hub tool, 1 routes except for one argument sh
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
 | `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
-| `list_github_repos` | it runs `gh` over this machine's SSH connection to the host; browse repositories from the hub or a standalone app |
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |

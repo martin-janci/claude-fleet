@@ -3,7 +3,6 @@
     "add_host",
     "add_org",
     "add_org_rule",
-    "add_project",
     "add_tracker",
     "assets_inventory",
     "assign_host_org",
@@ -47,7 +46,6 @@
     "inspect_safe_kill",
     "install_fleet_hook",
     "list_account_usage",
-    "list_github_repos",
     "list_host_tokens",
     "mcp_configure",
     "mcp_status",
@@ -85,6 +83,7 @@
     "work_usage"
   ],
   "routed": [
+    "add_project",
     "archive_session_work",
     "assets_scan_hosts",
     "cancel_task",
@@ -99,6 +98,7 @@
     "kill_session",
     "link_session_work",
     "list_accounts",
+    "list_github_repos",
     "list_host_worktrees",
     "list_hosts",
     "list_local_work_items",

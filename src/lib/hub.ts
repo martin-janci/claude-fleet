@@ -222,8 +222,6 @@ const REASONS = {
   // --- acted out over this machine's SSH, and the hub has no tool for it ---
   repo_write:
     'the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session',
-  add_project:
-    'it clones or adopts a checkout using this machine’s SSH and GitHub credentials',
   purge_project:
     'it deletes Claude Code state on every host over this machine’s SSH connections, and the hub exposes no tool for it',
   inspect_safe_kill:
@@ -330,6 +328,7 @@ export const ROUTED_ACTIONS = [
   'dismiss_reopened',
   'name_session_work',
   'rename_work_item',
+  'add_project',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];
