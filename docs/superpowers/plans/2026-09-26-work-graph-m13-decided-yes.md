@@ -335,3 +335,26 @@ M13.4 ── independent (fleet-mobile repository)
     rename is offered where the work already is, the session's sheet.
   - `:shared:jvmTest` passes 1,006 / 1,006. The Android emulator and iOS
     jobs run only in fleet-mobile's CI.
+- 2026-09-27: **M13.4e review fixes.**
+  - Conformance row 11 (`c11_write`, every provider): only a `caps.write`
+    provider writes. For Jira Cloud and DC, that is one POST to
+    `/issue/{key}/remotelink` with the same `globalId` on a repeat and no
+    secret in the body; 429 maps to `RateLimited` with its `Retry-After`,
+    and 403 to `Forbidden`. A bad key sends nothing. Every other provider
+    refuses without a request.
+  - An isolation row: turning `write_back.pr_remote_link` on through
+    `work_admin update` is the master's alone; every other caller gets
+    `E_FORBIDDEN`.
+  - The outbox's retention moved from the Jira drain to the M12.3 GC
+    sweep. The drain only ran after a successful pass, so a failing
+    tracker's outbox never shrank. It is capped per tick, one batch per
+    lock, by the journal's window, and counted as `tracker_writes` in the
+    sweep record (`fleet-hub tracker status`, Settings → Retention).
+    **Deviation kept**: failed rows go by the same window as done ones. A
+    year-old failure is no longer a live signal for `write_failures`, and
+    keeping it forever would be growth without bound. Pending rows never
+    go.
+  - Not changed, and left for the owner: `pr_title` accepts a PR URL on
+    any `https` host, because the URL comes from `gh` on the session's
+    host. Limiting it to github.com plus the configured GHES hostnames
+    would need a small new rule.

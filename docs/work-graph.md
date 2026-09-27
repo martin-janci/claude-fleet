@@ -493,6 +493,9 @@ it. `0` keeps a table forever.
   kept ticket.
 - `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
   timeline events. The newest of each kind per session stays.
+- The write-back outbox (see *Write-back*) follows the journal's window:
+  a PR link that was sent, or given up on, goes once it is older than
+  `work.retention.journal_days`; one still waiting is never swept.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
 Settings → Limits → Retention (standalone desktop) shows the row counts, a
