@@ -116,6 +116,7 @@
   - `work { tree, task, session_tasks, review, rules, rule_preview, views, org_impact }`.
   - Keyset pagination.
   - `fleet-hub pair --org` and `OrgScope::Org`.
+  - D31's per-org flag `orgs.bound_sees_unassigned` (default on), editable through `work_admin`, with isolation rows for both values.
   - The isolation rows for every new read.
   - The scale test: its p95 bound is kept from the branch and re-measured on `main`.
   - `BUDGET_BYTES` re-measured, and the reference regenerated.
@@ -205,14 +206,14 @@ Part R of `docs/work-graph-acceptance.md`, run by the owner on:
 
 | # | Question | Default |
 |---|---|---|
-| D31 | May an org-bound client see *unassigned* work and sessions? | Yes, as a host does. To fence everything, assign every host and tracker to an org. |
-| D32 | Does a forced cross-org link raise a review item until it is acknowledged? | Yes (`cross_org` review kind, cleared by `ack`). |
-| D33 | May a full, unbound phone change a local task's org? | Yes, with the impact preview. Bound clients and hosts may not. |
-| D34 | Placement rules only, or also link rules? | Placement only. Link rules would bypass detection's evidence and R9. |
-| D35 | Saved views: shared on the hub, or per device? | Shared on the hub. A bound client's views are its org's. |
-| D36 | M14 as a milestone, despite D26 ("operating: issues, not milestones")? And who drives it? | Yes, M14 is the last work-graph milestone; D26 applies after it. One driver session, named in M14.0. |
+| D31 | May an org-bound client see *unassigned* work and sessions? | **Answered 2026-09-27: by setting.** A per-org flag `orgs.bound_sees_unassigned` (in M14.1b's migration; `work_admin` org edit; Settings → Work → Organisations), **default on** (as a host sees today). Off: the org's bound clients see only rows assigned to their org. An isolation row covers both values. |
+| D32 | Does a forced cross-org link raise a review item until it is acknowledged? | **Answered 2026-09-27: the default.** Yes (`cross_org` review kind, cleared by `ack`). |
+| D33 | May a full, unbound phone change a local task's org? | **Answered 2026-09-27: the default.** Yes, with the impact preview. Bound clients and hosts may not. |
+| D34 | Placement rules only, or also link rules? | **Answered 2026-09-27: the default.** Placement only. Link rules would bypass detection's evidence and R9. |
+| D35 | Saved views: shared on the hub, or per device? | **Answered 2026-09-27: the default.** Shared on the hub. A bound client's views are its org's. |
+| D36 | M14 as a milestone, despite D26? Who drives it? | **Answered 2026-09-27: yes, M14 is the last work-graph milestone (D26 applies after it); driven by session `session_01W4pX97MogoZ5YiBXxBhxPw`.** The backend branch's session does not continue it. |
 
-D31–D35 come from the spec. The branch marks them "built", but on `main` they are **proposed** until the owner answers.
+D31–D35 come from the spec. D31 changed from the spec's fixed "yes" to a per-org setting; M14.1b builds it.
 
 ## Order and parallelism
 
@@ -229,4 +230,5 @@ M14.0 ──► M14.1a ──► M14.1b ──► M14.1c ──► M14.1d
 - M13.3, M13.4b and M13.5 are independent of all of this.
 
 ## Revisions
+- 2026-09-27: the owner answered D31 (per-org setting, default on), D32–D35 (defaults) and D36 (yes; this session drives M14).
 - 2026-09-27: written at `main` `f10d0b92`, from the spec and the backend commit on `claude/fleet-dynamic-work-view-kwc3r9` (`defe19c3`).
