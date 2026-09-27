@@ -39,7 +39,7 @@ fn the_run_is_a_fork_with_no_tools_no_mcp_no_hooks_and_no_transcript() {
     for flag in [
         format!("claude -p --resume '{CID}' --fork-session --no-session-persistence"),
         "--model 'haiku'".to_string(),
-        r#"--settings '{"hooks":{}}'"#.to_string(),
+        r#"--settings '{"disableAllHooks":true}'"#.to_string(),
         "--tools ''".to_string(),
         "--strict-mcp-config".to_string(),
     ] {
@@ -48,6 +48,10 @@ fn the_run_is_a_fork_with_no_tools_no_mcp_no_hooks_and_no_transcript() {
     assert!(
         !sc.contains("--mcp-config "),
         "no MCP server may load: {sc}"
+    );
+    assert!(
+        !sc.contains(r#""hooks":{}"#),
+        "an empty hooks object keeps the user's hooks: {sc}"
     );
     assert!(!sc.contains("--dangerously"), "{sc}");
     assert!(!sc.contains("--permission-mode"), "{sc}");

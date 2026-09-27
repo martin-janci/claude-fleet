@@ -8,46 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
-## [0.2.43] - 2026-09-27
-
-### Added
-- **trackers:** webhook nudges on a public hub (work graph M13.4f)
-- **trackers:** write a session's PR to its Jira ticket, opt-in (work graph M13.4e)
-- **work:** M13.2 usage summary, work_admin { usage } (D24)
-- **ui:** Settings → Work → Usage, a read-only table with Copy as text
-- **work:** add work_admin { usage } — how the work graph is used, as counts
-- **trackers:** keep running pass totals in the sync metrics
-- **ui:** Settings → Work → Usage, a read-only table with Copy as text
-- **work:** add work_admin { usage } — how the work graph is used, as counts
-- **work-graph:** M13.1 partial sync failures are visible
-- **trackers:** keep running pass totals in the sync metrics
-- **sessions:** label external rows with the name Claude gives them
-- **ui:** say "Sync skipping items" instead of Reconnect for a tracker stuck on items
-- **trackers:** make partial sync failures visible in metrics and fleet health
-- **work:** summaries of dead sessions, on demand (work graph M13.1)
-- **conversation:** show a sent message at once, with its delivery state
-- **sessions:** carry prompt_submit_seq on the session row
-
-### Changed
-- **e2e:** usage counts in hub W (work graph M13.2)
-- Revert M13.2 (work_admin { usage }) out of the M13.1 PR
-- Revert "feat(work-graph): M13.1 partial sync failures are visible"
-
-### Fixed
-- **release-drift:** decide draft visibility from the listing, not a user-only probe
-- **sessions:** stop dead external rows flooding the Outside fleet group
-
-### Documentation
-- **work:** the phone names and renames local work (M13.4a, D20)
-- **work-graph:** document the usage summary and add it to the acceptance run
-- **work-graph:** document the usage summary and add it to the acceptance run
-- **work-graph:** document sync skipping items in fleet health and troubleshooting
-- **work-graph:** M13.0 roadmap truth pass
-- **work-graph:** M13 plan — live use
-- **work:** pin M13.1's no-tools flags from the installed claude --help
-- **work:** plan M13, the decided-against items the user said yes to
-- **work-graph:** M12 plan — ship and operate
-- **work-graph:** M11 plan — the long tail
 ## [0.3.1] - 2026-09-26
 
 A tracker sync fix, and a release pipeline that keeps releases on their tag.
@@ -1856,7 +1816,6 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
-[0.2.43]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.43
 [0.3.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.1
 [0.3.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.0
 [0.2.42]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.42

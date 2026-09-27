@@ -665,7 +665,9 @@ Plan: `plans/2026-09-25-work-graph-m10-settle.md`.
 - **M10.3** the written acceptance: #313 (below).
 - **M10.4** as above: #278.
 - **M10.5** Today, *Share standup* and the ticket card on the phone:
-  martin-janci/fleet-mobile#36.
+  martin-janci/fleet-mobile#36; the card on the session's work sheet with
+  *Copy* (never *Send*), and the org colour bar on rows:
+  martin-janci/fleet-mobile#48.
 - **M10.6** replay-ring pressure measured
   (`reviews/2026-09-25-replay-ring-pressure.md`), `session:updated` for a
   tracker item only when the row shows the change: #280. The first-sync
@@ -984,6 +986,10 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   hold the defaults for their details. M13.4c (D10) is built; M13.4e (D3)
   is next. D13 had no slot in M13.4 ("M13 does not reopen it"), so it gets
   **M13.4f**. D5 and D15 are unchanged.
+- 2026-09-27: M10.5 finished in fleet-mobile (martin-janci/fleet-mobile#48):
+  the ticket card on the session's work sheet (`work card`, read-only, any
+  token), *Copy* on every card, and the org colour bar on session rows
+  when two or more orgs show. No hub change, no contract bump.
 - 2026-09-27: The owner confirmed D3, D10 and D20 **yes** in this
   session, and answered **D15 yes** (multi-start on the phone, M13.4d,
   martin-janci/fleet-mobile#50). D5 stays off until the remote
