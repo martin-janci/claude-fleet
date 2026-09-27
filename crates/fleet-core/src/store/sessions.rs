@@ -1235,6 +1235,9 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("idle")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
+        }
         Ok(self.emit_session(row_id)?)
     }
 
@@ -1272,6 +1275,9 @@ impl Store {
         )?;
         if changed == 0 {
             return Ok(None);
+        }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("working")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
         // A person's prompt is a touch (work graph M7): it protects the
         // session from tidy-up for an hour and un-archives it.
@@ -1322,6 +1328,9 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("stopped")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
+        }
         Ok(self.emit_session(row_id)?)
     }
 
@@ -1350,6 +1359,9 @@ impl Store {
         )?;
         if changed == 0 {
             return Ok(None);
+        }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("failed")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
         Ok(self.emit_session(row_id)?)
     }
@@ -1443,6 +1455,9 @@ impl Store {
             .execute(&sql, rusqlite::params![row_id, now, kind, status])?;
         if changed == 0 {
             return Ok(None);
+        }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some(status)) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
         Ok(self.emit_session(row_id)?)
     }

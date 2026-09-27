@@ -2687,6 +2687,42 @@ mod tests {
         assert_eq!(status_of(&store, id).claude_status.as_deref(), Some("idle"));
     }
 
+    /// F10 (the two-writer gap): the hooks set status without recording
+    /// it; reconcile recorded only what IT changed. Now each transition is
+    /// on the timeline exactly once, whoever wrote it.
+    #[test]
+    fn hook_transitions_land_on_the_timeline_once() {
+        let store = make_store();
+        let id = hooked(&store);
+        let master = Caller::master();
+        let c = ctx(&master, None);
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-1"),
+            &c,
+        )
+        .unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-1"),
+            &c,
+        )
+        .unwrap();
+        apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1"), &c).unwrap();
+        let changes: Vec<Option<String>> = events(&store, id)
+            .into_iter()
+            .filter(|(k, _)| k == "status_change")
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(
+            changes,
+            vec![Some("idle".into()), Some("working".into())],
+            "newest first; the repeated prompt wrote nothing"
+        );
+    }
+
     #[test]
     fn stop_failure_class_sorts_the_cli_error_names() {
         assert_eq!(stop_failure_class("rate_limit"), "rate_limit");

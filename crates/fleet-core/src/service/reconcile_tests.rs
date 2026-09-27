@@ -575,11 +575,17 @@ async fn no_phantom_status_change_when_the_last_hook_at_guard_wins() {
         Some("working"),
         "the hook-stamped status wins over the pane"
     );
-    // Only pass 1's first sighting of `c1` is on the timeline.
+    // Pass 1's first sighting of `c1`, then the hook's OWN transition
+    // (the hooks record theirs since the timeline-hygiene change) — and no
+    // phantom `status_change` from the pass: the guard kept the stored
+    // status, so reconcile transitioned nothing.
     assert_eq!(
         f.timeline(r1.id),
-        vec![ev("conversation_started", Some("unknown"))],
-        "the guard kept the stored status, so nothing transitioned"
+        vec![
+            ev("conversation_started", Some("unknown")),
+            ev("status_change", Some("working")),
+        ],
+        "the guard kept the stored status, so only the hook's transition is written"
     );
 }
 
