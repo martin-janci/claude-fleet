@@ -295,7 +295,10 @@ dialog. The brief is editable before you start.
 
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
-one.
+one. While another device is still starting or resuming the same key (a
+multi-repo start holds it until its last repository), a second start or
+resume is refused: "ABC-123 is being started or resumed already; wait for
+that session, then jump to it".
 
 **Multi-start.** For work that spans repositories, the dialog's **Also
 start in** list (the projects the key ran in before) starts one sibling
