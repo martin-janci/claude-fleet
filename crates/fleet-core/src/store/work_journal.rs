@@ -33,6 +33,9 @@ pub const JOURNAL_KINDS: &[&str] = &[
     "reopened",
     // Tidy-up acted on the session (work graph M7): archive, kill, safe kill.
     "tidy",
+    // A summary of a dead session's conversation, asked for on demand
+    // (work graph M13.4c, D10): from the `agent`, one per conversation.
+    "summary",
 ];
 
 /// `source` values.
@@ -89,6 +92,7 @@ fn cap_kind(kind: &str) -> Option<usize> {
     match kind {
         "progress" => Some(PROGRESS_CAP),
         "compact_summary" => Some(COMPACT_SUMMARY_CAP),
+        "summary" => Some(1),
         _ => None,
     }
 }
@@ -245,6 +249,27 @@ impl Store {
             Some(body),
             None,
         )
+    }
+
+    /// The newest row of `kind` on a conversation.
+    pub fn newest_journal_of(
+        &self,
+        claude_session_id: &str,
+        kind: &str,
+    ) -> Result<Option<JournalRow>, IpcError> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM work_journal \
+                     WHERE claude_session_id = ?1 AND kind = ?2 \
+                     ORDER BY at DESC, id DESC LIMIT 1"
+                ),
+                rusqlite::params![claude_session_id, kind],
+                map_row,
+            )
+            .optional()
+            .map_err(IpcError::from)
     }
 
     /// Every row of these conversations except handovers, oldest first.

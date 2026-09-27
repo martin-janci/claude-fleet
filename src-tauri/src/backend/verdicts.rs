@@ -310,6 +310,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "request_work_handover",
         Verdict::Routed { tool: "work_link" },
     ),
+    // Work graph M13.4c: summarise a dead session (on demand, D10).
+    ("summarize_work", Verdict::Routed { tool: "work_link" }),
     // Work graph M9.6: one ticket, one sibling session per repository.
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
     // Work graph M11.1: "Name this work…" — local work items, listed from

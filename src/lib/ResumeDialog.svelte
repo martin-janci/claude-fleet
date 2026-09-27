@@ -9,7 +9,8 @@
   import { get } from 'svelte/store';
   import Modal from './Modal.svelte';
   import SpiralLoader from './SpiralLoader.svelte';
-  import { resumeWork, workResumePlan, type ResumeMode, type ResumePlan } from './work';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import { resumeWork, summarizeWork, workResumePlan, type ResumeMode, type ResumePlan } from './work';
   import { sessions } from './sessions';
   import { selectSessionExplicitly } from './selection';
 
@@ -49,6 +50,10 @@
   let briefFor = $state<string | null>(null);
   let briefLoading = $state(false);
   let busy = $state(false);
+  // Work graph M13.4c: a summary of the dead session, on demand, confirmed.
+  let summaryAsk = $state(false);
+  let summaryBusy = $state(false);
+  let summary = $state<string | null>(null);
 
   const modes = $derived((plan?.modes ?? []) as ResumeMode[]);
   const current = $derived(modes.find((m) => m.mode === mode) ?? null);
@@ -126,6 +131,25 @@
     onclose();
   }
 
+  const pastLink = $derived(plan?.candidates?.find((c) => c.link_id === plan?.link_id) ?? null);
+
+  async function summarise() {
+    if (summaryBusy) return;
+    summaryBusy = true;
+    error = null;
+    const r = await summarizeWork(workKey, plan?.link_id ?? linkId);
+    summaryBusy = false;
+    summaryAsk = false;
+    if (!r.ok) {
+      error = r.error.message;
+      return;
+    }
+    summary = r.value.summary;
+    // The brief now carries it: build it again when it is next shown.
+    briefFor = null;
+    if (mode === 'brief') void loadBrief();
+  }
+
   onMount(() => {
     void loadPlan();
   });
@@ -168,6 +192,23 @@
           </select>
         </label>
       {/if}
+    {/if}
+
+    {#if live.length === 0 && pastLink && pastLink.resumable !== false}
+      <p class="summ" data-testid="resume-summary-row">
+        <button
+          type="button"
+          class="linkish"
+          data-testid="resume-summarise"
+          disabled={summaryBusy}
+          onclick={() => (summaryAsk = true)}
+          >{#if summaryBusy}<SpiralLoader size={12} class="btn-spiral" />Summarising…{:else}Summarise…{/if}</button
+        >
+        <span class="hint">ask Claude to summarise the past session's last conversation</span>
+      </p>
+    {/if}
+    {#if summary}
+      <pre class="summary" data-testid="resume-summary">{summary}</pre>
     {/if}
 
     {#each plan.warnings ?? [] as w (w)}
@@ -219,6 +260,23 @@
     >
   </div>
 </Modal>
+
+{#if summaryAsk}
+  <ConfirmDialog
+    title="Summarise the past session?"
+    confirmLabel="Summarise"
+    busy={summaryBusy}
+    confirmTestId="resume-summarise-confirm"
+    onconfirm={summarise}
+    oncancel={() => (summaryAsk = false)}
+  >
+    <p>
+      Runs <code>claude -p</code> once on <b>{pastLink?.host_alias ?? 'its host'}</b>, with no tools, to summarise
+      the last conversation of this past session. It spends one model call on that host's account; the summary is
+      kept in <code>{workKey}</code>'s work journal and shown in the next brief.
+    </p>
+  </ConfirmDialog>
+{/if}
 
 <style>
   button :global(.btn-spiral) {
@@ -284,6 +342,21 @@
   .warn {
     margin: 0 0 0.5rem;
     color: var(--warn, #f59e0b);
+  }
+  .summ {
+    margin: 0 0 0.5rem;
+  }
+  .summ .hint {
+    font-size: 0.85em;
+    color: var(--fg-muted, #999);
+    margin-left: 0.4rem;
+  }
+  .summary {
+    white-space: pre-wrap;
+    max-height: 14rem;
+    overflow: auto;
+    font-size: 0.8em;
+    margin: 0 0 0.5rem;
   }
   .linkish {
     background: none;

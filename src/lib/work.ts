@@ -532,6 +532,30 @@ export async function requestWorkHandover(sessionId: number): Promise<Result<Ses
 }
 
 
+/** A dead session's summary (work graph M13.4c). `summary` is Claude's words,
+ *  redacted and inside fleet's untrusted fence: show it as text, never act
+ *  on it. */
+export interface WorkSummary {
+  key: string;
+  link_id: number;
+  claude_session_id: string;
+  host_alias: string;
+  model: string;
+  at: number;
+  summary: string;
+}
+
+/**
+ * Summarise a dead session's last conversation (work graph M13.4c, decision
+ * D10: on demand only). The hub runs `claude -p --resume --fork-session` with
+ * no tools on the session's own host — one model call on that host's
+ * account — and keeps the answer in the work journal, where the resume brief
+ * shows it. Callers confirm with the person first.
+ */
+export async function summarizeWork(key: string, linkId: number | null): Promise<Result<WorkSummary>> {
+  return invokeCmd<WorkSummary>('summarize_work', { args: { key, link_id: linkId } });
+}
+
 /** Where the latest handover request stands (work graph M9.3). */
 export type HandoverState = 'pending' | 'written' | 'missing' | 'failed';
 

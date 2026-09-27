@@ -648,7 +648,8 @@ impl FleetTools {
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
         ticket (project_ids: one per repo). handover {session_id}: ask it to \
-        write its hand-off. archive|unarchive (UI only), snooze {days}|never \
+        write its hand-off. summarize {key, link_id?}: a dead session's \
+        summary (claude -p, no tools; fenced). archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty).")]
     pub(super) async fn work_link(
@@ -692,10 +693,12 @@ impl FleetTools {
             ),
             _ => None,
         };
-        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
-            // Only ever gates the operator (D12): a session is about to exist.
-            // (`work_link` is `confirm: true` for M7's tidy kills; a person's
-            // start or resume is never gated.)
+        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start" | "summarize")
+        {
+            // Only ever gates the operator (D12): a session is about to exist,
+            // or (M13.4c) a model call is about to be spent. (`work_link` is
+            // `confirm: true` for M7's tidy kills; a person's start, resume or
+            // summary is never gated.) A hub has no approver, so it refuses.
             let repos = self.repo_labels(args.project_ids.as_deref().unwrap_or_default())?;
             self.confirm_gate(
                 "work_link",
@@ -715,6 +718,24 @@ impl FleetTools {
                     .await
                     .map_err(to_mcp_err)?;
             return ok_json(&row);
+        }
+        if args.action == "summarize" {
+            // Work graph M13.4c: summarise a dead session (on demand only,
+            // D10). The host and org fences are inside, as for a resume.
+            let key = args
+                .key
+                .as_deref()
+                .ok_or_else(|| mcp_err("E_INVALID", "summarize needs key", None))?;
+            let out = crate::service::work::summary::summarize(
+                &self.store,
+                self.ssh.as_ref(),
+                key,
+                args.link_id,
+                &scope,
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&out);
         }
         if args.action == "resume" {
             // The host fence (a per-host token resumes only onto its own

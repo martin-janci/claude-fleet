@@ -172,6 +172,8 @@ const RESOLVE_MOVE_PAYLOAD: &str = r#"{"action":"finish","source_session_id":7,"
 /// as `null` rather than omitted. `host` is the one defaulted field (a hub
 /// from before it only ever homed the operator on `local`), spelled out here
 /// all the same so the payload is the whole shape.
+/// A complete `WorkSummary` (work graph M13.4c): every field is required.
+const SUMMARY_PAYLOAD: &str = r#"{"key":"ABC-1","link_id":4,"claude_session_id":"0a1b2c3d-0000-4000-8000-00000000abcd","host_alias":"hetzner","model":"haiku","at":1,"summary":"fenced"}"#;
 const OPERATOR_STATUS_PAYLOAD: &str =
     r#"{"ready":true,"session":null,"blocked":null,"host":"local"}"#;
 
@@ -1217,6 +1219,25 @@ fn routed_mutation_cases() -> Vec<Case> {
                 block_on(commands::work::routed::request_work_handover(
                     b,
                     commands::work::RequestWorkHandoverArgs { session_id: 5 },
+                    s,
+                    &ssh(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "summarize_work",
+            "work_link",
+            json!({ "session_id": null, "action": "summarize", "key": "ABC-1", "item_id": null,
+                    "link_id": 4, "source": null }),
+            SUMMARY_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::summarize_work(
+                    b,
+                    commands::work::SummarizeWorkArgs {
+                        key: "ABC-1".into(),
+                        link_id: Some(4),
+                    },
                     s,
                     &ssh(),
                 ))

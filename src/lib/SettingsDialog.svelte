@@ -364,6 +364,14 @@
     }
     void applyLimit(key, r.value);
   }
+  function onSummaryModelChange(e: Event) {
+    const v = (e.currentTarget as HTMLInputElement).value.trim();
+    if (!v) {
+      limitsError = 'Summary model: name a model (e.g. haiku)';
+      return;
+    }
+    void applyLimit(SETTING_KEYS.workSummaryModel, v);
+  }
   function onIdleUnlinkedDaysChange(e: Event) {
     const r = parseBoundedIntInput(
       (e.currentTarget as HTMLInputElement).value,
@@ -1143,6 +1151,16 @@
           onchange={() => toggleSetting(SETTING_KEYS.workClassifyNudge)} />
         After three prompts with no ticket, ask Claude once which of your few open tickets it is on (only ever a suggestion)
       </label>
+      <div class="mcp-field">
+        <label class="lbl" for="work-summary-model">summary model</label>
+        <input class="port" id="work-summary-model" type="text" maxlength="128" spellcheck="false"
+          value={$fleetSettings[SETTING_KEYS.workSummaryModel] ?? ''}
+          disabled={limitsBusy}
+          aria-describedby="work-summary-model-desc"
+          data-testid="work-summary-model"
+          onchange={onSummaryModelChange} />
+        <span class="hook-desc" id="work-summary-model-desc">model a dead session's on-demand summary runs on (claude -p on its own host, no tools)</span>
+      </div>
       <h5 class="sub" data-testid="work-retention">Retention</h5>
       <div class="mcp-field">
         <label class="lbl" for="work-retention-journal-days">journal</label>

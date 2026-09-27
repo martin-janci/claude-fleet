@@ -21,6 +21,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::card::TicketCard;
 use fleet_core::service::work::local::LocalWorkItem;
 use fleet_core::service::work::resume::ResumePlan;
+use fleet_core::service::work::summary::WorkSummary;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
 use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
@@ -302,6 +303,25 @@ pub async fn request_work_handover(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     routed::request_work_handover(&backend, args, &store, &ssh).await
+}
+
+/// Summarise a dead session's last conversation (work graph M13.4c, on
+/// demand; the dialog confirms first). `link_id` picks the past session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SummarizeWorkArgs {
+    pub key: String,
+    #[serde(default)]
+    pub link_id: Option<i64>,
+}
+
+#[tauri::command]
+pub async fn summarize_work(
+    args: SummarizeWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<WorkSummary, IpcError> {
+    routed::summarize_work(&backend, args, &store, &ssh).await
 }
 
 /// The Today view's digest (work graph M9.1). `since` is the viewer's local
@@ -750,6 +770,33 @@ pub(crate) mod routed {
                     store,
                     ssh,
                     args.session_id,
+                    &fleet_core::service::orgs::OrgScope::All,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn summarize_work(
+        backend: &FleetBackend,
+        args: SummarizeWorkArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<WorkSummary, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "summarize".into(),
+            key: Some(args.key.clone()),
+            link_id: args.link_id,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("summarize_work", &wire).await,
+            None => {
+                work::summary::summarize(
+                    store,
+                    ssh.as_ref(),
+                    &args.key,
+                    args.link_id,
                     &fleet_core::service::orgs::OrgScope::All,
                 )
                 .await

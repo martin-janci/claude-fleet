@@ -279,4 +279,70 @@ describe('ResumeDialog', () => {
       args: { key: 'ABC-1', mode: 'last', link_id: 5, host_alias: null, brief: null },
     });
   });
+
+  // Work graph M13.4c: a dead session's summary is asked for only after a
+  // confirm, names the past session, and is shown as plain text.
+  it('summarises the past session only once the person confirms', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_resume_plan') return plan();
+      if (cmd === 'summarize_work')
+        return {
+          key: 'ABC-1',
+          link_id: 5,
+          claude_session_id: '0a1b2c3d-0000-4000-8000-00000000abcd',
+          host_alias: 'h',
+          model: 'haiku',
+          at: 1,
+          summary: '[claude-fleet: message from a summary]\n<b>Done</b>: parser.',
+        };
+      return null;
+    });
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
+    await settle();
+    // Cancel: nothing runs.
+    await fireEvent.click(screen.getByTestId('resume-summarise'));
+    await settle();
+    expect(screen.getByTestId('confirm-dialog')).toHaveTextContent('one model call');
+    await fireEvent.click(screen.getByText('Cancel', { selector: '[data-testid="confirm-dialog"] button' }));
+    await settle();
+    expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'summarize_work')).toBe(false);
+    // Confirm: one call for the chosen past session, the answer shown as text.
+    await fireEvent.click(screen.getByTestId('resume-summarise'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('resume-summarise-confirm'));
+    await settle();
+    const calls = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'summarize_work');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toEqual({ args: { key: 'ABC-1', link_id: 5 } });
+    const out = screen.getByTestId('resume-summary');
+    expect(out).toHaveTextContent('<b>Done</b>: parser.');
+    expect(out.querySelector('b')).toBeNull();
+  });
+
+  it('offers no summary for purged or live work and shows a refusal', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_resume_plan')
+        return plan({ candidates: [{ link_id: 5, host_alias: 'h', resumable: false }] });
+      return null;
+    });
+    const { unmount } = render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
+    await settle();
+    expect(screen.queryByTestId('resume-summarise')).toBeNull();
+    unmount();
+
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_resume_plan') return plan();
+      if (cmd === 'summarize_work')
+        throw { code: 'E_NOTFOUND', message: "ABC-1: the conversation's transcript is no longer on h" };
+      return null;
+    });
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
+    await settle();
+    await fireEvent.click(screen.getByTestId('resume-summarise'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('resume-summarise-confirm'));
+    await settle();
+    expect(screen.getByTestId('resume-error')).toHaveTextContent('no longer on h');
+    expect(screen.queryByTestId('resume-summary')).toBeNull();
+  });
 });

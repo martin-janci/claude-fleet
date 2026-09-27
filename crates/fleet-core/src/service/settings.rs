@@ -37,6 +37,10 @@ pub enum Kind {
     /// JSON array of positive integer ids (`[3, 7]`), stored sorted and
     /// without duplicates. `[]` means "none".
     IdSet,
+    /// A Claude model name or alias (`haiku`, `claude-haiku-4-5-20251001`,
+    /// `opus[1m]`): letters, digits and `._-:[]`, starting with a letter or
+    /// digit, at most 128 chars — it goes on a command line.
+    Model,
     /// JSON object `{ "<model fragment>": {input, output, cache_write,
     /// cache_read} }` in USD per million tokens (`service::usage`). `{}`
     /// means "built-in prices only".
@@ -201,6 +205,10 @@ pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
 /// (`work_link { source: agent_inferred }` — only ever a suggestion). Off by
 /// default: it spends context on a guess. Read on every prompt.
 pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
+/// The model a dead session's on-demand summary runs on (work graph
+/// M13.4c, decision D10): `claude -p --model <this>` on the session's own
+/// host and account. A small model by default: a summary is a read.
+pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -427,6 +435,11 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Bool,
     },
     Spec {
+        key: WORK_SUMMARY_MODEL,
+        default: "haiku",
+        kind: Kind::Model,
+    },
+    Spec {
         key: WORK_TIDY_DONE_DAYS,
         default: "2",
         kind: Kind::Int { min: 1, max: 365 },
@@ -589,6 +602,13 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             format!("{key} must be one of: {}", options.join(", ")),
         )),
         Kind::PathMap => parse_path_map(key, v).map(|_| ()),
+        Kind::Model if crate::service::work::summary::valid_model(v) => Ok(()),
+        Kind::Model => Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{key} must be a model name or alias (letters, digits and ._-:[], at most 128)"
+            ),
+        )),
         Kind::IdSet => parse_id_set(v)
             .map(|_| ())
             .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key} {}", e.message))),
@@ -803,6 +823,13 @@ mod tests {
         assert_eq!(resolve(WORK_AUTO_TIDY, None), "false");
         assert_eq!(resolve(WORK_TIDY_DONE_DAYS, None), "2");
         assert_eq!(resolve(WORK_TIDY_IDLE_HOURS, None), "4");
+        assert_eq!(resolve(WORK_SUMMARY_MODEL, None), "haiku");
+        for ok in ["sonnet", "claude-haiku-4-5-20251001", "opus[1m]"] {
+            assert!(validate(WORK_SUMMARY_MODEL, ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "-p", "a b", "x;y", "$(id)"] {
+            assert!(validate(WORK_SUMMARY_MODEL, bad).is_err(), "{bad:?}");
+        }
         assert_eq!(resolve(WORK_TIDY_IDLE_UNLINKED_DAYS, None), "7");
         assert!(validate(WORK_TIDY_IDLE_UNLINKED_DAYS, "1").is_ok());
         assert!(validate(WORK_TIDY_IDLE_UNLINKED_DAYS, "90").is_ok());

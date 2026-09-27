@@ -965,6 +965,51 @@ async fn run_matrix(isolate: bool) {
     )
     .await;
     same_as_unknown(&hidden, &unknown, &fx.s_b.to_string(), "999999");
+    // A dead session's summary (work graph M13.4c), per caller: the fences
+    // of a resume. BB-3's past session ran on h-b; its conversation id is
+    // not a UUID here, so a caller past the fences is refused for that
+    // (never an org or host refusal), before any model call.
+    //
+    // * master / full client / host B: past the fences.
+    // * host A / host in no org: B's past work is not visible.
+    // * readonly: refused by its mode.
+    m.row(
+        "work_link",
+        "summarize",
+        |_, _| json!({ "action": "summarize", "key": "BB-3" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone => {
+                    is_code(who, a, "E_FORBIDDEN", "summarise B's past work")
+                }
+                _ => {
+                    is_code(who, a, "E_INVALID", "past the fences");
+                    assert!(text(a).contains("no Claude conversation"), "{who:?}: {a:?}");
+                }
+            }
+        },
+    )
+    .await;
+    // Host B names a link id of work it cannot see (A's live link): the
+    // same answer as an id that does not exist.
+    let hidden = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "summarize", "key": "BB-3", "link_id": fx.link_x }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "summarize", "key": "BB-3", "link_id": 999_999 }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, &fx.link_x.to_string(), "999999");
     // Today (work graph M9.1): BB-3 shipped today (done, and its ended
     // session left a PR). Each host reads its own host's day inside its org.
     {

@@ -170,7 +170,7 @@ fn candidate(l: &WorkLinkRow) -> ResumeCandidate {
     }
 }
 
-fn host_reachable(s: &Store, host: &str) -> Result<Option<bool>, IpcError> {
+pub(super) fn host_reachable(s: &Store, host: &str) -> Result<Option<bool>, IpcError> {
     if host == crate::service::projects::LOCAL_HOST {
         return Ok(Some(
             crate::service::hub::ensure_local_allowed(host).is_ok(),
@@ -476,11 +476,25 @@ pub fn parse_transcript_probe(stdout: &str) -> TranscriptProbe {
         .unwrap_or(TranscriptProbe::Unknown)
 }
 
-/// The probe a planned *continue* needs, read under the lock.
-struct TranscriptCheck {
+/// The probe a planned *continue* (or a summary, M13.4c) needs, read
+/// under the lock.
+pub(super) struct TranscriptCheck {
     host: String,
     /// The script, or why none could be built (answered as `Unknown`).
     script: Result<String, String>,
+}
+
+/// The probe of `claude_session_id`'s transcript on `host`, from the path a
+/// conversation row recorded (`stored`) and the host's own projects.
+pub(super) fn transcript_check_for(
+    host: &str,
+    stored: Option<&str>,
+    claude_session_id: &str,
+) -> TranscriptCheck {
+    TranscriptCheck {
+        host: host.to_string(),
+        script: transcript_probe_script(stored, claude_session_id),
+    }
 }
 
 /// The probe for `plan`, when it would continue the held conversation on a
@@ -506,15 +520,15 @@ fn transcript_check(s: &Store, plan: &ResumePlan) -> Result<Option<TranscriptChe
     } else {
         None
     };
-    Ok(Some(TranscriptCheck {
-        script: transcript_probe_script(stored.as_deref(), &id),
-        host,
-    }))
+    Ok(Some(transcript_check_for(&host, stored.as_deref(), &id)))
 }
 
 /// Run the check: one command over the host's ControlMaster (`local` runs
 /// it locally, without SSH), capped at [`TRANSCRIPT_PROBE_TIMEOUT`].
-async fn run_transcript_check(exec: &dyn SshExec, check: &TranscriptCheck) -> TranscriptProbe {
+pub(super) async fn run_transcript_check(
+    exec: &dyn SshExec,
+    check: &TranscriptCheck,
+) -> TranscriptProbe {
     let Ok(script) = &check.script else {
         return TranscriptProbe::Unknown;
     };

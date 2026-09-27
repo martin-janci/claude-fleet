@@ -324,6 +324,28 @@ There are two kinds:
   `handover_requested`, then `handover_written`, `handover_missing` or
   `handover_send_failed`. Fleet never spends a turn on this by itself, not
   even at safe kill (decision D9).
+- **A summary of a dead session, on demand.** A session that is gone
+  cannot write its own hand-off, so in the Resume dialog each past session
+  has **Summarise…**. After you confirm, fleet runs
+  `claude -p --resume <id> --fork-session` on the session's own host,
+  under that host's own Claude account, with the model in
+  `work.summary_model` (`haiku` by default). The run has **no tools** (no
+  built-in tool, no MCP server, no skill, nothing unapproved), fleet's
+  hooks are off for it, and the fork is never saved as a transcript, so
+  the original conversation is untouched and nothing shows up as lost
+  work. Fleet first checks that the conversation's transcript is still on
+  the host and refuses in words when it is gone (or was purged). The
+  answer is redacted, kept as the work journal's `summary` row for that
+  conversation (one per conversation), and shown inside the untrusted
+  fence: the next resume brief and `work { action: context }` put it right
+  after the agent-written handover. It costs one model call per click on
+  that host's account; one summary runs at a time per host, for at most
+  three minutes. Fleet never summarises by itself (decision D10). Over the
+  control API it is `work_link { action: summarize, key, link_id? }`
+  (`link_id` picks a past session, else the newest): a per-host token asks
+  only for its own host's past work inside its org, the operator's request
+  always waits for a person's approval, and on a hub (nobody to approve)
+  the operator's request is refused.
 
 ## Today and standup
 
@@ -605,6 +627,7 @@ table.
 | `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
 | `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |
 | `work.classify_nudge` | `false` | on / off | one note per conversation asking Claude to name its work after three unlinked turns |
+| `work.summary_model` | `haiku` | a model name or alias | the model a dead session's on-demand summary runs on (`claude -p --model`, on the session's own host) |
 | `work.tidy_done_days` | `2` | 1–365 days | how long a linked ticket must be done before tidy-up suggests its session |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | how long a session must be idle before any tidy reason suggests it |
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | idle and unprompted days before a session with no work is suggested (`idle_unlinked`) |

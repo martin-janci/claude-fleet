@@ -16,6 +16,7 @@ pub mod resume;
 pub mod retention;
 #[cfg(test)]
 mod scale_tests;
+pub mod summary;
 pub mod tidy;
 pub mod today;
 pub mod usage;
@@ -89,7 +90,7 @@ pub struct WorkLinkArgs {
     /// Or: a work item id.
     #[serde(default)]
     pub item_id: Option<i64>,
-    /// For unlink.
+    /// For unlink; summarize: the past session.
     #[serde(default)]
     pub link_id: Option<i64>,
     /// manual (default) | agent | agent_inferred (a suggestion)
@@ -263,6 +264,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "resume",
     "start",
     "handover",
+    "summarize",
     "archive",
     "unarchive",
     "snooze",
@@ -295,6 +297,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
     ("request_work_handover", "work_link", "handover"),
+    ("summarize_work", "work_link", "summarize"),
     ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),
     ("work_reopened", "work", "reopened"),

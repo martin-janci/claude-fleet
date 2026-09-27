@@ -3455,7 +3455,10 @@ fn the_served_definition_budget_stays_bounded() {
     // Work graph M13.2 (`work_admin` `usage` and its `days` window, "usage
     // counts" in the description): measured at 56,873 on 2026-09-26
     // (+144); plus 100.
-    const BUDGET_BYTES: usize = 56_973;
+    // Work graph M13.4c (`work_link` `summarize`: one enum value, a clause
+    // of description, `link_id`'s doc names it): measured at 56,997 on
+    // 2026-09-27 (+124); plus 100.
+    const BUDGET_BYTES: usize = 57_097;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7050,6 +7053,56 @@ async fn an_operator_start_waits_for_approval_and_a_phone_start_does_not() {
     )
     .await
     .expect("link is not gated");
+}
+
+/// Work graph M13.4c (decision D10): the operator's summary of a dead
+/// session spends a model call, so it waits for a person's approval; a hub
+/// (no approver) refuses it outright; a phone's is never gated.
+#[tokio::test]
+async fn an_operator_summary_is_confirm_gated_and_refused_on_a_hub() {
+    use crate::service::work::WorkLinkArgs;
+    let summarize = |nonce: Option<String>| WorkLinkArgs {
+        action: "summarize".into(),
+        key: Some("PAY-404".into()),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    // A phone: straight through to the service, which has no past work.
+    let phone = t
+        .work_link(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(summarize(None)),
+        )
+        .await
+        .unwrap_err();
+    assert!(phone.message.starts_with("E_NOTFOUND"), "{}", phone.message);
+    // The operator: asked first; approved, it reaches the same refusal.
+    let asked = t
+        .work_link(Extension(op.clone()), Parameters(summarize(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let after = t
+        .work_link(Extension(op.clone()), Parameters(summarize(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(after.message.starts_with("E_NOTFOUND"), "{}", after.message);
+    // A hub: nobody could approve it, so it is refused.
+    let (s, _, _) = two_host_store();
+    let hub = guarded_tools(s, false);
+    let e = hub
+        .work_link(Extension(op), Parameters(summarize(None)))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    assert!(e.message.contains("no approver"), "{}", e.message);
 }
 
 #[tokio::test]

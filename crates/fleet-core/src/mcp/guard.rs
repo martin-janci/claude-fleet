@@ -845,7 +845,8 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// tool — need a person's approval whatever `mcp.confirm_destructive` says
 /// (work graph M9.7, decision D12). For anyone else they are ungated.
 /// Some are gated only for the actions that create a session, at the call
-/// site: `work_link` for `start` / `resume`, `dispatch_task` for
+/// site: `work_link` for `start` / `resume` / `summarize` (a model call,
+/// M13.4c), `dispatch_task` for
 /// `new_worker`, `restore_host_sessions` unless `dry_run`.
 pub const OPERATOR_CONFIRMS: &[&str] = &[
     "new_session",
