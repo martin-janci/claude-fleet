@@ -588,7 +588,9 @@ const MIGRATIONS: &[Migration] = &[
     // indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(61, include_str!("../../migrations/061_tracker_writes.sql")),
     // Work graph M13.4f: a tracker's webhook secret. A new table,
-    // `IF NOT EXISTS`, safe to re-run.
+    // `IF NOT EXISTS`, safe to re-run. The feature was removed again (D13
+    // stays no); the entry stays so a database that ran it is not refused
+    // as newer, and 064 drops the table.
     Migration::plain(
         62,
         include_str!("../../migrations/062_tracker_webhooks.sql"),
@@ -599,6 +601,12 @@ const MIGRATIONS: &[Migration] = &[
     Migration::plain(
         63,
         include_str!("../../migrations/063_row_version_on_visible_change.sql"),
+    ),
+    // Drops 062's `tracker_webhooks`: nothing reads it since the webhook
+    // nudges were removed, and a secret no code can rotate must not stay.
+    Migration::plain(
+        64,
+        include_str!("../../migrations/064_drop_tracker_webhooks.sql"),
     ),
 ];
 

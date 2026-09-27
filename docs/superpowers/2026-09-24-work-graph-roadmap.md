@@ -764,8 +764,8 @@ Plan: `plans/2026-09-26-work-graph-m13-live-use.md`.
   nothing leaves the machine (D24).
 - **M13.3** triage of the owner's M10.3 run (waits on the run).
 - **M13.4** the decision-gated builds, each only on a "yes": D20, D5, D10,
-  D15, D3, and D13 (M13.4f). The user said yes to D3, D10, D13 and D20 on
-  2026-09-27; build notes in `plans/2026-09-26-work-graph-m13-decided-yes.md`.
+  D15, D3, and D13 (M13.4f). The user said yes to D3, D10 and D20 on
+  2026-09-27 (D13 was built, then removed: it stays no); build notes in `plans/2026-09-26-work-graph-m13-decided-yes.md`.
 - **M13.5** close-out: the work graph is *operating* (D26).
 
 **Value:** the roadmap matches `main`, partial sync failures are visible,
@@ -774,10 +774,11 @@ and every open decision gets an answer backed by usage.
 **Status (2026-09-26):**
 - **M13.0 done** (this revision).
 - M13.1 and M13.2 are not started. M13.3 waits on the owner's run.
-- M13.4: D3, D10, D13 and D20 are yes (2026-09-27). **M13.4c (D10),
-  M13.4e (D3) and M13.4f (D13) built** on `claude/cloud-fleet-work-graph-m13`;
-  **M13.4a (D20) built** on fleet-mobile's
-  `claude/work-graph-m13-4a-name-work`. D5 and D15 wait on the decisions.
+- M13.4: D3, D10 and D20 are yes (2026-09-27). **M13.4c (D10) and
+  M13.4e (D3) are on `main`** (#327); **M13.4a (D20)** is on fleet-mobile's
+  `main` (martin-janci/fleet-mobile#51). M13.4f (webhooks, D13) reached
+  `main` with #327 and was **removed** again: the owner keeps D13 at no.
+  D5 and D15 wait on the decisions.
 
 ## Critical path and parallelism
 
@@ -822,7 +823,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-26: yes, on demand only** (*Summarise* on a past-work row; `work.summary_model`, default `haiku`, D27; never automatic, D30): M13.4c, **built** |
 | D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before.** Built (M9.6, #268) |
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always.** Built (M9.7, #268) |
-| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-26: yes, a nudge only** (HMAC per tracker, the payload never trusted, polling stays; GitHub, Jira Cloud and Linear, D28): M13.4f |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **No.** Recorded yes on 2026-09-26 and built as M13.4f (reached `main` with #327); **the owner reversed it on 2026-09-27 → no** (the M12.6 recommendation), and M13.4f was removed. Migration 062 stays in the chain, 064 drops its table (063 is another change, #333) |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25)**: `work.classify_nudge`. Opened as #273 (closed unmerged); the commit reached `main` with #270 |
 | D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | Desktop only. **Waits on the user** after M10.3 (M13.4d) |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done.** hub-e2e runs in CI's `hub-headless` job (`.github/workflows/ci.yml`, every PR and `main` push). Since #314 the job also builds an `e2e`-feature hub into `target/e2e` and passes it as `WBIN`, so the M10.2 work-graph leg runs on every PR; with `CI=true` a missing `WBIN` fails instead of skipping (`scripts/hub-e2e.sh`) |
@@ -837,7 +838,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1 |
 | D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | Yes (default); M13.5 |
 | D27 | Which model summarises a dead session, on whose quota? (M13.4c) | a small model · the session's configured model | `haiku` (`work.summary_model`: haiku / sonnet / opus), on the session's own host and account |
-| D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | GitHub, Jira Cloud, Linear (Asana needs a handshake; Jira DC later) |
+| D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | **Moot**: D13 is no, and M13.4f was removed |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
 | D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
 
@@ -990,3 +991,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   the ticket card on the session's work sheet (`work card`, read-only, any
   token), *Copy* on every card, and the org colour bar on session rows
   when two or more orgs show. No hub change, no contract bump.
+- 2026-09-27: **D13 back to no.** The owner reversed the yes; M13.4f
+  (webhook nudges), which reached `main` with #327, is removed. Migration 062
+  stays in the chain so a database that ran it is not refused as newer, and
+  064 drops its `tracker_webhooks` table. D28 is moot.

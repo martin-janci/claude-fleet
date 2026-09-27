@@ -64,6 +64,34 @@ fn the_run_is_a_fork_with_no_tools_no_mcp_no_hooks_and_no_transcript() {
 }
 
 #[test]
+fn nothing_in_the_run_grants_a_tool_back() {
+    let sc = summary_script(None, CID, "haiku").unwrap();
+    for grant in [
+        "--allowedTools",
+        "--allowed-tools",
+        "--mcp-config",
+        "--dangerously-skip-permissions",
+        "bypassPermissions",
+        "acceptEdits",
+        "--add-dir",
+        "--plugin-dir",
+        "--agents",
+    ] {
+        assert!(!sc.contains(grant), "{grant:?} in {sc}");
+    }
+    // The only `--tools` is the empty one.
+    assert_eq!(sc.matches("--tools").count(), 1, "{sc}");
+    // The prompt is the last word of the command, before the redirect.
+    assert!(
+        sc.contains(&format!(
+            "{} </dev/null",
+            crate::shell::quote(SUMMARY_PROMPT)
+        )),
+        "{sc}"
+    );
+}
+
+#[test]
 fn the_run_happens_in_the_transcripts_recorded_directory() {
     let sc = summary_script(None, CID, "haiku").unwrap();
     assert!(
