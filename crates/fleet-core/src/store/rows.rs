@@ -321,7 +321,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                                                   THEN 'true' ELSE 'false' END), \
                          'state', l.state, 'strength', l.strength, 'rule', l.rule, \
                          'archived_at', l.archived_at, \
-                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
+                         'org_id', COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \
@@ -353,7 +353,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                                                      AND c.ended_at IS NULL \
                                                      AND c.is_primary = 1 \
                                                      AND c.state = 'confirmed'))), \
-                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
+                         'org_id', COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.state = 'suggested' \
@@ -823,6 +823,8 @@ pub struct ClientTokenRow {
     pub last_seen_at: Option<i64>,
     pub revoked_at: Option<i64>,
     pub trusted_at: Option<i64>,
+    /// The org the client is bound to (migration 065), `None` unbound.
+    pub org_id: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of
@@ -1057,7 +1059,7 @@ pub struct HostReconcile<'a> {
     /// marker and the BE-3 ghost guard's evidence. Folded into the upsert
     /// rather than written by a second UPDATE, so a pass is one physical
     /// UPDATE per row; the stamp alone does not bump `row_version`
-    /// (migration 063). `None` (the default, store-level tests) leaves the
+    /// (migration 065). `None` (the default, store-level tests) leaves the
     /// stored stamp alone.
     pub reconciled_at: Option<i64>,
 }

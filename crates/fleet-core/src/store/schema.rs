@@ -221,6 +221,27 @@ fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 065 (work graph M14.1b): its last
+/// ADD COLUMN (`client_tokens.org_id`) present means the whole migration is.
+fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'org_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 066 (work graph M14.1b, D31).
+fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'bound_sees_unassigned'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -608,6 +629,22 @@ const MIGRATIONS: &[Migration] = &[
         64,
         include_str!("../../migrations/064_drop_tracker_webhooks.sql"),
     ),
+    // Work graph M14.1b: the Work view's reads (link versions, placements,
+    // placement rules, saved views, a local item's org, a conflict's review
+    // ack, org-bound paired clients). `ALTER TABLE ... ADD COLUMN` fails if
+    // the column is already there.
+    Migration {
+        version: 65,
+        sql: include_str!("../../migrations/065_work_view.sql"),
+        already_applied: Some(client_tokens_has_org),
+    },
+    // D31: `orgs.bound_sees_unassigned` (and its auth-epoch trigger). An
+    // ADD COLUMN, guarded like 053's.
+    Migration {
+        version: 66,
+        sql: include_str!("../../migrations/066_org_bound_sees_unassigned.sql"),
+        already_applied: Some(orgs_has_bound_sees_unassigned),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2940,11 +2977,47 @@ mod tests {
                 "created_at",
                 "last_seen_at",
                 "revoked_at",
-                "trusted_at"
+                "trusted_at",
+                // Work graph M14 (migration 065): its own trigger,
+                // `auth_epoch_client_tokens_org`.
+                "org_id"
             ],
             "client_tokens changed: add the column to auth_epoch_client_tokens_update \
              (migration 060) unless it is liveness-only like last_seen_at"
         );
+    }
+
+    /// Work graph M14: re-binding a paired client to another org (or
+    /// unbinding it) is a change of who it is — it must invalidate every
+    /// cached caller, or a re-bound phone would keep reading its old org
+    /// until the cache aged out.
+    #[test]
+    fn rebinding_a_client_bumps_the_auth_epoch() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.add_org("A", None, false).unwrap();
+        let b = s.add_org("B", None, false).unwrap();
+        s.insert_client_token("phone", &"0".repeat(64), "full")
+            .unwrap();
+        let at = |s: &Store| s.auth_epoch().unwrap();
+        let e0 = at(&s);
+        s.set_client_org("phone", Some(a.id)).unwrap();
+        let e1 = at(&s);
+        assert!(e1 > e0, "bound");
+        s.set_client_org("phone", Some(a.id)).unwrap();
+        assert_eq!(at(&s), e1, "the same binding again is no change");
+        s.set_client_org("phone", Some(b.id)).unwrap();
+        let e2 = at(&s);
+        assert!(e2 > e1, "re-bound");
+        s.set_client_org("phone", None).unwrap();
+        assert!(at(&s) > e2, "unbound");
+        assert_eq!(
+            s.set_client_org("phone", Some(9_999)).unwrap_err().code,
+            crate::ipc_error::codes::E_NOTFOUND
+        );
+        // A deleted org leaves the client bound to its id: fail closed.
+        s.set_client_org("phone", Some(b.id)).unwrap();
+        s.remove_org(b.id).unwrap();
+        assert_eq!(s.active_client_tokens().unwrap()[0].org_id, Some(b.id));
     }
 
     /// Migration 060 on a populated v59 database: the counter starts at 0,

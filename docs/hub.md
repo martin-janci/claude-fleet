@@ -706,15 +706,18 @@ fleet-hub client list --include-revoked
 fleet-hub client revoke phone
 fleet-hub client trust mac-desktop
 fleet-hub client untrust mac-desktop
+fleet-hub client bind contractor-phone 2
+fleet-hub client unbind contractor-phone
 ```
 
 `client list` prints one line per client, newest first:
 
 ```
-NAME         MODE      TRUSTED            CREATED            LAST SEEN          REVOKED
-mac-desktop  full      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
-phone        full      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
-kiosk        readonly  -                  2026-09-17 09:12Z  -                  -
+NAME              MODE      ORG    TRUSTED            CREATED            LAST SEEN          REVOKED
+mac-desktop       full      -      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
+contractor-phone  full      org 2  -                  2026-09-27 08:00Z  2026-09-27 09:12Z  -
+phone             full      -      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
+kiosk             readonly  -      -                  2026-09-17 09:12Z  -                  -
 ```
 
 The token itself is never shown again: only its SHA-256 is stored, and the
@@ -758,6 +761,33 @@ What a client may do:
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
   this option keeps marking everything, which is the safe direction.
+- **Bound to an org** (work graph M14.1b). `fleet-hub pair --name <name>
+  --org <org id>`, or `fleet-hub client bind <name> <org id>` later
+  (`work_admin { action: "assign_client", name, org_id }`; no `org_id` and
+  `fleet-hub client unbind <name>` unbind), restricts a client to one
+  organisation: it reads that org's work **and sessions** only — the Work
+  view (`work { tree | task | session_tasks | review | rules | rule_preview
+  | views }`), tickets, Today, conversations, `list_sessions`, every
+  session-addressed tool, `fleet_health`'s trackers and per-host spend, and
+  every `/events` frame. Whether it also sees *unassigned* work and sessions
+  (no org) is the org's switch `bound_sees_unassigned` (decision D31): on by
+  default, as a host sees them; `fleet-hub`'s master turns it off with
+  `work_admin { action: "update_org", org_id, bound_sees_unassigned: false }`
+  (or Settings → Work → Organisations), and the org's bound clients then see
+  only rows assigned to it. Another org's session or task answers exactly as
+  one that does not exist, whatever `isolate_sessions` says (a bound client
+  asked to be restricted, so the session fence is always on for it), and
+  `work` frames are not sent to it at all (it re-reads through `work { … }`).
+  It cannot start or resume a session in another org's project or host, read
+  what moving a task between orgs would change (`org_impact`), or change
+  trust or reopened work. The binding and the switch take effect from its
+  next request (re-binding invalidates the token cache; an open event
+  stream re-reads its scope and ends at its next beat when re-bound).
+  Deleting the org leaves the client bound to an org that no longer
+  exists — it then reads nothing of any org and no unassigned data either,
+  never every org (fail closed). A peer hub link is never bound. Use it for
+  a device that belongs to one company's work, such as a contractor's
+  second phone.
 
 **Work on a phone** (the work graph, M8). A client token is served `work`
 and — `full` only — `work_link`, and never `work_admin`, so tracker
@@ -1080,7 +1110,8 @@ tracker, or to make it a **boundary** for the hosts you put in it.
 
 An org is two things at once:
 
-- **A view** for people. The master and every paired client read every org;
+- **A view** for people. The master and every unbound paired client read
+  every org (a client bound to an org reads that org only — *Clients* above);
   the sidebar's selector (⌘⇧O / Ctrl+Shift+O) only narrows what is shown,
   and a session waiting on you in another scope still says so ("2 need you
   in Personal →").

@@ -270,6 +270,8 @@ pub fn scope_sees_tracker(scope: &OrgScope, tracker_org: Option<i64>) -> bool {
     match scope {
         OrgScope::All => true,
         OrgScope::Host { org, .. } => tracker_org == *org,
+        // A bound client (work graph M14): its own org's trackers only.
+        OrgScope::Org { org, .. } => tracker_org == Some(*org),
     }
 }
 
@@ -449,6 +451,17 @@ pub fn scope_trackers(h: &mut Health, s: &Store, scope: &OrgScope) {
 pub fn scope_usage_to_host(h: &mut Health, s: &Store, host: &str) {
     h.usage_by_host.retain(|k, _| k == host);
     h.usage_by_day = usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, Some(host));
+}
+
+/// Restrict the per-host spend to the hosts an org-bound client sees (work
+/// graph M14): another org's host is not named to it. The daily roll-up is
+/// fleet-wide totals with no host in it and stays.
+pub fn scope_usage_to_org(h: &mut Health, s: &Store, scope: &OrgScope) {
+    h.usage_by_host.retain(|host, _| {
+        s.host_org(host)
+            .map(|org| scope.sees_session(host, org))
+            .unwrap_or(false)
+    });
 }
 
 fn now_unix() -> i64 {

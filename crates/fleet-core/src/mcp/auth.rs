@@ -68,6 +68,11 @@ pub struct ClientRef {
     pub id: i64,
     pub name: String,
     pub trusted: bool,
+    /// The org this client is bound to (work graph M14, `fleet-hub pair
+    /// --org`): its work and sessions are fenced to that org and unassigned
+    /// data ([`crate::service::orgs::OrgScope::Org`]). `None`: unbound, every
+    /// org (the org is a view, as for the master).
+    pub org_id: Option<i64>,
 }
 
 /// The authenticated identity behind a request, derived from the bearer
@@ -136,18 +141,34 @@ impl Caller {
     }
 
     /// The work graph's org scope for this caller (M5) — the ONE place a
-    /// caller becomes a scope. The master and a paired client read every
-    /// org (the org is a view there); a per-host token is bounded by its
-    /// host's org, read from the store now, so a host moved by the master
-    /// is fenced from its next call on.
+    /// caller becomes a scope. The master and an unbound paired client read
+    /// every org (the org is a view there); a per-host token is bounded by
+    /// its host's org, read from the store now, so a host moved by the
+    /// master is fenced from its next call on; a client bound to an org
+    /// (M14) is bounded by that org. The binding travels in the cached
+    /// caller, and a re-bind bumps the auth epoch (migration 065), so a
+    /// re-bound client is fenced from its next request on.
     pub fn org_scope(
         &self,
         store: &crate::store::Store,
     ) -> Result<crate::service::orgs::OrgScope, crate::ipc_error::IpcError> {
-        match &self.host_alias {
-            None => Ok(crate::service::orgs::OrgScope::All),
-            Some(h) => crate::service::orgs::OrgScope::for_host(store, h),
+        match (&self.host_alias, &self.client) {
+            (Some(h), _) => crate::service::orgs::OrgScope::for_host(store, h),
+            (
+                None,
+                Some(ClientRef {
+                    org_id: Some(org), ..
+                }),
+            ) => crate::service::orgs::OrgScope::for_client(store, *org),
+            (None, _) => Ok(crate::service::orgs::OrgScope::All),
         }
+    }
+
+    /// True when this caller reads through an org boundary: a per-host
+    /// token, or a paired client bound to an org (work graph M14). The
+    /// result gate redacts every answer such a caller receives.
+    pub fn is_scoped(&self) -> bool {
+        self.host_alias.is_some() || self.client.as_ref().is_some_and(|c| c.org_id.is_some())
     }
 
     /// Short identity label for audit rows and rate-limit buckets.
@@ -233,6 +254,7 @@ pub fn resolve_token(
                     id: row.id,
                     name: row.name.clone(),
                     trusted: row.trusted_at.is_some(),
+                    org_id: row.org_id,
                 }),
                 mode: TokenMode::parse_client(&row.mode),
             });
@@ -419,6 +441,7 @@ mod tests {
             last_seen_at: None,
             revoked_at: None,
             trusted_at: None,
+            org_id: None,
         }
     }
 
@@ -557,6 +580,7 @@ mod tests {
                     last_seen_at: None,
                     revoked_at: None,
                     trusted_at: None,
+                    org_id: None,
                 }]
             ),
             None

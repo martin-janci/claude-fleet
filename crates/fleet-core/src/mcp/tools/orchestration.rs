@@ -542,7 +542,8 @@ impl FleetTools {
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
         {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
-        tidy; reopened.")]
+        tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; \
+        session_tasks; review; rules; rule_preview {rule}; views; org_impact.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -639,6 +640,66 @@ impl FleetTools {
                 &crate::service::work::local::local_items(&self.store, &scope)
                     .map_err(to_mcp_err)?,
             ),
+            // Work graph M14: the Work view. Its reads build from the read
+            // pool (one pass over every item and link), never the writer.
+            WorkAction::Tree => ok_json_compact(
+                &w::view::tree(
+                    self.reader(),
+                    &scope,
+                    &w::view::TreeArgs {
+                        filters: args.filters.clone().unwrap_or_default(),
+                        cursor: args.cursor.clone(),
+                        limit: args.limit,
+                        per_task: args.per_task,
+                    },
+                )
+                .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Task => {
+                let task_id = args
+                    .task_id
+                    .as_deref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "task needs task_id", None))?;
+                ok_json_compact(&w::view::task(self.reader(), &scope, task_id).map_err(to_mcp_err)?)
+            }
+            WorkAction::SessionTasks => {
+                let id = args
+                    .session_id
+                    .ok_or_else(|| mcp_err("E_INVALID", "session_tasks needs session_id", None))?;
+                self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+                ok_json_compact(
+                    &w::view::session_tasks(self.reader(), &scope, id).map_err(to_mcp_err)?,
+                )
+            }
+            WorkAction::Review => ok_json_compact(
+                &w::view::review(self.reader(), &scope, args.cursor.as_deref(), args.limit)
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Rules => {
+                ok_json_compact(&w::structure::rules(&self.store, &scope).map_err(to_mcp_err)?)
+            }
+            WorkAction::RulePreview => {
+                let rule = args
+                    .rule
+                    .as_ref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "rule_preview needs rule", None))?;
+                ok_json_compact(
+                    &w::structure::rule_preview(self.reader(), &scope, rule).map_err(to_mcp_err)?,
+                )
+            }
+            WorkAction::Views => {
+                ok_json_compact(&w::structure::views(&self.store, &scope).map_err(to_mcp_err)?)
+            }
+            WorkAction::OrgImpact => {
+                let task_id = args
+                    .task_id
+                    .as_deref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "org_impact needs task_id", None))?;
+                ok_json_compact(
+                    &w::structure::org_impact(&self.store, &scope, task_id, args.org_id)
+                        .map_err(to_mcp_err)?,
+                )
+            }
         }
     }
 
@@ -768,11 +829,12 @@ impl FleetTools {
             return ok_json(&row);
         }
         if args.action == "trust_project" {
-            // Trust is fleet configuration, not one host's to change.
-            if caller.host_alias.is_some() {
+            // Trust is fleet configuration, not one host's (nor one bound
+            // client's, M14) to change.
+            if caller.is_scoped() {
                 return Err(mcp_err(
                     "E_FORBIDDEN",
-                    "trust_project is not available to a per-host token",
+                    "trust_project is not available to a per-host token or an org-bound client",
                     None,
                 ));
             }
@@ -781,11 +843,12 @@ impl FleetTools {
             );
         }
         if args.action == "dismiss" {
-            // Reopened work is fleet-wide, not one host's to dismiss.
-            if caller.host_alias.is_some() {
+            // Reopened work is fleet-wide, not one host's (nor one bound
+            // client's, M14) to dismiss.
+            if caller.is_scoped() {
                 return Err(mcp_err(
                     "E_FORBIDDEN",
-                    "dismiss is not available to a per-host token",
+                    "dismiss is not available to a per-host token or an org-bound client",
                     None,
                 ));
             }

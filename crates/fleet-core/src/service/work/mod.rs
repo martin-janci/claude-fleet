@@ -16,10 +16,12 @@ pub mod resume;
 pub mod retention;
 #[cfg(test)]
 mod scale_tests;
+pub mod structure;
 pub mod summary;
 pub mod tidy;
 pub mod today;
 pub mod usage;
+pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -73,6 +75,26 @@ pub struct WorkArgs {
     /// Today: unix start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// item:<id> or ref:<KEY>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Tree filters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub filters: Option<view::WorkTreeFilters>,
+    /// Next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Sessions per task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_task: Option<usize>,
+    /// Draft rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub rule: Option<structure::RuleInput>,
+    /// Org id; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -229,6 +251,22 @@ pub enum WorkAction {
     Reopened,
     /// Local work items: named work with no ticket (work graph M11.1).
     LocalItems,
+    /// The Work view (work graph M14): a page of tasks with their sessions.
+    Tree,
+    /// One task with every session, its provenance and last outcome.
+    Task,
+    /// Every link of one session, with its task.
+    SessionTasks,
+    /// Suggestions and conflicts to decide.
+    Review,
+    /// Placement rules.
+    Rules,
+    /// What a drafted rule would move.
+    RulePreview,
+    /// Saved views.
+    Views,
+    /// What moving a local task to another org changes.
+    OrgImpact,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -250,6 +288,14 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
     ("local_items", WorkAction::LocalItems),
+    ("tree", WorkAction::Tree),
+    ("task", WorkAction::Task),
+    ("session_tasks", WorkAction::SessionTasks),
+    ("review", WorkAction::Review),
+    ("rules", WorkAction::Rules),
+    ("rule_preview", WorkAction::RulePreview),
+    ("views", WorkAction::Views),
+    ("org_impact", WorkAction::OrgImpact),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -327,6 +373,15 @@ fn work_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars
 
 fn work_link_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
     action_schema(WORK_LINK_ACTIONS.iter().copied())
+}
+
+/// The Work view's nested parameters (work graph M14) are served as a bare
+/// `object`: their shape is in `docs/control-api.md` and the spec,
+/// and a typed schema per nested struct would cost the tool budget (C21)
+/// several kilobytes. The server still deserialises them strictly — a
+/// malformed one is refused, never ignored.
+fn object_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({ "type": "object" })
 }
 
 impl WorkArgs {

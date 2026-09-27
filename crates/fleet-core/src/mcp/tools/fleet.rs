@@ -40,6 +40,25 @@ impl FleetTools {
                 }
                 Err(_) => h.trackers = Default::default(),
             }
+        } else if caller.is_scoped() {
+            // Work graph M14: a client bound to an org sees its org's
+            // trackers only, as a host token does.
+            match self.reader().lock() {
+                Ok(s) => match caller.org_scope(&s) {
+                    Ok(scope) => {
+                        health::scope_usage_to_org(&mut h, &s, &scope);
+                        health::scope_trackers(&mut h, &s, &scope)
+                    }
+                    Err(_) => {
+                        h.usage_by_host.clear();
+                        h.trackers = Default::default()
+                    }
+                },
+                Err(_) => {
+                    h.usage_by_host.clear();
+                    h.trackers = Default::default()
+                }
+            }
         }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
@@ -221,8 +240,8 @@ impl FleetTools {
         full drives sessions fleet-wide, readonly observes, peer is another \
         hub's link (see peer_exchange); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
-        Master token only. Returns { url, code, expires_in_s, name, mode, \
-        trusted }.")]
+        org_id binds it to one org (its work and sessions only). Master token \
+        only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.")]
     // The master-only gate is `enforce_admin` in `call_tool` (`pair_client`
     // is in `guard::ADMIN_TOOLS`), so no caller extractor is needed here.
     pub(super) async fn pair_client(
@@ -243,11 +262,18 @@ impl FleetTools {
                 None,
             ));
         }
+        if mode == "peer" && p.org_id.is_some() {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                "a peer hub link is never bound to an org; drop org_id",
+                None,
+            ));
+        }
         audit(
             "pair_client",
             &format!(
-                "name={name} mode={mode} trusted={} ttl_s={:?}",
-                p.trusted, p.ttl_s
+                "name={name} mode={mode} trusted={} ttl_s={:?} org_id={:?}",
+                p.trusted, p.ttl_s, p.org_id
             ),
         );
         let ttl = pair_ttl(p.ttl_s);
@@ -272,9 +298,21 @@ impl FleetTools {
                     None,
                 ));
             }
+            if let Some(org) = p.org_id {
+                if s.get_org(org).map_err(to_mcp_err)?.is_none() {
+                    return Err(mcp_err(
+                        codes::E_NOTFOUND,
+                        format!("org {org} not found"),
+                        None,
+                    ));
+                }
+            }
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
         };
-        let req = self.guards.pairings.mint(&name, &mode, p.trusted, ttl);
+        let req = self
+            .guards
+            .pairings
+            .mint_bound(&name, &mode, p.trusted, p.org_id, ttl);
         ok_json(&serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
@@ -282,6 +320,7 @@ impl FleetTools {
             "name": req.name,
             "mode": req.mode,
             "trusted": req.trusted,
+            "org_id": req.org_id,
         }))
     }
 
