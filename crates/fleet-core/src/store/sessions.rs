@@ -824,6 +824,35 @@ impl Store {
         Ok(row)
     }
 
+    /// Label an `external` agent row (`bg:<uuid>`) with the name Claude shows
+    /// for that session (`claude agents --json` `name`, e.g. a Claude Desktop
+    /// title) on every reconcile pass, so the label follows a retitle. Only
+    /// `external` rows: fleet did not start them and the UI offers no label
+    /// edit there, so the agent's name is the only label they have. A `bg`
+    /// row keeps its prompt-derived label. Emits `session_updated` only when
+    /// the label actually changed, so a steady name costs no event per pass.
+    pub fn set_external_agent_name(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+        name: &str,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET friendly_name = ?3 \
+             WHERE host_alias = ?1 AND tmux_name = ?2 AND kind = 'external' \
+               AND friendly_name IS NOT ?3",
+            rusqlite::params![host_alias, tmux_name, name],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = fetch_session(&self.conn, tmux_name, host_alias)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
     /// Mark a safe-kill request: stamp state="requested", store the nonce we
     /// embedded in the prompt, and clear any prior failure detail. Emits
     /// session_updated.
@@ -3046,6 +3075,33 @@ mod tests {
             assert_eq!(row.friendly_name, None, "{name}");
             assert_eq!(s.default_friendly_name(row.id).unwrap(), None, "{name}");
         }
+    }
+
+    #[test]
+    fn set_external_agent_name_writes_only_external_rows_and_only_on_change() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        for (name, kind) in [("bg:u-bg", "bg"), ("bg:u-ext", "external")] {
+            s.upsert_bg_session("local", name, None, &name[3..], Some("idle"), 1, kind, 1)
+                .unwrap();
+        }
+        let row = s
+            .set_external_agent_name("local", "bg:u-ext", "Release cut")
+            .unwrap()
+            .expect("first label is a change");
+        assert_eq!(row.friendly_name.as_deref(), Some("Release cut"));
+        assert!(
+            s.set_external_agent_name("local", "bg:u-ext", "Release cut")
+                .unwrap()
+                .is_none(),
+            "an unchanged name is no write and no event"
+        );
+        assert!(s
+            .set_external_agent_name("local", "bg:u-bg", "review-pr-42")
+            .unwrap()
+            .is_none());
+        let bg = s.get_session("bg:u-bg", "local").unwrap().unwrap();
+        assert_eq!(bg.friendly_name, None, "a bg row keeps its own label");
     }
 
     #[test]
