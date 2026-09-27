@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
-## [Unreleased]
+## [0.3.2] - 2026-09-27
 
 The work graph's M13 (live use): what real use showed, and the decided-against
 ideas the owner said yes to, each in its smallest safe form. Migrations
@@ -47,6 +47,62 @@ older build refuses a database a newer one has migrated.
   bumps a session's row version only when something a client shows
   changed.
 
+### Added
+- **trackers:** webhook nudges on a public hub (work graph M13.4f)
+- **trackers:** write a session's PR to its Jira ticket, opt-in (work graph M13.4e)
+- **work:** M13.2 usage summary, work_admin { usage } (D24)
+- **ui:** Settings → Work → Usage, a read-only table with Copy as text
+- **work:** add work_admin { usage } — how the work graph is used, as counts
+- **trackers:** keep running pass totals in the sync metrics
+- **ui:** Settings → Work → Usage, a read-only table with Copy as text
+- **work:** add work_admin { usage } — how the work graph is used, as counts
+- **work-graph:** M13.1 partial sync failures are visible
+- **trackers:** keep running pass totals in the sync metrics
+- **sessions:** label external rows with the name Claude gives them
+- **ui:** say "Sync skipping items" instead of Reconnect for a tracker stuck on items
+- **trackers:** make partial sync failures visible in metrics and fleet health
+- **work:** summaries of dead sessions, on demand (work graph M13.1)
+- **conversation:** show a sent message at once, with its delivery state
+- **sessions:** carry prompt_submit_seq on the session row
+
+### Changed
+- **mcp:** the wire-level notice repeats until the caller lists
+- Revert "chore(release): v0.2.43"
+- **store:** row_version bumps only on a client-visible change
+- **release:** v0.2.43
+- **trackers:** remove the webhook nudges (M13.4f); D13 stays no
+- **work:** cover the PR remote link's drain, retries and sync wiring
+- **work:** pin the summary's confirm gate and that no tool is granted back
+- **e2e:** usage counts in hub W (work graph M13.2)
+- Revert M13.2 (work_admin { usage }) out of the M13.1 PR
+- Revert "feat(work-graph): M13.1 partial sync failures are visible"
+
+### Fixed
+- **mcp:** keep telling a stale caller the list changed until it re-lists
+- **work:** M13.4e review fixes: conformance and isolation rows, outbox retention
+- **work:** a summary fork really runs without fleet's hooks (M13.4c)
+- **trackers:** build a GitHub Enterprise issue URL on its own instance
+- **ui:** say which session a lost start race left unlinked
+- **work:** re-check live work at a resume's link and name its orphan
+- **events:** refuse a resume across events the ring never recorded
+- **release-drift:** decide draft visibility from the listing, not a user-only probe
+- **sessions:** stop dead external rows flooding the Outside fleet group
+
+### Documentation
+- **work-graph:** M13.5 close-out; the work graph is operating (D26)
+- live-instance analysis (six lenses) and four fix plans
+- **work-graph:** record the owner's M13.4 decisions (D3, D10, D15, D20 yes)
+- **work:** the phone names and renames local work (M13.4a, D20)
+- **work:** record M10.5 finished in fleet-mobile (#48)
+- **work-graph:** document the usage summary and add it to the acceptance run
+- **work-graph:** document the usage summary and add it to the acceptance run
+- **work-graph:** document sync skipping items in fleet health and troubleshooting
+- **work-graph:** M13.0 roadmap truth pass
+- **work-graph:** M13 plan — live use
+- **work:** pin M13.1's no-tools flags from the installed claude --help
+- **work:** plan M13, the decided-against items the user said yes to
+- **work-graph:** M12 plan — ship and operate
+- **work-graph:** M11 plan — the long tail
 ## [0.3.1] - 2026-09-26
 
 A tracker sync fix, and a release pipeline that keeps releases on their tag.
@@ -1855,6 +1911,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.3.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.2
 [0.3.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.1
 [0.3.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.0
 [0.2.42]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.2.42

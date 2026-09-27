@@ -259,15 +259,14 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
             ..Default::default()
         });
     };
+    let org_id = s.item_org(item.id)?;
     if let Some(allowed) = crate::service::trackers::tickets::allowed(scope, &s)? {
-        if !allowed.contains(&item.id) && item.tracker_id.is_some() {
-            return Err(orgs::not_visible_key(
-                scope.host().unwrap_or_default(),
-                &key,
-            ));
+        // A local item with an org of its own (work graph M14) is fenced
+        // like a ticket.
+        if !allowed.contains(&item.id) && (item.tracker_id.is_some() || !scope.sees_org(org_id)) {
+            return Err(orgs::not_visible_to(scope, &key));
         }
     }
-    let org_id = s.item_org(item.id)?;
     let description = s.work_item_meta(item.id)?.description;
     let acceptance = description
         .as_deref()
@@ -285,7 +284,8 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
         &acceptance,
         excerpt.as_deref(),
     );
-    let for_agent = !scope.is_all();
+    // An agent's card is fenced; a person's (a bound phone too) is not.
+    let for_agent = matches!(scope, OrgScope::Host { .. });
     Ok(TicketCard {
         key,
         title: item.title,

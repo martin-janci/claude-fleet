@@ -1,0 +1,9 @@
+⏺ Bash(grep -rn "oom" crates/fleet-core/src/service/pane_intel.rs)
+  ⎿  32:    Oom,
+     53:            StuckKind::Oom => "oom",
+     374:fn is_oom_line(lower: &str) -> bool {
+     376:        || lower.contains("out of memory")
+     379:        || contains_word(lower, "oom")
+
+✶ Cooking… (12s · esc to interrupt)
+❯

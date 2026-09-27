@@ -76,6 +76,7 @@ pub(crate) fn sample_session() -> SessionRow {
         ci_status: Some("passing".into()),
         turn_seq: 7,
         last_stop_at: Some(1_725_000_900),
+        stale_working_at: Some(1_790_500_000),
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -254,6 +255,7 @@ fn sample_health() -> Health {
         by_status: BTreeMap::from([("working".to_string(), 1u32)]),
         ghosts: 1,
         context_red: 1,
+        context_red_pct: 85,
         stuck: 1,
         usage_by_host: BTreeMap::from([("trn".to_string(), sample_totals())]),
         usage_by_day: vec![DayUsage {
@@ -794,11 +796,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// forty keys nothing else would notice losing. Its list is a literal here,
+/// sixty keys nothing else would notice losing. Its list is a literal here,
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_fifty_nine() {
+fn a_session_rows_wire_names_are_these_exact_sixty() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -839,6 +841,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_nine() {
         "safe_kill_nonce",
         "safe_kill_requested_at",
         "safe_kill_state",
+        "stale_working_at",
         "started_at",
         "status",
         "stuck_kind",
@@ -861,7 +864,7 @@ fn a_session_rows_wire_names_are_these_exact_fifty_nine() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 59, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 60, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

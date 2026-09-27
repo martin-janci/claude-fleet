@@ -4,14 +4,16 @@
 //! Every `work` / `work_link` / `work_admin` action — enumerated from
 //! `WORK_ACTIONS`, `WORK_LINK_ACTIONS` and `AdminAction::NAMES`, so a new
 //! action without a row here fails `every_action_has_a_matrix_row` — runs
-//! against six callers (master, client full, client readonly, a host in org
-//! A, a host in org B, a host in no org), with `isolate_sessions` off and on
-//! for org B. Each call goes through what `call_tool` does around a tool:
+//! against eight callers (master, client full, client readonly, a host in
+//! org A, a host in org B, a host in no org, and — work graph M14.1b — a
+//! full client bound to org A and one bound to org B), with
+//! `isolate_sessions` off and on for org B. The bound clients' second D31
+//! value (`bound_sees_unassigned` off) is `the_work_view_reads_follow_d31_off`. Each call goes through what `call_tool` does around a tool:
 //! the mode and admin gates before it, the org redaction after it.
 //!
 //! Two kinds of check run on every row:
 //!
-//! * **No leak.** Whatever a host-bound caller gets back — a result or an
+//! * **No leak.** Whatever a host-bound or org-bound caller gets back — a result or an
 //!   error sentence — never contains another org's markers (title, key,
 //!   journal and description text). A host in no org sees neither org's.
 //! * **The row's own expectation**: who gets what, which error, and that an
@@ -36,6 +38,9 @@ enum Who {
     HostA,
     HostB,
     HostNone,
+    /// A full paired client bound to org A / org B (work graph M14.1b).
+    BoundA,
+    BoundB,
 }
 
 const EVERYONE: &[Who] = &[
@@ -45,7 +50,13 @@ const EVERYONE: &[Who] = &[
     Who::HostA,
     Who::HostB,
     Who::HostNone,
+    Who::BoundA,
+    Who::BoundB,
 ];
+
+/// The fixture's org ids (the first two orgs it adds).
+const ORG_A: i64 = 1;
+const ORG_B: i64 = 2;
 
 impl Who {
     fn caller(self) -> Caller {
@@ -54,19 +65,22 @@ impl Who {
             client: None,
             mode: TokenMode::Full,
         };
-        let client = |mode| Caller {
+        let client = |mode, org_id| Caller {
             host_alias: None,
             client: Some(crate::mcp::auth::ClientRef {
                 id: 7,
                 name: "phone".into(),
                 trusted: false,
+                org_id,
             }),
             mode,
         };
         match self {
             Who::Master => Caller::master(),
-            Who::ClientFull => client(TokenMode::Full),
-            Who::ClientReadonly => client(TokenMode::Readonly),
+            Who::ClientFull => client(TokenMode::Full, None),
+            Who::ClientReadonly => client(TokenMode::Readonly, None),
+            Who::BoundA => client(TokenMode::Full, Some(ORG_A)),
+            Who::BoundB => client(TokenMode::Full, Some(ORG_B)),
             Who::HostA => host("h-a"),
             Who::HostB => host("h-b"),
             Who::HostNone => host("h-n"),
@@ -77,11 +91,21 @@ impl Who {
         matches!(self, Who::HostA | Who::HostB | Who::HostNone)
     }
 
+    /// A client bound to an org (work graph M14).
+    fn is_bound(self) -> bool {
+        matches!(self, Who::BoundA | Who::BoundB)
+    }
+
+    /// Reads every org: the master and an unbound client.
+    fn is_unbound(self) -> bool {
+        matches!(self, Who::Master | Who::ClientFull | Who::ClientReadonly)
+    }
+
     /// Markers this caller must never read.
     fn forbidden_markers(self) -> Vec<&'static str> {
         match self {
-            Who::HostA => B_MARKERS.to_vec(),
-            Who::HostB => A_MARKERS.to_vec(),
+            Who::HostA | Who::BoundA => B_MARKERS.to_vec(),
+            Who::HostB | Who::BoundB => A_MARKERS.to_vec(),
             Who::HostNone => A_MARKERS.iter().chain(B_MARKERS).copied().collect(),
             _ => Vec::new(),
         }
@@ -134,6 +158,11 @@ fn fixture(isolate_b: bool) -> Fx {
         .unwrap();
     let a = s.add_org("Company A", Some("#f00"), false).unwrap();
     let b = s.add_org("Company B", Some("#00f"), isolate_b).unwrap();
+    assert_eq!(
+        (a.id, b.id),
+        (ORG_A, ORG_B),
+        "the bound callers name these ids"
+    );
     for (org, owner) in [(a.id, "acme"), (b.id, "beta")] {
         s.add_org_rule(crate::store::OrgRuleRow {
             org_id: org,
@@ -327,7 +356,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
     };
     match r {
         Ok(mut res) => {
-            if c.host_alias.is_some() {
+            if c.is_scoped() {
                 fx.t.redact_work_for(&c, &mut res);
             }
             if res.is_error == Some(true) {
@@ -351,7 +380,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
 /// master's pick otherwise.
 fn own(fx: &Fx, who: Who) -> i64 {
     match who {
-        Who::HostB => fx.s_b,
+        Who::HostB | Who::BoundB => fx.s_b,
         Who::HostNone => fx.s_n,
         _ => fx.s_a,
     }
@@ -475,6 +504,8 @@ async fn run_matrix(isolate: bool) {
         |fx, _| json!({ "session_id": fx.s_b }),
         |_, who, a| match who {
             Who::HostA | Who::HostNone => is_code(who, a, "E_FORBIDDEN", "other host"),
+            // A client bound to A never reaches B's session (M14).
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's session"),
             _ => is_ok(who, a, "links of s_b"),
         },
     )
@@ -494,6 +525,13 @@ async fn run_matrix(isolate: bool) {
                 text(a).contains(&format!("\"item_id\":{}", fx.item_b)),
                 "{who:?}: {a:?}"
             ),
+            // s_x is an A session: A's bound client reads it without B's
+            // ticket; B's never reaches it (M14).
+            Who::BoundA => {
+                is_ok(who, a, "own org's session");
+                assert_eq!(text(a), "[]", "the forced B link is not A's to read");
+            }
+            Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's session"),
             _ => is_code(who, a, "E_FORBIDDEN", "other host"),
         },
     )
@@ -505,6 +543,7 @@ async fn run_matrix(isolate: bool) {
         |_, who, a| match who {
             Who::HostB => assert!(text(a).contains("\"snap_host\":\"h-b\""), "{a:?}"),
             w if w.is_host() => assert_eq!(text(a), "[]", "{who:?}"),
+            Who::BoundA => assert_eq!(text(a), "[]", "B's past work is not A's"),
             _ => assert!(text(a).contains("h-b"), "{who:?}: {a:?}"),
         },
     )
@@ -525,6 +564,7 @@ async fn run_matrix(isolate: bool) {
                 Who::HostA | Who::HostNone => {
                     is_code(who, a, "E_FORBIDDEN", "another org's context")
                 }
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's context"),
                 Who::HostB => assert!(text(a).contains("SECRET-B"), "{who:?} {key}: {a:?}"),
                 _ => assert!(text(a).contains("SECRET-B"), "{who:?} {key}: {a:?}"),
             },
@@ -564,6 +604,7 @@ async fn run_matrix(isolate: bool) {
             Who::HostA | Who::HostNone => {
                 is_code(who, a, "E_FORBIDDEN", "another org's resume plan")
             }
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's resume plan"),
             _ => is_ok(who, a, "resume plan"),
         },
     )
@@ -639,6 +680,13 @@ async fn run_matrix(isolate: bool) {
                     assert_eq!(k, vec!["BB-1", "BB-3"], "own org, own host")
                 }
                 Who::HostNone => assert!(keys.is_empty(), "a host in no org: {keys:?}"),
+                // A bound client: its org's tickets, no host fence (M14).
+                Who::BoundA => assert_eq!(keys, vec!["AA-1"], "own org"),
+                Who::BoundB => {
+                    let mut k = keys.clone();
+                    k.sort();
+                    assert_eq!(k, vec!["BB-1", "BB-2", "BB-3"], "own org")
+                }
                 _ => assert_eq!(keys.len(), 4, "{who:?}: {keys:?}"),
             }
         },
@@ -650,7 +698,7 @@ async fn run_matrix(isolate: bool) {
         "tickets",
         |fx, _| json!({ "action": "tickets", "tracker_id": fx.tracker_b }),
         |_, who, a| {
-            if matches!(who, Who::HostA | Who::HostNone) {
+            if matches!(who, Who::HostA | Who::HostNone | Who::BoundA) {
                 assert_eq!(text(a), "[]", "{who:?}");
             }
         },
@@ -687,9 +735,14 @@ async fn run_matrix(isolate: bool) {
                 "lookup",
                 |_, _| args.clone(),
                 |_, who, a| {
-                    let mine = matches!((who, key), (Who::HostA, "AA-1") | (Who::HostB, "BB-1"));
+                    let mine = matches!(
+                        (who, key),
+                        (Who::HostA | Who::BoundA, "AA-1") | (Who::HostB | Who::BoundB, "BB-1")
+                    );
                     if who.is_host() && !mine {
                         is_code(who, a, "E_FORBIDDEN", "another org's ticket")
+                    } else if who.is_bound() && !mine {
+                        is_code(who, a, "E_NOTFOUND", "another org's ticket")
                     } else {
                         is_ok(who, a, "lookup");
                         assert!(text(a).contains(key), "{who:?}: {a:?}");
@@ -725,8 +778,8 @@ async fn run_matrix(isolate: bool) {
                 .filter_map(|t| t["id"].as_i64())
                 .collect();
             match who {
-                Who::HostA => assert_eq!(ids, vec![fx.tracker_a]),
-                Who::HostB => assert_eq!(ids, vec![fx.tracker_b]),
+                Who::HostA | Who::BoundA => assert_eq!(ids, vec![fx.tracker_a]),
+                Who::HostB | Who::BoundB => assert_eq!(ids, vec![fx.tracker_b]),
                 Who::HostNone => assert!(ids.is_empty()),
                 _ => assert_eq!(ids.len(), 2),
             }
@@ -741,9 +794,15 @@ async fn run_matrix(isolate: bool) {
             "card",
             move |_, _| json!({ "action": "card", "key": key }),
             move |_, who, a| {
-                let mine = matches!((who, key), (Who::HostA, "AA-1") | (Who::HostB, "BB-1"));
+                let mine = matches!(
+                    (who, key),
+                    (Who::HostA | Who::BoundA, "AA-1") | (Who::HostB | Who::BoundB, "BB-1")
+                );
                 if who.is_host() && !mine {
                     return is_code(who, a, "E_FORBIDDEN", "another org's card");
+                }
+                if who.is_bound() && !mine {
+                    return is_code(who, a, "E_NOTFOUND", "another org's card");
                 }
                 is_ok(who, a, "card");
                 let v: Value = serde_json::from_str(text(a)).unwrap();
@@ -815,6 +874,23 @@ async fn run_matrix(isolate: bool) {
             let v: Value = serde_json::from_str(text(a)).unwrap();
             let failed = v["failed"].as_array().cloned().unwrap_or_default();
             let of = |pid: i64| failed.iter().find(|f| f["project_id"] == pid).cloned();
+            // A bound client (M14) never starts in the other org's repo:
+            // the session would be invisible to it. BB-2 is not A's to read,
+            // so for A it is a bare key (as an unknown key is).
+            if who.is_bound() {
+                let (other, own_pid) = if who == Who::BoundA {
+                    (fx.pid_beta, fx.pid_acme)
+                } else {
+                    (fx.pid_acme, fx.pid_beta)
+                };
+                let f = of(other).unwrap_or_else(|| panic!("{who:?}: {v}"));
+                assert_eq!(f["code"], "E_FORBIDDEN", "{who:?}: {v}");
+                assert!(f["message"].as_str().unwrap().contains("bound"), "{v}");
+                if let Some(f) = of(own_pid) {
+                    assert_ne!(f["code"], "E_FORBIDDEN", "{who:?}: {v}");
+                }
+                return;
+            }
             if who == Who::HostB {
                 assert_eq!(v["key"], "BB-1", "{v}");
                 assert_eq!(v["started"], json!([]), "{v}");
@@ -924,6 +1000,7 @@ async fn run_matrix(isolate: bool) {
             }
             match who {
                 Who::HostB => is_code(who, a, "E_NOTFOUND", "another host's session"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's session"),
                 Who::HostNone => attempted(fx, who, a, fx.s_n),
                 _ => attempted(fx, who, a, fx.s_a),
             }
@@ -1009,12 +1086,17 @@ async fn run_matrix(isolate: bool) {
                 Who::HostA => vec![fx.s_a, fx.s_x],
                 Who::HostB => vec![fx.s_b],
                 Who::HostNone => vec![fx.s_n],
+                // A bound client: its org's and unassigned sessions (M14).
+                Who::BoundA => vec![fx.s_a, fx.s_n, fx.s_x],
+                Who::BoundB => vec![fx.s_b, fx.s_n],
                 _ => vec![fx.s_a, fx.s_b, fx.s_n, fx.s_x],
             };
             want.sort();
             assert_eq!(ids, want, "{who:?}: {v}");
             match who {
-                Who::HostA | Who::HostNone => assert!(shipped.is_empty(), "{who:?}: {v}"),
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    assert!(shipped.is_empty(), "{who:?}: {v}")
+                }
                 _ => assert_eq!(shipped, vec!["BB-3"], "{who:?}: {v}"),
             }
         },
@@ -1030,7 +1112,8 @@ async fn run_matrix(isolate: bool) {
             match who {
                 Who::HostA => assert!(!named.contains(&fx.org_b), "{v:?}"),
                 Who::HostNone => assert!(named.is_empty(), "{v:?}"),
-                Who::HostB => assert_eq!(named, vec![fx.org_b]),
+                Who::HostB | Who::BoundB => assert_eq!(named, vec![fx.org_b]),
+                Who::BoundA => assert!(!named.contains(&fx.org_b) && named.len() == 1, "{v:?}"),
                 _ => assert_eq!(named.len(), 2),
             }
         },
@@ -1043,7 +1126,8 @@ async fn run_matrix(isolate: bool) {
         |fx, who, a| {
             let v: Vec<Value> = serde_json::from_str(text(a)).unwrap();
             match who {
-                Who::HostA => assert!(v.iter().all(|o| o["id"] != fx.org_b)),
+                Who::HostA | Who::BoundA => assert!(v.iter().all(|o| o["id"] != fx.org_b)),
+                Who::BoundB => assert!(v.iter().all(|o| o["id"] == fx.org_b)),
                 Who::HostNone => assert!(v.is_empty()),
                 _ => assert!(!v.is_empty()),
             }
@@ -1068,15 +1152,19 @@ async fn run_matrix(isolate: bool) {
         "work_link",
         "link",
         |fx, who| {
-            let key = if who == Who::HostB { "AA-1" } else { "BB-1" };
+            let key = if matches!(who, Who::HostB | Who::BoundB) {
+                "AA-1"
+            } else {
+                "BB-1"
+            };
             json!({ "action": "link", "session_id": own(fx, who), "key": key })
         },
         |_, who, a| {
             if readonly_refused(who, a) {
                 return;
             }
-            if who.is_host() {
-                // A key outside the host's orgs links as the bare key it
+            if who.is_host() || who.is_bound() {
+                // A key outside the caller's orgs links as the bare key it
                 // typed — exactly what an unknown key does: no oracle.
                 is_ok(who, a, "bare link");
                 let row: Value = serde_json::from_str(text(a)).unwrap();
@@ -1161,7 +1249,7 @@ async fn run_matrix(isolate: bool) {
         "work_link",
         "link",
         |fx, who| {
-            let item = if who == Who::HostB {
+            let item = if matches!(who, Who::HostB | Who::BoundB) {
                 fx.item_a
             } else {
                 fx.item_b
@@ -1172,7 +1260,7 @@ async fn run_matrix(isolate: bool) {
             if readonly_refused(who, a) {
                 return;
             }
-            if who.is_host() {
+            if who.is_host() || who.is_bound() {
                 is_code(who, a, "E_NOTFOUND", "another org's item id");
             } else {
                 is_code(who, a, "E_FORBIDDEN", "cross-org by item id");
@@ -1242,7 +1330,7 @@ async fn run_matrix(isolate: bool) {
         "work_link",
         "reject",
         |fx, who| {
-            let item = if who == Who::HostB {
+            let item = if matches!(who, Who::HostB | Who::BoundB) {
                 fx.item_a
             } else {
                 fx.item_b
@@ -1253,7 +1341,7 @@ async fn run_matrix(isolate: bool) {
             if readonly_refused(who, a) {
                 return;
             }
-            if who.is_host() {
+            if who.is_host() || who.is_bound() {
                 is_code(who, a, "E_NOTFOUND", "reject another org's item");
             } else {
                 is_ok(who, a, "a rejection is no link");
@@ -1320,7 +1408,11 @@ async fn run_matrix(isolate: bool) {
                         return;
                     }
                     let link = cur.get();
-                    if who.is_host() && !(who == Who::HostB && pick == 1) {
+                    // Bound clients (M14) as hosts: B's link on A's s_x is
+                    // neither A's to see nor s_x B's to reach; B's own s_b
+                    // link is B's.
+                    let own_b = matches!(who, Who::HostB | Who::BoundB) && pick == 1;
+                    if (who.is_host() || who.is_bound()) && !own_b {
                         is_code(who, a, "E_NOTFOUND", "another org's link id");
                         assert!(link_is_live(fx, link), "{who:?}: a refusal deletes nothing");
                     } else if action == "unlink" {
@@ -1328,7 +1420,7 @@ async fn run_matrix(isolate: bool) {
                         // full client (pick 0), s_b for host B (pick 1). The
                         // master's and the client's pick 1 is s_a, whose
                         // links do not include link_b.
-                        if pick == 0 || who == Who::HostB {
+                        if pick == 0 || own_b {
                             is_ok(who, a, "unlink");
                             assert!(!link_is_live(fx, link), "{who:?}: unlinked");
                         } else {
@@ -1341,6 +1433,8 @@ async fn run_matrix(isolate: bool) {
             .await;
         }
     }
+    // The last caller of the rows above unlinked s_b's ticket: put it back.
+    relink(&fx, fx.s_b, fx.item_b);
     m.row(
         "work_link",
         "trust_project",
@@ -1349,7 +1443,7 @@ async fn run_matrix(isolate: bool) {
             if readonly_refused(who, a) {
                 return;
             }
-            if who.is_host() {
+            if who.is_host() || who.is_bound() {
                 is_code(who, a, "E_FORBIDDEN", "trust is fleet configuration");
             } else {
                 is_ok(who, a, "trust");
@@ -1367,6 +1461,7 @@ async fn run_matrix(isolate: bool) {
             }
             match who {
                 Who::HostA | Who::HostNone => is_code(who, a, "E_FORBIDDEN", "resume B's work"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "resume B's work"),
                 // Everyone else gets as far as the spawn, which fails
                 // here for want of a real host — never an org refusal.
                 _ => assert!(!text(a).contains("not visible"), "{who:?}: {a:?}"),
@@ -1399,6 +1494,7 @@ async fn run_matrix(isolate: bool) {
                 Who::HostA | Who::HostNone => {
                     is_code(who, a, "E_FORBIDDEN", "summarise B's past work")
                 }
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "summarise B's past work"),
                 _ => {
                     is_code(who, a, "E_INVALID", "past every fence");
                     assert!(text(a).contains("claude session id"), "{who:?}: {a:?}");
@@ -1422,8 +1518,17 @@ async fn run_matrix(isolate: bool) {
                 }
                 // Hosts: not visible (host B: not linked on its host, and
                 // h-a is not its host). Master and clients: BB-2 on an A
-                // session is the integrity refusal.
-                is_code(who, a, "E_FORBIDDEN", "start B's ticket on A");
+                // session is the integrity refusal. B's bound client: never
+                // in A's repo (M14). A's bound client: BB-2 is not its to
+                // read — by URL unknown; by key a bare key in its own repo,
+                // as an unknown key is (it reaches the spawn).
+                match who {
+                    Who::BoundA if args["url"].is_string() => {
+                        is_code(who, a, "E_NOTFOUND", "B's ticket by URL")
+                    }
+                    Who::BoundA => assert_ne!(code(a), "E_FORBIDDEN", "{a:?}"),
+                    _ => is_code(who, a, "E_FORBIDDEN", "start B's ticket on A"),
+                }
             },
         )
         .await;
@@ -1436,7 +1541,7 @@ async fn run_matrix(isolate: bool) {
             if readonly_refused(who, a) {
                 return;
             }
-            if matches!(who, Who::HostA | Who::HostNone) {
+            if matches!(who, Who::HostA | Who::HostNone | Who::BoundA) {
                 is_code(who, a, "E_NOTFOUND", "start by another org's item id");
             }
         },
@@ -1537,6 +1642,9 @@ async fn run_matrix(isolate: bool) {
             let sees_a = rows.iter().any(|r| r["id"] == fx.s_a);
             match who {
                 Who::HostA | Who::HostNone => assert_eq!(sees_b, !isolated, "{who:?}"),
+                // A bound client's session fence is strict (M14).
+                Who::BoundA => assert!(sees_a && !sees_b, "{who:?}"),
+                Who::BoundB => assert!(sees_b && !sees_a, "{who:?}"),
                 Who::HostB => {
                     assert!(sees_b);
                     assert_eq!(
@@ -1578,6 +1686,11 @@ async fn run_matrix(isolate: bool) {
                         assert_eq!(work_key(fx.s_b), None);
                     }
                 }
+                Who::BoundA => {
+                    assert_eq!(work_key(fx.s_a).as_deref(), Some("AA-1"));
+                    assert_eq!(work_key(fx.s_x), None, "B's ticket on A's session");
+                }
+                Who::BoundB => assert_eq!(work_key(fx.s_b).as_deref(), Some("BB-1")),
                 _ => {
                     assert_eq!(work_key(fx.s_a).as_deref(), Some("AA-1"));
                     assert_eq!(work_key(fx.s_x).as_deref(), Some("BB-1"));
@@ -1595,6 +1708,7 @@ async fn run_matrix(isolate: bool) {
             Who::HostA | Who::HostNone if isolated => {
                 is_code(who, a, "E_NOTFOUND", "isolated peer")
             }
+            Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's session"),
             _ => is_ok(who, a, "peer status"),
         },
     )
@@ -1625,6 +1739,7 @@ async fn run_matrix(isolate: bool) {
             Who::HostA | Who::HostNone if isolated => {
                 is_code(who, a, "E_SQLITE", "isolated anchor")
             }
+            Who::BoundA => assert!(a.is_err(), "another org's anchor: {a:?}"),
             _ => is_ok(who, a, "related"),
         },
     )
@@ -1661,7 +1776,8 @@ async fn run_matrix(isolate: bool) {
                 Who::HostA | Who::HostNone if isolated => {
                     is_code(who, a, "E_NOTFOUND", "message to an isolated session")
                 }
-                Who::HostB => is_code(who, a, "E_SELF_TARGET", "own session"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "message to another org's session"),
+                Who::HostB | Who::BoundB => is_code(who, a, "E_SELF_TARGET", "own session"),
                 _ => is_ok(who, a, "message"),
             }
         },
@@ -1691,7 +1807,16 @@ async fn run_matrix(isolate: bool) {
             if isolate && matches!(who, Who::HostA | Who::HostNone) {
                 is_code(who, &a, "E_NOTFOUND", tool);
             }
-            if tool == "whoami" && matches!(who, Who::Master | Who::ClientFull | Who::HostB) {
+            // A client bound to A never reaches B's session (M14).
+            if who == Who::BoundA {
+                is_code(who, &a, "E_NOTFOUND", tool);
+            }
+            if tool == "whoami"
+                && matches!(
+                    who,
+                    Who::Master | Who::ClientFull | Who::HostB | Who::BoundB
+                )
+            {
                 is_ok(who, &a, tool);
                 let row: Value = serde_json::from_str(text(&a)).unwrap();
                 assert_eq!(row["work"]["key"], "BB-1", "{who:?}: {a:?}");
@@ -1721,10 +1846,10 @@ async fn run_matrix(isolate: bool) {
             c.org_scope(&s).unwrap()
         };
         let kinds = crate::mcp::events_route::fence_host_bound(&c, None);
-        if who.is_host() {
+        if who.is_host() || who.is_bound() {
             assert!(
                 !kinds.unwrap().iter().any(|k| k == "work"),
-                "work frames never reach a host"
+                "work frames never reach a host nor a bound client"
             );
         }
         for (i, row) in rows.iter().enumerate() {
@@ -1756,9 +1881,13 @@ async fn run_matrix(isolate: bool) {
             let is_a = row.id == fx.s_a || row.id == fx.s_x;
             // B isolates: nobody outside B reads B's session frames, and
             // B's hosts read only B's and unassigned ones.
-            let dropped = isolate
+            // A bound client never reads another org's session frame (M14),
+            // isolated or not.
+            let dropped = (isolate
                 && ((matches!(who, Who::HostA | Who::HostNone) && is_b)
-                    || (who == Who::HostB && is_a));
+                    || (who == Who::HostB && is_a)))
+                || (who == Who::BoundA && is_b)
+                || (who == Who::BoundB && is_a);
             if dropped {
                 assert!(out.is_none(), "{who:?} got an isolated frame of {}", row.id);
                 continue;
@@ -1769,9 +1898,9 @@ async fn run_matrix(isolate: bool) {
             // host, stripped everywhere for the no-org host.
             let own_key = key_of(row);
             let expected: Option<&str> = match (who, row.id) {
-                (Who::HostA, id) if id == fx.s_a => Some("AA-1"),
-                (Who::HostB, id) if id == fx.s_b => Some("BB-1"),
-                (Who::HostA | Who::HostB | Who::HostNone, _) => None,
+                (Who::HostA | Who::BoundA, id) if id == fx.s_a => Some("AA-1"),
+                (Who::HostB | Who::BoundB, id) if id == fx.s_b => Some("BB-1"),
+                (Who::HostA | Who::HostB | Who::HostNone | Who::BoundA | Who::BoundB, _) => None,
                 _ => own_key.as_deref(),
             };
             if row.id != fx.s_n {
@@ -1878,8 +2007,8 @@ async fn run_matrix(isolate: bool) {
             match who {
                 // Its own host's and org's candidates only; B's ticket on its
                 // own session is not named (the leak check covers the text).
-                Who::HostA => assert!(has(fx.s_x) && !has(fx.s_b), "{t}"),
-                Who::HostB => assert!(has(fx.s_b) && !has(fx.s_x), "{t}"),
+                Who::HostA | Who::BoundA => assert!(has(fx.s_x) && !has(fx.s_b), "{t}"),
+                Who::HostB | Who::BoundB => assert!(has(fx.s_b) && !has(fx.s_x), "{t}"),
                 Who::HostNone => assert!(!has(fx.s_b) && !has(fx.s_x), "{t}"),
                 _ => assert!(has(fx.s_b) && has(fx.s_x), "{who:?}: {t}"),
             }
@@ -1909,7 +2038,7 @@ async fn run_matrix(isolate: bool) {
             let refused = text(a).contains(&format!("session {} not found", fx.s_b));
             assert_eq!(
                 refused,
-                matches!(who, Who::HostA | Who::HostNone),
+                matches!(who, Who::HostA | Who::HostNone | Who::BoundA),
                 "{who:?}: {a:?}"
             );
         },
@@ -1940,7 +2069,8 @@ async fn run_matrix(isolate: bool) {
                 return;
             }
             match who {
-                Who::HostA => is_code(who, a, "E_NOTFOUND", "another org's link"),
+                Who::HostA | Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's link"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's session"),
                 Who::HostB | Who::HostNone => is_code(who, a, "E_FORBIDDEN", "other host"),
                 _ => is_ok(who, a, "snooze"),
             }
@@ -1955,7 +2085,7 @@ async fn run_matrix(isolate: bool) {
             if readonly_refused(who, a) {
                 return;
             }
-            if who.is_host() {
+            if who.is_host() || who.is_bound() {
                 is_code(who, a, "E_FORBIDDEN", "fleet-wide");
             } else {
                 is_ok(who, a, "dismiss");
@@ -2011,7 +2141,7 @@ async fn run_matrix(isolate: bool) {
                 return;
             }
             match who {
-                Who::HostA | Who::HostNone => {
+                Who::HostA | Who::HostNone | Who::BoundA => {
                     same_as_unknown(a, &unknown_session, &fx.s_b.to_string(), "999999")
                 }
                 _ => is_ok(who, a, "name s_b's work"),
@@ -2059,6 +2189,8 @@ async fn run_matrix(isolate: bool) {
                 return;
             }
             match who {
+                // Bound A comes after host A, and meets the local item host
+                // A just named under that key (one fleet-wide namespace).
                 Who::HostA => is_ok(who, a, "an invisible ticket's key"),
                 _ => is_code(who, a, "E_EXISTS", "a taken key"),
             }
@@ -2090,7 +2222,7 @@ async fn run_matrix(isolate: bool) {
                 return;
             }
             match who {
-                Who::HostB | Who::HostNone => {
+                Who::HostB | Who::HostNone | Who::BoundB => {
                     same_as_unknown(a, &unknown_item, &local_a.to_string(), "999999")
                 }
                 _ => assert!(text(a).contains(&format!("renamed-{who:?}")), "{who:?}: {a:?}"),
@@ -2108,7 +2240,9 @@ async fn run_matrix(isolate: bool) {
                 return;
             }
             match who {
-                Who::HostA | Who::HostNone => is_code(who, a, "E_NOTFOUND", "another org's ticket"),
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    is_code(who, a, "E_NOTFOUND", "another org's ticket")
+                }
                 _ => is_code(who, a, "E_INVALID", "a ticket"),
             }
         },
@@ -2129,6 +2263,18 @@ async fn run_matrix(isolate: bool) {
                 }
                 Who::HostNone => assert!(!lists_a && !t.contains("named-HostA"), "{t}"),
                 Who::HostA => assert!(lists_a && !t.contains("named-HostB"), "{t}"),
+                // A bound client: its org's local work, no host fence (M14).
+                Who::BoundA => assert!(
+                    lists_a
+                        && t.contains("named-HostA")
+                        && !t.contains("named-HostB")
+                        && !t.contains("named-BoundB"),
+                    "{t}"
+                ),
+                Who::BoundB => assert!(
+                    !lists_a && t.contains("named-HostB") && !t.contains("named-HostA"),
+                    "{t}"
+                ),
                 _ => assert!(lists_a && t.contains("named-HostB"), "{who:?}: {t}"),
             }
         },
@@ -2174,8 +2320,8 @@ async fn run_matrix(isolate: bool) {
                     })
                 };
             match who {
-                Who::HostA => assert!(has(u_a) && !has(u_b), "{t}"),
-                Who::HostB => assert!(has(u_b) && !has(u_a), "{t}"),
+                Who::HostA | Who::BoundA => assert!(has(u_a) && !has(u_b), "{t}"),
+                Who::HostB | Who::BoundB => assert!(has(u_b) && !has(u_a), "{t}"),
                 Who::HostNone => assert!(!has(u_a) && !has(u_b), "{t}"),
                 _ => assert!(has(u_a) && has(u_b), "{who:?}: {t}"),
             }
@@ -2200,7 +2346,7 @@ async fn run_matrix(isolate: bool) {
             let refused = t.contains(&format!("session {u_b} not found"));
             assert_eq!(
                 refused,
-                matches!(who, Who::HostA | Who::HostNone),
+                matches!(who, Who::HostA | Who::HostNone | Who::BoundA),
                 "{who:?}: {t}"
             );
             assert_eq!(t.contains("\"outcome\":\"kept\""), !refused, "{who:?}: {t}");
@@ -2212,6 +2358,293 @@ async fn run_matrix(isolate: bool) {
         for id in [u_a, u_b] {
             s.delete_session(id).unwrap();
         }
+    }
+
+    // ── the Work view's reads (work graph M14.1b) ───────────────────────
+    // Navigation a person keeps (M14.1c writes it; seeded here): a rule on
+    // each org's tracker, one on a word of A's title, and a saved view of
+    // every owner. Their names are markers of their org.
+    let bravo_rule;
+    {
+        let s = fx.t.store.lock().unwrap();
+        let rule =
+            |name: &str, c: crate::store::RuleConditions, group: &str| s.seed_rule(name, &c, group);
+        let _ = rule(
+            "Alpha rule",
+            crate::store::RuleConditions {
+                tracker_id: Some(fx.tracker_a),
+                ..Default::default()
+            },
+            "SECRET-A group",
+        );
+        bravo_rule = rule(
+            "Bravo rule",
+            crate::store::RuleConditions {
+                tracker_id: Some(fx.tracker_b),
+                ..Default::default()
+            },
+            "SECRET-B group",
+        );
+        let _ = rule(
+            "Alpha login rule",
+            crate::store::RuleConditions {
+                title_contains: Some("login".into()),
+                ..Default::default()
+            },
+            "SECRET-A login",
+        );
+        s.seed_view("Everyone's", &json!({}), None);
+        s.seed_view("SECRET-A view", &json!({ "org": ORG_A }), Some(ORG_A));
+        s.seed_view("SECRET-B view", &json!({ "org": ORG_B }), Some(ORG_B));
+    }
+    // The tree: each caller its own orgs' tasks; the forced cross-org link
+    // (s_x, an A session, on B's BB-1) never names s_x to an org-B reader
+    // nor BB-1 to an org-A one.
+    m.row(
+        "work",
+        "tree",
+        |_, _| json!({ "action": "tree", "limit": 200 }),
+        move |_, who, a| {
+            is_ok(who, a, "tree");
+            let v: Value = serde_json::from_str(text(a)).unwrap();
+            let keys: BTreeSet<String> = v["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t["key"].as_str().map(String::from))
+                .collect();
+            let has = |k: &str| keys.contains(k);
+            match who {
+                w if w.is_unbound() => {
+                    assert!(
+                        has("AA-1") && has("BB-1") && has("BB-3") && has("LOC-1"),
+                        "{who:?}: {keys:?}"
+                    );
+                    assert!(
+                        text(a).contains("\"cross_org\":true"),
+                        "the forced link is flagged"
+                    );
+                }
+                Who::HostA => assert!(
+                    has("AA-1") && !has("BB-1") && !has("BB-3") && !has("LOC-1"),
+                    "own org, own host: {keys:?}"
+                ),
+                Who::HostB => {
+                    assert!(has("BB-1") && has("BB-3") && !has("AA-1"), "{keys:?}");
+                    // s_x (A's) is named to host B only while no org
+                    // isolates sessions (D7).
+                    assert_eq!(text(a).contains("s-x"), !isolate, "{a:?}");
+                }
+                Who::HostNone => assert!(has("LOC-1") && !has("AA-1") && !has("BB-1"), "{keys:?}"),
+                Who::BoundA => {
+                    assert!(has("AA-1") && has("LOC-1") && !has("BB-1"), "{keys:?}");
+                }
+                Who::BoundB => {
+                    assert!(has("BB-1") && has("BB-3") && !has("AA-1"), "{keys:?}");
+                    assert!(
+                        !text(a).contains("s-x"),
+                        "an A session never reaches a B-bound client"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "task",
+        |fx, _| json!({ "action": "task", "task_id": format!("item:{}", fx.item_b) }),
+        move |_, who, a| match who {
+            w if w.is_unbound() => {
+                assert!(text(a).contains("s-x") && text(a).contains("s-b"), "{a:?}");
+            }
+            Who::HostB => {
+                assert!(text(a).contains("s-b"), "{a:?}");
+                assert_eq!(text(a).contains("s-x"), !isolate, "D7: {a:?}");
+            }
+            Who::BoundB => assert!(text(a).contains("s-b") && !text(a).contains("s-x"), "{a:?}"),
+            _ => is_code(who, a, "E_NOTFOUND", "another org's task"),
+        },
+    )
+    .await;
+    // No oracle: B's task answers org-A readers exactly as an unknown id.
+    for who in [Who::HostA, Who::BoundA] {
+        let hidden = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "task", "task_id": format!("item:{}", fx.item_b) }),
+        )
+        .await;
+        let unknown = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "task", "task_id": "item:987654" }),
+        )
+        .await;
+        same_as_unknown(&hidden, &unknown, &fx.item_b.to_string(), "987654");
+    }
+    m.row(
+        "work",
+        "session_tasks",
+        |fx, _| json!({ "action": "session_tasks", "session_id": fx.s_x }),
+        |fx, who, a| match who {
+            w if w.is_unbound() => assert!(
+                text(a).contains(&format!("\"link_id\":{}", relink(fx, fx.s_x, fx.item_b))),
+                "{who:?}: {a:?}"
+            ),
+            // s_x is A's and on h-a: A's readers get the session without
+            // B's task.
+            Who::HostA | Who::BoundA => {
+                is_ok(who, a, "own session");
+                assert!(text(a).contains("\"links\":[]"), "{who:?}: {a:?}");
+            }
+            Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's session"),
+            _ => is_code(who, a, "E_FORBIDDEN", "another host's session"),
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "review",
+        |_, _| json!({ "action": "review" }),
+        |fx, who, a| {
+            is_ok(who, a, "review");
+            let flagged =
+                text(a).contains(&format!("\"link_id\":{}", relink(fx, fx.s_x, fx.item_b)));
+            assert_eq!(flagged, who.is_unbound(), "{who:?}: {a:?}");
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "rules",
+        |_, _| json!({ "action": "rules" }),
+        |_, who, a| {
+            is_ok(who, a, "rules");
+            let t = text(a);
+            let (sa, sb) = (t.contains("Alpha rule"), t.contains("Bravo rule"));
+            match who {
+                w if w.is_unbound() => assert!(sa && sb && t.contains("Alpha login"), "{t}"),
+                // A host keeps no navigation.
+                w if w.is_host() => assert_eq!(t, "[]", "{who:?}"),
+                // A bound client: the rules that place a task it sees.
+                Who::BoundA => assert!(sa && !sb && t.contains("Alpha login"), "{t}"),
+                Who::BoundB => assert!(sb && !sa && !t.contains("Alpha login"), "{t}"),
+                _ => unreachable!(),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "rule_preview",
+        // An edit of B's rule, previewed: it moves B's tasks to "Pay".
+        move |fx, _| {
+            json!({ "action": "rule_preview",
+                    "rule": { "id": bravo_rule, "name": "p",
+                              "conditions": { "tracker_id": fx.tracker_b }, "group": "Pay" } })
+        },
+        |_, who, a| match who {
+            w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "hosts do not preview rules"),
+            Who::BoundA => {
+                is_ok(who, a, "preview");
+                assert!(
+                    text(a).contains("\"total\":0"),
+                    "nothing of B moves for A: {a:?}"
+                );
+            }
+            _ => {
+                is_ok(who, a, "preview");
+                assert!(!text(a).contains("\"total\":0"), "{who:?}: {a:?}");
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "views",
+        |_, _| json!({ "action": "views" }),
+        |_, who, a| {
+            is_ok(who, a, "views");
+            let names: Vec<String> = serde_json::from_str::<Vec<Value>>(text(a))
+                .unwrap()
+                .iter()
+                .filter_map(|v| v["name"].as_str().map(String::from))
+                .collect();
+            match who {
+                w if w.is_unbound() => assert_eq!(names.len(), 3, "{names:?}"),
+                w if w.is_host() => assert!(names.is_empty(), "{who:?}: {names:?}"),
+                // A bound client: its own org's views only (D35).
+                Who::BoundA => assert_eq!(names, vec!["SECRET-A view".to_string()]),
+                Who::BoundB => assert_eq!(names, vec!["SECRET-B view".to_string()]),
+                _ => unreachable!(),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work",
+        "org_impact",
+        |fx, _| json!({ "action": "org_impact", "task_id": format!("item:{}", fx.item_b), "org_id": 0 }),
+        |fx, who, a| match who {
+            // Only a caller that may move an org reads the impact of a
+            // move (D33): it names both orgs' hosts and bound clients.
+            w if w.is_unbound() => {
+                is_ok(who, a, "impact");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(v["reason"], "tracker_controlled", "{v}");
+                assert_eq!(v["from_org"], fx.org_b, "{v}");
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "a scoped caller moves no org"),
+        },
+    )
+    .await;
+    // The refusal is the same for a task the caller sees and one it does
+    // not: no oracle.
+    for who in [Who::HostA, Who::BoundA, Who::BoundB] {
+        let seen = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "org_impact", "task_id": format!("item:{}", fx.item_a), "org_id": 0 }),
+        )
+        .await;
+        let unseen = call(
+            &fx,
+            who,
+            "work",
+            json!({ "action": "org_impact", "task_id": "item:987654", "org_id": 0 }),
+        )
+        .await;
+        assert_eq!(seen, unseen, "{who:?}");
+    }
+    // D31's switch is org administration: the master's, and nobody else's.
+    m.row(
+        "work_admin",
+        "update_org",
+        |_, _| json!({ "action": "update_org", "org_id": ORG_A, "bound_sees_unassigned": true }),
+        |fx, who, a| match who {
+            Who::Master => {
+                is_ok(who, a, "D31");
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(v["bound_sees_unassigned"], true, "{v}");
+                let _ = fx;
+            }
+            _ => is_code(who, a, "E_FORBIDDEN", "work_admin is master-only"),
+        },
+    )
+    .await;
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.conn_for_test()
+            .execute_batch(
+                "DELETE FROM work_placements; DELETE FROM work_rules; DELETE FROM work_views; \
+                 UPDATE work_links SET review_ack_at = NULL;",
+            )
+            .unwrap();
     }
 
     // Coverage: every action of the three tools has a row.
@@ -2244,6 +2677,182 @@ async fn the_isolation_matrix_holds_with_sessions_shared() {
 #[tokio::test]
 async fn the_isolation_matrix_holds_with_org_b_isolating_sessions() {
     run_matrix(true).await;
+}
+
+/// D31 (work graph M14.1b), its second value: with an org's
+/// `bound_sees_unassigned` off — set through `work_admin`'s org edit, as the
+/// operator does — its bound clients read only rows assigned to their org:
+/// no unassigned session (s_n on the no-org host h-n) and no unassigned
+/// work (its bare key LOC-1), through any of the Work view's reads, nor
+/// the session list. The master and the hosts read as before: D31 is a
+/// bound client's switch only. The matrix above runs with the default (on).
+#[tokio::test]
+async fn the_work_view_reads_follow_d31_off() {
+    let fx = fixture(false);
+    for org in [ORG_A, ORG_B] {
+        let a = call(
+            &fx,
+            Who::Master,
+            "work_admin",
+            json!({ "action": "update_org", "org_id": org, "bound_sees_unassigned": false }),
+        )
+        .await;
+        is_ok(Who::Master, &a, "D31 off");
+        assert!(
+            text(&a).contains("\"bound_sees_unassigned\":false"),
+            "{a:?}"
+        );
+    }
+    // What an unassigned row would show: its key and its session's name.
+    const UNASSIGNED: &[&str] = &["LOC-1", "s-n"];
+    let reads = |fx: &Fx| -> Vec<(&'static str, Value)> {
+        vec![
+            ("tree", json!({ "action": "tree", "limit": 200 })),
+            ("task", json!({ "action": "task", "task_id": "ref:LOC-1" })),
+            (
+                "session_tasks",
+                json!({ "action": "session_tasks", "session_id": fx.s_n }),
+            ),
+            ("review", json!({ "action": "review" })),
+            ("rules", json!({ "action": "rules" })),
+            (
+                "rule_preview",
+                json!({ "action": "rule_preview",
+                        "rule": { "name": "loc", "conditions": { "key_prefix": "LOC" }, "group": "Loc" } }),
+            ),
+            ("views", json!({ "action": "views" })),
+            (
+                "org_impact",
+                json!({ "action": "org_impact", "task_id": "ref:LOC-1", "org_id": 0 }),
+            ),
+        ]
+    };
+    for who in [
+        Who::Master,
+        Who::HostA,
+        Who::HostNone,
+        Who::BoundA,
+        Who::BoundB,
+    ] {
+        for (action, args) in reads(&fx) {
+            let a = call(&fx, who, "work", args).await;
+            let t = text(&a);
+            for m in who.forbidden_markers() {
+                assert!(
+                    !t.contains(m),
+                    "LEAK: {who:?} read {m:?} through {action}: {t}"
+                );
+            }
+            if who.is_bound() {
+                // The asked-for key may come back in its own refusal.
+                for m in UNASSIGNED
+                    .iter()
+                    .filter(|m| !(action == "task" && **m == "LOC-1"))
+                {
+                    assert!(
+                        !t.contains(m),
+                        "D31 off: {who:?} read the unassigned {m:?} through {action}: {t}"
+                    );
+                }
+            }
+            match (who, action) {
+                (Who::Master, "tree") | (Who::HostNone, "tree") => {
+                    assert!(t.contains("LOC-1"), "unchanged for {who:?}: {t}")
+                }
+                (Who::Master, "task" | "session_tasks") => is_ok(who, &a, action),
+                (Who::HostNone, "task" | "session_tasks") => is_ok(who, &a, "its own host"),
+                (Who::BoundA | Who::BoundB, "task" | "session_tasks") => {
+                    is_code(who, &a, "E_NOTFOUND", "unassigned, D31 off")
+                }
+                (Who::BoundA, "tree") => assert!(t.contains("AA-1"), "its own org: {t}"),
+                (Who::BoundB, "tree") => assert!(t.contains("BB-1"), "its own org: {t}"),
+                (Who::BoundA | Who::BoundB, "rule_preview") => {
+                    assert!(t.contains("\"total\":0"), "{who:?}: {t}")
+                }
+                (Who::Master, "rule_preview") => assert!(t.contains("LOC-1"), "{t}"),
+                (w, "org_impact") if !w.is_unbound() => {
+                    is_code(who, &a, "E_FORBIDDEN", "a scoped caller moves no org")
+                }
+                _ => {}
+            }
+        }
+        // No oracle: the hidden bare key reads as a key nobody linked.
+        if who.is_bound() {
+            let hidden = call(
+                &fx,
+                who,
+                "work",
+                json!({ "action": "task", "task_id": "ref:LOC-1" }),
+            )
+            .await;
+            let unknown = call(
+                &fx,
+                who,
+                "work",
+                json!({ "action": "task", "task_id": "ref:NOPE-1" }),
+            )
+            .await;
+            same_as_unknown(&hidden, &unknown, "LOC-1", "NOPE-1");
+        }
+        // The session list follows the same switch.
+        let a = call(&fx, who, "list_sessions", json!({})).await;
+        if who.is_bound() {
+            assert!(!text(&a).contains("s-n"), "{who:?}: {a:?}");
+        }
+    }
+    // Nor does it start a session it could not see: an unassigned project
+    // on the no-org host is refused while the switch is off.
+    {
+        let s = fx.t.store.lock().unwrap();
+        let loose = s.upsert_project("loose", "x", "/src/loose").unwrap();
+        let err = super::support::require_bound_client_may_create(
+            &s,
+            &Who::BoundA.caller(),
+            "h-n",
+            loose,
+        )
+        .unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{err:?}");
+        assert!(super::support::require_bound_client_may_create(
+            &s,
+            &Who::BoundA.caller(),
+            "h-a",
+            fx.pid_acme
+        )
+        .is_ok());
+    }
+    // Back on: A's bound client reads the unassigned rows again, from its
+    // next call on (the scope is read with each call).
+    call(
+        &fx,
+        Who::Master,
+        "work_admin",
+        json!({ "action": "update_org", "org_id": ORG_A, "bound_sees_unassigned": true }),
+    )
+    .await
+    .unwrap();
+    let a = call(
+        &fx,
+        Who::BoundA,
+        "work",
+        json!({ "action": "tree", "limit": 200 }),
+    )
+    .await;
+    assert!(
+        text(&a).contains("LOC-1") && text(&a).contains("s-n"),
+        "{a:?}"
+    );
+    let a = call(
+        &fx,
+        Who::BoundB,
+        "work",
+        json!({ "action": "tree", "limit": 200 }),
+    )
+    .await;
+    assert!(
+        !text(&a).contains("LOC-1"),
+        "B's switch is still off: {a:?}"
+    );
 }
 
 /// Every Routed work command of the desktop maps to an action the matrix
@@ -2297,8 +2906,8 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
             assert!(!text(&a).contains(m), "{who:?} read {m}: {}", text(&a));
         }
         let want = match who {
-            Who::HostA => vec![fx.tracker_a],
-            Who::HostB => vec![fx.tracker_b],
+            Who::HostA | Who::BoundA => vec![fx.tracker_a],
+            Who::HostB | Who::BoundB => vec![fx.tracker_b],
             Who::HostNone => vec![],
             _ => vec![fx.tracker_a, fx.tracker_b],
         };
@@ -2322,6 +2931,122 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
             };
             assert!(!text(&a).contains(other), "{who:?}: {}", text(&a));
         }
+        // Work graph M14: a bound client is not told the other org's
+        // tracker, nor its host's spend.
+        if who.is_bound() {
+            let (other, other_host) = if *who == Who::BoundA {
+                ("B Jira", "h-b")
+            } else {
+                ("A Jira", "h-a")
+            };
+            assert!(!text(&a).contains(other), "{who:?}: {}", text(&a));
+            let v: Value = serde_json::from_str(text(&a)).unwrap();
+            let hosts: Vec<&str> = v["usage_by_host"]
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            assert!(!hosts.contains(&other_host), "{who:?}: {hosts:?}");
+        }
+    }
+}
+
+/// Work graph M14: every roll-up in `fleet_health` that sums across hosts
+/// (spend by host and by day, host and session counts) is taken over the
+/// hosts an org-bound client sees — its org's, and unassigned ones only
+/// while D31 is on — so B's spend never reaches A's client, not even as a
+/// fleet-wide total. Everyone else reads as before.
+#[tokio::test]
+async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
+    let fx = fixture(false);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    {
+        let s = fx.t.store.lock().unwrap();
+        for (id, host, cost) in [
+            (fx.s_a, "h-a", 100),
+            (fx.s_b, "h-b", 20_000),
+            (fx.s_n, "h-n", 3_000),
+        ] {
+            s.apply_usage(
+                id,
+                host,
+                &crate::store::UsageDelta {
+                    reset: false,
+                    totals: crate::store::UsageTotals {
+                        input_tokens: cost,
+                        cost_micros: cost,
+                        ..Default::default()
+                    },
+                    model: None,
+                    offset: 1,
+                    source: "x.jsonl".into(),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now,
+                },
+            )
+            .unwrap();
+        }
+    }
+    // (daily cost, usage_by_host keys, hosts_total, sessions_total)
+    let read = |a: &Answer| -> (i64, Vec<String>, i64, i64) {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        let day: i64 = v["usage_by_day"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["cost_micros"].as_i64().unwrap())
+            .sum();
+        let hosts = v["usage_by_host"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        (
+            day,
+            hosts,
+            v["hosts_total"].as_i64().unwrap(),
+            v["sessions_total"].as_i64().unwrap(),
+        )
+    };
+    let names = |hs: &[&str]| hs.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+    let everything = (23_100, names(&["h-a", "h-b", "h-n"]), 3, 4);
+    for who in EVERYONE {
+        let a = call(&fx, *who, "fleet_health", json!({})).await;
+        assert_eq!(code(&a), "OK", "{who:?}: {a:?}");
+        let want = match who {
+            // D31 on (the default): the org's hosts and h-n. s_x is A's
+            // too; B's s_b and its 20 000 are nowhere.
+            Who::BoundA => (3_100, names(&["h-a", "h-n"]), 2, 3),
+            Who::BoundB => (23_000, names(&["h-b", "h-n"]), 2, 2),
+            // As before: its own host's spend, fleet-wide counts.
+            Who::HostA => (100, names(&["h-a"]), 3, 4),
+            Who::HostB => (20_000, names(&["h-b"]), 3, 4),
+            Who::HostNone => (3_000, names(&["h-n"]), 3, 4),
+            _ => everything.clone(),
+        };
+        assert_eq!(read(&a), want, "{who:?}");
+    }
+    // D31 off: the unassigned host leaves a bound client's totals too.
+    for org in [ORG_A, ORG_B] {
+        let a = call(
+            &fx,
+            Who::Master,
+            "work_admin",
+            json!({ "action": "update_org", "org_id": org, "bound_sees_unassigned": false }),
+        )
+        .await;
+        is_ok(Who::Master, &a, "D31 off");
+    }
+    for (who, want) in [
+        (Who::BoundA, (100, names(&["h-a"]), 1, 2)),
+        (Who::BoundB, (20_000, names(&["h-b"]), 1, 1)),
+        (Who::Master, everything.clone()),
+        (Who::ClientReadonly, everything.clone()),
+    ] {
+        let a = call(&fx, who, "fleet_health", json!({})).await;
+        assert_eq!(read(&a), want, "{who:?} with D31 off");
     }
 }
 
@@ -2369,8 +3094,8 @@ fn a_skipping_trackers_health_is_fenced_by_org_too() {
             assert!(!body.contains(m), "{who:?} read {m}: {body}");
         }
         let want = match who {
-            Who::HostA => vec![ta],
-            Who::HostB => vec![tb],
+            Who::HostA | Who::BoundA => vec![ta],
+            Who::HostB | Who::BoundB => vec![tb],
             Who::HostNone => vec![],
             _ => vec![ta, tb],
         };

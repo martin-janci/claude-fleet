@@ -405,7 +405,8 @@ impl ServerHandler for FleetTools {
         // Work graph M5: whatever tool answered — a result or an error's
         // details — a per-host token never receives session rows' work of
         // another org.
-        if let (Ok(result), true) = (out.as_mut(), caller.host_alias.is_some()) {
+        // A client bound to an org (M14) is gated the same way.
+        if let (Ok(result), true) = (out.as_mut(), caller.is_scoped()) {
             // A tool that wrote nothing has no write of its own to see, so
             // its gate reads the pool too; every other tool's reads the
             // writer, after its own writes.

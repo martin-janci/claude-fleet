@@ -574,3 +574,115 @@ fn scale_usage_summary() {
     });
     budget("usage", p95, 1_500.0);
 }
+
+/// Work graph M14.1b (UC13): the Work view's reads at scale. The 3,000 ms
+/// bound is the branch's, re-measured on `main` (2026-09-27, test build):
+/// p95 first page 831 ms, filtered 875, per-host token 594, bound client
+/// 684, task 619, review 704 — a margin of about 3.4x, like the M12 budgets.
+/// The view is a projection of the whole graph (every item, link and
+/// session, read once), so unlike
+/// the reads above its statements DO read the big tables in full — by
+/// design, once per request, off the writer (the MCP read pool). What is
+/// held here is the wall clock of a first page, a filtered page, a section,
+/// a task and the review inbox, for every kind of scope.
+#[test]
+fn scale_work_view() {
+    use crate::service::work::view::{review, task, tree, IdOrWord, TreeArgs, WorkTreeFilters};
+    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let store = &f.store;
+    let first = tree(store, &OrgScope::All, &TreeArgs::default()).unwrap();
+    assert!(first.total > 4_000, "every item is a task: {}", first.total);
+    assert_eq!(first.tasks.len(), 50);
+    assert!(first.next_cursor.is_some());
+    let (_, p95) = measure("work tree, first page (All)", || {
+        tree(store, &OrgScope::All, &TreeArgs::default()).unwrap()
+    });
+    budget("work tree first page (All)", p95, 3_000.0);
+
+    let filtered = TreeArgs {
+        filters: WorkTreeFilters {
+            status: Some("open".into()),
+            has: Some("active".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (_, p95) = measure("work tree, open with an active session", || {
+        tree(store, &OrgScope::All, &filtered).unwrap()
+    });
+    budget("work tree filtered", p95, 3_000.0);
+
+    // A section, paged: the cursor walks it without repeats.
+    let group = first.groups[0].group.id.clone();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = None;
+    for _ in 0..3 {
+        let p = tree(
+            store,
+            &OrgScope::All,
+            &TreeArgs {
+                filters: WorkTreeFilters {
+                    group: Some(group.clone()),
+                    ..Default::default()
+                },
+                cursor: cursor.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for t in &p.tasks {
+            assert!(
+                seen.insert(t.task_id.clone()),
+                "a task twice: {}",
+                t.task_id
+            );
+        }
+        match p.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+
+    let host = host_scope(store);
+    let (_, p95) = measure("work tree, a per-host token", || {
+        tree(store, &host, &TreeArgs::default()).unwrap()
+    });
+    budget("work tree (host)", p95, 3_000.0);
+    let bound = OrgScope::Org {
+        org: 1,
+        sees_unassigned: true,
+    };
+    let (page, p95) = {
+        let p = tree(
+            store,
+            &bound,
+            &TreeArgs {
+                filters: WorkTreeFilters {
+                    org: Some(IdOrWord::Id(2)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (_, p95) = measure("work tree, a client bound to org 1", || {
+            tree(store, &bound, &TreeArgs::default()).unwrap()
+        });
+        (p, p95)
+    };
+    assert_eq!(
+        page.total, 0,
+        "org 2's tasks never reach a client bound to org 1"
+    );
+    budget("work tree (bound client)", p95, 3_000.0);
+
+    let hot = first.tasks[0].task_id.clone();
+    let (_, p95) = measure("work task detail", || {
+        task(store, &OrgScope::All, &hot).unwrap()
+    });
+    budget("work task", p95, 3_000.0);
+    let (_, p95) = measure("work review inbox", || {
+        review(store, &OrgScope::All, None, None).unwrap()
+    });
+    budget("work review", p95, 3_000.0);
+}

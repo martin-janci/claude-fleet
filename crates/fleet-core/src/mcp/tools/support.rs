@@ -246,7 +246,62 @@ pub(super) fn resolve_row_and_gate(
     let row = sessions::resolve_session_target(s, session_id, host_alias, tmux_name)
         .map_err(to_mcp_err)?;
     require_host(caller, &row.host_alias, what)?;
+    require_bound_client_sees(s, caller, &row)?;
     Ok(row)
+}
+
+/// A paired client bound to an org (work graph M14) starts sessions only
+/// where they would belong to its org (or to none): a session it creates in
+/// another org's project would at once be invisible to it — work it cannot
+/// see, assigned where it does not belong.
+pub(super) fn require_bound_client_may_create(
+    s: &Store,
+    caller: &Caller,
+    host: &str,
+    project_id: i64,
+) -> Result<(), McpError> {
+    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
+        return Ok(());
+    }
+    // Its org's projects and hosts — and unassigned ones only while the
+    // org's `bound_sees_unassigned` is on (D31).
+    let scope = caller.org_scope(s).map_err(to_mcp_err)?;
+    let org = s
+        .org_for_new_session(host, project_id)
+        .map_err(to_mcp_err)?;
+    if !scope.sees_org(org) {
+        return Err(mcp_err(
+            codes::E_FORBIDDEN,
+            "a client bound to an org starts sessions only in its own org's projects and hosts",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// A paired client bound to an org (work graph M14) reaches only its org's
+/// and unassigned sessions — to read, prompt, kill or link them. Another
+/// org's session answers exactly as one that does not exist. A per-host
+/// token's own rule (its host, D7) is [`require_host`] and
+/// `require_visible_session`; everyone else is unrestricted.
+pub(super) fn require_bound_client_sees(
+    s: &Store,
+    caller: &Caller,
+    row: &crate::store::SessionRow,
+) -> Result<(), McpError> {
+    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
+        return Ok(());
+    }
+    let scope = caller.org_scope(s).map_err(to_mcp_err)?;
+    if scope.sees_row(row) {
+        Ok(())
+    } else {
+        Err(mcp_err(
+            codes::E_NOTFOUND,
+            format!("session {} not found", row.id),
+            None,
+        ))
+    }
 }
 
 /// Characters of a free-text argument shown readably in a confirm summary.
@@ -923,10 +978,29 @@ pub(super) struct SessionWithController {
 }
 
 impl SessionWithController {
+    /// [`Self::with_threshold`] at the default threshold, for tests that
+    /// have no store; production callers hold the store and pass its value.
+    #[cfg(test)]
     pub(super) fn new(is_controller: bool, row: crate::store::SessionRow) -> Self {
+        Self::with_threshold(
+            is_controller,
+            row,
+            crate::service::attention::DEFAULT_CONTEXT_RED_PCT,
+        )
+    }
+
+    /// [`Self::new`] at the store's `health.context_red_pct`
+    /// (`service::health::context_red_pct`), which every caller holding the
+    /// store should pass so `context_full` and `fleet_health.context_red`
+    /// agree.
+    pub(super) fn with_threshold(
+        is_controller: bool,
+        row: crate::store::SessionRow,
+        context_red_pct: f64,
+    ) -> Self {
         Self {
             is_controller,
-            needs_attention: crate::service::attention::needs_attention(&row),
+            needs_attention: crate::service::attention::needs_attention_with(&row, context_red_pct),
             row,
         }
     }
@@ -946,6 +1020,9 @@ pub(super) struct ClientSummary {
     pub(super) last_seen_at: Option<i64>,
     pub(super) revoked_at: Option<i64>,
     pub(super) trusted_at: Option<i64>,
+    /// The org the client is bound to (work graph M14); absent: unbound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) org_id: Option<i64>,
 }
 
 impl From<crate::store::ClientTokenRow> for ClientSummary {
@@ -958,6 +1035,7 @@ impl From<crate::store::ClientTokenRow> for ClientSummary {
             last_seen_at: r.last_seen_at,
             revoked_at: r.revoked_at,
             trusted_at: r.trusted_at,
+            org_id: r.org_id,
         }
     }
 }
@@ -1249,7 +1327,7 @@ impl FleetTools {
         caller: &Caller,
         session_id: i64,
     ) -> Result<(), McpError> {
-        if caller.host_alias.is_none() {
+        if !caller.is_scoped() {
             return Ok(());
         }
         let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -1515,7 +1593,7 @@ pub(super) fn resolve_reader(s: &Store, caller: &Caller, reader: i64) -> Result<
         return Ok(false);
     };
     require_host(caller, &row.host_alias, "fresh_for's session")?;
-    if caller.host_alias.is_some() {
+    if caller.is_scoped() {
         let scope = caller.org_scope(s).map_err(to_mcp_err)?;
         if !scope.sees_row(&row) {
             return Err(mcp_err(

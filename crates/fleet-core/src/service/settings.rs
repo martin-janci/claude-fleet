@@ -59,6 +59,10 @@ pub struct Spec {
 
 // ── keys ──
 pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
+/// A `working` row with no hook, no turn, no transcript growth and no pane
+/// output for this long is demoted to `idle` by the tick (lifecycle F2).
+/// `0` turns the rule off.
+pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
 /// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
 /// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
 /// is kept before Phase 2
@@ -75,11 +79,19 @@ pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
 pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
+/// Recreates the `oom` playbook may run on one session per 24 h
+/// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
+/// recreate while keeping the refusals on the timeline.
+pub const PLAYBOOK_OOM_MAX_ATTEMPTS: &str = "playbooks.oom_max_attempts";
 pub const GC_ENABLED: &str = "gc.enabled";
 pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
 pub const GC_WORK_IDLE_SECS: &str = "gc.work_idle_secs";
 pub const GC_SWEEP_INTERVAL_SECS: &str = "gc.sweep_interval_secs";
+/// How long a lost `external` row (a Claude fleet only observes, never
+/// resumable) is kept before Phase 2 deletes it — long enough for the
+/// desktop that owns it to restart, no longer. `0` reaps it on the next pass.
+pub const GC_EXTERNAL_LOST_TTL_SECS: &str = "gc.external_lost_ttl_secs";
 /// Opt-in reconcile-tick repair: re-adds deleted worktrees without anyone
 /// opening them. Dropping a stale entry first (tick or click) always needs
 /// the vanished-directory guard, including the parent fingerprint match.
@@ -162,6 +174,12 @@ pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
 /// Rows older than this are swept on the tick; `0` disables the age sweep.
 pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
 
+/// Percent of the context window at or past which a session counts as
+/// `context_red` in `fleet_health`, reads `context_full` in
+/// `needs_attention`, and draws red on the desktop. One number for all
+/// three (ux F-09: the hub said 85 while the desktop said 70/90).
+pub const HEALTH_CONTEXT_RED_PCT: &str = "health.context_red_pct";
+
 /// Retention (work graph M12.3, `store::work_retention`): days a work
 /// journal row is kept once nothing live points at it. `0` keeps forever.
 pub const WORK_RETENTION_JOURNAL_DAYS: &str = "work.retention.journal_days";
@@ -237,6 +255,11 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Secs,
     },
     Spec {
+        key: RECONCILE_STALE_WORKING_SECS,
+        default: "1800",
+        kind: Kind::Secs,
+    },
+    Spec {
         key: SESSIONS_LOST_TTL_SECS,
         default: "1209600",
         kind: Kind::Secs,
@@ -262,6 +285,11 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Bool,
     },
     Spec {
+        key: PLAYBOOK_OOM_MAX_ATTEMPTS,
+        default: "2",
+        kind: Kind::Int { min: 0, max: 20 },
+    },
+    Spec {
         key: GC_ENABLED,
         default: "false",
         kind: Kind::Bool,
@@ -284,6 +312,11 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: GC_SWEEP_INTERVAL_SECS,
         default: "300",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: GC_EXTERNAL_LOST_TTL_SECS,
+        default: "3600",
         kind: Kind::Secs,
     },
     Spec {
@@ -386,6 +419,11 @@ pub const SPECS: &[Spec] = &[
         key: REPORTS_MAX_AGE_SECS,
         default: "604800",
         kind: Kind::Secs,
+    },
+    Spec {
+        key: HEALTH_CONTEXT_RED_PCT,
+        default: "85",
+        kind: Kind::Int { min: 1, max: 100 },
     },
     Spec {
         key: WORK_RETENTION_JOURNAL_DAYS,
