@@ -644,7 +644,7 @@ token:
 - **Today** with *Copy standup*, and the ticket card with its acceptance
   criteria, **read-only** (decision D15): the card offers *Copy*, never
   *Send*;
-- org labels and an org filter.
+- org labels, an org filter and each row's org colour bar.
 
 - with a **full** token, **Name this work…** for a session with no work,
   and **Rename** for local work (D20; fleet-mobile M13.4a).
