@@ -1,5 +1,6 @@
 use super::*;
 use crate::ipc_error::codes;
+use crate::service::add_project::{AddProjectArgs, AddProjectSource};
 use crate::store::{CursorRow, StartSource};
 use std::time::Duration;
 
@@ -1912,7 +1913,8 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88;
+/// `add_project` / `list_github_repos`: 91.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1933,7 +1935,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 89);
+    assert_eq!(served, 91);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3457,7 +3459,15 @@ fn the_served_definition_budget_stays_bounded() {
     // (+144); plus 100.
     // Merged with M13.4c (`work_link` `summarize`): measured at 56,950 on
     // 2026-09-27; plus 100.
-    const BUDGET_BYTES: usize = 57_050;
+    ///
+    /// Raised from 57,050 to 59,174 for `add_project` and `list_github_repos`
+    /// (a hub client adds a project). The surface before them measured
+    /// 56,760; the two add 2,314 — `add_project`'s `source` is a three-variant
+    /// tagged enum whose every variant and field
+    /// `every_tool_parameter_is_documented` requires documented, which puts
+    /// it at 1,976, the size of `new_session` — for 59,074 measured, plus the
+    /// customary 100 of headroom.
+    const BUDGET_BYTES: usize = 59_174;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7912,4 +7922,80 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     );
     assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
     assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
+}
+
+// ---- add_project / list_github_repos (a hub client adds a project) --------
+
+#[test]
+fn add_project_tools_are_client_reachable_with_the_right_flags() {
+    let add = guard::policy("add_project").expect("add_project has a TOOL_POLICIES row");
+    assert!(
+        guard::is_client_tool("add_project"),
+        "a full client adds projects"
+    );
+    assert!(!guard::is_admin_tool("add_project"));
+    assert!(!add.readonly, "it writes a project row");
+    assert!(!add.confirm, "it has its own create_remote confirm token");
+    assert_eq!(
+        crate::mcp::tool_deadline("add_project"),
+        LONG_POLL_CAP,
+        "a clone's wall clock is 600 s; the lifecycle cap (300 s) would cut it"
+    );
+    let ls = guard::policy("list_github_repos").expect("list_github_repos has a row");
+    assert!(guard::is_client_tool("list_github_repos"));
+    assert!(ls.readonly, "gh repo list observes");
+    assert!(guard::is_readonly_tool("list_github_repos"));
+    assert!(!guard::is_readonly_tool("add_project"));
+}
+
+#[test]
+fn a_readonly_client_may_browse_repos_but_not_add_a_project() {
+    let ro = client_caller("phone", TokenMode::Readonly);
+    assert!(enforce_mode(&ro, "list_github_repos").is_ok());
+    assert!(enforce_mode(&ro, "add_project").is_err());
+    let full = client_caller("laptop", TokenMode::Full);
+    assert!(enforce_mode(&full, "add_project").is_ok());
+}
+
+#[tokio::test]
+async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
+    let t = test_tools(Store::open_in_memory().unwrap());
+    let err = t
+        .add_project(Parameters(AddProjectArgs {
+            host_alias: "-oProxyCommand=x".into(),
+            source: AddProjectSource::Clone {
+                url: "https://github.com/o/r".into(),
+            },
+            call_id: None,
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_"), "{}", err.message);
+    let err = t
+        .list_github_repos(Parameters(ListGithubReposParams {
+            host_alias: "-oProxyCommand=x".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_"), "{}", err.message);
+}
+
+#[test]
+fn add_project_serves_the_source_variants_and_no_call_id() {
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let t = tools
+        .iter()
+        .find(|t| t.name == "add_project")
+        .expect("add_project is served");
+    let props = t.input_schema["properties"].as_object().unwrap();
+    assert!(props.contains_key("host_alias"));
+    assert!(props.contains_key("source"));
+    assert!(!props.contains_key("call_id"));
+    let text = serde_json::to_string(&t.input_schema).unwrap();
+    for kind in ["clone", "folder", "new"] {
+        assert!(
+            text.contains(&format!("\"{kind}\"")),
+            "source kind {kind} missing: {text}"
+        );
+    }
 }

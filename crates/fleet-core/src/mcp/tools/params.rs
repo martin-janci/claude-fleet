@@ -488,6 +488,12 @@ pub struct ListHostWorktreesParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListGithubReposParams {
+    /// Host whose `gh` login lists the repositories.
+    pub host_alias: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct PeerStatusParams {
     /// Peer's fleet session id.
     pub session_id: i64,

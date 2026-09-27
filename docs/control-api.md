@@ -260,6 +260,8 @@ Index by area (names only; see the reference for details):
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
+  `add_project` (clone, adopt or create a repository on a host — `git` and
+  `gh` run there), `list_github_repos` (what `gh` on a host can see),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
