@@ -221,6 +221,17 @@ fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 064: `orgs` already has its
+/// `jev_allowed` column.
+fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'jev_allowed'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn projects_has_system(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'system'",
@@ -600,6 +611,16 @@ const MIGRATIONS: &[Migration] = &[
         63,
         include_str!("../../migrations/063_row_version_on_visible_change.sql"),
     ),
+    // Jev evaluation (D31 / D36): `orgs.jev_allowed`, an org's consent to
+    // decision-model calls. One ADD COLUMN, its own guard.
+    Migration {
+        version: 64,
+        sql: include_str!("../../migrations/064_org_jev_allowed.sql"),
+        already_applied: Some(orgs_has_jev_allowed),
+    },
+    // Jev evaluation (D35 / D37): `decision_runs` and `decision_secrets`.
+    // New tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(65, include_str!("../../migrations/065_decision_runs.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

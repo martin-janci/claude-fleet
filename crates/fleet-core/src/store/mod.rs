@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod catalog;
 mod clients;
 mod conversations;
+mod decisions;
 mod hosts_accounts;
 mod layers;
 mod nl_census;
@@ -49,6 +50,11 @@ pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
+pub use decisions::{
+    is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
+    NewDecisionRun, DECISION_CALL_FAILURES, DECISION_FALLBACKS, DECISION_FOLLOWUPS,
+    DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_WORD_MAX_CHARS,
+};
 pub use layers::HostLayerRow;
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
