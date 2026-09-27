@@ -50,6 +50,17 @@ export function host(alias: string, over: Partial<HostRow> = {}): HostRow {
     provisioned: true,
     transport: 'ssh',
     claude_version_at: NOW - 2 * MIN,
+    // Healthy by default (49 % used): the plan's 45 GB of 480 GB is the live
+    // Mac at 91 %, which would trip `disk_low` on every fixture host.
+    disk_home_free_kb: 245_000_000,
+    disk_home_total_kb: 480_000_000,
+    disk_tmp_free_kb: 20_000_000,
+    load_1m: 1.2,
+    mem_avail_kb: 4_000_000,
+    uptime_secs: 3 * 86400,
+    health_at: NOW - 2 * MIN,
+    last_hook_at: NOW - 5 * MIN,
+    agent_version: null,
     ...over,
   };
 }

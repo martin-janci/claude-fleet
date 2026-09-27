@@ -1062,6 +1062,25 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(badges[0].closest('[data-testid="sess-details"]')).not.toBeNull();
   });
 
+  it('a host almost out of disk gets a red dot on its pill and the meter in its tooltip', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fakeProjects;
+      if (cmd === 'list_sessions') return [];
+      if (cmd === 'list_hosts') return [
+        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 },
+        { alias: 'oci', ssh_alias: 'oci', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, disk_home_free_kb: 72_000_000, disk_home_total_kb: 96_000_000 },
+      ];
+      return null;
+    });
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    expect(screen.getAllByTestId('host-pill-disk')).toHaveLength(1);
+    const pills = document.querySelectorAll('.hosts .pill');
+    const mef = Array.from(pills).find((p) => p.textContent?.includes('mefistos'));
+    expect(mef!.getAttribute('title')).toContain('disk 98%');
+  });
+
   it('host pill tooltip includes account info when present', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_projects') return fakeProjects;

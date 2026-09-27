@@ -1,5 +1,6 @@
 <script lang="ts">
   import { sessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy } from './sessions';
+  import { diskMeter } from './hosts_view';
   import { hosts, hostFilter } from './hosts';
   import { hintAnchor } from './hints';
   import { accountByUuid } from './accounts';
@@ -152,14 +153,19 @@
       onclick={() => hostFilter.set('all')}
     >all</button>
     {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}
+      {@const disk = diskMeter(h)}
       <button
         class="pill"
         class:active={$hostFilter === h.alias}
+        class:disk-crit={disk?.level === 'crit'}
+        data-testid="host-pill"
+        data-alias={h.alias}
         onclick={() => hostFilter.set(h.alias)}
-        title={`${h.alias}${h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}${h.claude_version ? ` · claude ${h.claude_version}` : ''}${accountLabel(h)}`}
+        title={`${h.alias}${h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}${h.claude_version ? ` · claude ${h.claude_version}` : ''}${disk ? ` · disk ${disk.text}` : ''}${accountLabel(h)}`}
       >
         <span class="host-dot status-{h.reachable ? 'on' : 'off'}"></span>
         {h.alias}
+        {#if disk?.level === 'crit'}<span class="disk-dot" aria-label="disk almost full" data-testid="host-pill-disk"></span>{/if}
       </button>
     {/each}
     <button
@@ -530,6 +536,15 @@
   }
   .host-dot.status-on { background: rgb(80, 200, 110); }
   .host-dot.status-off { background: rgb(220, 130, 130); }
+  .disk-dot {
+    display: inline-block;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: var(--danger, #c33);
+    margin-left: 0.2rem;
+    vertical-align: middle;
+  }
 
   .err { color: #e64a4a; font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
 </style>

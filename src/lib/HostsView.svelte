@@ -39,7 +39,8 @@
   import HostDetail from './HostDetail.svelte';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
-  import { fleetSettings, SETTING_KEYS, settingSecs } from './fleet_settings';
+  import { fleetSettings, SETTING_KEYS, settingInt, settingSecs } from './fleet_settings';
+  import { healthCheck } from './ipc';
 
   let {
     preselect = null,
@@ -96,7 +97,14 @@
   const groups = $derived(filterGroups(allGroups, filter));
   const ordered = $derived(groups.flatMap((g) => g.hosts));
   const versionMaxAge = $derived(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs));
+  const diskLowPct = $derived(settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct));
   const newestClaude = $derived(newestClaudeVersion($hosts, now, versionMaxAge));
+  /** The fleet's version (the hub's when paired): what an agent should match. */
+  let hubVersion = $state<string | null>(null);
+  onMount(async () => {
+    const r = await healthCheck();
+    if (r.ok && r.value?.version) hubVersion = r.value.version;
+  });
 
   const rowInfo = $derived.by(() => {
     const m = new Map<string, HostRowInfo>();
@@ -111,6 +119,8 @@
         newestClaude,
         now,
         versionMaxAgeSecs: versionMaxAge,
+        diskLowPct,
+        hubVersion,
       });
       m.set(h.alias, { counts, attention });
     }

@@ -163,7 +163,13 @@ export function newestClaudeVersion(hosts: readonly HostRow[], now: number, maxA
   return best;
 }
 
-export type AttentionKind = 'token_missing' | 'hooks_missing' | 'hooks_stale' | 'claude_old';
+export type AttentionKind =
+  | 'token_missing'
+  | 'hooks_missing'
+  | 'hooks_stale'
+  | 'disk_low'
+  | 'agent_old'
+  | 'claude_old';
 
 export interface HostAttention {
   kind: AttentionKind;
@@ -174,9 +180,10 @@ export interface HostAttention {
 
 /**
  * At most ONE attention mark per host, strongest first: no control-API token
- * (so no hooks either), hooks installed but silent, then a Claude Code older
- * than the newest in the fleet. Token-derived marks wait for `tokensLoaded`
- * so a slow token fetch never flashes a false alarm.
+ * (so no hooks either), hooks installed but silent, a home filesystem almost
+ * full, a fleet-agent behind the hub, then a Claude Code older than the
+ * newest in the fleet. Token-derived marks wait for `tokensLoaded` so a slow
+ * token fetch never flashes a false alarm.
  */
 export function hostAttention(args: {
   host: HostRow;
@@ -189,8 +196,13 @@ export function hostAttention(args: {
   now: number;
   /** `health.version_max_age_secs`: a stamp older than this earns no `claude_old` mark. */
   versionMaxAgeSecs: number;
+  /** `health.disk_low_pct`: used percent of `$HOME` at which `disk_low` fires. */
+  diskLowPct: number;
+  /** The hub's (or this app's) version; null until known. */
+  hubVersion: string | null;
 }): HostAttention | null {
-  const { host, hasToken, tokensLoaded, hook, sessionCount, newestClaude, now, versionMaxAgeSecs } = args;
+  const { host, hasToken, tokensLoaded, hook, sessionCount, newestClaude, now, versionMaxAgeSecs, diskLowPct, hubVersion } =
+    args;
   if (tokensLoaded && !hasToken) {
     if (hook.state === 'seen') {
       return {
@@ -210,6 +222,23 @@ export function hostAttention(args: {
       kind: 'hooks_stale',
       glyph: '⚠',
       title: `Fleet hooks are installed on ${host.alias}, but none of its sessions has reported a finished turn. The hooks may be stale — re-provision the host.`,
+    };
+  }
+  // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal anywhere.
+  const disk = diskMeter(host);
+  if (disk && disk.pct >= diskLowPct) {
+    return {
+      kind: 'disk_low',
+      glyph: '▮',
+      title: `${host.alias} is at ${disk.pct}% disk in $HOME (${gb(host.disk_home_free_kb ?? 0)} free): transcripts, worktrees and moves onto it will fail with ENOSPC.`,
+    };
+  }
+  // hosts F5: an agent that is not the hub's version silently lacks features.
+  if (host.transport === 'agent' && hubVersion && host.agent_version && host.agent_version !== hubVersion) {
+    return {
+      kind: 'agent_old',
+      glyph: '⬆',
+      title: `fleet-agent ${host.agent_version} on ${host.alias}, hub ${hubVersion}: upgrade the agent (fleet-agent install with the existing token, then systemctl restart fleet-agent).`,
     };
   }
   // ux F-13: only a version read from the host recently earns the mark; a
@@ -233,6 +262,52 @@ export function hostAttention(args: {
 export interface HostRowInfo {
   counts: SessionCounts;
   attention: HostAttention | null;
+}
+
+// ── host health (host identity & health, task 3) ──
+
+export interface DiskMeter {
+  pct: number;
+  /** `98% · 3.4 GB free` */
+  text: string;
+  level: 'ok' | 'warn' | 'crit';
+}
+
+function gb(kb: number): string {
+  const g = kb / (1024 * 1024);
+  return g >= 10 ? `${Math.round(g)} GB` : `${g.toFixed(1)} GB`;
+}
+
+/** Used percent of `$HOME`'s filesystem; null until sampled. */
+export function diskMeter(h: HostRow): DiskMeter | null {
+  const free = h.disk_home_free_kb ?? null;
+  const total = h.disk_home_total_kb ?? null;
+  if (free === null || total === null || total <= 0) return null;
+  const pct = Math.min(100, Math.max(0, Math.round(((total - free) * 100) / total)));
+  const level = pct >= 95 ? 'crit' : pct >= 90 ? 'warn' : 'ok';
+  return { pct, text: `${pct}% · ${gb(free)} free`, level };
+}
+
+function days(secs: number): string {
+  return secs >= 86400 ? `${Math.floor(secs / 86400)}d` : formatAge(secs);
+}
+
+/** One line for the Health block; only the parts the host answered. */
+export function healthLine(h: HostRow, now: number): string {
+  if (h.health_at == null) return 'not sampled yet';
+  const parts: string[] = [];
+  const disk = diskMeter(h);
+  if (disk) parts.push(`disk ${disk.text}`);
+  if (h.load_1m != null) parts.push(`load ${h.load_1m.toFixed(1)}`);
+  if (h.uptime_secs != null) parts.push(`up ${days(h.uptime_secs)}`);
+  if (h.transport === 'agent' && h.agent_version) parts.push(`agent ${h.agent_version}`);
+  void now;
+  return parts.length ? parts.join(' · ') : 'sampled, nothing readable';
+}
+
+/** `checked 2h ago` for the claude/tmux version stamp. */
+export function versionAge(h: HostRow, now: number): string {
+  return h.claude_version_at == null ? 'never checked' : `checked ${formatAge(now - h.claude_version_at)} ago`;
 }
 
 // ── compact usage (group header) ──

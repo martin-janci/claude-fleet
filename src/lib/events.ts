@@ -1,7 +1,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SessionRow, SessionEvent } from './sessions';
 import type { SessionEvent as TimelineEvent } from './timeline';
-import type { HostRow, HostEvent } from './hosts';
+import type { HostRow, HostEvent, HostHealth } from './hosts';
 import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
 import type { TaskRow, TaskEvent } from './tasks';
@@ -78,7 +78,16 @@ type Queued =
   | { name: 'session:event'; payload: TimelineEvent }
   | { name: 'session:conversations'; payload: { session_id: number } }
   | { name: 'host:added' | 'host:probed'; payload: HostRow }
-  | { name: 'host:pinged'; payload: { alias: string; last_pinged_at: number; reachable: boolean; claude_version_at?: number | null } }
+  | {
+      name: 'host:pinged';
+      payload: {
+        alias: string;
+        last_pinged_at: number;
+        reachable: boolean;
+        claude_version_at?: number | null;
+        health?: HostHealth | null;
+      };
+    }
   | { name: 'host:removed'; payload: { alias: string } }
   | { name: 'account:upserted'; payload: AccountRow }
   | { name: 'project:updated'; payload: ProjectRow }
