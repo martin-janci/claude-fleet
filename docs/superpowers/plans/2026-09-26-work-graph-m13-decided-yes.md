@@ -297,32 +297,6 @@ M13.4 ── independent (fleet-mobile repository)
   - `fleet_health.trackers[].write_failures` (additive; never part of
     `health`) and the footer's "N writes not sent".
   - Settings → Work: a checkbox per Jira tracker.
-- 2026-09-27: **M13.4f built** on `claude/cloud-fleet-work-graph-m13`.
-  - Verifiers checked against the providers' docs: GitHub
-    `X-Hub-Signature-256: sha256=<hex>`, Jira Cloud `X-Hub-Signature:
-    sha256=<hex>` (admin and REST webhooks with a secret, since 2024),
-    Linear `Linear-Signature: <hex>` plus `webhookTimestamp` within 60 s. HMAC
-    from the `hmac` 0.12 crate (the only new dependency), checked against
-    RFC 4231; compared with the existing `constant_time_eq`.
-  - Narrower than planned: a delivery refreshes only an item fleet already
-    has for that tracker (`tracker_item_for_key_in`), so a forged payload
-    can at most cause refetches of known items; new items still come by
-    polling.
-  - The route is mounted only with `McpGuards::with_tracker_hooks` (set by
-    fleet-hub), not inferred from a public URL: the desktop runs the same
-    server and even a tracker sync. It still answers 404 until the hub has
-    a public URL and the tracker a secret.
-  - The secret is its own table, `tracker_webhooks` (migration **062**; 061
-    is the M13.4e outbox), with one reader and a grep guard like
-    `tracker_secrets`, masked in diagnostics. `fleet-hub tracker webhook`
-    writes the store directly, like `peer add`, so no tool reply ever
-    carries it and the tool surface does not grow.
-  - Coalescing is per server (the route's `Coalescer`), not process-global.
-    Health fields are flat (`webhook_enabled`, `webhook_last_delivery_at`,
-    `webhook_rejected`) rather than a nested object.
-  - hub-e2e: a signed delivery refreshes E2E-3 from the fake Jira without a
-    sync pass; a forged one is 401, an unknown tracker 404, and
-    `fleet_health` reports it.
 - 2026-09-27: **M13.4a built** in fleet-mobile, branch
   `claude/work-graph-m13-4a-name-work` (61b09a7). No hub change.
   - *Name this work…* is in the session menu when the session has no
@@ -351,3 +325,11 @@ M13.4 ── independent (fleet-mobile repository)
   - Recorded deviation: the run's timeout is 170 s on the host (`timeout`)
     and 180 s for the SSH call, not the plan's 120 s. A cold `--resume` of a
     long transcript needs the margin; the cap on the output is unchanged.
+- 2026-09-27: **M13.4f removed.** Its build (webhook nudges, D13) reached
+  `main` with #327, but the owner keeps D13 at *no* (the M12.6
+  recommendation), so the commit is reverted. Migration 062
+  (`tracker_webhooks`) stays in the chain: it is on `main`, a database that
+  ran it would otherwise be refused by the downgrade guard, and migrations
+  are one-way. Nothing reads or writes the table any more. The `hmac`
+  dependency, the `/hooks/tracker/{id}` route, `fleet-hub tracker webhook`,
+  the `fleet_health` webhook fields and the hub-e2e checks are gone.
