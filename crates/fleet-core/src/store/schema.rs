@@ -129,6 +129,18 @@ fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 067: `hosts` already has its
+/// `health_at` column (and the eight beside it), and `ALTER TABLE ... ADD
+/// COLUMN` would fail again. See [`Migration`].
+fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'health_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 043: `session_messages` already has
 /// its `to_participant_id` column, and `ALTER TABLE ... ADD COLUMN` would
 /// fail again. See [`Migration`].
@@ -647,6 +659,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 66,
         sql: include_str!("../../migrations/066_host_claude_version_at.sql"),
         already_applied: Some(hosts_has_claude_version_at),
+    },
+    // Host identity & health, task 2: the per-pass health sample, the last
+    // accepted hook and the agent version on `hosts`. Guarded: ADD COLUMN.
+    Migration {
+        version: 67,
+        sql: include_str!("../../migrations/067_host_health.sql"),
+        already_applied: Some(hosts_has_health_at),
     },
 ];
 

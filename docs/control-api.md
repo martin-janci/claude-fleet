@@ -1026,6 +1026,32 @@ Each call returns a status for every non-hidden host:
 
 Per-host failures do not abort provisioning of other hosts.
 
+### Host health
+
+Every reconcile pass reads one health sample from each reachable host in the
+same batched probe script (`df -Pk` of `$HOME` and `${TMPDIR:-/tmp}`, the
+1-minute load, `MemAvailable` on Linux, the uptime) and, every 6 h, `tmux -V`
+and `claude --version`. `list_hosts` carries the sample on each row
+(`disk_home_free_kb`, `disk_home_total_kb`, `disk_tmp_free_kb`, `load_1m`,
+`mem_avail_kb`, `uptime_secs`, `health_at`), the versions stamp
+(`claude_version_at`), the last accepted hook from the host's own token
+(`last_hook_at`) and, for an agent host, the `agent_version` its last hello
+reported. `fleet_health.hosts[]` judges them per host:
+
+| Field | Meaning |
+|---|---|
+| `disk_home_pct` | Used percent of `$HOME`'s filesystem, when sampled. |
+| `disk_low` | `disk_home_pct >= health.disk_low_pct` (default 90). |
+| `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
+| `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
+| `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+
+The desktop's "older than the fleet" mark trusts a `claude_version_at`
+younger than `health.version_max_age_secs` (default 24 h). `move_session`
+refuses (`E_INVALID`, `reason: target_disk_low`) a target whose last sample
+cannot take the source worktree plus 1 GiB of headroom; an unsampled target
+proceeds.
+
 ### Notes
 
 - If `~/.claude.json` is missing or empty the file is created from scratch; if it exists and is not valid JSON provisioning fails for that host (before any write).

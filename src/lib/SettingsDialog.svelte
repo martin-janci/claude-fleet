@@ -1035,6 +1035,36 @@
         <span class="hook-desc" id="health-version-max-age-hours-desc">hours a probed Claude version stays trusted for the "older than the fleet" mark</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="health-disk-low-pct">disk low</label>
+        <input class="port" id="health-disk-low-pct" type="number" min="50" max="100" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct)}
+          disabled={limitsBusy}
+          aria-describedby="health-disk-low-pct-desc"
+          data-testid="health-disk-low-pct"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthDiskLowPct, 'Disk low threshold (%)', e)} />
+        <span class="hook-desc" id="health-disk-low-pct-desc">percent of a host's home filesystem in use at which it is marked low on disk</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-claude-max-behind">claude behind</label>
+        <input class="port" id="health-claude-max-behind" type="number" min="0" max="1000" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthClaudeMaxBehind)}
+          disabled={limitsBusy}
+          aria-describedby="health-claude-max-behind-desc"
+          data-testid="health-claude-max-behind"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthClaudeMaxBehind, 'Claude patch releases behind', e)} />
+        <span class="hook-desc" id="health-claude-max-behind-desc">patch releases a host's Claude may trail the fleet's newest before fleet_health flags it</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-hooks-silent-hours">hooks silent</label>
+        <input class="port" id="health-hooks-silent-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthHooksSilentSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-hooks-silent-hours-desc"
+          data-testid="health-hooks-silent-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthHooksSilentSecs, e)} />
+        <span class="hook-desc" id="health-hooks-silent-hours-desc">hours a reachable host with live sessions may go without an accepted hook before fleet_health flags it</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
         <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}

@@ -612,6 +612,48 @@ pub fn carry_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> 
     Ok(())
 }
 
+/// One GiB of headroom on top of the worktree the carry recreates.
+const TARGET_DISK_HEADROOM_KB: i64 = 1_048_576;
+
+/// `du -sk` of the source worktree; empty output (an unmatched fake, a
+/// missing `du`) is "unknown" and skips the check.
+fn worktree_size_script(worktree: &str) -> String {
+    format!(
+        "# cf-move:size\ndu -sk -- {} 2>/dev/null | cut -f1",
+        quote(worktree)
+    )
+}
+
+/// Pure: refuse a target whose `$HOME` filesystem cannot take the worktree
+/// plus [`TARGET_DISK_HEADROOM_KB`] (hosts F4). `None` on either side =
+/// unknown = proceed, as everywhere else in the move.
+pub fn target_disk_verdict(
+    target: &str,
+    target_free_kb: Option<i64>,
+    source_kb: Option<i64>,
+) -> Result<(), IpcError> {
+    let (Some(free), Some(size)) = (target_free_kb, source_kb) else {
+        return Ok(());
+    };
+    let needed = size + TARGET_DISK_HEADROOM_KB;
+    if free < needed {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{target} has {free} kB free in $HOME, the worktree needs {size} kB plus 1 GiB \
+                 headroom ({needed} kB); free disk on {target} first"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "reason": "target_disk_low",
+            "target": target,
+            "free_kb": free,
+            "needed_kb": needed,
+        })));
+    }
+    Ok(())
+}
+
 /// The strict-mode verdict: [`carry_verdict`] plus today's refusals of
 /// uncommitted and unpushed work.
 pub fn preflight_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> {
@@ -2327,6 +2369,31 @@ async fn gather(
         return Err(IpcError::new(codes::E_GIT, msg));
     }
     let state = parse_inspection(&String::from_utf8_lossy(&out.stdout))?;
+    // hosts F4: the target's last health sample vs. the source worktree's
+    // size. Unknown on either side proceeds; a known shortfall is a check
+    // failure, before the transcript is read or anything is written.
+    let target_free_kb = {
+        let s = lock(store)?;
+        s.get_host_row(&target)?.and_then(|h| h.disk_home_free_kb)
+    };
+    let source_kb = if target_free_kb.is_some() {
+        let out = sh(
+            ssh,
+            &src,
+            &worktree_size_script(&state.worktree),
+            GIT_TIMEOUT,
+        )
+        .await?;
+        // The first word: `cut -f1` leaves a bare number, a `du` without
+        // it (or a fake) leaves `<kb>\t<path>`; either way the size.
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<i64>().ok())
+    } else {
+        None
+    };
+    target_disk_verdict(&target, target_free_kb, source_kb)?;
     if args.strict && args.dry_run && state.origin_tip_not_local {
         // The move would fetch origin's tip here and then refuse only if the
         // source has commits it lacks. Without the fetch that half cannot be
@@ -3890,6 +3957,49 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_DIRTY);
         assert_eq!(progress_of(&f, &bus), ["check:started", "check:failed"]);
+    }
+
+    /// hosts F4: every writer on the target fails with ENOSPC before anyone
+    /// is told why. The check runs before the transcript is read.
+    #[tokio::test]
+    async fn a_target_low_on_disk_is_refused_in_the_check() {
+        let (f, bus) = recorded_fixture();
+        {
+            let s = f.store.lock().unwrap();
+            s.set_host_health(
+                "beta",
+                &crate::tmux::HostHealthSample {
+                    disk_home_free_kb: Some(1_500_000),
+                    disk_home_total_kb: Some(150_000_000),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        }
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:size"),
+            Reply::ok("2097152\t/local/o/r/.claude/worktrees/feat\n"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{}", err.message);
+        assert_eq!(err.details.as_ref().unwrap()["reason"], "target_disk_low");
+        assert_eq!(
+            err.details.as_ref().unwrap()["needed_kb"],
+            2_097_152 + 1_048_576
+        );
+        assert_eq!(progress_of(&f, &bus), ["check:started", "check:failed"]);
+    }
+
+    /// An unsampled target (no health row yet) or an unmeasurable source
+    /// never refuses: unknown means proceed, as everywhere else in the move.
+    #[tokio::test]
+    async fn an_unsampled_target_does_not_block_the_move() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        assert!(run(&f, &hooks, false).await.is_ok());
     }
 
     #[tokio::test]

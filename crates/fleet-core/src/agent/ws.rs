@@ -524,6 +524,14 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         close_with_reason(&mut sink, fleet_proto::VERSION_REFUSED_CLOSE_CODE, reason).await;
         return;
     }
+    // hosts F5: the version the agent reported, kept on the host row so
+    // `fleet_health.hosts[]` and the desktop can say `agent_behind` even
+    // when the registry (this process) has restarted since.
+    if let Ok(s) = store.lock() {
+        if let Err(e) = s.set_host_agent_version(&alias, &hello.agent_version) {
+            tracing::debug!(host = %alias, error = %e, "[agent] agent_version not stamped");
+        }
+    }
     // Two channels into the writer. The registry holds the ONLY sender of
     // the first, so the writer sees it close exactly when the registry lets
     // go of this connection — deregistered, or replaced by a second
@@ -1613,6 +1621,18 @@ mod tests {
         assert_eq!(snap[0].host_name, "laptop.local");
         assert_eq!(snap[0].os, "linux");
         assert!(snap[0].connected_at > 0);
+        // hosts F5: the hello's version is also stamped on the host row.
+        assert_eq!(
+            hub.store
+                .lock()
+                .unwrap()
+                .get_host_row("laptop")
+                .unwrap()
+                .unwrap()
+                .agent_version
+                .as_deref(),
+            Some("1.2.3")
+        );
         // The token names the alias; a second host's token registers a second
         // alias and nothing about the first.
         let _other = connected(&hub, DESK_TOKEN, "desk").await;

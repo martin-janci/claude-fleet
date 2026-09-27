@@ -12,7 +12,9 @@ impl FleetTools {
         (micro-USD) per host and UTC day for 7 days, and trackers (each \
         ok/degraded/failing, failures in a row, last error and success; \
         detection_backlog: suggestions undecided for detection_backlog_days). \
-        A per-host token sees its own host's usage and its org's trackers.")]
+        A per-host token sees its own host's usage and its org's trackers. \
+        hosts[]: per host disk_home_pct/disk_low, claude_behind, \
+        agent_behind, hooks_silent.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -27,6 +29,16 @@ impl FleetTools {
             h.db_ready = false;
         }
         h.set_tunnels(self.tunnels.health());
+        // Host identity & health, task 2: the agents connected right now
+        // outrank the stored hello for `agent_version` / `agent_behind`.
+        if let Some(reg) = self.ssh.agent_registry() {
+            let live: Vec<(String, String)> = reg
+                .snapshot()
+                .into_iter()
+                .map(|a| (a.alias, a.agent_version))
+                .collect();
+            health::overlay_agents(&mut h.hosts, &live, crate::app_version::get());
+        }
         if let Some(host) = caller.host_alias.as_deref() {
             match self.reader().lock() {
                 Ok(s) => {

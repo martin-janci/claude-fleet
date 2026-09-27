@@ -690,6 +690,58 @@ pub struct HostRow {
     /// or an older store left. Per-field default: an older hub omits it.
     #[serde(default)]
     pub claude_version_at: Option<i64>,
+    /// Health sample from the last reachable probe (migration 067). All
+    /// per-field default: an older hub omits them.
+    #[serde(default)]
+    pub disk_home_free_kb: Option<i64>,
+    #[serde(default)]
+    pub disk_home_total_kb: Option<i64>,
+    #[serde(default)]
+    pub disk_tmp_free_kb: Option<i64>,
+    #[serde(default)]
+    pub load_1m: Option<f64>,
+    #[serde(default)]
+    pub mem_avail_kb: Option<i64>,
+    #[serde(default)]
+    pub uptime_secs: Option<i64>,
+    /// When the sample above was taken. `None`: never.
+    #[serde(default)]
+    pub health_at: Option<i64>,
+    /// Last hook accepted from this host's own token.
+    #[serde(default)]
+    pub last_hook_at: Option<i64>,
+    /// The fleet-agent version its last hello reported (agent hosts).
+    #[serde(default)]
+    pub agent_version: Option<String>,
+}
+
+/// The volatile half of a host row, as `host:pinged` carries it (host
+/// identity & health, task 2): a value that moves every pass must not turn
+/// every ping into a full-row `host:probed`. Mirrors the migration-067
+/// columns.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HostHealth {
+    pub disk_home_free_kb: Option<i64>,
+    pub disk_home_total_kb: Option<i64>,
+    pub disk_tmp_free_kb: Option<i64>,
+    pub load_1m: Option<f64>,
+    pub mem_avail_kb: Option<i64>,
+    pub uptime_secs: Option<i64>,
+    pub health_at: Option<i64>,
+}
+
+impl HostHealth {
+    pub fn of(row: &HostRow) -> Self {
+        HostHealth {
+            disk_home_free_kb: row.disk_home_free_kb,
+            disk_home_total_kb: row.disk_home_total_kb,
+            disk_tmp_free_kb: row.disk_tmp_free_kb,
+            load_1m: row.load_1m,
+            mem_avail_kb: row.mem_avail_kb,
+            uptime_secs: row.uptime_secs,
+            health_at: row.health_at,
+        }
+    }
 }
 
 /// The only values `hosts.transport` may hold (migration 034). The single
@@ -700,7 +752,9 @@ pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
-     last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at";
+     last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
+     disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
+     uptime_secs, health_at, last_hook_at, agent_version";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -717,6 +771,15 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         transport: row.get(9)?,
         org_id: row.get(10)?,
         claude_version_at: row.get(11)?,
+        disk_home_free_kb: row.get(12)?,
+        disk_home_total_kb: row.get(13)?,
+        disk_tmp_free_kb: row.get(14)?,
+        load_1m: row.get(15)?,
+        mem_avail_kb: row.get(16)?,
+        uptime_secs: row.get(17)?,
+        health_at: row.get(18)?,
+        last_hook_at: row.get(19)?,
+        agent_version: row.get(20)?,
     })
 }
 

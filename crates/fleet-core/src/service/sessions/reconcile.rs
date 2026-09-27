@@ -211,6 +211,8 @@ pub(super) struct HostProbe {
     /// (task 1). `None`: not due, or unanswerable — the stored versions
     /// are kept and the stamp does not move.
     pub(super) versions: Option<crate::tmux::HostVersions>,
+    /// This pass's health sample (task 2), when the host answered it.
+    pub(super) health: Option<crate::tmux::HostHealthSample>,
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     /// `None`: not asked this pass (cadence) or unanswerable — the bg
     /// pruner is skipped.
@@ -918,6 +920,10 @@ fn write_reachable_host(
     if probed.is_some_and(|v| v.claude_version.is_some()) {
         s.set_host_versions_at(&host.alias, now)?;
     }
+    // Task 2: the health sample, every pass the host answered it.
+    if let Some(h) = &probe.health {
+        s.set_host_health(&host.alias, h, now)?;
+    }
     s.ensure_in_tx()?;
     s.apply_host_reconcile_in_tx(HostReconcile {
         alias: &host.alias,
@@ -1477,6 +1483,11 @@ pub(super) async fn probe_with_timeout(
         } else {
             None
         };
+        let health = if tmux_result.is_ok() {
+            snap.health
+        } else {
+            None
+        };
         // Which account the host is logged into NOW — so a `claude /login`
         // as someone else on a remote host relinks it within one pass
         // instead of waiting for a manual Re-probe. Skipped when the list
@@ -1523,21 +1534,25 @@ pub(super) async fn probe_with_timeout(
             account,
             identity,
             versions,
+            health,
         )
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, agent_mtimes, intel, account, identity, versions)) => HostProbe {
-            host,
-            versions,
-            result,
-            agent_rows,
-            agent_mtimes,
-            intel,
-            pr_info: PrInfoMap::new(),
-            account,
-            identity,
-            started_at,
-        },
+        Ok((result, agent_rows, agent_mtimes, intel, account, identity, versions, health)) => {
+            HostProbe {
+                host,
+                versions,
+                health,
+                result,
+                agent_rows,
+                agent_mtimes,
+                intel,
+                pr_info: PrInfoMap::new(),
+                account,
+                identity,
+                started_at,
+            }
+        }
         Err(_elapsed) => {
             tracing::warn!(
                 host = %host.alias,
@@ -1547,6 +1562,7 @@ pub(super) async fn probe_with_timeout(
             return HostProbe {
                 host,
                 versions: None,
+                health: None,
                 result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
                 agent_rows: None,
                 agent_mtimes: None,

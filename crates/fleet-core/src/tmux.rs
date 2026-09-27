@@ -105,6 +105,14 @@ pub trait TmuxExec: Send + Sync {
         None
     }
 
+    /// One health sample (disk, load, memory, uptime) from the host. `None`
+    /// = could not tell (or an executor that does not implement it); the
+    /// stored sample is then left alone. `LocalTmux` and `RemoteTmux`
+    /// override it.
+    async fn host_health(&self) -> Option<HostHealthSample> {
+        None
+    }
+
     /// Everything a reconcile pass needs from the host. The default composes
     /// the per-call methods (local tmux, test fakes); `RemoteTmux` overrides
     /// it with one script so a pass costs one round trip, not 5 + N.
@@ -123,6 +131,11 @@ pub trait TmuxExec: Send + Sync {
         } else {
             None
         };
+        let health = if sessions.is_ok() {
+            self.host_health().await
+        } else {
+            None
+        };
         let mut pane_tails = std::collections::HashMap::new();
         if let Ok(live) = &sessions {
             for s in live {
@@ -137,6 +150,7 @@ pub trait TmuxExec: Send + Sync {
             account,
             pane_tails,
             versions,
+            health,
         }
     }
 }
@@ -193,6 +207,8 @@ pub struct ProbeSnapshot {
     pub pane_tails: std::collections::HashMap<String, String>,
     /// The versions section, when this pass asked for it and it parsed.
     pub versions: Option<HostVersions>,
+    /// The health section (every pass), when the host answered it.
+    pub health: Option<HostHealthSample>,
 }
 
 /// Shell script listing the most recently modified Claude transcripts under
@@ -299,6 +315,64 @@ pub fn parse_host_versions(stdout: &str) -> HostVersions {
         }
     }
     v
+}
+
+/// One health sample of a host (host identity & health, task 2). Every
+/// field `None` when the host could not answer that line; nothing here is
+/// ever an error.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostHealthSample {
+    pub disk_home_free_kb: Option<i64>,
+    pub disk_home_total_kb: Option<i64>,
+    pub disk_tmp_free_kb: Option<i64>,
+    pub load_1m: Option<f64>,
+    pub mem_avail_kb: Option<i64>,
+    pub uptime_secs: Option<i64>,
+}
+
+/// `df -Pk` of `$HOME` and `${TMPDIR:-/tmp}` (POSIX output, one line each,
+/// header dropped), the load average (`/proc/loadavg` on Linux, `sysctl -n
+/// vm.loadavg` on macOS — `{ 1.62 1.80 1.91 }`), available memory in kB
+/// (`MemAvailable` on Linux; empty on macOS, whose `vm_stat` has no single
+/// equivalent), and the uptime in seconds (`/proc/uptime`, else derived
+/// from `kern.boottime`). Every command is `2>/dev/null` with an empty
+/// value on failure, so a missing tool degrades one field, never the probe.
+pub const HOST_HEALTH_SCRIPT: &str = "printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
+printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; \
+printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
+printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)\"; \
+printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*sec = \\([0-9]*\\).*/\\1/'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"";
+
+/// Second field of a `df -Pk` data line is total kB, fourth is available kB.
+fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
+    let f: Vec<&str> = line.split_whitespace().collect();
+    let total = f.get(1).and_then(|v| v.parse().ok());
+    let avail = f.get(3).and_then(|v| v.parse().ok());
+    (total, avail)
+}
+
+/// Parse [`HOST_HEALTH_SCRIPT`] output.
+pub fn parse_host_health(stdout: &str) -> HostHealthSample {
+    let mut h = HostHealthSample::default();
+    for line in stdout.lines() {
+        if let Some(v) = line.strip_prefix("dfhome=") {
+            let (total, avail) = df_kb(v);
+            h.disk_home_total_kb = total;
+            h.disk_home_free_kb = avail;
+        } else if let Some(v) = line.strip_prefix("dftmp=") {
+            h.disk_tmp_free_kb = df_kb(v).1;
+        } else if let Some(v) = line.strip_prefix("load=") {
+            h.load_1m = v
+                .split(|c: char| c.is_whitespace() || c == '{' || c == '}')
+                .find(|s| !s.is_empty())
+                .and_then(|s| s.parse().ok());
+        } else if let Some(v) = line.strip_prefix("memkb=") {
+            h.mem_avail_kb = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("uptime=") {
+            h.uptime_secs = v.trim().parse().ok();
+        }
+    }
+    h
 }
 
 /// Parse [`HOST_IDENTITY_SCRIPT`] output. Requires BOTH a `tmuxrc=` line
@@ -477,6 +551,16 @@ impl TmuxExec for LocalTmux {
             .filter(|o| o.status.success())?;
         Some(parse_host_versions(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn host_health(&self) -> Option<HostHealthSample> {
+        local_allowed().ok()?;
+        let out = tokio::process::Command::new("bash")
+            .args(["-c", HOST_HEALTH_SCRIPT])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
+    }
 }
 
 /// tmux over an `SshExec`. Generic (defaulting to the production client) so
@@ -562,6 +646,7 @@ pub fn probe_snapshot_script(tail_lines: u32, want_versions: bool) -> String {
     format!(
         "printf '%s\\n' '---FLEET:identity'; {HOST_IDENTITY_SCRIPT}; \
          {versions}\
+         printf '%s\\n' '---FLEET:health'; {HOST_HEALTH_SCRIPT}; \
          printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'; \
          printf '%s\\n' '---FLEET:account'; {}; \
          printf '%s\\n' '---FLEET:panes'; \
@@ -648,6 +733,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
     let account =
         section("account").and_then(|b| crate::service::hosts::parse_oauth_account(b.trim()));
     let versions = section("versions").map(parse_host_versions);
+    let health = section("health").map(parse_host_health);
     let mut pane_tails = std::collections::HashMap::new();
     for (name, body) in &sections {
         if let Some(pane) = name.strip_prefix("pane ") {
@@ -660,6 +746,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         account,
         pane_tails,
         versions,
+        health,
     })
 }
 
@@ -871,6 +958,14 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .filter(|o| o.status.success())?;
         Some(parse_host_versions(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn host_health(&self) -> Option<HostHealthSample> {
+        let out = self
+            .remote_sh(HOST_HEALTH_SCRIPT)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
+    }
     async fn probe_snapshot(&self, tail_lines: u32, want_versions: bool) -> ProbeSnapshot {
         let script = probe_snapshot_script(tail_lines, want_versions);
         match self.remote_sh(&script).await {
@@ -880,6 +975,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 account: None,
                 pane_tails: Default::default(),
                 versions: None,
+                health: None,
             },
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -898,6 +994,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                             account: None,
                             pane_tails: Default::default(),
                             versions: None,
+                            health: None,
                         }
                     }
                 }
@@ -1531,6 +1628,7 @@ mod tests {
         for section in [
             "---FLEET:identity",
             "---FLEET:versions",
+            "---FLEET:health",
             "---FLEET:sessions",
             "---FLEET:account",
             "---FLEET:panes",
@@ -1543,6 +1641,7 @@ mod tests {
         }
         assert!(s.contains(HOST_IDENTITY_SCRIPT));
         assert!(s.contains(HOST_VERSIONS_SCRIPT));
+        assert!(s.contains(HOST_HEALTH_SCRIPT));
         assert!(s.contains(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT));
         // A pass that is not due for versions leaves the section (and its
         // `claude --version` node start) out entirely.
@@ -2102,6 +2201,33 @@ mod tests {
         assert_eq!(v.tmux_version.as_deref(), Some("3.3a"));
         assert_eq!(v.claude_version, None);
         assert_eq!(parse_host_versions(""), HostVersions::default());
+    }
+
+    #[test]
+    fn parse_host_health_reads_linux_and_macos_shapes() {
+        let linux = "dfhome=/dev/sda1 157286400 150000000 3600000 98% /home\n\
+                     dftmp=tmpfs 8000000 2100000 5900000 27% /tmp\n\
+                     load=5.25 4.10 3.90 1/900 12345\n\
+                     memkb=1234567\n\
+                     uptime=12441600\n";
+        let h = parse_host_health(linux);
+        assert_eq!(h.disk_home_total_kb, Some(157_286_400));
+        assert_eq!(h.disk_home_free_kb, Some(3_600_000));
+        assert_eq!(h.disk_tmp_free_kb, Some(5_900_000));
+        assert_eq!(h.load_1m, Some(5.25));
+        assert_eq!(h.mem_avail_kb, Some(1_234_567));
+        assert_eq!(h.uptime_secs, Some(12_441_600));
+        let mac = "dfhome=/dev/disk3s5 488245288 440000000 45000000 91% /System/Volumes/Data\n\
+                   dftmp=\n\
+                   load={ 1.62 1.80 1.91 }\n\
+                   memkb=\n\
+                   uptime=86400\n";
+        let h = parse_host_health(mac);
+        assert_eq!(h.disk_home_free_kb, Some(45_000_000));
+        assert_eq!(h.disk_tmp_free_kb, None);
+        assert_eq!(h.load_1m, Some(1.62));
+        assert_eq!(h.mem_avail_kb, None);
+        assert_eq!(parse_host_health(""), HostHealthSample::default());
     }
 
     #[test]

@@ -218,15 +218,25 @@ impl Store {
             // which is why this emitted ~265 B per host per pass to every
             // connected client to say nothing had changed. When the stamp is
             // the only thing that moved, say just that.
+            // The health sample (task 2) moves every pass too, so it rides
+            // the ping rather than forcing a full row.
             let only_the_stamp_moved = prior.is_some_and(|before| {
                 HostRow {
                     last_pinged_at: row.last_pinged_at,
                     claude_version_at: row.claude_version_at,
+                    disk_home_free_kb: row.disk_home_free_kb,
+                    disk_home_total_kb: row.disk_home_total_kb,
+                    disk_tmp_free_kb: row.disk_tmp_free_kb,
+                    load_1m: row.load_1m,
+                    mem_avail_kb: row.mem_avail_kb,
+                    uptime_secs: row.uptime_secs,
+                    health_at: row.health_at,
                     ..before
                 } == row
             });
             out.push(if only_the_stamp_moved {
                 RowChange::HostPinged {
+                    health: Some(crate::store::HostHealth::of(&row)),
                     alias: row.alias,
                     last_pinged_at: row.last_pinged_at.unwrap_or(last_pinged_at),
                     reachable: row.reachable,
@@ -977,6 +987,15 @@ mod tests {
             transport: "ssh".to_string(),
             org_id: None,
             claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
         }
     }
 

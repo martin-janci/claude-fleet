@@ -215,6 +215,56 @@ impl Store {
         Ok(())
     }
 
+    /// Write one health sample (migration 067). No event: the reconcile
+    /// transaction's `update_host_probe_in_tx` announces the row and puts
+    /// this sample on the ping.
+    pub fn set_host_health(
+        &self,
+        alias: &str,
+        h: &crate::tmux::HostHealthSample,
+        at: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
+             disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
+             health_at = ?7 WHERE alias = ?8",
+            rusqlite::params![
+                h.disk_home_free_kb,
+                h.disk_home_total_kb,
+                h.disk_tmp_free_kb,
+                h.load_1m,
+                h.mem_avail_kb,
+                h.uptime_secs,
+                at,
+                alias
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp the last hook accepted from this host's own token (hosts F9).
+    /// Silent: hooks arrive several times per turn.
+    pub fn set_host_last_hook_at(&self, alias: &str, at: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET last_hook_at = ?1 WHERE alias = ?2",
+            rusqlite::params![at, alias],
+        )?;
+        Ok(())
+    }
+
+    /// The fleet-agent version the host's hello reported (hosts F5).
+    pub fn set_host_agent_version(
+        &self,
+        alias: &str,
+        version: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET agent_version = ?1 WHERE alias = ?2 AND agent_version IS NOT ?1",
+            rusqlite::params![version, alias],
+        )?;
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
+    }
+
     pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE hosts SET hidden=?1 WHERE alias=?2",
@@ -666,6 +716,34 @@ mod tests {
         s.set_host_versions_at("h", 1_700_000_000).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();
         assert_eq!(row.claude_version_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn set_host_health_writes_every_column_and_the_stamp() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let sample = crate::tmux::HostHealthSample {
+            disk_home_free_kb: Some(3_600_000),
+            disk_home_total_kb: Some(150_000_000),
+            disk_tmp_free_kb: Some(5_900_000),
+            load_1m: Some(5.25),
+            mem_avail_kb: Some(1_234_567),
+            uptime_secs: Some(144 * 86400),
+        };
+        s.set_host_health("h", &sample, 1_700_000_000).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.disk_home_free_kb, Some(3_600_000));
+        assert_eq!(row.disk_home_total_kb, Some(150_000_000));
+        assert_eq!(row.disk_tmp_free_kb, Some(5_900_000));
+        assert_eq!(row.load_1m, Some(5.25));
+        assert_eq!(row.mem_avail_kb, Some(1_234_567));
+        assert_eq!(row.uptime_secs, Some(144 * 86400));
+        assert_eq!(row.health_at, Some(1_700_000_000));
+        s.set_host_last_hook_at("h", 1_700_000_100).unwrap();
+        s.set_host_agent_version("h", "0.2.26").unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.last_hook_at, Some(1_700_000_100));
+        assert_eq!(row.agent_version.as_deref(), Some("0.2.26"));
     }
 
     #[test]
