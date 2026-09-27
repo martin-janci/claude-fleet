@@ -478,29 +478,48 @@ exact rule and the image name/tag scheme.
 
 ### Signing caveat
 
-**Nothing is code-signed or notarized.** There is no Apple Developer ID for
-this project yet, so `release.yml` deliberately contains no signing step
-(ad-hoc signing would only fake provenance). Until that changes:
+**macOS bundles are signed, not notarized.** `release.yml` signs them with the
+owner's free Personal Team *Apple Development* certificate (secrets
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`);
+there is no Apple Developer ID, so nothing is notarized.
 
-- macOS: Gatekeeper blocks the downloaded app on first launch with
-  *"claude-fleet.app is damaged and can't be opened"*. Copy the app to
+- **Why sign at all:** the desktop keeps its hub token in the login keychain,
+  and macOS scopes a keychain item to a *partition* derived from the signer's
+  Team ID. Unsigned or ad-hoc builds — and self-signed ones, which were tried —
+  have no Team ID, so the partition falls back to the build's cdhash and every
+  update asked for keychain access again. With a Team ID, *Always Allow*
+  survives updates. It is a stable identity, not provenance for anyone else.
+- **The workflow fails closed:** a macOS leg stops if the secrets are missing,
+  installs Apple's WWDR G3 intermediate (pinned by hash; without it `codesign`
+  fails with `errSecInternalComponent`), and the *Verify the macOS signature*
+  step turns a bundle without a Team ID into a red leg.
+- **`hardenedRuntime` is off** in `tauri.conf.json`: it only matters for
+  notarization.
+- **Yearly renewal:** the certificate expires after a year. Renew it in Xcode
+  (Settings → Accounts → your team → Manage Certificates → + Apple
+  Development), export the identity with `security export -t identities -f
+  pkcs12` from the login keychain, and replace the three secrets. The current
+  export and its password are backed up in the owner's keychain
+  (`claude-fleet-apple-dev-p12-base64`, `claude-fleet-apple-dev-p12-password`).
+- **The certificate name is public:** it carries the Apple ID's email, which
+  every signed bundle shows under `codesign -dv`.
+- **Gatekeeper still blocks a download** on first launch. Copy the app to
   `/Applications`, then clear the quarantine flag:
 
   ```bash
   xattr -dr com.apple.quarantine /Applications/claude-fleet.app
   ```
 
-  Right-click → **Open** and the **Open Anyway** button in System Settings are
-  the bypass for a *signed but un-notarized* app; they are unreliable for an
-  unsigned one, so point users at `xattr`. The user-facing version of this is
-  in the README's *Installing a release build* section.
+  The user-facing version of this is in the README's *Installing a release
+  build* section.
 
 - Linux: the AppImage and `.deb` are unsigned, which is normal for those
   formats. Mark the AppImage executable (`chmod +x`) before running it.
 
-When a Developer ID exists, add the `APPLE_*` secrets documented at
-https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
-`tauri-action` step; nothing else in the workflow needs to change.
+With a Developer ID later, replace the certificate secrets and add `APPLE_ID`
+/ `APPLE_PASSWORD` / `APPLE_TEAM_ID` for notarization
+(https://v2.tauri.app/distribute/sign/macos/); nothing else in the workflow
+needs to change.
 
 ## What the script touches
 
