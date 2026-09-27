@@ -184,8 +184,7 @@ Trackers give you:
 
 Fleet writes one thing back, and only where you turn it on (decision D3):
 a session's pull request as a link on its Jira ticket (see *Write-back*
-below). On a hub with a public URL, a tracker can also nudge fleet with a
-webhook (D13, *Webhook nudges* below); polling stays either way.
+below). It has no inbound webhook (D13).
 
 ### Connecting one
 
@@ -275,38 +274,6 @@ its links stay. A tracker's state is one of `ok`, `auth_failed`
 once in a browser), `rate_limited` and `unreachable` (both retry on their
 own). See [troubleshooting.md](troubleshooting.md#work-and-trackers) when a
 sync fails.
-
-### Webhook nudges (a public hub; off by default)
-
-Polling is the source of truth. On a hub with a public URL, Jira Cloud,
-GitHub and Linear (D28) can also call the hub when an issue changes, so it
-shows up in seconds instead of at the next pass:
-
-```sh
-fleet-hub tracker webhook 1            # prints the URL and a new secret, once
-fleet-hub tracker webhook 1 --rotate   # a new secret; the old one stops at once
-fleet-hub tracker webhook 1 --off
-```
-
-Register the URL (`https://<public-url>/hooks/tracker/<id>`) and the secret
-on the tracker, for issue events. A delivery only **nudges**:
-
-- it must carry the provider's HMAC-SHA256 signature made with that secret
-  (GitHub `X-Hub-Signature-256`, Jira `X-Hub-Signature`, Linear
-  `Linear-Signature` within a minute of its timestamp); anything else is
-  refused (401) and counted;
-- fleet reads only the issue's key from it, and only refreshes an issue it
-  already has for that tracker, from the tracker's own API. A delivery can
-  never add, change or reach anything else;
-- deliveries for one issue within 5 seconds make one refresh, and the route
-  is rate-limited and takes at most 64 KiB;
-- without a public URL or a secret, the route is not there (404). The
-  desktop never serves it.
-
-`fleet_health` shows, per tracker, `webhook_enabled`,
-`webhook_last_delivery_at` and `webhook_rejected` (the footer says "N
-webhooks refused" — a wrong secret on the tracker's side, or someone
-knocking).
 
 ## Starting work
 

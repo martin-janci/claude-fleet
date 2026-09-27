@@ -22,7 +22,6 @@ pub mod settings;
 mod tests_token_cache;
 mod token_cache;
 mod tools;
-pub mod tracker_hook;
 pub mod wire;
 
 use crate::cancel::CancellationRegistry;
@@ -123,10 +122,6 @@ pub struct McpGuards {
     /// operator's starts and kills (work graph M9.7) — is refused outright
     /// rather than handed a nonce nobody can approve.
     pub approver: bool,
-    /// Serve `POST /hooks/tracker/{id}` (work graph M13.4f). Only a hub
-    /// sets it ([`Self::with_tracker_hooks`]): the desktop never takes a
-    /// call from a tracker.
-    pub tracker_hooks: bool,
 }
 
 impl McpGuards {
@@ -138,21 +133,12 @@ impl McpGuards {
             notify,
             pairings: Arc::new(PendingPairings::new()),
             approver: true,
-            tracker_hooks: false,
         }
     }
 
     /// The same guards for a server with no one to approve a confirmation.
     pub fn without_approver(mut self) -> Self {
         self.approver = false;
-        self
-    }
-
-    /// The same guards for a server that takes tracker webhook nudges (a
-    /// hub). The route still answers 404 until the hub has a public URL and
-    /// the tracker a webhook secret.
-    pub fn with_tracker_hooks(mut self) -> Self {
-        self.tracker_hooks = true;
         self
     }
 }
@@ -739,10 +725,6 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             Arc::clone(&guards.rate),
             base_url,
         );
-        // Work graph M13.4f: only a hub mounts the webhook route.
-        let tracker_hooks = guards.tracker_hooks.then(|| {
-            tracker_hook::TrackerHookState::new(Arc::clone(&store), Arc::clone(&guards.rate))
-        });
         // Cloned before `guards` moves into `FleetTools`: the route and the
         // tool router must write and read the same counters.
         let metrics_for_route = Arc::clone(&guards.metrics);
@@ -781,13 +763,6 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             crate::agent::ws::AgentWsState::new(agent_registry.map(|r| (r, agents_store))),
             report_route::ReportState::new(reports_store),
         );
-        // Outside `authorize` and the Host allowlist, like `/pair`: the
-        // tracker's signature is what authorizes a delivery (see
-        // `tracker_hook`).
-        let app = match tracker_hooks {
-            Some(state) => app.merge(tracker_hook::router(state)),
-            None => app,
-        };
 
         let scheme = if tls.is_some() { "https" } else { "http" };
         tracing::info!("[mcp] control API listening on {scheme}://{addr}/mcp");

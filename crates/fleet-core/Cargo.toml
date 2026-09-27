@@ -75,8 +75,6 @@ rustls-native-certs = "0.8"
 # Asset catalog (docs/superpowers/specs/2026-09-14-asset-catalog-design.md)
 serde_yaml = "0.9"
 sha2 = "0.10"
-# HMAC-SHA256 for tracker webhook signatures (work graph M13.4f).
-hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
 toml = "0.8"
