@@ -298,6 +298,18 @@ only, off): the Asana probe keeps `config.unmapped_sections` /
 unclassified section after a clean sync (`StatusMapTrigger`, daily), and
 `fleet-hub decide proposals` lists what a person applies with `fleet-hub
 tracker section-map`; follow-ups are recorded in `work_admin update`.
+Phase 0 (offline) is built for J1 `work_link` and J3: `fleet-hub decide bench
+work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
+split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
+/ `--labels`) with the `claude -p haiku` baseline (D33,
+`service/decide/haiku.rs`: a named host of the SAME org only, prompt on
+stdin). J1 has no live adapter: it waits on its acceptance lines. Label
+hygiene (D34) is built: an agent never overturns a person's rejection,
+`store::Decider` records `agent` / `agent_started` vs `manual` / `started`
+(`PERSON_SOURCES` gate write-back, auto-trust and person counts), and a
+person's Clear work holds against the unchanged branch / PR (R9u, migration
+066 `work_unlinks`). The test map is
+`docs/superpowers/specs/2026-09-27-jev-test-map.md`.
 Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
