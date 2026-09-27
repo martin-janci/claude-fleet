@@ -721,6 +721,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             tracing::warn!(error = %e, "file logging unavailable; logging to stderr only");
         }
     }
+    if let Some(warning) = crate::config::plaintext_exposure_warning(&r) {
+        tracing::warn!("{warning}");
+    }
     persist(&store, &r)?;
     if !r.local_host {
         // Before the control API and the ticks start: from here on every

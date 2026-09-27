@@ -19,7 +19,13 @@ services:
     env_file: fleet-hub.env
     environment:
       FLEET_HUB_BIND: 0.0.0.0
-    ports: ["4180:4180"]
+    # Reachable only from your proxy's container network: nothing is published
+    # on the host, so LAN and VPN peers cannot reach the plaintext port. The
+    # image's HEALTHCHECK probes 127.0.0.1:4180 inside the container and is
+    # unaffected. FLEET_HUB_PROXY_NETWORK (in .env) names the network your
+    # proxy is on — `docker network ls` shows it (caddy_default for a compose
+    # project named caddy).
+    networks: [proxy]
     # Docker's stdout capture of the same lines the hub already rotates in
     # its own log file; uncapped it is the file that fills the disk.
     logging:
@@ -30,3 +36,7 @@ services:
     volumes:
       - ./data:/var/lib/fleet-hub
       - ./ssh:/home/fleet/.ssh
+networks:
+  proxy:
+    external: true
+    name: ${FLEET_HUB_PROXY_NETWORK:-caddy_default}

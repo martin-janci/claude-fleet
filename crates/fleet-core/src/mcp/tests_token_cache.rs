@@ -49,6 +49,10 @@ impl Hub {
     }
 
     async fn refused(&self, token: &str) {
+        // Every call here is from loopback: one auth-failure bucket. A
+        // refusal inside `AUTH_FAIL_INTERVAL` of the previous one would be
+        // 429 (`tests_auth_limit`), and this asserts the 401 itself.
+        tokio::time::sleep(AUTH_FAIL_INTERVAL + Duration::from_millis(50)).await;
         let r = self.call(token).await;
         assert!(r.contains("401"), "expected {token} to be refused:\n{r}");
     }
@@ -103,6 +107,7 @@ async fn hub() -> Hub {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
             tokens,
+            rate: Arc::new(RateLimiter::new()),
         },
         pairing::PairState::new(
             Arc::clone(&store),

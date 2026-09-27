@@ -131,6 +131,7 @@ mod tests {
                 store: Arc::clone(&store),
                 allowed_hosts: Arc::new(vec![]),
                 tokens: None,
+                rate: Arc::new(crate::mcp::RateLimiter::new()),
             },
             pairing::PairState::new(
                 Arc::clone(&store),

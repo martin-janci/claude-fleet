@@ -342,6 +342,23 @@ permits the `0.0.0.0` bind without `--allow-plaintext`. Files: `.env`,
 `fleet-hub.env`, `docker-compose.yml`, `backup.sh`, `upgrade.sh`, `data/`,
 `ssh/`, `backups/`.
 
+The variant publishes **no** port: the hub joins your proxy's docker network
+(`FLEET_HUB_PROXY_NETWORK` in `.env`, `caddy_default` for a compose project
+named `caddy`) and the proxy forwards by service name:
+
+```
+http://fleet.example.com {
+    reverse_proxy fleet-hub:4180 {
+        flush_interval -1
+    }
+}
+```
+
+The https:// public URL permits the `0.0.0.0` bind, and the hub logs at
+startup that plaintext 4180 is reachable by anything that can route to it —
+on the proxy network, that is the proxy. Publishing `4180:4180` on the host
+instead makes it the whole LAN and every VPN peer; the warning says so.
+
 **Tidying a hand-upgraded deployment.** A directory upgraded by hand tends to
 collect `docker-compose.yml.<version>` copies (the `image:` line was the only
 difference), `data.pre-<version>` directory copies and `backup-<version>-<ts>`
@@ -2210,6 +2227,12 @@ deliberately.
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a
   phone* and *Clients* above.
+- **Failed bearers are throttled per address.** A bad or missing token on any
+  authenticated route is answered `401` once per second per source address
+  (the peer, or the last `X-Forwarded-For` hop when the peer is a private or
+  loopback proxy — the same rule `/pair` uses); a repeat inside that second is
+  `429`. The `[mcp] rejected request` log line names the address. A valid
+  token is never throttled: successes do not touch the bucket.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there
