@@ -77,8 +77,19 @@ and a rejection is sticky: fleet never suggests that pair again.
 Claude in the session can link its own work too (`work_link`, source
 `agent`), which is how the friendly-name skill records "I'm working on
 ABC-123". An agent cannot overturn your rejection: once you said *Not
-this* to a key for a session, Claude linking that key is refused
-(`E_FORBIDDEN`) and your rejection stands. Only you can link it again.
+this* to a key for a session, Claude linking or confirming that key is
+refused (`E_FORBIDDEN`) and your rejection stands. Only you can link it
+again.
+
+Who decides is recorded by who is asking, not by what they claim. A link,
+confirmation or rejection made through a per-host token (the host's own
+Claude) or by the operator (the agent panel's session) is recorded with
+source `agent`, even if it passes `source: manual`; one made from the
+desktop, the master token or a paired phone is recorded as yours
+(`manual`). An agent's confirmation therefore never counts as yours: it
+does not count toward a project's automatic trust, it is not written back
+to a tracker, and the usage summary counts it apart. When an agent
+decides the same way you already did, your decision is kept.
 
 ### Detection
 
@@ -243,8 +254,9 @@ is ever written: no transition, no worklog, no comment (D29), and nothing a
 transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
-  hand or by *Start* (`manual` / `started`). A detection guess or an agent's
-  suggestion never writes.
+  hand or by *Start* (`manual` / `started`). A detection guess, an agent's
+  suggestion, and a link or confirmation an agent made (`agent`) never
+  write.
 - **Only your own org's tracker.** A session in one org never writes to
   another org's tracker, even a link made with `force_cross_org`; the org is
   checked again just before sending.
@@ -602,8 +614,8 @@ title, key, path or error text.
 
 | Group | What it counts |
 |---|---|
-| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, …); a suggestion a person decided reads `manual` |
-| detection | suggestions made, confirmed by a person, promoted by detection itself, rejected, expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
+| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, `agent`, …); a suggestion a person decided reads `manual`, one an agent decided `agent` |
+| detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
 | handover | handovers requested and written, turns that ended without one, requests that could not be sent |
 | resume | resumes, with and without a brief |
 | journal | briefs queued and delivered, compaction summaries harvested |
@@ -625,7 +637,7 @@ numbers.
 $ fleet-hub work usage --days 30
 work graph usage, last 30 d
 links: 41 made (branch 12, manual 20, resumed 3, started 6)
-detection: 18 suggested, 9 confirmed by a person, 4 promoted, 3 rejected, 1 expired; median decision 12 min; 2 nudges
+detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 1 expired; median decision 12 min; 2 nudges
 handover: 5 requested, 4 written, 1 missing, 0 send failed
 resume: 3 (2 with a brief, 1 without)
 journal: 8 briefs queued, 7 delivered; 11 compaction summaries

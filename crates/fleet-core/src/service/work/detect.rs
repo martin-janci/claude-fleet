@@ -19,7 +19,7 @@
 use super::recognize::{recognize, MatchKind, RecognizeCtx, TrackerHost};
 use super::resolve::{resolve, Candidate, Evidence, ResolveInput, Signal, Strength};
 use crate::ipc_error::{codes, IpcError};
-use crate::store::{DetectionState, Store};
+use crate::store::{Decider, DetectionState, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -711,14 +711,22 @@ pub fn on_agent_inference(
     run(s, &st, &tv, vec![c])
 }
 
-/// A person confirmed or rejected suggestion `link_id`. Confirming a branch
+/// `decider` confirmed or rejected suggestion `link_id`; the link records
+/// who ([`Store::decide_work_link`]). A person confirming a branch
 /// suggestion counts toward the project's automatic trust
-/// ([`AUTO_TRUST_AFTER`]). Re-resolves afterwards (a rejection can leave a
-/// sole candidate). Returns whether the project became trusted.
-pub fn decide(s: &Store, session_id: i64, link_id: i64, confirm: bool) -> Result<bool, IpcError> {
-    let link = s.decide_work_link(session_id, link_id, confirm)?;
+/// ([`AUTO_TRUST_AFTER`]); an agent's confirmation never does. Re-resolves
+/// afterwards (a rejection can leave a sole candidate). Returns whether the
+/// project became trusted.
+pub fn decide(
+    s: &Store,
+    session_id: i64,
+    link_id: i64,
+    confirm: bool,
+    decider: Decider,
+) -> Result<bool, IpcError> {
+    let link = s.decide_work_link(session_id, link_id, confirm, decider)?;
     let mut trusted_now = false;
-    if confirm && matches!(link.rule.as_deref(), Some("R3b" | "R4")) {
+    if confirm && decider == Decider::Person && matches!(link.rule.as_deref(), Some("R3b" | "R4")) {
         if let Some(pid) = s.detection_state(session_id)?.and_then(|st| st.project_id) {
             if !trusted_projects(s).contains(&pid)
                 && s.confirmed_branch_suggestions(pid)? >= AUTO_TRUST_AFTER

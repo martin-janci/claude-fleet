@@ -28,27 +28,69 @@ pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent"];
 /// overturn a person's rejection.
 pub const PERSON_SOURCES: &[&str] = &["manual", "started"];
 
-/// `E_FORBIDDEN` when the live link `link_id` is a rejection a PERSON made
-/// (its source is not `agent`): an agent's decision must not turn a
-/// person's "Not this" into a link. The one guard both decision paths share
-/// (`decide_session_work`, `decide_work_link`).
-pub(super) fn refuse_overturning_rejection(
+/// Who makes a link decision. The decider, not what a caller claims,
+/// decides the `source` a decision records: work-link labels must say
+/// whether a person or an agent decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decider {
+    /// A person: the desktop, the master token, a paired person's client.
+    /// Records `manual`.
+    Person,
+    /// An agent: a per-host token (the host's own Claude) or the operator
+    /// (the UX agent's client). Records `agent`.
+    Agent,
+}
+
+impl Decider {
+    /// The `source` a decision by this decider records.
+    pub fn source(self) -> &'static str {
+        match self {
+            Decider::Person => "manual",
+            Decider::Agent => "agent",
+        }
+    }
+}
+
+/// What an agent's decision does to a live link a decision already settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentOver {
+    /// Nothing a person decided is in the way: write the agent's decision.
+    Write,
+    /// A person already decided the same way: keep their decision (its
+    /// source and time) — a confirm only makes it primary again.
+    KeepPersons,
+}
+
+/// An AGENT deciding `new_state` over the live link `link_id` (now
+/// `old_state` by `old_source`): `E_FORBIDDEN` when that would turn a
+/// person's rejection ("Not this") into a link, [`AgentOver::KeepPersons`]
+/// when a person already decided the same way. The one rule both decision
+/// paths share (`decide_session_work`, `decide_work_link`).
+pub(super) fn agent_over_decision(
     session_id: i64,
     link_id: i64,
-    state: &str,
-    source: &str,
-) -> Result<(), IpcError> {
-    if state != "rejected" || source == "agent" {
-        return Ok(());
+    old_state: &str,
+    old_source: &str,
+    new_state: &str,
+) -> Result<AgentOver, IpcError> {
+    if !PERSON_SOURCES.contains(&old_source) {
+        return Ok(AgentOver::Write);
     }
-    Err(IpcError::new(
-        codes::E_FORBIDDEN,
-        format!(
-            "a person rejected this work for session {session_id} (work link {link_id}); \
-             an agent cannot overturn a person's rejection — ask the person to link it"
-        ),
-    )
-    .with_details(serde_json::json!({ "link_id": link_id, "reason": "rejected_by_person" })))
+    if old_state == "rejected" && new_state == "confirmed" {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "a person rejected this work for session {session_id} (work link {link_id}); \
+                 an agent cannot overturn a person's rejection — ask the person to link it"
+            ),
+        )
+        .with_details(serde_json::json!({ "link_id": link_id, "reason": "rejected_by_person" })));
+    }
+    Ok(if old_state == new_state {
+        AgentOver::KeepPersons
+    } else {
+        AgentOver::Write
+    })
 }
 
 /// Longest accepted work key / free-form work reference.
@@ -621,7 +663,8 @@ impl Store {
     /// A person's rejection is overturned only by a person: confirming a
     /// target whose live link a person rejected, with a source outside
     /// [`PERSON_SOURCES`] (an agent's `link`), is `E_FORBIDDEN` and writes
-    /// nothing.
+    /// nothing. Such a decision the same way a person already decided keeps
+    /// the person's (a confirm only makes it primary again).
     fn decide_session_work(
         &self,
         session_id: i64,
@@ -655,12 +698,19 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        let mut keep = AgentOver::Write;
         if let Some((id, old_state, old_source)) = &existing {
-            if primary && !PERSON_SOURCES.contains(&source) {
-                refuse_overturning_rejection(session_id, *id, old_state, old_source)?;
+            if !PERSON_SOURCES.contains(&source) {
+                keep = agent_over_decision(session_id, *id, old_state, old_source, state)?;
             }
         }
         let existing = existing.map(|(id, _, _)| id);
+        if let (AgentOver::KeepPersons, Some(id), false) = (keep, existing, primary) {
+            // A person rejected it already: nothing to write.
+            return self
+                .get_work_link(id)?
+                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"));
+        }
         if primary {
             self.conn.execute(
                 "UPDATE work_links SET is_primary = 0 \
@@ -669,6 +719,15 @@ impl Store {
             )?;
         }
         let id = match existing {
+            // A person confirmed it already: it becomes primary again, and
+            // stays the person's decision.
+            Some(id) if keep == AgentOver::KeepPersons => {
+                self.conn.execute(
+                    "UPDATE work_links SET is_primary = 1 WHERE id = ?1",
+                    rusqlite::params![id],
+                )?;
+                id
+            }
             // A decision over a suggestion keeps its evidence and rule, so
             // the link can still say what proposed it.
             Some(id) => {
@@ -724,14 +783,25 @@ impl Store {
         self.decide_session_work(session_id, target, "confirmed", source)
     }
 
-    /// Say that `session_id` does NOT work on `target`. Sticky: detection
-    /// must never re-propose it; only a later explicit link overrides it.
+    /// Say that `session_id` does NOT work on `target` (a person's "Not
+    /// this"). Sticky: detection must never re-propose it; only a later
+    /// explicit link by a person overrides it.
     pub fn reject_session_work(
         &self,
         session_id: i64,
         target: WorkTarget<'_>,
     ) -> Result<WorkLinkRow, IpcError> {
-        self.decide_session_work(session_id, target, "rejected", "manual")
+        self.reject_session_work_by(session_id, target, Decider::Person)
+    }
+
+    /// [`Self::reject_session_work`] recorded as `decider`'s decision.
+    pub fn reject_session_work_by(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        decider: Decider,
+    ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_session_work(session_id, target, "rejected", decider.source())
     }
 
     /// Remove one live link of `session_id` (a mistaken link, not a

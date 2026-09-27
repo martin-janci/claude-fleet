@@ -127,6 +127,19 @@ impl Caller {
                 .is_some_and(|c| c.name == crate::service::operator::OPERATOR_CLIENT_NAME)
     }
 
+    /// Who a work-link decision by this caller is (D34 label hygiene): a
+    /// per-host token is the host's own Claude and the operator is the UX
+    /// agent, so both are an AGENT, and their links and confirmations are
+    /// recorded as `agent` whatever `source` they pass. The master and a
+    /// paired person's client (a phone, a paired desktop) are a PERSON.
+    pub fn work_decider(&self) -> crate::store::Decider {
+        if self.host_alias.is_some() || self.is_operator() || self.mode == TokenMode::Peer {
+            crate::store::Decider::Agent
+        } else {
+            crate::store::Decider::Person
+        }
+    }
+
     /// True for a paired client the operator has vouched for
     /// (`client_tokens.trusted_at` set): its text is the operator's own, so
     /// the untrusted-content marker is left off. Never true for the master
@@ -432,6 +445,33 @@ mod tests {
         assert_eq!(c.mode, TokenMode::Full);
         assert_eq!(c.client.as_ref().unwrap().id, 7);
         assert!(c.host_alias.is_none());
+    }
+
+    /// D34: a per-host token (the host's Claude) and the operator (the UX
+    /// agent) decide work links as an agent; the master and a paired
+    /// person's client as a person.
+    #[test]
+    fn host_tokens_and_the_operator_decide_work_as_agents() {
+        use crate::store::Decider;
+        let clients = vec![
+            client_row(1, "phone", "tok-phone", "full"),
+            client_row(
+                2,
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                "tok-op",
+                "full",
+            ),
+        ];
+        let hosts = vec![host_row("mefistos", "tok-mef", "full")];
+        let who = |tok: &str| {
+            resolve_token(tok, "s3cret", &hosts, &clients)
+                .unwrap()
+                .work_decider()
+        };
+        assert_eq!(who("s3cret"), Decider::Person);
+        assert_eq!(who("tok-phone"), Decider::Person);
+        assert_eq!(who("tok-mef"), Decider::Agent);
+        assert_eq!(who("tok-op"), Decider::Agent);
     }
 
     #[test]

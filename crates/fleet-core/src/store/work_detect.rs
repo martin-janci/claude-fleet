@@ -3,7 +3,8 @@
 //! of its live links, and applying the resolver's changes. The rules are in
 //! `service::work::resolve`; this file only reads and writes.
 
-use super::{now_unix, Store, WorkLinkRow};
+use super::work::{agent_over_decision, AgentOver};
+use super::{now_unix, Decider, Store, WorkLinkRow};
 use crate::ipc_error::{codes, IpcError};
 use crate::service::work::resolve::{Evidence, LinkChange, NewState, PrimaryRef, EVIDENCE_MAX};
 use rusqlite::OptionalExtension;
@@ -464,32 +465,50 @@ impl Store {
         Ok(())
     }
 
-    /// A person decides one suggestion by id: `confirm` makes it a confirmed
-    /// manual link and the session's primary; otherwise it is rejected
-    /// (sticky, R9). `E_NOTFOUND` when the link is not this session's live
-    /// link.
+    /// `decider` decides one suggestion by id: `confirm` makes it a
+    /// confirmed link and the session's primary; otherwise it is rejected
+    /// (sticky, R9). The link records the decider's source (`manual` for a
+    /// person, `agent` for an agent), so an agent's confirmation never reads
+    /// as a person's. An agent cannot confirm a link a person rejected
+    /// (`E_FORBIDDEN`), and deciding the way a person already did keeps the
+    /// person's decision. `E_NOTFOUND` when the link is not this session's
+    /// live link.
     pub fn decide_work_link(
         &self,
         session_id: i64,
         link_id: i64,
         confirm: bool,
+        decider: Decider,
     ) -> Result<WorkLinkRow, IpcError> {
-        let participant: Option<i64> = self
+        let found: Option<(i64, String, String)> = self
             .conn
             .query_row(
-                "SELECT l.participant_id FROM work_links l JOIN participants p \
-                   ON p.id = l.participant_id AND p.retired_at IS NULL \
+                "SELECT l.participant_id, l.state, l.source FROM work_links l \
+                   JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  WHERE l.id = ?1 AND l.ended_at IS NULL AND p.session_id = ?2",
                 rusqlite::params![link_id, session_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some(participant) = participant else {
+        let Some((participant, old_state, old_source)) = found else {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
                 format!("session {session_id} has no live work link {link_id}"),
             ));
         };
+        let new_state = if confirm { "confirmed" } else { "rejected" };
+        let keep = match decider {
+            Decider::Person => AgentOver::Write,
+            Decider::Agent => {
+                agent_over_decision(session_id, link_id, &old_state, &old_source, new_state)?
+            }
+        };
+        if keep == AgentOver::KeepPersons && !confirm {
+            // A person rejected it already: nothing to write.
+            return self
+                .get_work_link(link_id)?
+                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"));
+        }
         let conv: Option<String> = self
             .conn
             .query_row(
@@ -508,21 +527,30 @@ impl Store {
                 rusqlite::params![participant],
             )?;
         }
-        // A decision keeps the evidence and the rule that proposed it, so
-        // "why" still reads after the person agreed.
-        self.conn.execute(
-            "UPDATE work_links SET state = ?2, source = 'manual', is_primary = ?3, \
-               decided_at = ?4, claude_session_id = COALESCE(?5, claude_session_id), \
-               strength = 'explicit', preselected = 0 \
-             WHERE id = ?1",
-            rusqlite::params![
-                link_id,
-                if confirm { "confirmed" } else { "rejected" },
-                confirm as i64,
-                now,
-                conv
-            ],
-        )?;
+        if keep == AgentOver::KeepPersons {
+            // A person confirmed it already: primary again, still theirs.
+            self.conn.execute(
+                "UPDATE work_links SET is_primary = 1 WHERE id = ?1",
+                rusqlite::params![link_id],
+            )?;
+        } else {
+            // A decision keeps the evidence and the rule that proposed it,
+            // so "why" still reads after the decider agreed.
+            self.conn.execute(
+                "UPDATE work_links SET state = ?2, source = ?6, is_primary = ?3, \
+                   decided_at = ?4, claude_session_id = COALESCE(?5, claude_session_id), \
+                   strength = 'explicit', preselected = 0 \
+                 WHERE id = ?1",
+                rusqlite::params![
+                    link_id,
+                    new_state,
+                    confirm as i64,
+                    now,
+                    conv,
+                    decider.source()
+                ],
+            )?;
+        }
         self.conn.execute(
             "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
             rusqlite::params![session_id],

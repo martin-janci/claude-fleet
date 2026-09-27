@@ -15,7 +15,7 @@
 use crate::ipc_error::{codes, IpcError};
 use crate::service::gc::tidy::TidyReason;
 use crate::service::trackers::sync::SyncMetrics;
-use crate::store::{Store, WORK_LINK_SOURCES};
+use crate::store::{Store, PERSON_SOURCES};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -102,7 +102,8 @@ pub struct LinkUsage {
     /// Links made in the window.
     #[serde(default)]
     pub created: u64,
-    /// Per `source` (a suggestion a person decided reads `manual`).
+    /// Per `source` (a suggestion a person decided reads `manual`, one an
+    /// agent decided `agent`).
     #[serde(default)]
     pub by_source: BTreeMap<String, u64>,
 }
@@ -112,9 +113,16 @@ pub struct DetectionUsage {
     /// Suggestions made (at least: withdrawn and decayed ones leave no row).
     #[serde(default)]
     pub suggested: u64,
+    /// Decided by a person (`manual` / `started`).
     #[serde(default)]
     pub confirmed_by_person: u64,
-    /// Suggestions detection confirmed later by itself (R2 / R8).
+    /// Confirmed by an agent — a per-host token or the operator (`agent`,
+    /// D34); never counted as a person's.
+    #[serde(default)]
+    pub confirmed_by_agent: u64,
+    /// Suggestions detection confirmed later by itself: a sole state
+    /// candidate in a trusted project (R3) or a first prompt's sole ticket
+    /// URL (R5).
     #[serde(default)]
     pub promoted: u64,
     #[serde(default)]
@@ -220,8 +228,8 @@ pub fn usage(
         *links.by_source.entry(key).or_default() += n;
     }
 
-    let d = s.usage_detection(since, until, auto, WORK_LINK_SOURCES)?;
-    let secs = s.usage_decision_secs(since, until, WORK_LINK_SOURCES)?;
+    let d = s.usage_detection(since, until, auto, PERSON_SOURCES)?;
+    let secs = s.usage_decision_secs(since, until, PERSON_SOURCES)?;
     let events: BTreeMap<String, u64> = s
         .usage_event_kinds(since, until, &[HANDOVER_KINDS, OTHER_KINDS].concat())?
         .into_iter()
@@ -230,6 +238,7 @@ pub fn usage(
     let detection = DetectionUsage {
         suggested: d.suggested,
         confirmed_by_person: d.confirmed_by_person,
+        confirmed_by_agent: d.confirmed_by_agent,
         promoted: d.promoted,
         rejected: d.rejected,
         expired: d.expired,
@@ -337,10 +346,11 @@ impl UsageSummary {
                 pairs(&self.links.by_source)
             ),
             format!(
-                "detection: {} suggested, {} confirmed by a person, {} promoted, {} rejected, \
-                 {} expired; median decision {}; {} nudges",
+                "detection: {} suggested, {} confirmed by a person, {} confirmed by an agent, \
+                 {} promoted, {} rejected, {} expired; median decision {}; {} nudges",
                 d.suggested,
                 d.confirmed_by_person,
+                d.confirmed_by_agent,
                 d.promoted,
                 d.rejected,
                 d.expired,
@@ -455,6 +465,10 @@ mod tests {
         let spot = link("SECRET-7", "manual");
         // A link from long ago: outside the window.
         let ancient = link("SECRET-8", "manual");
+        // A suggestion an agent confirmed after two hours (D34): not a
+        // person's decision, and not in the person's median.
+        let by_agent = link("SECRET-9", "manual");
+        set(&s, "UPDATE work_links SET created_at = ?1, decided_at = ?1 + 7200, rule = 'R3b', source = 'agent' WHERE id = ?2", &[&in_window, &by_agent]);
         for id in [manual, started] {
             set(
                 &s,
@@ -545,10 +559,11 @@ mod tests {
 
         let u = usage(&s, 30, NOW, &metrics).unwrap();
         assert_eq!((u.days, u.until - u.since), (30, 30 * 86_400 + 1));
-        assert_eq!(u.links.created, 7, "{:?}", u.links);
+        assert_eq!(u.links.created, 8, "{:?}", u.links);
         assert_eq!(
             u.links.by_source,
             BTreeMap::from([
+                ("agent".into(), 1),
                 ("branch".into(), 1),
                 ("manual".into(), 3),
                 ("pr".into(), 1),
@@ -559,13 +574,16 @@ mod tests {
         assert_eq!(
             u.detection,
             DetectionUsage {
-                // confirmed, promoted, rejected, expired — not the spot one.
-                suggested: 4,
+                // confirmed (by a person and by an agent), promoted,
+                // rejected, expired — not the spot one.
+                suggested: 5,
                 confirmed_by_person: 1,
+                confirmed_by_agent: 1,
                 promoted: 1,
                 rejected: 1,
                 expired: 1,
-                // the person's two decisions: 600 s and 3600 s.
+                // the person's two decisions: 600 s and 3600 s (the
+                // agent's 7200 s is not a person's).
                 median_decision_secs: Some(600),
                 nudges: 1,
             }

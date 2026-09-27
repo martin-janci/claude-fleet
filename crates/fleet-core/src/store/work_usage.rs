@@ -20,6 +20,9 @@ use crate::ipc_error::IpcError;
 pub struct DetectionCounts {
     pub suggested: u64,
     pub confirmed_by_person: u64,
+    /// Confirmed by an agent (a per-host token or the operator): source
+    /// `agent` (D34).
+    pub confirmed_by_agent: u64,
     pub promoted: u64,
     pub rejected: u64,
     pub expired: u64,
@@ -77,7 +80,8 @@ impl Store {
 
     /// Detection outcomes in the window. A suggestion is a link a resolver
     /// rule made (`rule` set) that was not confirmed on the spot; a person's
-    /// decision rewrites `source` to one of `person` and keeps the rule; a
+    /// decision rewrites `source` to one of `person` and keeps the rule, an
+    /// agent's to `agent`; a
     /// promotion keeps an `auto` source and is decided after it was made;
     /// an expired suggestion is one whose session ended undecided. Withdrawn
     /// and decayed suggestions are deleted, so `suggested` is a floor.
@@ -101,13 +105,16 @@ impl Store {
                    AND decided_at >= ?1 AND decided_at < ?2), 0),
                COALESCE(SUM(state = 'rejected' AND rule IS NOT NULL
                    AND decided_at >= ?1 AND decided_at < ?2), 0),
-               COALESCE(SUM(state = 'suggested' AND ended_at >= ?1 AND ended_at < ?2), 0)
+               COALESCE(SUM(state = 'suggested' AND ended_at >= ?1 AND ended_at < ?2), 0),
+               COALESCE(SUM(state = 'confirmed' AND source = 'agent' AND rule IS NOT NULL
+                   AND decided_at >= ?1 AND decided_at < ?2), 0)
              FROM work_links"
         );
         Ok(self.conn.query_row(&sql, [since, until], |r| {
             Ok(DetectionCounts {
                 suggested: count(r.get(0)?),
                 confirmed_by_person: count(r.get(1)?),
+                confirmed_by_agent: count(r.get(5)?),
                 promoted: count(r.get(2)?),
                 rejected: count(r.get(3)?),
                 expired: count(r.get(4)?),
