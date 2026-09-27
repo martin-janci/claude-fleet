@@ -417,6 +417,7 @@ fn sample_session_row() -> SessionRow {
         parent_session_id: None,
         tags: vec!["review".into()],
         row_version: 0,
+        prompt_submit_seq: 0,
         usage: fleet_core::store::SessionUsage {
             usage_input_tokens: 1200,
             usage_output_tokens: 800,

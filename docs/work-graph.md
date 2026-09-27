@@ -25,6 +25,7 @@ acceptance run, [work-graph-acceptance.md](work-graph-acceptance.md).
 - [Retention](#retention)
 - [Organisations and isolation](#organisations-and-isolation)
 - [Trackers in fleet health](#trackers-in-fleet-health)
+- [Usage summary](#usage-summary)
 - [The phone](#the-phone)
 - [The operator and confirmations](#the-operator-and-confirmations)
 - [Settings](#settings)
@@ -203,6 +204,7 @@ fleet-hub tracker add https://acme.atlassian.net/browse/ABC-123
 fleet-hub tracker set-credential 1 --email you@acme.com < jira-token.txt
 fleet-hub tracker test 1      # account, key prefixes, sprints, views
 fleet-hub tracker status      # last sync pass per tracker, and retention
+fleet-hub work usage          # how the work graph is used, as counts
 ```
 
 A token is read from stdin, from `--from-env NAME`, or stored as a
@@ -585,6 +587,51 @@ status` and Settings → Work. See
 
 > **[Screenshot placeholder]** The attention strip with a Reconnect item,
 > and the footer's trackers line.
+
+## Usage summary
+
+`work_admin { action: usage, days? }` (on a hub, `fleet-hub work usage
+[--days N] [--json]`; on a standalone desktop, Settings → Work → *Usage*)
+counts how the work graph is actually used over the last `days` (default
+30, 1 to 365). It is read-only and master-only (a per-host or client token
+is refused, and a paired desktop shows no Usage section). It records
+nothing, sends nothing anywhere, and holds counts and ids only: never a
+title, key, path or error text.
+
+| Group | What it counts |
+|---|---|
+| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, …); a suggestion a person decided reads `manual` |
+| detection | suggestions made, confirmed by a person, promoted by detection itself, rejected, expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
+| handover | handovers requested and written, turns that ended without one, requests that could not be sent |
+| resume | resumes, with and without a brief |
+| journal | briefs queued and delivered, compaction summaries harvested |
+| tidy | sessions tidied from Tidy-up, *Keep* answers, auto-tidies per reason |
+| trackers | per tracker id: passes, failed passes and items skipped since the syncing process started (not windowed, reset on restart) |
+
+Some things are not stored anywhere, so the answer lists them under
+`unrecorded` instead of guessing: suggestions *shown*, handovers refused as
+busy, `last` vs fresh resumes, the transcript probe's outcomes, Tidy-up's
+suggestions per reason before anything is applied, and multi-start runs.
+Suggestions that detection withdrew or let decay leave no row, so
+`suggested` is a floor. The counts are bounded by retention and by the
+timeline's cap per session (500 events).
+
+Paste it into an acceptance run's record: that gives the decisions real
+numbers.
+
+```
+$ fleet-hub work usage --days 30
+work graph usage, last 30 d
+links: 41 made (branch 12, manual 20, resumed 3, started 6)
+detection: 18 suggested, 9 confirmed by a person, 4 promoted, 3 rejected, 1 expired; median decision 12 min; 2 nudges
+handover: 5 requested, 4 written, 1 missing, 0 send failed
+resume: 3 (2 with a brief, 1 without)
+journal: 8 briefs queued, 7 delivered; 11 compaction summaries
+tidy: 6 applied, 2 kept, 0 auto-tidied (none)
+tracker 1: 288 passes, 3 failed, 0 items skipped (since the sync started)
+not recorded: suggestions shown (only made, confirmed, rejected and expired are stored)
+…
+```
 
 ## The phone
 

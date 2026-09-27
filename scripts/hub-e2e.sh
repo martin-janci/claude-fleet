@@ -1019,6 +1019,18 @@ else
   bli=$(wcall "$HTOKB" work '{"action":"local_items"}')
   check "nor list local's local work" '! echo "$bli" | grep -q "E2E local cleanup"' "${bli:0:400}"
 
+  # --- 9. usage counts (M13.2) ---------------------------------------------
+  echo "-- 9. usage"
+  us=$(wcall "$TOKW" work_admin '{"action":"usage","days":7}')
+  check "work_admin usage counts what this run did: starts, detection, a handover request" '[ "$(jt "$us" .days)" = 7 ] && [ "$(jt "$us" ".links.by_source.started // 0")" -ge 1 ] && [ "$(jt "$us" ".detection.suggested")" -ge 1 ] && [ "$(jt "$us" ".handover.requested")" -ge 1 ]' "${us:0:800}"
+  check "and carries counts only: no key, title or path of the run" '[ -n "$(jt "$us" .days)" ] && ! echo "$us" | grep -qE "E2E-[0-9]|E2E local cleanup|$WBASE"' "${us:0:800}"
+  ub=$(wcall "$HTOKB" work_admin '{"action":"usage"}')
+  check "a host token may not read usage: work_admin is master-only" 'echo "$ub" | grep -q E_FORBIDDEN' "${ub:0:300}"
+  ucli=$("$WBIN" work usage --days 7 --data-dir "$ROOT/w" --port "$PW" 2>&1)
+  check "fleet-hub work usage prints the same counts" 'echo "$ucli" | grep -q "^work graph usage, last 7 d" && echo "$ucli" | grep -q "^links: " && ! echo "$ucli" | grep -qE "E2E-[0-9]"' "${ucli:0:600}"
+  ujs=$("$WBIN" work usage --days 7 --json --data-dir "$ROOT/w" --port "$PW" 2>&1)
+  check "and --json is the tool's answer" '[ "$(printf "%s" "$ujs" | jq -r .days)" = 7 ] && [ "$(printf "%s" "$ujs" | jq -r .links.created)" = "$(jt "$us" .links.created)" ]' "${ujs:0:400}"
+
   # --- operator confirm (M9.7): no approver on a hub -------------------------
   echo "-- operator"
   opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')

@@ -41,6 +41,7 @@
   } from './trackers';
   import { hosts } from './hosts';
   import { hubStatus, hubBlock, ownsTheFleet } from './hub';
+  import WorkUsage from './WorkUsage.svelte';
   import { pushError, push } from './toasts';
   import OrgSettings from './OrgSettings.svelte';
 
@@ -480,6 +481,7 @@
   {/if}
 
   <OrgSettings />
+  {#if owns}<WorkUsage />{/if}
 </section>
 
 <style>

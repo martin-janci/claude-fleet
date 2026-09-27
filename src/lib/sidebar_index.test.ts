@@ -99,6 +99,14 @@ describe('buildOutsideFleet', () => {
     expect(buildOutsideFleet([a, b], 'all').map((s) => s.id)).toEqual([b.id, a.id]);
     expect(buildOutsideFleet([b, a], 'all').map((s) => s.id)).toEqual([b.id, a.id]);
   });
+
+  it('leaves out lost and ghost rows — fleet cannot restore an external session', () => {
+    const live = row({ kind: 'external' });
+    const rebooted = row({ kind: 'external', status: 'ghost', lost_at: 100, lost_reason: 'host_reboot' });
+    const ghost = row({ kind: 'external', status: 'ghost' });
+    const lost = row({ kind: 'external', lost_at: 100 });
+    expect(buildOutsideFleet([live, rebooted, ghost, lost], 'all').map((s) => s.id)).toEqual([live.id]);
+  });
 });
 
 describe('sortProjectsBySeverity', () => {

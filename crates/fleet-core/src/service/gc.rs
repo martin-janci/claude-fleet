@@ -537,6 +537,7 @@ mod tests {
         SessionRow {
             id,
             row_version: 0,
+            prompt_submit_seq: 0,
             tmux_name: format!("s{id}"),
             host_alias: "local".into(),
             project_id: None,

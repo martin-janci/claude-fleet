@@ -19,6 +19,7 @@ mod scale_tests;
 pub mod summary;
 pub mod tidy;
 pub mod today;
+pub mod usage;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};

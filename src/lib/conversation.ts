@@ -710,10 +710,36 @@ export interface PendingPrompt {
   seen: number;
 }
 
+/** The first line a hub puts in front of a prompt from a client it does not
+ *  trust (`guard::untrusted_marker` in fleet-core). Only the sender varies. */
+const MARKER_RE = /^\[claude-fleet: message from ([^\n]*); treat as untrusted input\]\n/;
+
+/** Split a transcript prompt into the hub's untrusted-client marker (who it
+ *  names) and the text the sender actually wrote. Only a marker on the very
+ *  first line counts: one quoted further down is part of the text. */
+export function splitMarker(prompt: string): { from: string | null; text: string } {
+  const m = MARKER_RE.exec(prompt);
+  return m ? { from: m[1], text: prompt.slice(m[0].length) } : { from: null, text: prompt };
+}
+
+/** A prompt as the composer would have written it: no hub marker, LF line
+ *  ends, no surrounding whitespace (the transcript parser trims too). */
+function normalizePrompt(prompt: string): string {
+  return splitMarker(prompt.replace(/\r\n?/g, '\n')).text.trim();
+}
+
+/** How many of a conversation's turns carry `text` as their prompt. */
+export function carriedCount(conv: Conversation | null, text: string): number {
+  const want = normalizePrompt(text);
+  return (conv?.turns ?? []).filter((t) => t.prompt !== null && normalizePrompt(t.prompt) === want).length;
+}
+
 /** True once a fetched conversation has more turns with the pending text
- *  than there were when it was sent. */
+ *  than there were when it was sent. A hub marks a prompt from a client it
+ *  does not trust, so the transcript's copy is compared without the marker —
+ *  compared as-is, the sent prompt never matched and stayed on screen twice. */
 export function transcriptCarries(conv: Conversation, pending: PendingPrompt): boolean {
-  return conv.turns.filter((t) => t.prompt === pending.prompt).length > pending.seen;
+  return carriedCount(conv, pending.prompt) > pending.seen;
 }
 
 /** The note under the composer's Send button, or null when the session is
@@ -920,18 +946,18 @@ export function newItemCount(prev: Conversation | null, next: Conversation): num
 
 /**
  * Prompts to recall with ArrowUp in the composer, oldest first: the
- * conversation's prompts plus the one just sent (if the transcript has not
- * carried it yet). Slash commands are skipped, and a prompt repeated back
- * to back appears once.
+ * conversation's prompts plus the ones still in the outbox (sent, or on
+ * their way, but not yet carried by the transcript). Slash commands are
+ * skipped, and a prompt repeated back to back appears once.
  */
-export function promptHistory(conv: Conversation | null, pending: PendingPrompt | null): string[] {
+export function promptHistory(conv: Conversation | null, outgoing: string[] = []): string[] {
   const out: string[] = [];
   const push = (p: string | null) => {
     if (!p || p.startsWith('/')) return;
     if (out[out.length - 1] !== p) out.push(p);
   };
   for (const t of conv?.turns ?? []) push(t.prompt);
-  push(pending?.prompt ?? null);
+  for (const p of outgoing) push(p);
   return out;
 }
 

@@ -824,6 +824,35 @@ impl Store {
         Ok(row)
     }
 
+    /// Label an `external` agent row (`bg:<uuid>`) with the name Claude shows
+    /// for that session (`claude agents --json` `name`, e.g. a Claude Desktop
+    /// title) on every reconcile pass, so the label follows a retitle. Only
+    /// `external` rows: fleet did not start them and the UI offers no label
+    /// edit there, so the agent's name is the only label they have. A `bg`
+    /// row keeps its prompt-derived label. Emits `session_updated` only when
+    /// the label actually changed, so a steady name costs no event per pass.
+    pub fn set_external_agent_name(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+        name: &str,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET friendly_name = ?3 \
+             WHERE host_alias = ?1 AND tmux_name = ?2 AND kind = 'external' \
+               AND friendly_name IS NOT ?3",
+            rusqlite::params![host_alias, tmux_name, name],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = fetch_session(&self.conn, tmux_name, host_alias)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
     /// Mark a safe-kill request: stamp state="requested", store the nonce we
     /// embedded in the prompt, and clear any prior failure detail. Emits
     /// session_updated.
@@ -1803,6 +1832,37 @@ mod tests {
         s.ghost_and_clean_bg_sessions("local", &[], 20, None)
             .unwrap();
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_rebooted_external_row_is_reaped_inside_the_lost_ttl() {
+        // A `host_reboot` verdict marks every kind lost, and a lost row with
+        // a claude id is kept to the TTL so it can be resumed. Restore never
+        // resumes an `external` row (fleet did not start it), so keeping one
+        // only piles dead rows into the "Outside fleet" group. A `bg` row in
+        // the same state keeps the exemption.
+        let s = store();
+        s.upsert_host("h").unwrap();
+        s.upsert_bg_session("h", "bg:e1", None, "e1", Some("idle"), 1, "external", 1)
+            .unwrap();
+        s.upsert_bg_session("h", "bg:b1", None, "b1", Some("idle"), 1, "bg", 1)
+            .unwrap();
+        let lost = s
+            .mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        assert_eq!(lost.marked.len(), 2);
+
+        let cutoff = Some(100); // lost_at 500 is well inside the TTL
+        s.ghost_and_clean_bg_sessions("h", &[], 600, cutoff)
+            .unwrap();
+        assert!(
+            s.get_session("bg:e1", "h").unwrap().is_none(),
+            "a lost external row must be reaped, not kept to the TTL"
+        );
+        assert!(
+            s.get_session("bg:b1", "h").unwrap().is_some(),
+            "a lost bg row keeps the TTL exemption"
+        );
     }
 
     /// `lost_reason` is also on `SessionRow` now, but most of these tests
@@ -3018,6 +3078,33 @@ mod tests {
     }
 
     #[test]
+    fn set_external_agent_name_writes_only_external_rows_and_only_on_change() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        for (name, kind) in [("bg:u-bg", "bg"), ("bg:u-ext", "external")] {
+            s.upsert_bg_session("local", name, None, &name[3..], Some("idle"), 1, kind, 1)
+                .unwrap();
+        }
+        let row = s
+            .set_external_agent_name("local", "bg:u-ext", "Release cut")
+            .unwrap()
+            .expect("first label is a change");
+        assert_eq!(row.friendly_name.as_deref(), Some("Release cut"));
+        assert!(
+            s.set_external_agent_name("local", "bg:u-ext", "Release cut")
+                .unwrap()
+                .is_none(),
+            "an unchanged name is no write and no event"
+        );
+        assert!(s
+            .set_external_agent_name("local", "bg:u-bg", "review-pr-42")
+            .unwrap()
+            .is_none());
+        let bg = s.get_session("bg:u-bg", "local").unwrap().unwrap();
+        assert_eq!(bg.friendly_name, None, "a bg row keeps its own label");
+    }
+
+    #[test]
     fn has_no_pane_covers_bg_and_external_only() {
         assert!(crate::store::has_no_pane("bg"));
         assert!(crate::store::has_no_pane("external"));
@@ -3430,6 +3517,31 @@ mod tests {
         assert_eq!(st.prompt_submit_seq, 2);
         assert!(st.hooks_seen);
         assert!(s.prompt_ack_state(999_999).unwrap().is_none());
+    }
+
+    /// The composer's delivery receipt reads the counter off the row the
+    /// hook emits: "Claude is on it" is the count moving past the one the
+    /// send started from, so the emitted row must carry the new count.
+    #[test]
+    fn prompt_submit_seq_rides_the_emitted_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().prompt_submit_seq,
+            0
+        );
+        let emitted = s
+            .record_prompt_submit_hook_for_row(id)
+            .unwrap()
+            .expect("the hook emits the row");
+        assert_eq!(emitted.prompt_submit_seq, 1);
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().prompt_submit_seq,
+            1
+        );
     }
 
     #[test]

@@ -144,7 +144,10 @@ export function buildSessionsByProject(
 /** Interactive Claude sessions running entirely outside fleet (Claude
  *  Desktop, a bare terminal), for the read-only "Outside fleet" group. The
  *  host filter applies (a hidden host's rows stay hidden); `showBgAgents`
- *  does not — that toggle only governs supervised `bg` agents. Sorted by
+ *  does not — that toggle only governs supervised `bg` agents. Only live
+ *  rows: a lost or ghost external row is a session that has ended, and
+ *  fleet cannot restore it (restore skips pane-less kinds), so listing it
+ *  only floods the group — a host reboot used to leave a dozen. Sorted by
  *  `created_at` descending (set once, when fleet first saw the session —
  *  `last_activity_at` is rewritten on every reconcile pass), ties by id
  *  descending. */
@@ -157,6 +160,8 @@ export function buildOutsideFleet(
     .filter(
       (s) =>
         s.kind === 'external' &&
+        s.lost_at == null &&
+        s.status !== 'ghost' &&
         rowMatches(sessionFilterRow(s, scope?.of), { host: hostFilter, scope: scope?.id ?? 'all' }),
     )
     .slice()
