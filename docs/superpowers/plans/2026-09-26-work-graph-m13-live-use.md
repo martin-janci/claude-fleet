@@ -212,3 +212,10 @@ M13.5   last
   covers M10–M13. Found on the way: M4.6's #273 was closed unmerged, the
   commit reached `main` with #270; `main` had moved to a599ffa (v0.3.1),
   which changes none of the facts above.
+- 2026-09-27: **Decisions recorded.** The owner answered D3, D10, D15 and
+  D20 yes, before the M10.3 run, each in its M12.6 smallest safe version;
+  D5 stays off until the remote numbers are in; D13 stays no. M13.4a, d, c
+  and e may start, one PR each, in that order. Earlier builds of M13.4c and
+  e on an unmerged branch (made before M13.1 / M13.2 landed, and numbered
+  as "M13.1") are ported onto `main` item by item, not merged whole; its
+  webhook build (D13) is dropped.
