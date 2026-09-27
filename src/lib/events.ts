@@ -8,7 +8,7 @@ import type { TaskRow, TaskEvent } from './tasks';
 import type { AccountUsageSnapshot } from './account_usage_store';
 import type { AssetInventoryRow, CatalogSummary, SyncProgress } from './assets';
 import type { MoveProgress } from './moveProgress';
-import type { TrackerRow, WorkEvent, WorkItemRow } from './trackers';
+import type { TrackerRow, WorkChange, WorkEvent, WorkItemRow } from './trackers';
 
 /**
  * How long a flush waits for more events after the first one arrives. Tauri
@@ -93,7 +93,8 @@ type Queued =
   | { name: 'move:progress'; payload: MoveProgress }
   | { name: 'work:item'; payload: WorkItemRow }
   | { name: 'work:tracker'; payload: TrackerRow }
-  | { name: 'work:tracker_removed'; payload: { id: number } };
+  | { name: 'work:tracker_removed'; payload: { id: number } }
+  | { name: 'work:changed'; payload: WorkChange };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -215,6 +216,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'work:tracker_removed':
           workEvents.push({ type: 'tracker_removed', id: ev.payload.id });
           break;
+        case 'work:changed':
+          workEvents.push({ type: 'changed', change: ev.payload });
+          break;
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -300,6 +304,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:item', wanted.work),
     sub('work:tracker', wanted.work),
     sub('work:tracker_removed', wanted.work),
+    sub('work:changed', wanted.work),
   ]);
   return () => {
     disposed = true;

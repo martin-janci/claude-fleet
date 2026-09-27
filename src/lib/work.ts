@@ -77,23 +77,58 @@ export function sessionWorkLinks(sessionId: number): Promise<Result<WorkLink[]>>
   return invokeCmd<WorkLink[]>('session_work_links', { args: { session_id: sessionId } });
 }
 
+/** Bumped after every work write this window makes, and by `work:changed`
+ *  and session events that touch work; the Work view, the task detail and
+ *  the session's Tasks re-read what they show (debounced) when it moves.
+ *  (Re-exported by `work_view.ts`, where its readers live.) */
+export const workChanged = writable(0);
+
+export function bumpWorkChanged(): void {
+  workChanged.update((n) => n + 1);
+}
+
 async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>(cmd, { args });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 
-/** Say the session works on `ref`; it becomes the session's primary work.
- *  `forceCrossOrg`: the person saw the cross-org refusal and meant it. */
+/** Work graph M14: the optional half of every link decision. `primary`
+ *  (link / confirm): `false` adds a secondary link and leaves the primary
+ *  alone; absent keeps today's behaviour (it takes the primary).
+ *  `expectedVersion`: the link's `version` as last read; a mismatch answers
+ *  `E_CONFLICT` and changes nothing. Both are sent only when set, so an older
+ *  hub sees exactly what it always saw. */
+export interface LinkDecisionOpts {
+  primary?: boolean;
+  expectedVersion?: number;
+}
+
+function decisionExtras(opts: LinkDecisionOpts): Record<string, unknown> {
+  return {
+    ...(opts.primary !== undefined ? { primary: opts.primary } : {}),
+    ...(opts.expectedVersion !== undefined ? { expected_version: opts.expectedVersion } : {}),
+  };
+}
+
+/** Say the session works on `ref`; it becomes the session's primary work
+ *  (unless `primary: false`). `forceCrossOrg`: the person saw the cross-org
+ *  refusal and meant it. */
 export function linkSessionWork(
   sessionId: number,
   ref: WorkRef,
-  opts: { forceCrossOrg?: boolean } = {},
+  // No `expectedVersion`: a new link has no version to expect, and the
+  // `link_session_work` command (`LinkSessionWorkArgs`) takes none.
+  opts: { forceCrossOrg?: boolean } & Pick<LinkDecisionOpts, 'primary'> = {},
 ): Promise<Result<SessionRow>> {
   return decide('link_session_work', {
     session_id: sessionId,
     ...ref,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+    ...decisionExtras(opts),
   });
 }
 
@@ -132,19 +167,24 @@ export function rejectSessionWork(sessionId: number, ref: WorkRef): Promise<Resu
 export function confirmSessionWork(
   sessionId: number,
   linkId: number,
-  opts: { forceCrossOrg?: boolean } = {},
+  opts: { forceCrossOrg?: boolean } & LinkDecisionOpts = {},
 ): Promise<Result<SessionRow>> {
   return decide('confirm_session_work', {
     session_id: sessionId,
     link_id: linkId,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+    ...decisionExtras(opts),
   });
 }
 
 /** "Not this" for one detected link (a suggestion or an auto link, e.g. the
  *  Undo of an automatic link). Sticky: never proposed again. */
-export function rejectWorkLink(sessionId: number, linkId: number): Promise<Result<SessionRow>> {
-  return decide('reject_session_work', { session_id: sessionId, link_id: linkId });
+export function rejectWorkLink(
+  sessionId: number,
+  linkId: number,
+  opts: Pick<LinkDecisionOpts, 'expectedVersion'> = {},
+): Promise<Result<SessionRow>> {
+  return decide('reject_session_work', { session_id: sessionId, link_id: linkId, ...decisionExtras(opts) });
 }
 
 /** Trust (or stop trusting) branch keys in a project: a sole branch key there
@@ -248,8 +288,12 @@ export function newAutoLinks(prev: ReadonlyMap<number, number>, rows: readonly S
 }
 
 /** Remove a mistaken link (not a rejection: the key may come back). */
-export function unlinkSessionWork(sessionId: number, linkId: number): Promise<Result<SessionRow>> {
-  return decide('unlink_session_work', { session_id: sessionId, link_id: linkId });
+export function unlinkSessionWork(
+  sessionId: number,
+  linkId: number,
+  opts: Pick<LinkDecisionOpts, 'expectedVersion'> = {},
+): Promise<Result<SessionRow>> {
+  return decide('unlink_session_work', { session_id: sessionId, link_id: linkId, ...decisionExtras(opts) });
 }
 
 // ── Local work: "Name this work…" (work graph M11.1) ──
@@ -346,7 +390,10 @@ export async function renameWorkItem(itemId: number, title: string): Promise<Res
   const r = await invokeCmd<WorkItemRow>('rename_work_item', {
     args: { item_id: itemId, title: title.trim() },
   });
-  if (r.ok) patchWorkItemTitle(itemId, r.value.title);
+  if (r.ok) {
+    patchWorkItemTitle(itemId, r.value.title);
+    bumpWorkChanged();
+  }
   return r;
 }
 
@@ -498,7 +545,10 @@ export async function resumeWork(a: ResumeWorkArgs): Promise<Result<SessionRow>>
       brief: a.brief ?? null,
     },
   });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 

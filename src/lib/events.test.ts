@@ -422,3 +422,20 @@ describe('row event batching', () => {
     unlisten();
   });
 });
+
+describe('work:changed (work graph M14)', () => {
+  it('arrives in the batched work handler with the frame, in order with work:item', async () => {
+    const seen: unknown[] = [];
+    const unlisten = await subscribeToRowEvents({ onWorkEvents: (evs) => seen.push(...evs) });
+    fire('work:changed', { what: 'placement', task_id: 'item:12' });
+    fire('work:tracker_removed', { id: 3 });
+    fire('work:changed', { what: 'rule', rule_id: 4 });
+    await flush();
+    expect(seen).toEqual([
+      { type: 'changed', change: { what: 'placement', task_id: 'item:12' } },
+      { type: 'tracker_removed', id: 3 },
+      { type: 'changed', change: { what: 'rule', rule_id: 4 } },
+    ]);
+    unlisten();
+  });
+});

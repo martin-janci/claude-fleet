@@ -8,6 +8,7 @@
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
+import { bumpWorkChanged } from './work';
 
 /** `trackers.state`. Anything else a newer hub sends is treated as not ok. */
 export type TrackerState =
@@ -112,7 +113,18 @@ export interface WorkItemRow {
 export type WorkEvent =
   | { type: 'item'; row: WorkItemRow }
   | { type: 'tracker'; row: TrackerRow }
-  | { type: 'tracker_removed'; id: number };
+  | { type: 'tracker_removed'; id: number }
+  /** `work:changed` (work graph M14): the structure moved (a placement, a
+   *  rule, a view, a task's org). Ids only; the Work view re-reads. */
+  | { type: 'changed'; change: WorkChange };
+
+/** A `work:changed` payload. */
+export interface WorkChange {
+  what: 'placement' | 'rule' | 'view' | 'org' | string;
+  task_id?: string | null;
+  rule_id?: number | null;
+  view_id?: number | null;
+}
 
 // ---------------------------------------------------------------------------
 // Commands (work graph M3). Reads and `start_work` route to a hub; the admin
@@ -179,7 +191,10 @@ export interface StartWorkArgs {
  *  (details.session_id) means the key already has a live session. */
 export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('start_work', { args });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 

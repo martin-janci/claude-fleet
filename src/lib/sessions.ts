@@ -141,6 +141,11 @@ export interface SessionRow {
   /** The session's org (work graph M5): the most specific org rule, else
    *  its host's org. Absent = unassigned (or a hub older than M5). */
   org_id?: number | null;
+  /** A digest of the versions and ids of the session's live (non-ended)
+   *  work links (work graph M14): it moves whenever any of them changes —
+   *  added, removed, primary, state — a secondary link too. Absent = 0 (no
+   *  live links, or a hub older than the Work view). */
+  work_rev?: number;
 }
 
 /** `SessionRow.work`: the primary link's summary. `key` is the item's key or

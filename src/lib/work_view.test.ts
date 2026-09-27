@@ -1,0 +1,443 @@
+// The Work view's contract layer (work graph M14): the argument shapes of
+// every command, the filters' round trips, sections merged from pages, the
+// occurrence rules, conflicts and older hubs, and the undo of a decision.
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { get } from 'svelte/store';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+import { invoke } from '@tauri-apps/api/core';
+import { sessions } from './sessions';
+import { session } from './hosts_fixture';
+import { linkSessionWork, confirmSessionWork, rejectWorkLink, unlinkSessionWork } from './work';
+import {
+  ackWorkLink,
+  activeFilterCount,
+  assignWorkOrg,
+  buildSections,
+  conflictOf,
+  decideWorkBatch,
+  deleteWorkRule,
+  deleteWorkView,
+  distributeTasks,
+  filtersFromQuery,
+  filtersKey,
+  filtersToQuery,
+  groupSessionLinks,
+  groupSourceText,
+  isOccurrenceOf,
+  isOlderHub,
+  mergeTasks,
+  noteWorkEvents,
+  normalizeFilters,
+  occurrenceKind,
+  openTask,
+  orgSourceText,
+  placementNote,
+  placeWork,
+  readErrorText,
+  NEWER_HUB,
+  reconsiderWorkLink,
+  sameFilters,
+  saveWorkRule,
+  saveWorkView,
+  sectionFilters,
+  sectionKey,
+  selectedTaskId,
+  sessionEventsTouchWork,
+  setPrimaryWork,
+  showTaskInWorkView,
+  sidebarView,
+  taskDetailOpen,
+  tasksShowingSession,
+  toggleSidebarView,
+  trackerDown,
+  undoOf,
+  workChanged,
+  workOrgImpact,
+  workReview,
+  workRulePreview,
+  workRules,
+  workSessionTasks,
+  workTask,
+  workTree,
+  workViews,
+  revealTaskRequest,
+  type WorkTreePage,
+} from './work_view';
+import { link, task } from './work_view_fixture';
+
+const lastCall = () => vi.mocked(invoke).mock.calls.at(-1)!;
+
+beforeEach(() => {
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockResolvedValue(null);
+});
+
+describe('commands: every one takes { args: { … } } with the action’s fields', () => {
+  it('reads', async () => {
+    await workTree({ filters: { status: 'open', query: ' login ', has: 'any' }, limit: 50 });
+    expect(lastCall()).toEqual(['work_tree', { args: { filters: { status: 'open', query: 'login' }, limit: 50 } }]);
+    await workTree({ filters: { org: 3, group: 'tracker:1:ABC' }, cursor: 'c1', limit: 20, per_task: 4 });
+    expect(lastCall()).toEqual([
+      'work_tree',
+      { args: { filters: { org: 3, group: 'tracker:1:ABC' }, cursor: 'c1', limit: 20, per_task: 4 } },
+    ]);
+    await workTask('ref:ABC-1');
+    expect(lastCall()).toEqual(['work_task', { args: { task_id: 'ref:ABC-1' } }]);
+    await workSessionTasks(7);
+    expect(lastCall()).toEqual(['work_session_tasks', { args: { session_id: 7 } }]);
+    await workReview({ limit: 1 });
+    expect(lastCall()).toEqual(['work_review', { args: { limit: 1 } }]);
+    await workReview({ cursor: 'r2', limit: 50 });
+    expect(lastCall()).toEqual(['work_review', { args: { cursor: 'r2', limit: 50 } }]);
+    await workRules();
+    expect(lastCall()).toEqual(['work_rules', { args: {} }]);
+    await workViews();
+    expect(lastCall()).toEqual(['work_views', { args: {} }]);
+    await workOrgImpact('item:77', 0);
+    expect(lastCall()).toEqual(['work_org_impact', { args: { task_id: 'item:77', org_id: 0 } }]);
+    await workRulePreview({
+      name: ' Payments ',
+      enabled: true,
+      group: 'Payments',
+      conditions: { tracker_id: 1, container: 'PAY', key_prefix: ' ', title_contains: '', repo: null },
+    });
+    expect(lastCall()).toEqual([
+      'work_rule_preview',
+      {
+        args: {
+          rule: {
+            name: 'Payments',
+            enabled: true,
+            conditions: { tracker_id: 1, container: 'PAY', key_prefix: null, title_contains: null, repo: null },
+            group: 'Payments',
+          },
+        },
+      },
+    ]);
+  });
+
+  it('link writes answer the row and patch it in', async () => {
+    const row = session('mefistos', 'api', { id: 7 });
+    vi.mocked(invoke).mockResolvedValue(row);
+    sessions.set([]);
+    const r = await setPrimaryWork(7, 43, 42);
+    expect(r.ok).toBe(true);
+    expect(lastCall()).toEqual(['set_primary_work', { args: { session_id: 7, link_id: 43, expected_primary: 42 } }]);
+    expect(get(sessions).map((s) => s.id)).toEqual([7]);
+    await setPrimaryWork(7, 43, null);
+    expect(lastCall()).toEqual(['set_primary_work', { args: { session_id: 7, link_id: 43, expected_primary: 0 } }]);
+    await reconsiderWorkLink(7, 42, 4);
+    expect(lastCall()).toEqual(['reconsider_work_link', { args: { session_id: 7, link_id: 42, expected_version: 4 } }]);
+    await reconsiderWorkLink(7, 42);
+    expect(lastCall()).toEqual(['reconsider_work_link', { args: { session_id: 7, link_id: 42 } }]);
+    await ackWorkLink(7, 42, 2);
+    expect(lastCall()).toEqual(['ack_work_link', { args: { session_id: 7, link_id: 42, expected_version: 2 } }]);
+  });
+
+  it('the existing link commands take primary / expected_version only when given', async () => {
+    vi.mocked(invoke).mockResolvedValue(session('mefistos', 'api', { id: 7 }));
+    await linkSessionWork(7, { key: 'ABC-12' });
+    expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, key: 'ABC-12' } }]);
+    await linkSessionWork(7, { item_id: 12 }, { primary: false });
+    expect(lastCall()).toEqual(['link_session_work', { args: { session_id: 7, item_id: 12, primary: false } }]);
+    await confirmSessionWork(7, 42, { primary: false, expectedVersion: 3 });
+    expect(lastCall()).toEqual([
+      'confirm_session_work',
+      { args: { session_id: 7, link_id: 42, primary: false, expected_version: 3 } },
+    ]);
+    await rejectWorkLink(7, 42, { expectedVersion: 3 });
+    expect(lastCall()).toEqual(['reject_session_work', { args: { session_id: 7, link_id: 42, expected_version: 3 } }]);
+    await unlinkSessionWork(7, 42, { expectedVersion: 5 });
+    expect(lastCall()).toEqual(['unlink_session_work', { args: { session_id: 7, link_id: 42, expected_version: 5 } }]);
+    await unlinkSessionWork(7, 42);
+    expect(lastCall()).toEqual(['unlink_session_work', { args: { session_id: 7, link_id: 42 } }]);
+  });
+
+  it('structure writes', async () => {
+    await decideWorkBatch([
+      { session_id: 7, link_id: 42, decision: 'confirm', expected_version: 2, primary: false },
+      { session_id: 8, link_id: 50, decision: 'reject' },
+    ]);
+    expect(lastCall()).toEqual([
+      'decide_work_batch',
+      {
+        args: {
+          decisions: [
+            { session_id: 7, link_id: 42, decision: 'confirm', expected_version: 2, primary: false },
+            { session_id: 8, link_id: 50, decision: 'reject' },
+          ],
+        },
+      },
+    ]);
+    await placeWork('item:12', ' Payments ', 0, ' moved for Q4 ');
+    expect(lastCall()).toEqual([
+      'place_work',
+      { args: { task_id: 'item:12', group: 'Payments', note: 'moved for Q4', expected_version: 0 } },
+    ]);
+    await placeWork('item:12', '', 3);
+    expect(lastCall()).toEqual(['place_work', { args: { task_id: 'item:12', group: '', expected_version: 3 } }]);
+    await assignWorkOrg('item:77', 2, 'tok');
+    expect(lastCall()).toEqual(['assign_work_org', { args: { task_id: 'item:77', org_id: 2, impact_token: 'tok' } }]);
+    await saveWorkRule({ id: 3, name: 'Payments', enabled: false, conditions: { tracker_id: 1, container: 'PAY' }, group: 'Payments', expected_version: 2 });
+    expect(lastCall()).toEqual([
+      'save_work_rule',
+      {
+        args: {
+          rule: {
+            id: 3,
+            name: 'Payments',
+            enabled: false,
+            conditions: { tracker_id: 1, container: 'PAY', key_prefix: null, title_contains: null, repo: null },
+            group: 'Payments',
+            expected_version: 2,
+          },
+        },
+      },
+    ]);
+    await deleteWorkRule(3, 2);
+    expect(lastCall()).toEqual(['delete_work_rule', { args: { rule_id: 3, expected_version: 2 } }]);
+    await saveWorkView({ name: ' Mine ', filters: { mine: true, status: 'open', group: 'x' }, expected_version: 0 });
+    expect(lastCall()).toEqual([
+      'save_work_view',
+      { args: { view: { name: 'Mine', filters: { status: 'open', mine: true }, expected_version: 0 } } },
+    ]);
+    await deleteWorkView(1);
+    expect(lastCall()).toEqual(['delete_work_view', { args: { view_id: 1 } }]);
+  });
+});
+
+describe('filters', () => {
+  it('drops defaults and junk', () => {
+    expect(normalizeFilters({ status: 'any', has: 'any', mine: false, review: false, query: '  ' })).toEqual({});
+    expect(normalizeFilters({ org: 'none', tracker: 'ref', status: 'nope', has: 'suggested', org2: 1 })).toEqual({
+      org: 'none',
+      tracker: 'ref',
+      has: 'suggested',
+    });
+    expect(normalizeFilters({ org: -1, tracker: 1.5 })).toEqual({});
+    expect(normalizeFilters(null)).toEqual({});
+  });
+
+  it('round-trips through a URL-safe string', () => {
+    const f = { org: 3, tracker: 'local' as const, status: 'in_progress' as const, mine: true, has: 'past_only' as const, review: true, query: 'log in & out', group: 'tracker:1:ABC' };
+    const q = filtersToQuery(f);
+    expect(q).not.toMatch(/[ &]out/);
+    expect(filtersFromQuery(q)).toEqual(f);
+    expect(filtersFromQuery('?org=none&tracker=2')).toEqual({ org: 'none', tracker: 2 });
+    expect(filtersFromQuery('status=bogus&mine=0')).toEqual({});
+  });
+
+  it('keys equal filters equally, whatever the field order', () => {
+    expect(filtersKey({ query: 'x', org: 1 })).toBe(filtersKey({ org: 1, query: 'x', status: 'any' }));
+    expect(sameFilters({ mine: true }, { mine: false })).toBe(false);
+    expect(activeFilterCount({ mine: true, status: 'open', group: 'none' })).toBe(2);
+  });
+
+  it('a section loads with its org and group on top of the view', () => {
+    expect(sectionFilters({ status: 'open', org: 2 }, null, 'none')).toEqual({ status: 'open', org: 'none', group: 'none' });
+    expect(sectionFilters({}, 1, 'tracker:1:ABC')).toEqual({ org: 1, group: 'tracker:1:ABC' });
+  });
+});
+
+describe('sections', () => {
+  const page: WorkTreePage = {
+    tasks: [task(), task({ task_id: 'ref:ABC-13', item_id: null, key: 'ABC-13', title: '', kind: 'ref' })],
+    groups: [
+      { org_id: 1, org_name: 'Acme', group: task().group, count: 5 },
+      { org_id: 1, org_name: 'Acme', group: { id: 'none', label: 'No group', source: 'none' }, count: 1 },
+      { org_id: null, group: { id: 'none', label: 'No group', source: 'none' }, count: 2 },
+    ],
+    orgs: [{ id: 1, name: 'Acme', color: '#f00' }],
+    trackers: [],
+    total: 8,
+    next_cursor: 'n1',
+  };
+
+  it('draws every header from groups, org first, with the first page’s tasks', () => {
+    const st = distributeTasks(page);
+    const s = buildSections(page.groups, page.orgs, st);
+    expect(s.map((o) => [o.name, o.count])).toEqual([
+      ['Acme', 6],
+      ['Unassigned', 2],
+    ]);
+    expect(s[0].color).toBe('#f00');
+    expect(s[0].groups.map((g) => [g.group.id, g.tasks.length, g.more])).toEqual([
+      ['tracker:1:ABC', 2, true],
+      ['none', 0, true],
+    ]);
+    // The same group id in another org is another section.
+    expect(s[1].groups[0].key).toBe(sectionKey(null, 'none'));
+    expect(s[1].groups[0].key).not.toBe(s[0].groups[1].key);
+  });
+
+  it('a section loaded by itself keeps its own tasks and cursor across a first-page read', () => {
+    const own = new Map([[sectionKey(1, 'none'), { tasks: [task({ task_id: 'item:99', group: { id: 'none', label: '', source: 'none' } })], cursor: null, own: true }]]);
+    const st = distributeTasks(page, own);
+    const s = buildSections(page.groups, page.orgs, st);
+    expect(s[0].groups[1].tasks.map((t) => t.task_id)).toEqual(['item:99']);
+    // Its own cursor is null: nothing more, whatever the count says.
+    expect(s[0].groups[1].more).toBe(false);
+  });
+
+  it('merges pages without repeating a task, taking the newer copy', () => {
+    const a = [task({ task_id: 'item:1' }), task({ task_id: 'item:2', title: 'old' })];
+    const b = [task({ task_id: 'item:2', title: 'new' }), task({ task_id: 'item:3' })];
+    const m = mergeTasks(a, b);
+    expect(m.map((t) => t.task_id)).toEqual(['item:1', 'item:2', 'item:3']);
+    expect(m[1].title).toBe('new');
+  });
+
+  it('finds every task that shows the selected session', () => {
+    const st = distributeTasks({
+      tasks: [
+        task({ task_id: 'item:1', sessions: [link({ session_id: 7 })] }),
+        task({ task_id: 'item:2', sessions: [link({ session_id: 7, primary: false, link_id: 43 })] }),
+        task({ task_id: 'item:3', sessions: [link({ session_id: 8 })] }),
+        task({ task_id: 'item:4', sessions: [link({ session_id: 7, state: 'ended', link_id: 44 })] }),
+      ],
+    });
+    const s = buildSections([{ org_id: 1, group: task().group, count: 4 }], [], st);
+    expect([...tasksShowingSession(s, 7)].sort()).toEqual(['item:1', 'item:2']);
+    expect(tasksShowingSession(s, null).size).toBe(0);
+  });
+});
+
+describe('occurrences and provenance', () => {
+  it('kinds: primary, secondary, suggested, past — an unknown state is never active', () => {
+    expect(occurrenceKind(link())).toBe('primary');
+    expect(occurrenceKind(link({ primary: false }))).toBe('secondary');
+    expect(occurrenceKind(link({ state: 'suggested', primary: false }))).toBe('suggested');
+    expect(occurrenceKind(link({ state: 'ended' }))).toBe('past');
+    expect(occurrenceKind(link({ state: 'frozen' }))).toBe('past');
+    expect(occurrenceKind(link({ state: 'rejected' }))).toBe('rejected');
+    expect(isOccurrenceOf(link({ state: 'ended' }), 7)).toBe(false);
+    expect(isOccurrenceOf(link({ state: 'suggested' }), 7)).toBe(true);
+  });
+
+  it('says where the org comes from', () => {
+    expect(orgSourceText(task())).toBe('from tracker Jira (acme)');
+    expect(orgSourceText(task({ org_source: 'item' }))).toBe('set by a person');
+    expect(orgSourceText(task({ org_source: 'sessions' }))).toBe('inferred from its sessions — not a boundary');
+    expect(orgSourceText(task({ org_source: 'sessions', org_mixed: true }))).toContain('span several organisations');
+    expect(orgSourceText(task({ org_source: 'none' }))).toBe('no organisation');
+  });
+
+  it('says where the group comes from, and that a tracker is never edited', () => {
+    const t = task();
+    expect(groupSourceText(t.group, t)).toBe('from the tracker: Jira (acme) ABC');
+    expect(placementNote(t.group, t)).toBe('Placing it elsewhere is local to fleet: it never changes Jira.');
+    const asana = task({ provider: 'asana', tracker_name: 'Asana (acme)' });
+    expect(placementNote(asana.group, asana)).toContain('never changes Asana');
+    expect(groupSourceText({ id: 'label:Payments', label: 'Payments', source: 'rule', rule_id: 3 }, t, 'Payments')).toBe(
+      'placed by the rule “Payments”',
+    );
+    expect(groupSourceText({ id: 'label:X', label: 'X', source: 'manual' }, t)).toBe('placed here by a person');
+    expect(groupSourceText({ id: 'repo:acme/api', label: 'acme/api', source: 'repo' }, t)).toContain('acme/api');
+    expect(groupSourceText({ id: 'key:ABC', label: 'ABC', source: 'key' }, t)).toBe('from its key prefix ABC');
+    expect(groupSourceText({ id: 'none', label: '', source: 'none' }, t)).toContain('no group');
+  });
+
+  it('a failing tracker is "down", not "no sessions"', () => {
+    expect(trackerDown(task({ tracker_state: 'unreachable' }))).toBe(true);
+    expect(trackerDown(task())).toBe(false);
+    expect(trackerDown(task({ kind: 'local', tracker_state: null }))).toBe(false);
+  });
+
+  it('groups a session’s links: primary first, past newest first', () => {
+    const g = groupSessionLinks([
+      link({ link_id: 1, primary: false }),
+      link({ link_id: 2, primary: true }),
+      link({ link_id: 3, state: 'ended', ended_at: 10 }),
+      link({ link_id: 4, state: 'ended', ended_at: 20 }),
+      link({ link_id: 5, state: 'suggested' }),
+      link({ link_id: 6, state: 'rejected' }),
+    ]);
+    expect(g.active.map((l) => l.link_id)).toEqual([2, 1]);
+    expect(g.past.map((l) => l.link_id)).toEqual([4, 3]);
+    expect(g.suggested.map((l) => l.link_id)).toEqual([5]);
+    expect(g.rejected.map((l) => l.link_id)).toEqual([6]);
+  });
+});
+
+describe('errors and undo', () => {
+  it('reads a conflict and its current value', () => {
+    const e = { code: 'E_CONFLICT', message: 'changed', details: { link_id: 42, version: 5, state: 'confirmed', primary: 43 } };
+    expect(conflictOf(e)).toEqual({ link_id: 42, version: 5, state: 'confirmed', primary: 43 });
+    expect(conflictOf({ code: 'E_CONFLICT', message: 'x' })).toEqual({});
+    expect(conflictOf({ code: 'E_INVALID', message: 'x' })).toBeNull();
+  });
+
+  it('an unknown work action is "Needs a newer hub"; other refusals are the hub’s sentence', () => {
+    expect(isOlderHub({ code: 'E_INVALID', message: 'unknown work action: tree' })).toBe(true);
+    expect(isOlderHub({ code: 'E_UNKNOWN', message: 'command work_tree not found' })).toBe(true);
+    expect(isOlderHub({ code: 'E_INVALID', message: 'cursor from other filters' })).toBe(false);
+    expect(readErrorText({ code: 'E_INVALID', message: 'unknown action tree' })).toBe(NEWER_HUB);
+    expect(readErrorText({ code: 'E_HUB', message: 'hub unreachable' })).toBe('hub unreachable');
+  });
+
+  it('undoes a confirm or a reject by reconsidering, with the new version', () => {
+    expect(undoOf({ session_id: 7, link_id: 42, decision: 'confirm' }, 4)).toEqual({
+      session_id: 7,
+      link_id: 42,
+      decision: 'reconsider',
+      expected_version: 4,
+    });
+    expect(undoOf({ session_id: 7, link_id: 42, decision: 'reject' })).toEqual({ session_id: 7, link_id: 42, decision: 'reconsider' });
+    expect(undoOf({ session_id: 7, link_id: 42, decision: 'ack' })).toBeNull();
+    expect(undoOf({ session_id: 7, link_id: 42, decision: 'reconsider' })).toBeNull();
+  });
+});
+
+describe('stores', () => {
+  it('toggles the sidebar view and remembers it', () => {
+    sidebarView.set('sessions');
+    toggleSidebarView();
+    expect(get(sidebarView)).toBe('work');
+    expect(localStorage.getItem('cf:pref:sidebar.view')).toBe('"work"');
+    toggleSidebarView();
+    expect(get(sidebarView)).toBe('sessions');
+  });
+
+  it('"Show in Work view" switches, selects, opens the detail and asks for a reveal', () => {
+    sidebarView.set('sessions');
+    taskDetailOpen.set(false);
+    showTaskInWorkView('item:12');
+    expect(get(sidebarView)).toBe('work');
+    expect(get(selectedTaskId)).toBe('item:12');
+    expect(get(taskDetailOpen)).toBe(true);
+    expect(get(revealTaskRequest)?.taskId).toBe('item:12');
+    openTask('item:13');
+    expect(get(selectedTaskId)).toBe('item:13');
+  });
+
+  it('work:changed bumps the tick; tracker frames do not', () => {
+    const before = get(workChanged);
+    noteWorkEvents([{ type: 'tracker' }]);
+    expect(get(workChanged)).toBe(before);
+    noteWorkEvents([{ type: 'changed' }]);
+    expect(get(workChanged)).toBe(before + 1);
+  });
+
+  it('session events touch work only when a row’s work, org or attention moved', () => {
+    const plain = session('mefistos', 'plain', { id: 1 });
+    const worked = session('mefistos', 'api', {
+      id: 7,
+      work: { link_id: 42, item_id: 12, key: 'ABC-12', title: 'Login', source: 'manual' },
+    });
+    const cur = [plain, worked];
+    // A status tick of a session with no work, not shown: nothing.
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, claude_status: 'working' } }], cur, new Set())).toBe(false);
+    // …unless the tree shows it.
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...plain, claude_status: 'working' } }], cur, new Set([1]))).toBe(true);
+    // Its work moved.
+    expect(
+      sessionEventsTouchWork([{ type: 'updated', row: { ...worked, work: { ...worked.work!, link_id: 43 } } }], cur, new Set()),
+    ).toBe(true);
+    // Same row again: nothing.
+    expect(sessionEventsTouchWork([{ type: 'updated', row: { ...worked } }], cur, new Set())).toBe(false);
+    // Killed with work.
+    expect(sessionEventsTouchWork([{ type: 'killed', id: 7 }], cur, new Set())).toBe(true);
+    expect(sessionEventsTouchWork([{ type: 'killed', id: 1 }], cur, new Set())).toBe(false);
+  });
+});
