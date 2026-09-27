@@ -617,6 +617,17 @@ fn the_board_is_a_window_around_the_section() {
     assert_eq!(b.last().map(String::as_str), Some("s79"));
     let b = board_of(&row, "s0");
     assert_eq!(b.first().map(String::as_str), Some("s0"));
+    // The request the adapter sends (and the benchmark reuses): the board
+    // windowed once, the same whether or not it was windowed before.
+    let full = &row.config.project_sections[0].1;
+    let req = question_for("s60", full);
+    assert_eq!(req, question_for("s60", &board_of(&row, "s60")));
+    assert_eq!(req.state, state("s60", &board_of(&row, "s60")));
+    assert_eq!(req.question, question());
+    assert_eq!(
+        board_window(full, "missing").first().map(String::as_str),
+        Some("s0")
+    );
 }
 
 #[test]
