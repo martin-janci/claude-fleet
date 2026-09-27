@@ -2422,30 +2422,44 @@ mod tests {
     /// (`set_transcript_path_for_row`) must skip a repeat of the same path.
     /// Replaying the exact same Stop hook payload writes the row twice: the
     /// first time the path is new (a real UPDATE), the second time it is
-    /// unchanged (should now be skipped). `record_stop_hook_for_row`'s own
-    /// write (turn_seq etc.) is a REAL change every time — turn counters may
-    /// legitimately bump — so the first replay must cost one MORE
-    /// `row_version` bump than the second: the transcript-path write firing
-    /// once (first call) but not twice (second call, no-op).
+    /// unchanged (skipped). A TEMP trigger counts every UPDATE that SETs
+    /// `transcript_path`, whatever the value: since migration 063 a
+    /// same-value UPDATE no longer moves `row_version`, so the counter can
+    /// no longer tell a skipped write from a no-op one.
     #[test]
     fn stop_hook_replay_skips_noop_transcript_path_write() {
         let store = make_store();
         let id = hooked(&store);
         let mut p = make_payload("Stop", "uuid-1");
         p.transcript_path = Some("/home/u/.claude/projects/proj/uuid-1.jsonl".into());
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch(
+                "CREATE TEMP TABLE path_writes (n INTEGER);
+                 CREATE TEMP TRIGGER count_path_writes
+                 AFTER UPDATE OF transcript_path ON main.sessions
+                 BEGIN INSERT INTO path_writes VALUES (1); END;",
+            )
+            .unwrap();
+        let writes = || -> i64 {
+            store
+                .lock()
+                .unwrap()
+                .conn_ref()
+                .query_row("SELECT COUNT(*) FROM temp.path_writes", [], |r| r.get(0))
+                .unwrap()
+        };
 
-        let v0 = status_of(&store, id).row_version;
         apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
-        let v1 = status_of(&store, id).row_version;
+        let first = writes();
         apply_hook(&store, &make_ssh(), &p, &ctx(&Caller::master(), None)).unwrap();
-        let v2 = status_of(&store, id).row_version;
-
-        let first_delta = v1 - v0;
-        let second_delta = v2 - v1;
-        assert!(
-            second_delta < first_delta,
-            "replaying the same transcript_path must not bump row_version \
-             again: first={first_delta} second={second_delta} (v0={v0} v1={v1} v2={v2})"
+        let second = writes() - first;
+        assert!(first >= 1, "the new path is written: {first}");
+        assert_eq!(
+            second, 0,
+            "replaying the same transcript_path must not write it again"
         );
         // The path itself is still there — skipping the write must not lose it.
         assert_eq!(

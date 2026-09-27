@@ -1521,8 +1521,8 @@ impl Store {
     /// `claude_session_id` is still its current conversation. A repeat of
     /// the same path is a no-op write (Task 3: every hook of a conversation
     /// resends the same `transcript_path`, and an unconditional write here
-    /// bumped `row_version` — see migration 042's trigger — on every one of
-    /// them).
+    /// was a physical UPDATE under the store lock on every one of them —
+    /// which, before migration 063, also bumped `row_version`).
     pub fn set_transcript_path_for_row(
         &self,
         row_id: i64,
@@ -3477,28 +3477,73 @@ mod tests {
         assert_eq!(bus.take(), vec!["move:progress:7:git:done"]);
     }
 
+    /// Migration 063: `row_version` moves once per UPDATE that changes a
+    /// column, and not for one that changes nothing (or only the
+    /// reconcile's `last_reconciled_at` stamp). An explicit
+    /// `row_version + 1` (a `work` change the row's own columns do not
+    /// show) still moves it by exactly one.
     #[test]
-    fn row_version_bumps_on_every_update_and_rides_the_row() {
+    fn row_version_bumps_once_per_visible_change_and_rides_the_row() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         let id = s
             .upsert_session("sess", "local", None, None, 1, 1, "running", None)
             .unwrap();
-        let v0 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        let v = || s.get_session_by_id(id).unwrap().unwrap().row_version;
+        let v0 = v();
         s.set_friendly_name("local", "sess", Some("one")).unwrap();
-        let v1 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        let v1 = v();
         s.set_started_at(id, 99).unwrap();
-        let v2 = s.get_session_by_id(id).unwrap().unwrap().row_version;
-        assert!(v1 > v0, "an UPDATE must bump row_version ({v0} -> {v1})");
-        assert!(v2 > v1, "every UPDATE bumps it ({v1} -> {v2})");
+        let v2 = v();
+        assert_eq!(v1, v0 + 1, "a changing UPDATE bumps row_version by one");
+        assert_eq!(v2, v1 + 1, "every changing UPDATE bumps it");
         // The upsert's DO UPDATE arm is an UPDATE too.
         s.upsert_session("sess", "local", None, None, 1, 2, "running", None)
             .unwrap();
-        let v3 = s.get_session_by_id(id).unwrap().unwrap().row_version;
-        assert!(
-            v3 > v2,
-            "an upsert of an existing row bumps it ({v2} -> {v3})"
+        let v3 = v();
+        assert_eq!(v3, v2 + 1, "an upsert that changes the row bumps it");
+
+        // Same values back: no client-visible change, no bump.
+        s.upsert_session("sess", "local", None, None, 1, 2, "running", None)
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE sessions SET status = status, friendly_name = 'one' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(v(), v3, "a same-value UPDATE must not bump row_version");
+        // The reconcile's freshness stamp alone is bookkeeping, not a change.
+        s.conn
+            .execute(
+                "UPDATE sessions SET last_reconciled_at = 12345 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(
+            v(),
+            v3,
+            "a last_reconciled_at-only UPDATE must not bump row_version"
         );
+        // The explicit bump still counts exactly once (the trigger's WHEN
+        // sees row_version itself moved and stays out of it).
+        s.conn
+            .execute(
+                "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(v(), v3 + 1, "an explicit bump moves row_version by one");
+        // A column that is not on the wire but is not the reconcile's
+        // per-pass stamp either (here `transcript_path`) still counts: only
+        // the listed bookkeeping columns are exempt.
+        s.conn
+            .execute(
+                "UPDATE sessions SET transcript_path = '/t.jsonl' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(v(), v3 + 2, "a real change to any other column bumps");
     }
 
     #[test]
