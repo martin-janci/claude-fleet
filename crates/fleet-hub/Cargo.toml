@@ -18,7 +18,10 @@ default = []
 e2e = ["fleet-core/e2e"]
 
 [dependencies]
-fleet-core = { path = "../fleet-core" }
+# `nl-detect`: the language detector behind `fleet-hub census languages`
+# (Jev evaluation D40). Its models add about 45 MB, which is why only the
+# hub turns it on.
+fleet-core = { path = "../fleet-core", features = ["nl-detect"] }
 # Directly, not through `fleet-core`, for one function: the loopback rule the
 # bind check applies is the same one the agent and the desktop use
 # (`fleet_proto::net`). Already in the tree — `fleet-core` depends on it.

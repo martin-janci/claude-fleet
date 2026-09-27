@@ -13,6 +13,7 @@ mod clients;
 mod conversations;
 mod hosts_accounts;
 mod layers;
+mod nl_census;
 mod orgs;
 mod participants;
 mod peer_links;
@@ -49,6 +50,10 @@ pub use clients::{
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use layers::HostLayerRow;
+pub use nl_census::{
+    CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
+    NL_CENSUS_MIN_SCHEMA,
+};
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
     SessionOrgFacts, ORG_NAME_MAX_CHARS,

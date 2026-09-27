@@ -30,6 +30,8 @@ pub mod hub;
 pub mod messages;
 pub mod move_session;
 pub mod names;
+#[cfg(feature = "nl-detect")]
+pub mod nl;
 pub mod onboarding;
 pub mod operator;
 pub mod orgs;

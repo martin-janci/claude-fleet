@@ -282,6 +282,13 @@ M13 (live use) is next: `docs/superpowers/plans/2026-09-26-work-graph-m13-live-u
 open decisions are the roadmap's table, and a decision-gated feature starts
 only on the user's "yes".
 
+The Jev evaluation (TypeSafe's decision model as an optional reader for
+closed-set decisions) has started with a local language census: `fleet-hub
+census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
+only in fleet-hub — the models add ~45 MB). Nothing calls Jev yet; decisions
+D31–D46 and what is still open are in
+`docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
 `/clear`, `/resume` and compaction tracked as conversation switches;

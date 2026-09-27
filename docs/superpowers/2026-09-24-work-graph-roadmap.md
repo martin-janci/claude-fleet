@@ -840,6 +840,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | GitHub, Jira Cloud, Linear (Asana needs a handshake; Jira DC later) |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
 | D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
+| D31–D46 | The Jev (decision model) evaluation, fleet-wide rather than work graph only | — | Numbered after D30 so the tables never collide; kept in `specs/2026-09-27-jev-language-census-design.md` |
 
 ## Risks to watch
 

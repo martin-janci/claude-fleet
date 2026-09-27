@@ -1,0 +1,113 @@
+# Jev evaluation: the language census (D40)
+
+**Date:** 2026-09-27
+**Status:** built (`fleet-hub census languages`, `fleet-core::service::nl`); the
+census itself is the owner's to run on the real hub.
+**Scope:** the first step of evaluating a decision model in fleet. It needs no
+decision model and nothing leaves the machine.
+
+## Why a census first
+
+We are evaluating **Jev**, TypeSafe AI's decision model, as an optional reader
+for fleet's closed-set decisions. The best-placed one is choosing a work item for
+a session no rule could link. Jev is English-first: TypeSafe says other languages
+are "handled but not equally well" and must be tested on your own content. So
+the benchmark gets a language axis. Before building that axis we need to know
+which languages fleet's texts are in, per organisation. The census measures it
+from what the store already keeps.
+
+## What is verified about Jev (sources, 2026-09-27)
+
+| Fact | Source |
+|---|---|
+| TypeSafe AI's first "System One" model, announced 2026-09-15, early access; `jev-1.13.0` behind the aliases `jev-latest` and `jev-preview` | [blog](https://typesafe.ai/blog/introducing-system-one-models-and-jev), [Models](https://docs.typesafe.ai/models.md) |
+| `POST https://api.typesafe.ai/v1/systemone` takes a `state` (text/JSON) and typed questions: Noul (0–1), Choice (≤ 255 options, probabilities + confidence), Score (2–10 levels) | [API](https://docs.typesafe.ai/api.md) |
+| $0.042 per million input tokens, output free; 64k tokens per request (32k for state plus the longest question); 250k tok/s and 1,200 RPM "adjusting dynamically"; text only | [Models](https://docs.typesafe.ai/models.md) |
+| English-first, other languages lower; the same weights for every account (no fine-tuning); ZDR only on enterprise plans | [Models](https://docs.typesafe.ai/models.md), [Legal](https://docs.typesafe.ai/legal.md) |
+| Known weak spots: literal reading, numbers and dates, indirection, a large state full of unrelated detail, **adversarial content**, no text generation | [Jev 1.13 jaggedness](https://docs.typesafe.ai/model-jaggedness/jev-1.13.md) |
+| No Rust SDK (Python, JS); fleet would call the HTTP API directly | [SDKs](https://docs.typesafe.ai/sdk.md) |
+
+Nothing about Jev has been tested **in fleet**; no code calls it.
+
+## Decisions so far
+
+The numbers continue after the work-graph roadmap's D30, so the two tables
+never collide. The roadmap's table points here.
+
+| # | Question | Answer |
+|---|---|---|
+| D31 | May prompts and ticket titles go to TypeSafe? | **Yes, per org, opt-in, off by default** |
+| D32 | First use case | Open (proposed: tracker status-mapping proposals first, work-link choice in offline benchmark and shadow) |
+| D33 | Baselines | **`claude -p --model haiku` on the host is a baseline and the generative fallback** (asynchronous decisions only) |
+| D34 | Label hygiene before any benchmark (agent `link` overwrites a person's rejection; confirmations always recorded `manual`; withdrawn suggestions deleted; impressions not recorded) | Open (proposed: fix first, separate PRs) |
+| D35 | Architecture | Open (proposed: a shared envelope — flag, redaction, timeout, breaker, budget, record — with thin per-use-case adapters; only in the process that owns the fleet) |
+| D36 | Feature flag | Open in detail (proposed: `decide.jev.enabled` kill switch in Settings, a mode per feature `off/shadow/assist/auto`, an org override; the phone only shows) |
+| D37 | What a decision records | Open (proposed: `decision_runs`, HMAC fingerprint of the input, never raw text by default) |
+| D38 | Language as an axis | **Yes**, detailed by D40–D46 |
+| D39 | Hand labels (~150 sessions without a link) | Open |
+| D40 | Measure the languages locally first | **Yes: this census** |
+| D41 | Routing | **A static table** `(use case, language bucket, code bucket) → Jev / haiku / rule-or-person`, from the benchmark and shadow data, changed only by review; automatic only toward the conservative side (a degraded cell falls back by itself; a person re-enables it) |
+| D42 | Programming language | **A stratum, not an axis**: `code` density (and later the dominant language of changed files), plus an A/B of replacing code blocks by a placeholder |
+| D43 | Parallel corpus translation | **LLM translation, spot-checked by a person** |
+| D44 | Languages the detector tells apart | **en, sk, cs, de**, with **pl, hu** as controls |
+| D45 | Form of the census | **A `fleet-hub` CLI**, not `work_admin { usage }` |
+| D46 | May the owner's own first prompts validate the detector? | **Yes, locally**: `--export-sample` / `--labels` |
+
+## What was built
+
+- `fleet-core::service::nl` (cargo feature `nl-detect`): `NlBucket` (`en sk cs
+  de pl hu other mixed unknown`), `CodeDensity` (`none low high`), and the
+  `folded` flag for Slovak or Czech with no diacritics. The code is taken out
+  first, then lingua names the language of the prose. Slovak vs Czech is settled
+  by words and letters only one of them uses. `DETECTOR_VERSION` is in every
+  output.
+- `store::nl_census`: the read-only queries. The org of a prompt or journal row
+  is the session's (`session_org_sql!`); the org of an item is its tracker's.
+- `service::nl::census`: counts per org and source, the prompt × title pairs of
+  confirmed links, fleet's own prompts left out (the loop guard, the start,
+  resume, handover and safe-kill templates, quick-reply chips), and counts under
+  5 shown as `<5`.
+- `fleet-hub census languages [--days] [--org] [--max-per-source] [--db] [--json]
+  [--labels FILE | --export-sample N --out FILE]`. See `docs/hub.md` → *Language
+  census*.
+
+## Choosing the detector (measured, not assumed)
+
+Both candidates were measured on the same rules; the whatlang row comes from a scratch prototype of those rules, the lingua row from the shipped code. `cases.jsonl` (203 synthetic
+texts, LLM-written per D43) was used while writing the rules. `holdout.jsonl`
+(43) was written after the rules and never tuned against.
+
+| | written-against set | holdout | binary cost |
+|---|---|---|---|
+| lingua 1.8 (6 languages) + rules | 98.0% (every mistake Slovak ↔ Czech) | **95.3%** | ~45 MB |
+| whatlang 0.18 + rules | 96.1% | 81.4% (Slovak/Czech read as Polish or English) | ~1 MB |
+
+lingua wins exactly where fleet needs it: Slovak and Czech typed without
+diacritics. That is the Slovak/Czech counterpart of the Darija-in-Latin-script
+drop a third party measured on Jev itself. Its models are why the feature exists:
+only `fleet-hub` enables `nl-detect`; the desktop bundle does not carry them.
+
+**These numbers are synthetic.** The real check is D46: the owner exports a
+sample of their own prompts, corrects it and runs `--labels`. Treat the
+detector's per-language counts as trustworthy only after that.
+
+## What the census cannot see
+
+It lists these itself instead of guessing:
+- prompts after a conversation's first;
+- conversations of deleted sessions;
+- Claude's replies as such (the journal stands in for them);
+- commit subjects and PR titles (on the hosts);
+- tracker items never synced.
+
+## How the result feeds the next decisions
+
+- **Router cells:** a language gets its own router cell only if it is ≥ 5% of
+  the prompt traffic in some org that would enable Jev. Everything else is
+  `other` and falls back.
+- **Sample sizes:** fewer than ~200 real prompts in a bucket over 90 days
+  means that bucket's comparison rests on the paired translated corpus.
+- **Cross-language share of confirmed links:** decides whether the work-link
+  benchmark is built as cross-language first.
+- **No-diacritics share:** decides how much of the perturbation tier goes to
+  it.

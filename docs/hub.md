@@ -1200,6 +1200,51 @@ sessions: `fleet-hub org set 1 --auto-tidy on|off|inherit` (or `work_admin
 fleet-wide setting. The allowed reasons and thresholds stay fleet-wide. A
 per-host token sees and applies only its own host's candidates of its org.
 
+## Language census (Jev evaluation)
+
+Before any decision model is tried in fleet (the Jev evaluation,
+`docs/superpowers/specs/2026-09-27-jev-language-census-design.md`), the
+census measures which languages the texts such a model would see are
+written in, per organisation. It is local and read-only: it opens
+`state.db` directly (no running hub needed), never writes it, sends
+nothing anywhere, and prints counts only — a count from 1 to 4 shows as
+`<5`.
+
+```bash
+fleet-hub census languages                      # last 90 days, every org
+fleet-hub census languages --days 30 --org 2 --json
+fleet-hub census languages --db ~/path/to/desktop/state.db   # a desktop's store
+```
+
+What it reads, per org:
+
+| Source | What | Stands for |
+|---|---|---|
+| `prompt` | each conversation's first prompt (the 200 characters the hook keeps) | the input of a work-link decision |
+| `title:<provider>`, `description:<provider>` | work items' titles and cached descriptions | the candidates of that decision |
+| `journal:<kind>` | journal notes, summaries and handovers written by a person or Claude, never fleet's own rows | the language of Claude's replies |
+| pairs | confirmed links: the prompt that opened the conversation × the item's title | how often the match is across languages |
+
+Prompts fleet typed itself — a ticket start or resume, a handover or
+safe-kill request, a quick-reply chip, anything `[claude-fleet`-marked —
+are counted as `fleet-typed` and left out. Each text is read as one of `en
+sk cs de pl hu other mixed unknown`, with Slovak and Czech written without
+diacritics flagged, and how much of it is code (`none`, `low`, `high`).
+The output lists what it cannot count (later prompts, Claude's replies as
+such, commit subjects) instead of guessing.
+
+**Checking the detector on your own texts.** `--export-sample N --out
+FILE` writes N distinct first prompts, spread over the window, with the
+detector's guess, to a new file created `0600` — the one path that writes
+text, so keep the file on the hub machine. Correct each `expect`, set
+`checked` to `true`, then `--labels FILE` prints how often the detector was
+right and which languages it confused. The same `--labels` runs the
+fixtures in `crates/fleet-core/src/service/testdata/nl/`.
+
+The detector's language models add about 45 MB to `fleet-hub` (cargo
+feature `nl-detect` of `fleet-core`, which only the hub turns on; the
+desktop app is built without it).
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
