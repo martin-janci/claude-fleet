@@ -19,6 +19,10 @@ services:
     env_file: fleet-hub.env
     environment:
       FLEET_HUB_BIND: 0.0.0.0
+      # Hourly files the operator can read without sudo:
+      # install -d -o 1000 -g users -m 2750 logs (setgid, so new files
+      # inherit the group).
+      FLEET_HUB_LOG_DIR: /var/lib/fleet-hub/logs
     # Reachable only from your proxy's container network: nothing is published
     # on the host, so LAN and VPN peers cannot reach the plaintext port. The
     # image's HEALTHCHECK probes 127.0.0.1:4180 inside the container and is
@@ -36,6 +40,7 @@ services:
     volumes:
       - ./data:/var/lib/fleet-hub
       - ./ssh:/home/fleet/.ssh
+      - ./logs:/var/lib/fleet-hub/logs
 networks:
   proxy:
     external: true

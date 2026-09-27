@@ -12,7 +12,9 @@ impl FleetTools {
         (micro-USD) per host and UTC day for 7 days, and trackers (each \
         ok/degraded/failing, failures in a row, last error and success; \
         detection_backlog: suggestions undecided for detection_backlog_days). \
-        A per-host token sees its own host's usage and its org's trackers.")]
+        A per-host token sees its own host's usage and its org's trackers. \
+        hub: this process's uptime and last reconcile pass; tunnels_mode \
+        none|reverse; peer_links_total.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,

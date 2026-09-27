@@ -6459,3 +6459,80 @@ async fn list_and_refresh_never_probe_a_resume_transcript() {
         "{commands:?}"
     );
 }
+
+/// perf-logs §5: a stuck transition was a `session_events` row and nothing
+/// in the log. One INFO line names host, session and kind.
+#[tokio::test]
+async fn a_stuck_transition_is_logged_with_host_session_and_kind() {
+    struct StuckTmux;
+    #[async_trait::async_trait]
+    impl TmuxExec for StuckTmux {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Ok(vec![tmux_session("dev-stuck")])
+        }
+        async fn new_session(
+            &self,
+            _n: &str,
+            _c: &std::path::Path,
+            _p: &str,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+            Ok(STUCK_PANE.to_string())
+        }
+        // The default `probe_snapshot` reads the tail through THIS call.
+        async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+            Ok(STUCK_PANE.to_string())
+        }
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
+        }
+    }
+    // The one pane shape `pane_intel` classifies as `press_enter` (its
+    // `press_enter_detected` test); the permission fixtures are `blocked`
+    // with no `stuck_kind`.
+    const STUCK_PANE: &str = "Update available.\nPress Enter to continue\n";
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let deps = ReconcileDeps::fake(|_| Box::new(StuckTmux), std::time::Duration::from_secs(5));
+    // First pass creates the row (no prior → no transition event).
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session("dev-stuck", "local").unwrap().unwrap();
+        assert!(
+            row.stuck_kind.is_some(),
+            "the pane must classify as stuck: {row:?}"
+        );
+    }
+    // Clear the flag, then let the next pass re-detect it: that is the transition.
+    {
+        let s = store.lock().unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET stuck_kind = NULL WHERE tmux_name = 'dev-stuck'",
+                [],
+            )
+            .unwrap();
+    }
+    let log = crate::logging::capture::start();
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let text = log.text();
+    assert!(
+        text.contains("INFO") && text.contains("[reconcile] stuck"),
+        "{text}"
+    );
+    assert!(
+        text.contains("host=local") && text.contains("session=dev-stuck"),
+        "{text}"
+    );
+}

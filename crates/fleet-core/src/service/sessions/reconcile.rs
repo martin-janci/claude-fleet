@@ -948,6 +948,13 @@ fn write_reachable_host(
         // A newly-set (or changed) stuck_kind is the alert-worthy
         // event; clearing it back to None is not recorded.
         if row.stuck_kind.is_some() && row.stuck_kind != prior.stuck_kind {
+            tracing::info!(
+                host = %host.alias,
+                session = %tmux_name,
+                kind = row.stuck_kind.as_deref().unwrap_or("?"),
+                was = prior.stuck_kind.as_deref().unwrap_or("none"),
+                "[reconcile] stuck"
+            );
             events.push(("stuck", row.stuck_kind.as_deref()));
         }
         for (kind, detail) in events {

@@ -88,6 +88,8 @@ async fn hub() -> Hub {
         metrics::MetricsState {
             metrics: Arc::new(metrics::Metrics::new()),
             streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            store: Arc::clone(&store),
+            stats: crate::service::tick::tick_stats(),
         },
         axum::routing::any(|axum::Extension(c): axum::Extension<Caller>| async move {
             format!(

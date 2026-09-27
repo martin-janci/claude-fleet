@@ -691,7 +691,12 @@ pub async fn collect_all(store: &Mutex<Store>, exec: &dyn SshExec, now: i64) -> 
     for host in hosts {
         match collect_host(store, exec, &host, &overrides, now).await {
             Ok(n) => changed += n,
-            Err(e) => tracing::debug!("usage: {host}: {} {}", e.code, e.message),
+            Err(e) => tracing::warn!(
+                host = %host,
+                code = %e.code,
+                error = %e.message,
+                "usage collection failed (retried next interval)"
+            ),
         }
     }
     changed
@@ -2054,5 +2059,33 @@ mod tests {
 
         assert_eq!(recent_days(&s, now, HEALTH_DAYS, None).len(), 2);
         assert_eq!(recent_days(&s, now, HEALTH_DAYS, Some("beta")).len(), 1);
+    }
+
+    /// perf-logs §5: a failed collection was DEBUG, invisible with the
+    /// default filter. One WARN per host per pass names the host and code.
+    #[tokio::test]
+    async fn a_failed_collection_is_a_warn_line_naming_the_host() {
+        let (store, _id, _path) = store_with_session("vps");
+        // `upsert_host` leaves a host unreachable, and `collect_all` only
+        // visits reachable ones (`collection_hosts`).
+        store
+            .lock()
+            .unwrap()
+            .update_host_probe("vps", true, None, None, 1)
+            .unwrap();
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script_contains("tail -c +"),
+            Reply::fail(1, "ssh: connect to host vps port 22: Connection refused"),
+        );
+        let log = crate::logging::capture::start();
+        assert_eq!(collect_all(&store, &fake, 1_000).await, 0);
+        let text = log.text();
+        assert!(text.contains("WARN"), "{text}");
+        assert!(
+            text.contains("usage collection failed") && text.contains("host=vps"),
+            "{text}"
+        );
+        assert!(text.contains("E_SHELL"), "{text}");
     }
 }

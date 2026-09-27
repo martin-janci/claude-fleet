@@ -72,6 +72,61 @@ pub struct Health {
     /// older hub omits it.
     #[serde(default)]
     pub trackers: TrackersHealth,
+    /// This process's uptime and last reconcile pass (perf-logs §5).
+    /// Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub hub: Option<HubHealth>,
+    /// [`TUNNELS_MODE_NONE`] on a public hub, [`TUNNELS_MODE_REVERSE`]
+    /// otherwise; `None` from an older hub.
+    #[serde(default)]
+    pub tunnels_mode: Option<String>,
+    /// Configured hub↔hub links (revoked excluded), so `peer_links_down: 0`
+    /// can be told from "nothing configured".
+    #[serde(default)]
+    pub peer_links_total: u32,
+}
+
+/// `fleet_health.hub`: this process's uptime and its last reconcile pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubHealth {
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default)]
+    pub uptime_secs: i64,
+    #[serde(default)]
+    pub reconcile: crate::service::tick::ReconcileStats,
+}
+
+/// `Health::tunnels_mode` on a hub with a public URL: hooks post to it
+/// directly and there is nothing to supervise, so an empty `tunnels` map
+/// is "not applicable", not "all down".
+pub const TUNNELS_MODE_NONE: &str = "none";
+/// `Health::tunnels_mode` without a public URL: reverse SSH tunnels carry
+/// the hooks and `tunnels` is their supervisor's view.
+pub const TUNNELS_MODE_REVERSE: &str = "reverse";
+
+/// Whether this fleet's hooks ride reverse tunnels, from `hub.public_url`.
+pub fn tunnels_mode(s: &Store) -> String {
+    let public = s
+        .get_setting(crate::service::hub::SETTING_PUBLIC_URL)
+        .ok()
+        .flatten()
+        .is_some_and(|u| !u.trim().is_empty());
+    if public {
+        TUNNELS_MODE_NONE
+    } else {
+        TUNNELS_MODE_REVERSE
+    }
+    .to_string()
+}
+
+fn hub_health() -> HubHealth {
+    let t = crate::service::tick::tick_stats();
+    HubHealth {
+        started_at: t.started_at(),
+        uptime_secs: t.uptime_secs(),
+        reconcile: t.reconcile(),
+    }
 }
 
 /// Consecutive failed sync passes — or, decision D25, consecutive passes
@@ -452,6 +507,9 @@ pub fn health_from_store(s: &Store) -> Health {
         // exchange.
         peer_links_down: s.peer_links_down(now_unix()).unwrap_or_default(),
         trackers: trackers_from_store(s, &OrgScope::All, &tracker_sync::metrics_for, now_unix()),
+        hub: Some(hub_health()),
+        tunnels_mode: Some(tunnels_mode(s)),
+        peer_links_total: s.peer_links_total().unwrap_or_default(),
     }
 }
 
@@ -498,6 +556,9 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             usage_by_day: Vec::new(),
             peer_links_down: 0,
             trackers: TrackersHealth::default(),
+            hub: None,
+            tunnels_mode: None,
+            peer_links_total: 0,
         },
     }
 }
@@ -848,6 +909,9 @@ mod tests {
             usage_by_day: Vec::new(),
             peer_links_down: 0,
             trackers: TrackersHealth::default(),
+            hub: None,
+            tunnels_mode: None,
+            peer_links_total: 0,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
@@ -1329,5 +1393,39 @@ mod tests {
             serde_json::from_str(r#"{"trackers":[{"tracker_id":3,"health":"failing"}]}"#).unwrap();
         assert_eq!(t.trackers[0].last_error, None);
         assert_eq!(t.trackers[0].health, "failing");
+    }
+
+    /// perf-logs §1 / §5, hub-ops F8: `fleet_health` could not say whether
+    /// tunnels applied, whether the tick was healthy, or whether "0 links
+    /// down" meant "all up" or "none configured".
+    #[test]
+    fn health_reports_hub_uptime_tunnels_mode_and_peer_links_total() {
+        let store = Store::open_in_memory().unwrap();
+        let h = health_from_store(&store);
+        let hub = h.hub.expect("this process reports itself");
+        assert!(hub.uptime_secs >= 0 && hub.started_at > 0);
+        assert_eq!(
+            h.tunnels_mode.as_deref(),
+            Some(TUNNELS_MODE_REVERSE),
+            "no public URL: reverse tunnels carry the hooks"
+        );
+        assert_eq!(
+            h.peer_links_total, 0,
+            "nothing configured is 0 total, not merely 0 down"
+        );
+        store
+            .set_setting(
+                crate::service::hub::SETTING_PUBLIC_URL,
+                "https://fleet.example.com",
+            )
+            .unwrap();
+        assert_eq!(
+            health_from_store(&store).tunnels_mode.as_deref(),
+            Some(TUNNELS_MODE_NONE),
+            "a public hub supervises no tunnel"
+        );
+        let v = serde_json::to_value(health_from_store(&store)).unwrap();
+        assert_eq!(v["tunnels_mode"], "none");
+        assert!(v["hub"]["reconcile"].is_object(), "{v}");
     }
 }

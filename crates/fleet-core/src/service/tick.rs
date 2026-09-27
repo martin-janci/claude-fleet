@@ -18,6 +18,105 @@ use tokio_util::sync::CancellationToken;
 /// whether an account is due.
 const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The last reconcile pass, as `fleet_health.hub.reconcile` reports it
+/// (perf-logs §5: tick failures were `warn!` lines and nothing else).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReconcileStats {
+    #[serde(default)]
+    pub last_started_at: Option<i64>,
+    #[serde(default)]
+    pub last_finished_at: Option<i64>,
+    #[serde(default)]
+    pub last_duration_ms: Option<i64>,
+    /// Failed passes since the last good one.
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Failed passes since the process started; never resets.
+    #[serde(default)]
+    pub failures_total: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// What `fleet_health.hub` and the `/metrics` reconcile gauges read: when
+/// this process started and how its last reconcile pass went, written by
+/// the tick loop. One per process (`tick_stats()`), like `reconcile_gate()`.
+pub struct TickStats {
+    started: std::time::Instant,
+    started_at: i64,
+    reconcile: Mutex<ReconcileStats>,
+}
+
+impl TickStats {
+    pub fn new(now: i64) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            started_at: now,
+            reconcile: Mutex::new(ReconcileStats::default()),
+        }
+    }
+
+    /// Stamp the start of a pass; the `Instant` goes back into [`finish`](Self::finish).
+    pub fn begin(&self, now: i64) -> std::time::Instant {
+        if let Ok(mut r) = self.reconcile.lock() {
+            r.last_started_at = Some(now);
+        }
+        std::time::Instant::now()
+    }
+
+    /// `Ok(true)`: a pass ran. `Ok(false)`: skipped, another pass was
+    /// running — nothing but the start stamp changes. `Err`: the pass failed.
+    pub fn finish(&self, started: std::time::Instant, now: i64, outcome: Result<bool, String>) {
+        let Ok(mut r) = self.reconcile.lock() else {
+            return;
+        };
+        let duration_ms = started.elapsed().as_millis() as i64;
+        match outcome {
+            Ok(false) => {}
+            Ok(true) => {
+                r.last_finished_at = Some(now);
+                r.last_duration_ms = Some(duration_ms);
+                r.consecutive_failures = 0;
+                r.last_error = None;
+            }
+            Err(e) => {
+                r.last_finished_at = Some(now);
+                r.last_duration_ms = Some(duration_ms);
+                r.consecutive_failures += 1;
+                r.failures_total += 1;
+                r.last_error = Some(e);
+            }
+        }
+    }
+
+    pub fn uptime_secs(&self) -> i64 {
+        self.started.elapsed().as_secs() as i64
+    }
+
+    pub fn started_at(&self) -> i64 {
+        self.started_at
+    }
+
+    pub fn reconcile(&self) -> ReconcileStats {
+        self.reconcile.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+}
+
+/// The process-wide stats, created on first use. `fleet-hub serve` touches
+/// it before the ticks start so `started_at` is the serve start.
+pub fn tick_stats() -> Arc<TickStats> {
+    static STATS: std::sync::LazyLock<Arc<TickStats>> =
+        std::sync::LazyLock::new(|| Arc::new(TickStats::new(unix_now())));
+    Arc::clone(&STATS)
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Runs `on_tick` once per tick of `ticker`, checking `token` for
 /// cancellation only BETWEEN passes (issue #144): a pass already running
 /// when `token` is cancelled runs to completion, and only then does the loop
@@ -88,13 +187,17 @@ pub fn spawn_reconcile_tick(
             let store = &store;
             let ssh = &ssh;
             async move {
-                match service::sessions::reconcile_now(store, ssh).await {
+                let stats = tick_stats();
+                let started = stats.begin(unix_now());
+                let outcome = service::sessions::reconcile_now(store, ssh).await;
+                match &outcome {
                     Ok(true) => {}
                     Ok(false) => {
                         tracing::debug!("a reconcile pass is already running; skipping tick")
                     }
                     Err(e) => tracing::warn!("reconcile tick: reconcile failed: {e}"),
                 }
+                stats.finish(started, unix_now(), outcome.map_err(|e| e.to_string()));
                 // Wave 2 Track D: lifecycle automation rides the same tick, after
                 // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
                 // Both are opt-in through settings and cheap when off. Their
@@ -289,5 +392,53 @@ mod tests {
             1,
             "the in-flight pass must have completed exactly once, and no more"
         );
+    }
+
+    #[test]
+    fn tick_stats_track_the_last_pass_and_consecutive_failures() {
+        let t = TickStats::new(1_000);
+        let s = t.begin(1_010);
+        t.finish(s, 1_011, Ok(true));
+        let r = t.reconcile();
+        assert_eq!(
+            (
+                r.last_started_at,
+                r.last_finished_at,
+                r.consecutive_failures
+            ),
+            (Some(1_010), Some(1_011), 0)
+        );
+        assert!(r.last_duration_ms.is_some());
+        for at in [1_030, 1_050] {
+            let s = t.begin(at);
+            t.finish(s, at + 1, Err("E_SSH: boom".into()));
+        }
+        let r = t.reconcile();
+        assert_eq!(
+            (
+                r.consecutive_failures,
+                r.failures_total,
+                r.last_error.as_deref()
+            ),
+            (2, 2, Some("E_SSH: boom"))
+        );
+        let s = t.begin(1_070);
+        t.finish(s, 1_071, Ok(false));
+        assert_eq!(
+            t.reconcile().consecutive_failures,
+            2,
+            "a skipped tick is not a pass"
+        );
+        let s = t.begin(1_090);
+        t.finish(s, 1_091, Ok(true));
+        assert_eq!(
+            t.reconcile().consecutive_failures,
+            0,
+            "a good pass clears the streak"
+        );
+        assert_eq!(t.reconcile().last_error, None);
+        assert_eq!(t.reconcile().failures_total, 2, "the total never resets");
+        assert_eq!(t.started_at(), 1_000);
+        assert!(t.uptime_secs() >= 0);
     }
 }

@@ -119,6 +119,8 @@ mod tests {
                 streams: crate::mcp::guard::LongPollLimiter::new(
                     crate::mcp::guard::MAX_LONG_POLLS_PER_CALLER,
                 ),
+                store: Arc::clone(&store),
+                stats: crate::service::tick::tick_stats(),
             },
             axum::routing::any(|| async { "MCP_OK" }),
             None,

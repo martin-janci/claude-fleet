@@ -142,6 +142,14 @@ curl -s https://fleet.example.com/mcp \
 
 A healthy hub answers with `db_ready: true` and the running version.
 
+`hub` is this process: `started_at`, `uptime_secs` and `reconcile`
+(`last_started_at`, `last_finished_at`, `last_duration_ms`,
+`consecutive_failures`, `failures_total`, `last_error`) — alert on
+`consecutive_failures >= 3`. `tunnels_mode` is `none` on a public hub (hooks
+post directly; the `tunnels` map is empty because nothing applies) and
+`reverse` otherwise. `peer_links_total` tells `peer_links_down: 0` from "no
+peers configured".
+
 The image carries a Docker `HEALTHCHECK` that runs `fleet-hub healthcheck`
 every 30 s, so `docker compose ps` shows the hub as `healthy` (or
 `unhealthy`) in its STATUS column. The check sends one `GET /healthz` to
@@ -358,6 +366,15 @@ The https:// public URL permits the `0.0.0.0` bind, and the hub logs at
 startup that plaintext 4180 is reachable by anything that can route to it —
 on the proxy network, that is the proxy. Publishing `4180:4180` on the host
 instead makes it the whole LAN and every VPN peer; the warning says so.
+
+**Logs without sudo.** The variant mounts `./logs` as the hub's log directory
+(`FLEET_HUB_LOG_DIR`); create it as `install -d -o 1000 -g users -m 2750 logs`
+so hourly files stay group-readable. Docker's own capture of the same lines
+is capped at 3 × 10 MB. **Watching it.** Uptime Kuma: an HTTP keyword monitor
+on `/healthz` (`fleet-hub ok`) and a JSON-query monitor posting `tools/call
+fleet_health` to `/mcp/json` with a readonly client token (`fleet-hub pair
+--mode readonly kuma`) — never the master — on `db_ready`, `hosts_reachable`,
+`tunnels_flapping` and `hub.reconcile.consecutive_failures`.
 
 **Tidying a hand-upgraded deployment.** A directory upgraded by hand tends to
 collect `docker-compose.yml.<version>` copies (the `image:` line was the only
@@ -1386,7 +1403,17 @@ curl -s https://fleet.example.com/metrics -H "Authorization: Bearer <master toke
 fleet_tool_calls_total{caller="client:phone"} 412
 fleet_tool_errors_total{caller="client:phone"} 3
 fleet_event_streams_open{caller="client:phone"} 1
+fleet_reconcile_duration_ms 812
+fleet_reconcile_failures_total 0
+fleet_sessions{status="working"} 12
+fleet_hosts_reachable 5
 ```
+
+Besides the per-caller counters the exposition carries four process gauges:
+`fleet_reconcile_duration_ms` (the last pass's wall time),
+`fleet_reconcile_failures_total`, `fleet_sessions{status="…"}` (by
+`claude_status`, external rows excluded, the same roll-up
+`fleet_health.by_status` uses) and `fleet_hosts_reachable`.
 
 Prometheus text format, **master token only** — a per-host token and a paired
 phone are both callers this reports on, and letting one read the others'

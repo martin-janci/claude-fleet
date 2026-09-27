@@ -170,16 +170,32 @@
       "ghosts",
       "hosts_reachable",
       "hosts_total",
+      "hub",
       "peer_links_down",
+      "peer_links_total",
       "schema_version",
       "sessions_total",
       "stuck",
       "trackers",
       "tunnels",
       "tunnels_flapping",
+      "tunnels_mode",
       "usage_by_day",
       "usage_by_host",
       "version"
+    ],
+    "Health.hub": [
+      "reconcile",
+      "started_at",
+      "uptime_secs"
+    ],
+    "Health.hub.reconcile": [
+      "consecutive_failures",
+      "failures_total",
+      "last_duration_ms",
+      "last_error",
+      "last_finished_at",
+      "last_started_at"
     ],
     "Health.trackers": [
       "degraded",
