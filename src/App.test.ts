@@ -518,3 +518,31 @@ describe('App: fleet:outcome-unknown', () => {
     }
   });
 });
+
+// Work graph M14.2: the sidebar's `Sessions | Work` switch and its chord.
+// jsdom's userAgent isn't macOS, so the chord is Ctrl+Shift+W.
+describe('App: Sessions | Work', () => {
+  it('Ctrl+Shift+W flips the sidebar to Work and back, keeping Sessions mounted', async () => {
+    const { sidebarMode } = await import('./lib/work_tree');
+    const { get } = await import('svelte/store');
+    sidebarMode.set('sessions');
+    render(App);
+    await screen.findByTestId('sidebar-switch');
+    expect(screen.queryByTestId('work-sidebar')).toBeNull();
+
+    await fireEvent.keyDown(window, { key: 'W', ctrlKey: true, shiftKey: true });
+    await tick();
+    expect(get(sidebarMode)).toBe('work');
+    expect(screen.getByTestId('work-sidebar')).toBeInTheDocument();
+    expect(screen.getByTestId('sidebar-switch-work').getAttribute('aria-checked')).toBe('true');
+    // The Sessions tree is hidden, not torn down.
+    expect(screen.getByTestId('sidebar-tree')).toBeInTheDocument();
+
+    await fireEvent.keyDown(window, { key: 'W', ctrlKey: true, shiftKey: true });
+    await tick();
+    expect(get(sidebarMode)).toBe('sessions');
+    await fireEvent.click(screen.getByTestId('sidebar-switch-work'));
+    expect(get(sidebarMode)).toBe('work');
+    sidebarMode.set('sessions');
+  });
+});

@@ -85,7 +85,7 @@ export function requestOpenPath(sessionId: number, path: string, line: number | 
 export const OPEN_PATH_CONTEXT = 'md-open-path';
 export type OpenPathFn = (path: string, line: number | null) => void;
 
-export type AppChord = 'hosts' | 'settings' | 'session-view' | 'agent' | 'scope' | 'today';
+export type AppChord = 'hosts' | 'settings' | 'session-view' | 'agent' | 'scope' | 'today' | 'work';
 
 /**
  * The app-level chords, platform-correct like the quick switcher's:
@@ -94,7 +94,8 @@ export type AppChord = 'hosts' | 'settings' | 'session-view' | 'agent' | 'scope'
  * Ctrl+Shift+J and Ctrl+Shift+E do the same (Ctrl+Shift+I is the devtools
  * chord). Plain Ctrl chords stay with the terminal — Ctrl+J is line-feed
  * there. ⌘⇧O / Ctrl+Shift+O cycles the org scope (work graph M5), and
- * ⌘⇧T / Ctrl+Shift+T toggles the Today view over Details (M9.1).
+ * ⌘⇧T / Ctrl+Shift+T toggles the Today view over Details (M9.1), and
+ * ⌘⇧W / Ctrl+Shift+W switches the sidebar between Sessions and Work (M14.2).
  */
 export function appChord(
   e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },
@@ -107,6 +108,9 @@ export function appChord(
   }
   if (k === 't' && e.shiftKey && (isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
     return 'today';
+  }
+  if (k === 'w' && e.shiftKey && (isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
+    return 'work';
   }
   if (e.metaKey && !e.ctrlKey && !e.shiftKey) {
     if (k === 'i') return 'hosts';
@@ -141,6 +145,11 @@ export function scopeChordLabel(isMac: boolean): string {
 /** Label for the Today chord, for the view's tooltip. */
 export function todayChordLabel(isMac: boolean): string {
   return isMac ? '⌘⇧T' : 'Ctrl+Shift+T';
+}
+
+/** Label for the Sessions | Work chord, for the switch's tooltip. */
+export function workChordLabel(isMac: boolean): string {
+  return isMac ? '⌘⇧W' : 'Ctrl+Shift+W';
 }
 
 /** Label for the agent chord, for the FAB's tooltip and the hint. */

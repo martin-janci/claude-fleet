@@ -9,6 +9,10 @@
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
+  import SidebarSwitch from './lib/SidebarSwitch.svelte';
+  import WorkSidebar from './lib/WorkSidebar.svelte';
+  import { sidebarMode, workTreeStore } from './lib/work_tree';
+  import type { SessionEvent } from './lib/sessions';
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
   import { composerInsert } from './lib/conversation';
@@ -169,6 +173,13 @@
   }
 
   let trackerRefresh: ReturnType<typeof setInterval> | null = null;
+
+  // The Work view is mounted the first time it is shown (its first read
+  // waits until then), and kept mounted after.
+  let workMounted = $state(false);
+  $effect(() => {
+    if ($sidebarMode === 'work') workMounted = true;
+  });
   onDestroy(() => {
     if (trackerRefresh) clearInterval(trackerRefresh);
   });
@@ -227,7 +238,11 @@
     // the list is in flight would otherwise be emitted to no listener and
     // lost until the row changes again.
     unlistenEvents = await subscribeToRowEvents({
-      onSessionEvents: applySessionEvents,
+      onSessionEvents: (evs: SessionEvent[]) => {
+        applySessionEvents(evs);
+        // The Work view (M14.2) patches its occurrences from the same batch.
+        workTreeStore.onSessionEvents(evs);
+      },
       onHostEvents: applyHostEvents,
       onAccountEvents: applyAccountEvents,
       onProjectEvents: applyProjectEvents,
@@ -241,6 +256,7 @@
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
       onWorkEvents: onWorkEvents,
+      onWorkChanged: (changes) => workTreeStore.onWorkChanged(changes),
     });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
@@ -616,6 +632,10 @@
     else if (chord === 'agent') void toggleAgent();
     else if (chord === 'scope') cycleScope();
     else if (chord === 'today') todayOpen.update((v) => !v);
+    else if (chord === 'work') {
+      sidebarCollapsed = false;
+      sidebarMode.update((m) => (m === 'work' ? 'sessions' : 'work'));
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -742,7 +762,19 @@
   {:else}
     <Pane id="sidebar" fullBleed>
       {#snippet children()}
-        <Sidebar onCollapse={toggleSidebar} />
+        <div class="sidebar-stack">
+          <SidebarSwitch />
+          <!-- Sessions stays mounted while Work shows, so its tree, search
+               and selection mode are where they were on the way back. -->
+          <div class="sidebar-slot" class:hidden={$sidebarMode !== 'sessions'}>
+            <Sidebar onCollapse={toggleSidebar} />
+          </div>
+          {#if workMounted}
+            <div class="sidebar-slot" class:hidden={$sidebarMode !== 'work'}>
+              <WorkSidebar onCollapse={toggleSidebar} />
+            </div>
+          {/if}
+        </div>
       {/snippet}
     </Pane>
     <Resizer id="sidebar" onresize={onResizeSidebar} />
@@ -1069,6 +1101,18 @@
     border-right: none;
     border-left: 1px solid var(--border);
   }
+
+  .sidebar-stack {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .sidebar-slot {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .sidebar-slot.hidden { display: none; }
 
   .center-wrap {
     position: relative;
