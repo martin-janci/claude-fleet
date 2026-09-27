@@ -84,6 +84,7 @@
   import SidebarFilters from './SidebarFilters.svelte';
   import SessionRowItem from './SessionRowItem.svelte';
   import ResumeButton from './ResumeButton.svelte';
+  import SummarizeButton from './SummarizeButton.svelte';
   import {
     reopenedBadge,
     reopenedByKey,
@@ -1037,6 +1038,7 @@
         >
         {#if l.resumable === false}<span class="past-purged" title="Its transcripts were purged: only a fresh start is possible">purged</span>{/if}
         <ResumeButton workKey={key} link={l} />
+        <SummarizeButton workKey={key} link={l} />
       </div>
     {/snippet}
     {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
@@ -1595,6 +1597,7 @@
   }
   .past-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.4rem;
     padding: 0.15rem 0.5rem 0.15rem 1.6rem;

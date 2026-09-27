@@ -121,7 +121,53 @@ gh api --paginate "repos/$REPO/releases?per_page=100" --jq "
 # Can this token see drafts at all? Only push access lists them, so a read-only
 # token makes check 2 vacuous — which must be said out loud, not passed off as
 # "no stale drafts".
-sees_drafts="$(gh api "repos/$REPO" --jq '.permissions.push // false' 2>/dev/null || echo unknown)"
+#
+# ASK THE DATA FIRST, NOT A PROXY. The original probe was
+# `gh api "repos/$REPO" --jq '.permissions.push // false'`, and it was a false
+# negative under the one token that matters: `GET /repos/{owner}/{repo}` carries
+# a `permissions` block only when authenticated AS A USER. An Actions
+# GITHUB_TOKEN is an installation token, the key is absent, `// false` fires, and
+# check 2 switched itself off while reporting "no push access".
+#
+# It was wrong on its own evidence. The releases listing above had already
+# returned the drafts: the 2026-09-27 06:41 run reported "20 releases" when a
+# push-scoped token also saw 20, of which 6 were drafts. The data was in hand and
+# the check refused to look at it (issue #322).
+#
+# So: a draft in the listing IS the proof, and needs no permission to interpret.
+# Only an empty draft set is ambiguous — "none exist" and "cannot see them" look
+# identical — and only then does the user-token probe get consulted, with an
+# absent `permissions` block reported as the "unknown" it is rather than as a no.
+if awk -F'\t' '$3 == "true" { found = 1 } END { exit !found }' "$work/releases"; then
+  sees_drafts=true
+  sees_drafts_why="the release listing returned at least one draft"
+else
+  probe="$(gh api "repos/$REPO" \
+    --jq 'if has("permissions") then (.permissions.push | tostring) else "absent" end' \
+    2>/dev/null || echo unknown)"
+  case "$probe" in
+    true)
+      # Push access and zero drafts: genuinely nothing stale to report.
+      sees_drafts=true
+      sees_drafts_why="no drafts exist, and this user token has push access"
+      ;;
+    false)
+      sees_drafts=false
+      sees_drafts_why="this user token has no push access (\`.permissions.push\` = \`false\`)"
+      ;;
+    absent)
+      # An installation token (Actions). Whether it lists drafts follows from the
+      # workflow's `contents:` permission, which the repo object does not expose.
+      # Nothing was found and nothing can be concluded — say exactly that.
+      sees_drafts=unknown
+      sees_drafts_why="no drafts were returned, and this looks like an Actions installation token (\`repos/$REPO\` carries no \`permissions\` block), so \"none exist\" cannot be told apart from \"not visible\""
+      ;;
+    *)
+      sees_drafts=unknown
+      sees_drafts_why="the permission probe itself failed"
+      ;;
+  esac
+fi
 
 if [ -f "$IGNORE_FILE" ]; then
   # Same separation as above: `grep -v '^$'` legitimately exits 1 on a file of
@@ -242,7 +288,7 @@ problems=0
   if [ "$sees_drafts" != "true" ]; then
     echo "### Drafts: not checked"
     echo
-    echo "This token has no push access (\`repos/$REPO\`.\`permissions.push\` = \`$sees_drafts\`), and GitHub only lists draft releases to a token that has it. The stale-draft check did not run — it did not pass."
+    echo "The stale-draft check did not run — it did not pass. Reason: $sees_drafts_why."
     echo
     problems=$((problems + 1))
   elif [ -s "$work/stale_drafts" ]; then

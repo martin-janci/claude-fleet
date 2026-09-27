@@ -157,6 +157,7 @@ Each item starts only when the user writes "yes" in the decisions table. Each on
 | M13.4c | D10: summarise a dead session, on demand | claude-fleet (+ phone via D15) | `work_link { action: summarize }`, run by `claude -p --resume --fork-session` with **no tools allowed** (a test proves it), fleet's hooks off, `logging::redact` plus the untrusted fence, and the M11.2 transcript probe first. A new `work.summary_model` setting. The operator is confirm-gated; a hub refuses it. |
 | M13.4d | D15: multi-start on the phone | fleet-mobile only | A project multi-select with a confirm sheet (count and org label). Cross-org is refused in words; the app never silently retries with `force_cross_org`. |
 | M13.4e | D3: PR remote link to Jira | claude-fleet | Only the idempotent remote link (`globalId`), only for `manual` / `started` links, only to the link's own org's tracker. An outbox table (**migration 061**, with a retention rule under M12.3), a per-tracker opt-in, and every write refused for per-host tokens. |
+| M13.4f | D13: webhook nudges on a public hub | claude-fleet | `POST /hooks/tracker/<id>`, 404 unless `hub.public_url` and the tracker's webhook secret are set; HMAC per provider (GitHub, Jira Cloud, Linear, D28), a body cap and a rate limit; the payload is read only for an id / key of that tracker and triggers a coalesced `fetch_one`. Polling stays. Minted by `fleet-hub tracker webhook`. |
 
 The review's scope, isolation, M9.7, budget, contract and phone notes for each decision are binding. Anything wider needs a new decision.
 
@@ -212,3 +213,9 @@ M13.5   last
   covers M10–M13. Found on the way: M4.6's #273 was closed unmerged, the
   commit reached `main` with #270; `main` had moved to a599ffa (v0.3.1),
   which changes none of the facts above.
+- 2026-09-27: the user said **yes** to D3, D10, D13 and D20. D13 was not in
+  M13.4, so it gets **M13.4f** above. The details of each build (the
+  commands, the outbox, the verifiers) are in
+  `2026-09-26-work-graph-m13-decided-yes.md`, written in a session that
+  planned them before this plan reached `main`; its defaults are D27–D30 in
+  the roadmap. **M13.4c (D10) is built** on `claude/cloud-fleet-work-graph-m13`.
