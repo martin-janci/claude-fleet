@@ -53,6 +53,9 @@ pub const DECISION_MODES: &[&str] = &["off", "shadow", "assist"];
 /// Most candidates one run records (Jev's own limit on choice options).
 pub const DECISION_MAX_CANDIDATES: usize = 255;
 
+/// Most runs [`Store::decision_runs_for_subjects`] returns.
+pub const DECISION_SUBJECT_RUNS_MAX: usize = 5_000;
+
 /// Longest id or vocabulary word a run records.
 pub const DECISION_WORD_MAX_CHARS: usize = 80;
 
@@ -396,6 +399,38 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// A feature's runs about subjects of `subject_kind` whose id starts with
+    /// `subject_prefix` (an adapter's own namespace, e.g. `3:` for tracker
+    /// 3's sections), at or after `since` when given, newest first, at most
+    /// [`DECISION_SUBJECT_RUNS_MAX`]. What an adapter reads to skip a
+    /// question it asked recently, and to list its proposals.
+    pub fn decision_runs_for_subjects(
+        &self,
+        feature: &str,
+        subject_kind: &str,
+        subject_prefix: &str,
+        since: Option<i64>,
+    ) -> Result<Vec<DecisionRunRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM decision_runs \
+             WHERE feature = ?1 AND subject_kind = ?2 \
+               AND substr(subject_id, 1, length(?3)) = ?3 \
+               AND (?4 IS NULL OR at >= ?4) \
+             ORDER BY id DESC LIMIT ?5"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                feature,
+                subject_kind,
+                subject_prefix,
+                since,
+                DECISION_SUBJECT_RUNS_MAX as i64
+            ],
+            map_run,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Runs since `since`, grouped per feature, provider, fallback and org.
     pub fn decision_stats(&self, since: i64) -> Result<Vec<DecisionStatRow>, IpcError> {
         let mut stmt = self.conn.prepare(
@@ -658,6 +693,45 @@ mod tests {
             input_tokens: 500,
             cost_microusd: 21,
         }
+    }
+
+    #[test]
+    fn runs_for_subjects_match_the_kind_and_the_prefix_exactly() {
+        let s = Store::open_in_memory().unwrap();
+        let at = |subject: &str, kind: &str, at: i64| NewDecisionRun {
+            subject_kind: kind.into(),
+            subject_id: subject.into(),
+            at,
+            ..run("status_map")
+        };
+        let a = s
+            .insert_decision_run(&at("3:aa", "tracker_section", 100))
+            .unwrap();
+        let b = s
+            .insert_decision_run(&at("3:bb", "tracker_section", 200))
+            .unwrap();
+        s.insert_decision_run(&at("31:aa", "tracker_section", 200))
+            .unwrap();
+        s.insert_decision_run(&at("3:aa", "session", 200)).unwrap();
+        s.insert_decision_run(&NewDecisionRun {
+            subject_kind: "tracker_section".into(),
+            subject_id: "3:cc".into(),
+            ..run("work_link")
+        })
+        .unwrap();
+        let ids = |since| {
+            s.decision_runs_for_subjects("status_map", "tracker_section", "3:", since)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(None),
+            vec![b, a],
+            "newest first; not 31:, not another kind or feature"
+        );
+        assert_eq!(ids(Some(150)), vec![b]);
     }
 
     #[test]

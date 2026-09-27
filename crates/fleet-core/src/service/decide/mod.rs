@@ -34,6 +34,7 @@
 //! briefly; the call runs without it.
 
 pub mod jev;
+pub mod status_map;
 #[cfg(test)]
 mod tests;
 
