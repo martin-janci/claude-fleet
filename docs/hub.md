@@ -920,7 +920,18 @@ fleet-hub tracker test 1          # probe: account, key prefixes, sprints, views
 fleet-hub tracker list
 fleet-hub tracker status          # each tracker's last sync pass, and retention
 fleet-hub tracker remove 1        # its items stay, marked unavailable
+fleet-hub tracker webhook 1       # webhook nudges (Jira Cloud, GitHub, Linear): URL + secret, once
 ```
+
+**Webhook nudges** (work graph M13.4f) need `--public-url`: the tracker
+calls `POST https://<public-url>/hooks/tracker/<id>`. The route sits beside
+`/pair` outside the bearer check and the `Host` allowlist; what authorizes a
+delivery is its HMAC-SHA256 signature made with the tracker's secret, which
+`tracker webhook` mints (`--rotate`, `--off`) and prints once. A delivery
+only makes the hub refresh an issue it already has for that tracker; polling
+stays. Without a public URL or a secret the route answers 404, and it is
+rate-limited and capped at 64 KiB. The secret is masked in diagnostics like
+a tracker token. See `docs/work-graph.md` → *Webhook nudges*.
 
 A token is read from **stdin**, from an environment variable of that command
 (`--from-env JIRA_TOKEN`), or not read at all: `--ref env:NAME` or `--ref

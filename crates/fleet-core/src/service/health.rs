@@ -165,6 +165,17 @@ pub struct TrackerHealth {
     /// unaffected, so it never changes `health`.
     #[serde(default)]
     pub write_failures: u64,
+    /// Webhook nudges are on for this tracker (work graph M13.4f: it has a
+    /// webhook secret). Polling runs either way.
+    #[serde(default)]
+    pub webhook_enabled: bool,
+    /// The last delivery whose signature verified (unix seconds, in memory).
+    #[serde(default)]
+    pub webhook_last_delivery_at: Option<i64>,
+    /// Deliveries refused for their signature since the hub started: a
+    /// wrong secret on the tracker's side, or someone knocking.
+    #[serde(default)]
+    pub webhook_rejected: u64,
 }
 
 /// A tracker's health level from its stored state and the sync's counts:
@@ -258,6 +269,9 @@ pub fn tracker_health(
         last_success_at: t.last_sync_at,
         last_pass_at: m.and_then(|m| m.last_pass_at),
         write_failures: 0,
+        webhook_enabled: false,
+        webhook_last_delivery_at: None,
+        webhook_rejected: 0,
     }
 }
 
@@ -302,8 +316,12 @@ pub fn trackers_from_store(
         .iter()
         .map(|t| {
             let org = t.org_id.and_then(|o| orgs.get(&o).cloned());
+            let hook = crate::service::trackers::webhook::hook_metrics(t.id);
             TrackerHealth {
                 write_failures: s.tracker_write_failures(t.id).unwrap_or(0),
+                webhook_enabled: s.tracker_webhook_since(t.id).ok().flatten().is_some(),
+                webhook_last_delivery_at: hook.last_delivery_at,
+                webhook_rejected: hook.rejected,
                 ..tracker_health(t, by_id.get(&t.id), org)
             }
         })

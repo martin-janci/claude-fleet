@@ -251,6 +251,13 @@ tracker `settings.write_back.pr_remote_link` (off), queued by the PR probe
 for `manual` / `started` confirmed links in the tracker's own org, through
 the outbox `tracker_writes` (migration 061) drained by the sync pass
 (`service/trackers/write_back.rs`, `TrackerProvider::write`).
+M13.4f (D13) too: webhook nudges on a public hub, `POST
+/hooks/tracker/{id}` outside `authorize` (`mcp/tracker_hook.rs`, mounted only
+with `McpGuards::with_tracker_hooks`, which only fleet-hub sets), HMAC-SHA256
+per provider (`service/trackers/webhook.rs`), only refreshing an item fleet
+already has; the secret is `tracker_webhooks` (migration 062), read ONLY by
+`Store::resolve_tracker_webhook_secret`, minted by `fleet-hub tracker
+webhook`.
 Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
 M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
 and the M5.5 filters (tracker / status / mine / has-session / archived)

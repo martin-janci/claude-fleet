@@ -772,9 +772,9 @@ and every open decision gets an answer backed by usage.
 **Status (2026-09-26):**
 - **M13.0 done** (this revision).
 - M13.1 and M13.2 are not started. M13.3 waits on the owner's run.
-- M13.4: D3, D10, D13 and D20 are yes (2026-09-27). **M13.4c (D10) and
-  M13.4e (D3) built** on `claude/cloud-fleet-work-graph-m13`; M13.4f (D13)
-  next, then M13.4a (D20, fleet-mobile). D5 and D15 wait on the decisions.
+- M13.4: D3, D10, D13 and D20 are yes (2026-09-27). **M13.4c (D10),
+  M13.4e (D3) and M13.4f (D13) built** on `claude/cloud-fleet-work-graph-m13`;
+  M13.4a (D20, fleet-mobile) next. D5 and D15 wait on the decisions.
 
 ## Critical path and parallelism
 

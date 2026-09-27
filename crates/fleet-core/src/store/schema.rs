@@ -587,6 +587,12 @@ const MIGRATIONS: &[Migration] = &[
     // Work graph M13.4e: the tracker write-back outbox. A new table and two
     // indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(61, include_str!("../../migrations/061_tracker_writes.sql")),
+    // Work graph M13.4f: a tracker's webhook secret. A new table,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        62,
+        include_str!("../../migrations/062_tracker_webhooks.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
