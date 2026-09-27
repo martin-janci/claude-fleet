@@ -38,15 +38,22 @@
 //! on dev) and `jev` (one Choice through [`super::super::decide`], recorded
 //! in `decision_runs` like any call; only when asked for, and only for a
 //! case whose org the gate lets through — otherwise the case is skipped
-//! with the gate's fallback).
+//! with the gate's fallback). With [`Shape::ChoiceNoul`] a chosen item is
+//! checked by a second call, one Noul ("does this session work on …?"),
+//! and the answer is kept when the noul reaches a threshold chosen on dev.
+//!
+//! **Acceptance** (card J1, when `jev` ran): accuracy on answered at the
+//! precision-0.9 point, Jev against BM25 at BM25's coverage (Jev's
+//! threshold chosen on dev to match it), abstention quality, calibration,
+//! and the per-language-cell rule — each PASS, FAIL or NOT JUDGED.
 //!
 //! The report holds ids, words and numbers only: no prompt and no title.
 
 use super::bm25::{self, Bm25};
-use super::{bootstrap_acc_diff, mix, percentile, Paired};
+use super::{bootstrap_acc_diff, mix, percentile, Calibration, Criterion, Paired, Verdict};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::decide::{
-    decide, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, Question,
+    decide, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
 };
 use crate::service::nl::census::{FleetPrompts, Shown};
 use crate::service::nl::{self, Ranker};
@@ -60,6 +67,17 @@ use std::sync::LazyLock;
 
 /// The question's version, recorded on every Jev run of the benchmark.
 pub const QUESTION_VERSION: &str = "work_link.bench.v1";
+/// The check's version ([`Shape::ChoiceNoul`]'s second call).
+pub const NOUL_QUESTION_VERSION: &str = "work_link.bench.noul.v1";
+/// Card J1's registered acceptance (assist), test map §5.
+pub const ACCEPT_ACCURACY: f64 = 0.90;
+pub const ACCEPT_COVERAGE: f64 = 0.40;
+pub const ACCEPT_ABOVE_BM25: f64 = 0.10;
+pub const ACCEPT_ABSTENTION: f64 = 0.85;
+/// A language cell this far below English at equal coverage falls back.
+pub const ACCEPT_CELL_BELOW_ENGLISH: f64 = 0.10;
+/// The English cell the language rule compares against.
+pub const ENGLISH_CELL: &str = "en×en";
 /// `decision_runs.subject_kind` of a benchmark call.
 pub const SUBJECT_KIND: &str = "bench";
 /// The option that means "none of these".
@@ -165,6 +183,37 @@ impl Provider {
             Provider::None => "none",
             Provider::Bm25 => "bm25",
             Provider::Jev => "jev",
+        }
+    }
+}
+
+/// How Jev is asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Shape {
+    /// One Choice over the candidates plus `none`.
+    #[default]
+    #[serde(rename = "choice")]
+    Choice,
+    /// The Choice, then one Noul on the chosen item only ("does this
+    /// session work on …?"); the answer stands when the noul reaches a
+    /// threshold chosen on dev. Two calls for a case that picks an item.
+    #[serde(rename = "choice+noul")]
+    ChoiceNoul,
+}
+
+impl Shape {
+    pub fn parse(s: &str) -> Option<Shape> {
+        match s {
+            "choice" => Some(Shape::Choice),
+            "choice+noul" => Some(Shape::ChoiceNoul),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Shape::Choice => "choice",
+            Shape::ChoiceNoul => "choice+noul",
         }
     }
 }
@@ -403,6 +452,8 @@ pub struct BenchOptions {
     pub providers: Vec<Provider>,
     /// Jev calls at most (cases beyond are skipped as `max_calls`).
     pub max_calls: usize,
+    /// How Jev is asked ([`Shape::Choice`] unless set).
+    pub shape: Shape,
     pub now: i64,
 }
 
@@ -444,8 +495,15 @@ impl BenchOptions {
             split,
             providers,
             max_calls: max_calls.unwrap_or(DEFAULT_MAX_CALLS),
+            shape: Shape::Choice,
             now,
         })
+    }
+
+    /// The same options, asking Jev in `shape`.
+    pub fn with_shape(mut self, shape: Shape) -> Self {
+        self.shape = shape;
+        self
     }
 
     pub fn since(&self) -> i64 {
@@ -990,18 +1048,28 @@ pub struct Outcome {
     pub ran: bool,
     /// Its pick (an option id), `None` for "none of these".
     pub pick: Option<String>,
-    /// Its score: BM25's top score, Jev's confidence.
+    /// Its score, what thresholds apply to: BM25's top score, Jev's
+    /// confidence — or, with [`Shape::ChoiceNoul`], the noul of the chosen
+    /// item.
     pub score: Option<f64>,
+    /// Jev: the Choice's own confidence (calibration).
+    pub choice_confidence: Option<f64>,
+    /// Jev with [`Shape::ChoiceNoul`]: the noul of the chosen item.
+    pub noul: Option<f64>,
     /// Why there is no usable answer: a gate refusal (skipped) or a failed
     /// call's fallback.
     pub reason: Option<String>,
+    /// Calls made for the case (Jev: 1, or 2 with the noul).
+    pub calls: u32,
+    /// The case's latency, both calls together.
     pub latency_ms: Option<i64>,
     pub input_tokens: i64,
     pub cost_microusd: i64,
 }
 
 impl Outcome {
-    fn usable(&self) -> bool {
+    /// Asked, and no fallback: an answer (or an abstention) to score.
+    pub fn usable(&self) -> bool {
         self.ran && self.reason.is_none()
     }
 
@@ -1069,12 +1137,93 @@ pub fn jev_request(case: &BenchCase) -> JevRequest {
     }
 }
 
+/// The instruction of the [`Shape::ChoiceNoul`] check; the item's title
+/// follows it.
+pub const NOUL_INSTRUCTIONS: &str = "The state is the first prompt a person typed into a coding \
+    session; ticket keys, links and branch names were removed from it. Does this session work on \
+    the following work item?";
+
+/// PURE: the check for `case` and its chosen `candidate`: the same state,
+/// one Noul on the item's title.
+pub fn noul_request(case: &BenchCase, candidate: &Candidate) -> JevRequest {
+    JevRequest {
+        state: serde_json::json!({ "first_prompt": case.state }),
+        question: Question::Noul {
+            instructions: serde_json::Value::String(format!(
+                "{NOUL_INSTRUCTIONS} {}",
+                candidate.title
+            )),
+            criteria: Some(NoulCriteria {
+                yes: serde_json::Value::String("The session works on this item.".into()),
+                no: serde_json::Value::String(
+                    "The session works on something else, or it cannot be told.".into(),
+                ),
+            }),
+        },
+    }
+}
+
+/// What one envelope call gave the benchmark.
+struct Call {
+    ran: bool,
+    fallback: Option<String>,
+    value: Option<String>,
+    confidence: Option<f64>,
+    latency_ms: Option<i64>,
+    input_tokens: i64,
+    cost_microusd: i64,
+}
+
+async fn call(
+    ctx: &DecideCtx,
+    case: &BenchCase,
+    subject: String,
+    request: JevRequest,
+    version: &str,
+) -> Call {
+    let res = decide(
+        ctx,
+        DecideRequest {
+            feature: Feature::WorkLink,
+            subject_kind: SUBJECT_KIND.into(),
+            subject_id: subject,
+            org_id: case.org_id,
+            request,
+            baseline: None,
+            question_version: version.into(),
+            min_confidence: None,
+        },
+    )
+    .await;
+    let run = res.run_id.and_then(|id| {
+        lock(&ctx.store)
+            .ok()
+            .and_then(|s| s.get_decision_run(id).ok().flatten())
+    });
+    let usable = res.usable();
+    Call {
+        ran: res.mode.is_some(),
+        fallback: res.fallback.map(|f| f.as_str().to_string()),
+        value: usable.map(|a| a.value.clone()),
+        confidence: usable.and_then(|a| a.confidence),
+        latency_ms: run.as_ref().and_then(|r| r.latency_ms),
+        input_tokens: run.as_ref().map(|r| r.input_tokens).unwrap_or_default(),
+        cost_microusd: run.as_ref().map(|r| r.cost_microusd).unwrap_or_default(),
+    }
+}
+
 /// Ask Jev about each case through the envelope, one call at a time. A case
 /// whose org the gate refuses is skipped with the gate's fallback and
 /// nothing is sent or recorded for it; every call that is made is recorded
-/// in `decision_runs` (feature `work_link`, subject `bench:<case>`). At most
-/// `max_calls` calls; the rest are skipped as `max_calls`.
-pub async fn run_jev(ctx: &DecideCtx, cases: &[&BenchCase], max_calls: usize) -> Vec<Outcome> {
+/// in `decision_runs` (feature `work_link`, subject `bench:<case>`, and
+/// `bench:<case>:noul` for a check). At most `max_calls` calls; the rest are
+/// skipped as `max_calls` (a case whose check no longer fits too).
+pub async fn run_jev(
+    ctx: &DecideCtx,
+    cases: &[&BenchCase],
+    max_calls: usize,
+    shape: Shape,
+) -> Vec<Outcome> {
     let mut out = Vec::with_capacity(cases.len());
     let mut calls = 0usize;
     for case in cases {
@@ -1095,36 +1244,60 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[&BenchCase], max_calls: usize) ->
             continue;
         }
         calls += 1;
-        let res = decide(
+        let c = call(
             ctx,
-            DecideRequest {
-                feature: Feature::WorkLink,
-                subject_kind: SUBJECT_KIND.into(),
-                subject_id: case.id.clone(),
-                org_id: case.org_id,
-                request: jev_request(case),
-                baseline: None,
-                question_version: QUESTION_VERSION.into(),
-                min_confidence: None,
-            },
+            case,
+            case.id.clone(),
+            jev_request(case),
+            QUESTION_VERSION,
         )
         .await;
-        let run = res.run_id.and_then(|id| {
-            lock(&ctx.store)
-                .ok()
-                .and_then(|s| s.get_decision_run(id).ok().flatten())
-        });
         let mut o = Outcome {
-            ran: res.mode.is_some(),
-            reason: res.fallback.map(|f| f.as_str().to_string()),
-            latency_ms: run.as_ref().and_then(|r| r.latency_ms),
-            input_tokens: run.as_ref().map(|r| r.input_tokens).unwrap_or_default(),
-            cost_microusd: run.as_ref().map(|r| r.cost_microusd).unwrap_or_default(),
+            ran: c.ran,
+            reason: c.fallback,
+            calls: 1,
+            latency_ms: c.latency_ms,
+            input_tokens: c.input_tokens,
+            cost_microusd: c.cost_microusd,
             ..Default::default()
         };
-        if let Some(a) = res.usable() {
-            o.pick = (a.value != NONE_OPTION).then(|| a.value.clone());
-            o.score = a.confidence;
+        if let Some(v) = &c.value {
+            o.pick = (v != NONE_OPTION).then(|| v.clone());
+            o.score = c.confidence;
+            o.choice_confidence = c.confidence;
+        }
+        let chosen = o
+            .pick
+            .as_ref()
+            .filter(|_| o.usable() && shape == Shape::ChoiceNoul)
+            .and_then(|p| case.candidates.iter().find(|x| &x.id == p));
+        if let Some(candidate) = chosen {
+            if calls >= max_calls {
+                o.reason = Some("max_calls".into());
+            } else {
+                calls += 1;
+                let n = call(
+                    ctx,
+                    case,
+                    format!("{}:noul", case.id),
+                    noul_request(case, candidate),
+                    NOUL_QUESTION_VERSION,
+                )
+                .await;
+                o.calls = 2;
+                o.latency_ms = match (o.latency_ms, n.latency_ms) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (a, b) => a.or(b),
+                };
+                o.input_tokens += n.input_tokens;
+                o.cost_microusd += n.cost_microusd;
+                o.reason = n.fallback;
+                o.noul = n.value.as_deref().and_then(|v| v.parse::<f64>().ok());
+                o.score = o.noul;
+                if o.reason.is_none() && o.noul.is_none() {
+                    o.reason = Some("invalid_answer".into());
+                }
+            }
         }
         out.push(o);
     }
@@ -1169,7 +1342,7 @@ pub async fn run_providers(
                     .filter(|c| c.dataset == Dataset::H || opts.split.keeps(c.dev))
                     .collect();
                 let outs = match jev {
-                    Some(ctx) => run_jev(ctx, &wanted, opts.max_calls).await,
+                    Some(ctx) => run_jev(ctx, &wanted, opts.max_calls, opts.shape).await,
                     None => wanted
                         .iter()
                         .map(|_| Outcome::skipped("no_backend"))
@@ -1228,11 +1401,43 @@ pub struct ProviderMetrics {
     /// Abstentions on none-cases ÷ none-cases.
     pub abstention_quality: Option<f64>,
     pub at_precision: AtPrecision,
+    /// Jev: the Choice's confidence against whether its answer (an item or
+    /// `none`) was right, over every usable case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<Calibration>,
+    /// Jev with the noul check: the noul against whether the chosen item
+    /// was right.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noul_calibration: Option<Calibration>,
+    /// Calls made (Jev: two for a case the check was asked for).
     pub calls: Shown,
+    /// Per case, both calls together.
     pub latency_p50_ms: Option<i64>,
     pub latency_p95_ms: Option<i64>,
     pub input_tokens: i64,
     pub cost_microusd: i64,
+}
+
+/// Jev against BM25 at BM25's coverage (card J1: "≥ 10 points above BM25
+/// at equal coverage"). BM25 answers at its dev-chosen abstain threshold;
+/// Jev at the score threshold whose dev coverage is closest to BM25's dev
+/// coverage. Both applied to the reported truth cases.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EqualCoverage {
+    pub bm25_dev_coverage: Option<f64>,
+    /// Chosen on dev.
+    pub jev_threshold: Option<f64>,
+    pub jev_dev_coverage: Option<f64>,
+    /// Truth cases both have a usable outcome for.
+    pub cases: Shown,
+    pub bm25_accuracy: Option<f64>,
+    pub bm25_coverage: Option<f64>,
+    pub jev_accuracy: Option<f64>,
+    pub jev_coverage: Option<f64>,
+    /// Jev − BM25 accuracy on answered, with its bootstrap interval.
+    pub gap: Option<f64>,
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
 }
 
 /// Accuracy-on-answered difference of two providers, with its bootstrap
@@ -1258,6 +1463,9 @@ pub struct CellMetrics {
     pub accuracy_on_answered: Option<f64>,
     pub coverage: Option<f64>,
     pub abstention_quality: Option<f64>,
+    /// Jev only (see [`ProviderMetrics::calibration`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<Calibration>,
 }
 
 /// One breakdown cell.
@@ -1285,6 +1493,13 @@ pub struct DatasetReport {
     pub providers: Vec<ProviderMetrics>,
     pub diffs: Vec<Diff>,
     pub breakdown: Vec<Cell>,
+    /// When both `jev` and `bm25` ran.
+    pub equal_coverage: Option<EqualCoverage>,
+    /// Card J1's acceptance, when `jev` ran: the four registered criteria,
+    /// then one line per language cell.
+    pub acceptance: Vec<Criterion>,
+    /// Over the four registered criteria (not the cells).
+    pub acceptance_overall: Option<Verdict>,
 }
 
 /// The thresholds chosen on dev.
@@ -1292,9 +1507,16 @@ pub struct DatasetReport {
 pub struct Thresholds {
     /// BM25 abstains under this score.
     pub bm25_abstain: Option<f64>,
+    /// Jev with the noul check: the answer stands at a noul of at least
+    /// this (chosen like BM25's: most right answers plus right abstentions).
+    pub jev_noul: Option<f64>,
     /// Per provider: the score / confidence at which dev reached
     /// [`TARGET_PRECISION`].
     pub at_precision: BTreeMap<&'static str, Option<f64>>,
+    /// BM25's coverage on dev, and the Jev score threshold whose dev
+    /// coverage is closest to it ([`EqualCoverage`]).
+    pub bm25_dev_coverage: Option<f64>,
+    pub jev_at_bm25_coverage: Option<f64>,
 }
 
 /// The whole benchmark.
@@ -1310,6 +1532,8 @@ pub struct BenchReport {
     pub split: &'static str,
     pub dev_share_pct: usize,
     pub providers: Vec<&'static str>,
+    /// How Jev was asked: `choice` or `choice+noul`.
+    pub shape: &'static str,
     pub sizes: Sizes,
     pub recall: Recall,
     pub thresholds: Thresholds,
@@ -1372,6 +1596,44 @@ fn choose_at_precision(dev: &[(&BenchCase, &Outcome)], target: f64) -> Option<f6
     None
 }
 
+/// PURE: the score threshold whose coverage of the truth cases in `rows`
+/// comes closest to `target` (ties: the lower threshold, the larger
+/// coverage). `None` when no pick carries a score.
+fn choose_for_coverage(rows: &[(&BenchCase, &Outcome)], target: f64) -> Option<f64> {
+    let truth: Vec<_> = rows.iter().filter(|(c, _)| c.truth.is_some()).collect();
+    if truth.is_empty() {
+        return None;
+    }
+    let mut ts: Vec<f64> = truth
+        .iter()
+        .filter(|(_, o)| o.pick.is_some())
+        .filter_map(|(_, o)| o.score)
+        .collect();
+    ts.sort_by(|a, b| a.total_cmp(b));
+    ts.dedup();
+    let mut best: Option<(f64, f64)> = None;
+    for t in ts {
+        let answered = truth
+            .iter()
+            .filter(|(_, o)| answer_at(o, Some(t)).is_some())
+            .count();
+        let d = (answered as f64 / truth.len() as f64 - target).abs();
+        if best.is_none_or(|(bd, _)| d < bd - 1e-12) {
+            best = Some((d, t));
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+/// Accuracy and coverage of `rows` at `threshold`.
+fn tally_at(rows: &[(&BenchCase, &Outcome)], threshold: Option<f64>) -> Tally {
+    let mut t = Tally::default();
+    for (c, o) in rows {
+        t.add(c, answer_at(o, threshold));
+    }
+    t
+}
+
 #[derive(Default)]
 struct Tally {
     cases: u64,
@@ -1422,9 +1684,10 @@ fn provider_metrics(
     let mut lat = Vec::new();
     let (mut calls, mut tokens, mut cost) = (0u64, 0i64, 0i64);
     let (mut pn, mut pk, mut pc) = (0u64, 0u64, 0u64);
+    let (mut cal, mut noul_cal) = (Vec::new(), Vec::new());
     for (c, o) in rows {
         if o.ran && p == Provider::Jev {
-            calls += 1;
+            calls += u64::from(o.calls.max(1));
             if let Some(l) = o.latency_ms {
                 lat.push(l);
             }
@@ -1435,6 +1698,14 @@ fn provider_metrics(
             let r = o.reason.clone().unwrap_or_else(|| "not_run".into());
             skipped.entry(r).or_default().0 += 1;
             continue;
+        }
+        if p == Provider::Jev {
+            if let Some(conf) = o.choice_confidence {
+                cal.push((conf, o.pick == c.truth));
+            }
+            if let Some(n) = o.noul {
+                noul_cal.push((n, o.pick.is_some() && o.pick == c.truth));
+            }
         }
         t.add(c, answer_at(o, threshold));
         if let Some(truth) = &c.truth {
@@ -1465,6 +1736,8 @@ fn provider_metrics(
             accuracy_on_answered: at_p.and_then(|_| pct(pk, pn)),
             answered: Shown(pn),
         },
+        calibration: (p == Provider::Jev).then(|| Calibration::of(&cal)),
+        noul_calibration: (!noul_cal.is_empty()).then(|| Calibration::of(&noul_cal)),
         calls: Shown(calls),
         latency_p50_ms: percentile(&lat, 50.0),
         latency_p95_ms: percentile(&lat, 95.0),
@@ -1521,6 +1794,16 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                 }
                 t
             }
+            Provider::Jev if opts.shape == Shape::ChoiceNoul => {
+                let t = choose_abstain(&dev);
+                th.jev_noul = t.map(round3);
+                if t.is_none() {
+                    notes.push(
+                        "jev: the noul check needs its threshold from dev; run --split all (or dev) to choose one".into(),
+                    );
+                }
+                t
+            }
             _ => None,
         };
         abstain.insert(p, a);
@@ -1538,6 +1821,31 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
             th.at_precision.insert(p.as_str(), ap.map(round3));
         }
         at_p.insert(p, ap);
+    }
+    // Jev at BM25's coverage: BM25's dev coverage, and the Jev threshold
+    // whose dev coverage is closest to it.
+    let mut eq_threshold: Option<f64> = None;
+    let mut eq_jev_dev_coverage: Option<f64> = None;
+    let jev_dev_ran = providers.contains(&Provider::Jev)
+        && rows_of(Provider::Jev, &is_dev)
+            .iter()
+            .any(|(_, o)| o.usable());
+    let both = providers.contains(&Provider::Bm25) && providers.contains(&Provider::Jev);
+    if both {
+        let truth_dev = |p: Provider| -> Vec<(&BenchCase, &Outcome)> {
+            rows_of(p, &is_dev)
+                .into_iter()
+                .filter(|(c, o)| o.usable() && c.truth.is_some())
+                .collect()
+        };
+        let bm = tally_at(&truth_dev(Provider::Bm25), abstain[&Provider::Bm25]);
+        th.bm25_dev_coverage = bm.coverage();
+        if let Some(target) = bm.coverage() {
+            let jev = truth_dev(Provider::Jev);
+            eq_threshold = choose_for_coverage(&jev, target);
+            th.jev_at_bm25_coverage = eq_threshold.map(round3);
+            eq_jev_dev_coverage = eq_threshold.and_then(|t| tally_at(&jev, Some(t)).coverage());
+        }
     }
     if opts.split != Split::Test {
         notes.push(format!(
@@ -1617,7 +1925,8 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                 ("candidates", c.size_bucket().to_string()),
             ]
         };
-        let mut cells: BTreeMap<Key, (Tally, BTreeMap<Provider, Tally>)> = BTreeMap::new();
+        type CellAcc = (Tally, BTreeMap<Provider, Tally>, Vec<(f64, bool)>);
+        let mut cells: BTreeMap<Key, CellAcc> = BTreeMap::new();
         for c in &cases {
             for k in dims(c) {
                 let e = cells.entry(k).or_default();
@@ -1628,6 +1937,11 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                 for &p in &providers {
                     if let Some(o) = outcomes[&p].get(&c.id).filter(|o| o.usable()) {
                         e.1.entry(p).or_default().add(c, answer_at(o, abstain[&p]));
+                        if p == Provider::Jev {
+                            if let Some(conf) = o.choice_confidence {
+                                e.2.push((conf, o.pick == c.truth));
+                            }
+                        }
                     }
                 }
             }
@@ -1635,7 +1949,7 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
         let order = ["org", "tracker", "nl", "code", "candidates"];
         let mut breakdown: Vec<Cell> = cells
             .into_iter()
-            .map(|((dim, value), (n, per))| {
+            .map(|((dim, value), (n, per, cal))| {
                 let shown = n.cases >= SHOW_MIN_CASES;
                 Cell {
                     dimension: dim,
@@ -1654,6 +1968,7 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                                 } else {
                                     None
                                 },
+                                calibration: (*p == Provider::Jev).then(|| Calibration::of(&cal)),
                             })
                             .collect()
                     } else {
@@ -1669,6 +1984,30 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                 .then(y.cases.cmp(&x.cases))
                 .then(x.value.cmp(&y.value))
         });
+        let equal_coverage = both.then(|| {
+            equal_coverage(
+                &cases,
+                outcomes,
+                abstain[&Provider::Bm25],
+                eq_threshold,
+                th.bm25_dev_coverage,
+                eq_jev_dev_coverage,
+            )
+        });
+        let (acceptance, acceptance_overall) =
+            match pm.iter().find(|m| m.provider == Provider::Jev.as_str()) {
+                Some(jm) => {
+                    let (mut crit, overall) =
+                        j1_acceptance(jm, equal_coverage.as_ref(), jev_dev_ran);
+                    crit.extend(language_cells(
+                        &cases,
+                        &outcomes[&Provider::Jev],
+                        abstain[&Provider::Jev],
+                    ));
+                    (crit, Some(overall))
+                }
+                None => (Vec::new(), None),
+            };
         datasets.push(DatasetReport {
             dataset: name,
             scope,
@@ -1677,6 +2016,9 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
             providers: pm,
             diffs,
             breakdown,
+            equal_coverage,
+            acceptance,
+            acceptance_overall,
         });
     }
     BenchReport {
@@ -1690,6 +2032,7 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
         split: opts.split.as_str(),
         dev_share_pct: DEV_SHARE_PCT,
         providers: providers.iter().map(|p| p.as_str()).collect(),
+        shape: opts.shape.as_str(),
         sizes: loaded.sizes.clone(),
         recall: loaded.recall.clone(),
         thresholds: th,
@@ -1697,6 +2040,242 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
         datasets,
         notes,
     }
+}
+
+// --- acceptance (card J1) --------------------------------------------------------
+
+/// PURE: Jev against BM25 at BM25's coverage over the truth cases of
+/// `cases` both answered usably: BM25 at `bm25_t`, Jev at `jev_t` (chosen
+/// on dev; without it Jev's side is empty).
+fn equal_coverage(
+    cases: &[&BenchCase],
+    outcomes: &Outcomes,
+    bm25_t: Option<f64>,
+    jev_t: Option<f64>,
+    bm25_dev_coverage: Option<f64>,
+    jev_dev_coverage: Option<f64>,
+) -> EqualCoverage {
+    let (bm, jv) = (&outcomes[&Provider::Bm25], &outcomes[&Provider::Jev]);
+    let (mut tb, mut tj) = (Tally::default(), Tally::default());
+    let mut obs = Vec::new();
+    for c in cases.iter().filter(|c| c.truth.is_some()) {
+        let (Some(ob), Some(oj)) = (bm.get(&c.id), jv.get(&c.id)) else {
+            continue;
+        };
+        if !ob.usable() || !oj.usable() {
+            continue;
+        }
+        let xb = answer_at(ob, bm25_t);
+        let xj = jev_t.and_then(|t| answer_at(oj, Some(t)));
+        tb.add(c, xb);
+        tj.add(c, xj);
+        obs.push(Paired {
+            a_answered: xj.is_some(),
+            a_correct: xj.is_some() && xj == c.truth.as_ref(),
+            b_answered: xb.is_some(),
+            b_correct: xb.is_some() && xb == c.truth.as_ref(),
+        });
+    }
+    let ci = jev_t.and_then(|_| bootstrap_acc_diff(&obs, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED));
+    EqualCoverage {
+        bm25_dev_coverage,
+        jev_threshold: jev_t.map(round3),
+        jev_dev_coverage,
+        cases: Shown(obs.len() as u64),
+        bm25_accuracy: tb.accuracy(),
+        bm25_coverage: tb.coverage(),
+        jev_accuracy: jev_t.and(tj.accuracy()),
+        jev_coverage: jev_t.and(tj.coverage()),
+        gap: ci.map(|x| round3(x.0)),
+        lo: ci.map(|x| round3(x.1)),
+        hi: ci.map(|x| round3(x.2)),
+    }
+}
+
+/// PURE: card J1's four registered criteria for Jev's metrics on one
+/// dataset, and their overall verdict. `jev_dev_ran`: Jev answered dev
+/// cases, so its thresholds could be chosen.
+fn j1_acceptance(
+    m: &ProviderMetrics,
+    eq: Option<&EqualCoverage>,
+    jev_dev_ran: bool,
+) -> (Vec<Criterion>, Verdict) {
+    let judged = m.cases.0 >= JUDGE_MIN_CASES;
+    let small = |n: Shown| {
+        if n.0 >= JUDGE_MIN_CASES {
+            String::new()
+        } else {
+            format!(" (n {n} < {JUDGE_MIN_CASES}: not judged)")
+        }
+    };
+    let ap = &m.at_precision;
+    let at_precision = match ap.threshold {
+        _ if !judged => Verdict::NotJudged,
+        None if jev_dev_ran => Verdict::Fail,
+        None => Verdict::NotJudged,
+        Some(_) => Verdict::all(&[
+            Verdict::at_least(ap.accuracy_on_answered, ACCEPT_ACCURACY, true),
+            Verdict::at_least(ap.coverage, ACCEPT_COVERAGE, true),
+        ]),
+    };
+    let at_precision_measured = match ap.threshold {
+        Some(t) => format!(
+            "{} at coverage {} (confidence ≥ {} chosen on dev){}",
+            f3(ap.accuracy_on_answered),
+            f3(ap.coverage),
+            f3(Some(t)),
+            small(m.cases)
+        ),
+        None if jev_dev_ran => format!(
+            "dev never reached {TARGET_PRECISION} over {AT_PRECISION_MIN_ANSWERED}+ answers{}",
+            small(m.cases)
+        ),
+        None => "no jev answers on dev to choose a threshold (--split all)".to_string(),
+    };
+    let (above, above_measured) = match eq {
+        None => (Verdict::NotJudged, "bm25 was not run".to_string()),
+        Some(e) if e.jev_threshold.is_none() => (
+            Verdict::NotJudged,
+            "no jev threshold at bm25's dev coverage (--split all)".to_string(),
+        ),
+        Some(e) => (
+            Verdict::at_least(e.gap, ACCEPT_ABOVE_BM25, e.cases.0 >= JUDGE_MIN_CASES),
+            format!(
+                "jev {} at coverage {} vs bm25 {} at {}: {} [{}, {}] over {} paired cases{}",
+                f3(e.jev_accuracy),
+                f3(e.jev_coverage),
+                f3(e.bm25_accuracy),
+                f3(e.bm25_coverage),
+                f3(e.gap),
+                f3(e.lo),
+                f3(e.hi),
+                e.cases,
+                small(e.cases)
+            ),
+        ),
+    };
+    let criteria = vec![
+        Criterion::new(
+            format!("accuracy on answered ≥ {ACCEPT_ACCURACY} at coverage ≥ {ACCEPT_COVERAGE}"),
+            at_precision_measured,
+            at_precision,
+        ),
+        Criterion::new(
+            format!(
+                "≥ {} points above bm25 at equal coverage",
+                (ACCEPT_ABOVE_BM25 * 100.0).round()
+            ),
+            above_measured,
+            above,
+        ),
+        Criterion::new(
+            "not worse than claude -p haiku by more than 3 points",
+            "the haiku baseline (D33) is not built",
+            Verdict::NotJudged,
+        ),
+        Criterion::new(
+            format!("abstention quality ≥ {ACCEPT_ABSTENTION}"),
+            format!(
+                "{} over {} none-cases, at jev's operating point{}",
+                f3(m.abstention_quality),
+                m.none_cases,
+                small(m.none_cases)
+            ),
+            Verdict::at_least(
+                m.abstention_quality,
+                ACCEPT_ABSTENTION,
+                m.none_cases.0 >= JUDGE_MIN_CASES,
+            ),
+        ),
+    ];
+    let overall = Verdict::all(&criteria.iter().map(|c| c.verdict).collect::<Vec<_>>());
+    (criteria, overall)
+}
+
+/// PURE: the per-language-cell rule — a `nl` cell (prompt × truth title)
+/// more than [`ACCEPT_CELL_BELOW_ENGLISH`] below [`ENGLISH_CELL`] at equal
+/// coverage falls back. The cell is taken at Jev's operating point
+/// (`threshold`); English is thresholded to the cell's coverage. One
+/// criterion per cell: PASS keeps it, FAIL falls back, NOT JUDGED under
+/// [`JUDGE_MIN_CASES`] truth cases on either side.
+fn language_cells(
+    cases: &[&BenchCase],
+    jev: &HashMap<String, Outcome>,
+    threshold: Option<f64>,
+) -> Vec<Criterion> {
+    let mut by_cell: BTreeMap<String, Vec<(&BenchCase, &Outcome)>> = BTreeMap::new();
+    for c in cases.iter().filter(|c| c.truth.is_some()) {
+        if let Some(o) = jev.get(&c.id).filter(|o| o.usable()) {
+            by_cell
+                .entry(format!("{}×{}", c.nl_prompt, c.nl_title))
+                .or_default()
+                .push((c, o));
+        }
+    }
+    let empty = Vec::new();
+    let en = by_cell.get(ENGLISH_CELL).unwrap_or(&empty);
+    let mut cells: Vec<(&String, &Vec<(&BenchCase, &Outcome)>)> = by_cell
+        .iter()
+        .filter(|(k, _)| k.as_str() != ENGLISH_CELL)
+        .collect();
+    cells.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+    let mut out = Vec::new();
+    for (cell, rows) in cells {
+        let n = Shown(rows.len() as u64);
+        let en_n = Shown(en.len() as u64);
+        let criterion = format!(
+            "language cell {cell}: at most {} points below {ENGLISH_CELL} at equal coverage",
+            (ACCEPT_CELL_BELOW_ENGLISH * 100.0).round()
+        );
+        if n.0 < SHOW_MIN_CASES {
+            out.push(Criterion::new(
+                criterion,
+                format!("{n} cases"),
+                Verdict::NotJudged,
+            ));
+            continue;
+        }
+        let t = tally_at(rows, threshold);
+        let (acc, cov) = (t.accuracy(), t.coverage());
+        let en_t = cov.and_then(|c| choose_for_coverage(en, c));
+        let en_tally = en_t.map(|x| tally_at(en, Some(x)));
+        let en_acc = en_tally.as_ref().and_then(|x| x.accuracy());
+        let en_cov = en_tally.as_ref().and_then(|x| x.coverage());
+        let gap = match (en_acc, acc) {
+            (Some(e), Some(a)) => Some(round3(e - a)),
+            _ => None,
+        };
+        let judged = n.0 >= JUDGE_MIN_CASES && en_n.0 >= JUDGE_MIN_CASES;
+        let verdict = match gap {
+            Some(g) if judged => {
+                if g > ACCEPT_CELL_BELOW_ENGLISH + 1e-9 {
+                    Verdict::Fail
+                } else {
+                    Verdict::Pass
+                }
+            }
+            _ => Verdict::NotJudged,
+        };
+        let what = match verdict {
+            Verdict::Pass => "keeps",
+            Verdict::Fail => "falls back",
+            Verdict::NotJudged => "not judged",
+        };
+        out.push(Criterion::new(
+            criterion,
+            format!(
+                "{} at coverage {} vs {ENGLISH_CELL} {} at {} ({} points; {n} / {en_n} cases) → {what}",
+                f3(acc),
+                f3(cov),
+                f3(en_acc),
+                f3(en_cov),
+                gap.map(|g| format!("{:.1}", g * 100.0))
+                    .unwrap_or_else(|| "-".into()),
+            ),
+            verdict,
+        ));
+    }
+    out
 }
 
 // --- lines ---------------------------------------------------------------------
@@ -1717,12 +2296,13 @@ impl BenchReport {
             format!("benchmark {} — question {}", self.benchmark, self.question_version),
             format!("detector {}; {}", self.detector, self.bm25),
             format!(
-                "window: {} days; schema {}; split: {} (dev = oldest {}% of A by decision time); providers: {}",
+                "window: {} days; schema {}; split: {} (dev = oldest {}% of A by decision time); providers: {}; jev shape: {}",
                 self.days,
                 self.schema_version,
                 self.split,
                 self.dev_share_pct,
-                self.providers.join(", ")
+                self.providers.join(", "),
+                self.shape
             ),
             format!(
                 "A: {} person-decided links read (manual/started), fleet-typed {} and other-org {} left out; {} cases + {} none-cases; dev {} / test {}",
@@ -1737,14 +2317,28 @@ impl BenchReport {
         }
         let th = &self.thresholds;
         v.push(format!(
-            "thresholds (chosen on dev): bm25 abstain < {}; at precision {}: {}",
+            "thresholds (chosen on dev): bm25 abstain < {}; at precision {}: {}{}{}",
             f3(th.bm25_abstain),
             TARGET_PRECISION,
             th.at_precision
                 .iter()
                 .map(|(p, t)| format!("{p} ≥ {}", f3(*t)))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            if self.shape == Shape::ChoiceNoul.as_str() {
+                format!("; jev noul ≥ {}", f3(th.jev_noul))
+            } else {
+                String::new()
+            },
+            if th.bm25_dev_coverage.is_some() {
+                format!(
+                    "; jev at bm25's dev coverage {}: ≥ {}",
+                    f3(th.bm25_dev_coverage),
+                    f3(th.jev_at_bm25_coverage)
+                )
+            } else {
+                String::new()
+            }
         ));
         v.push("counts from 1 to 4 show as <5; no prompt or title is printed".into());
         v.push(String::new());
@@ -1829,6 +2423,38 @@ impl BenchReport {
                     "  (bootstrap 95% interval, {BOOTSTRAP_RESAMPLES} resamples, seed {BOOTSTRAP_SEED:#x}; an interval across 0 is no difference)"
                 ));
             }
+            for p in &d.providers {
+                if let Some(c) = &p.calibration {
+                    v.push(format!(
+                        "  calibration {} (choice confidence, 10 equal-width bins): {}",
+                        p.provider,
+                        c.line()
+                    ));
+                }
+                if let Some(c) = &p.noul_calibration {
+                    v.push(format!(
+                        "  calibration {} (noul of the chosen item): {}",
+                        p.provider,
+                        c.line()
+                    ));
+                }
+            }
+            if let Some(e) = &d.equal_coverage {
+                v.push(format!(
+                    "  at bm25's coverage (dev {}; jev ≥ {} gave {} on dev): jev {} at coverage {} vs bm25 {} at {} over {} paired cases: {} [{}, {}]",
+                    f3(e.bm25_dev_coverage),
+                    f3(e.jev_threshold),
+                    f3(e.jev_dev_coverage),
+                    f3(e.jev_accuracy),
+                    f3(e.jev_coverage),
+                    f3(e.bm25_accuracy),
+                    f3(e.bm25_coverage),
+                    e.cases,
+                    f3(e.gap),
+                    f3(e.lo),
+                    f3(e.hi)
+                ));
+            }
             v.push(format!(
                 "  breakdown (a cell under {JUDGE_MIN_CASES} cases is not judged; acc@ans / coverage / abstain):"
             ));
@@ -1849,8 +2475,20 @@ impl BenchReport {
                         f2(m.coverage),
                         f2(m.abstention_quality)
                     ));
+                    if let Some(ece) = m.calibration.as_ref().and_then(|c| c.ece) {
+                        line.push_str(&format!(" ece {}", f2(Some(ece))));
+                    }
                 }
                 v.push(line);
+            }
+            if let Some(overall) = d.acceptance_overall {
+                v.push(format!(
+                    "  acceptance, card J1 (assist; registered in the test map): {}",
+                    overall.as_str()
+                ));
+                for c in &d.acceptance {
+                    v.push(format!("  {}", c.line()));
+                }
             }
         }
         if !self.notes.is_empty() {
