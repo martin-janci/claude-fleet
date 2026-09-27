@@ -1,6 +1,9 @@
 //! `fleet-hub decide bench …` — offline benchmarks of the decision
-//! envelope's use cases (Jev evaluation phase 0; the test map's card J1;
-//! `fleet_core::service::decide::bench`).
+//! envelope's use cases (Jev evaluation phase 0; the test map's cards J1
+//! and J3; `fleet_core::service::decide::bench`).
+//!
+//! `status-map` (J3) reads labeled sections — a file, or the built-in
+//! synthetic set — and opens no database at all unless `--provider jev`.
 //!
 //! By default the database is opened **read-only** and nothing is sent:
 //! the providers `none` and `bm25` run in this process. `--provider jev` is
@@ -16,7 +19,10 @@ use crate::config::{self, HubOptions};
 use crate::out;
 use crate::serve;
 use clap::Subcommand;
-use fleet_core::service::decide::bench::work_link::{self as wl, BenchOptions, Provider, Split};
+use fleet_core::service::decide::bench::status_map as sm;
+use fleet_core::service::decide::bench::work_link::{
+    self as wl, BenchOptions, Provider, Shape, Split,
+};
 use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::nl::Detector;
 use fleet_core::store::Store;
@@ -77,6 +83,46 @@ pub enum BenchCmd {
         /// Where --export-unlinked writes (must not exist).
         #[arg(long, value_name = "FILE", requires = "export_unlinked")]
         out: Option<PathBuf>,
+        /// How jev is asked: choice (one Choice over the candidates and
+        /// "none") or choice+noul (then one Noul on the chosen item, kept
+        /// above a threshold chosen on dev; two calls). [default: choice]
+        #[arg(long, value_parser = ["choice", "choice+noul"])]
+        shape: Option<String>,
+    },
+    /// Card J3: an Asana section's status category. Cases are labeled
+    /// sections (--labels FILE, one JSON line each: section,
+    /// project_sections, expect, lang, note, org_id) or the built-in
+    /// synthetic set (--fixture). Reports accuracy on answered, coverage,
+    /// coverage where the keyword rule abstains, done precision, the
+    /// confusion matrix and calibration per provider, by language and
+    /// ambiguous / clear, and card J3's acceptance.
+    ///
+    /// Offline unless --provider jev is given: without it no database is
+    /// opened. No section name is printed.
+    StatusMap {
+        /// The labeled sections (JSON lines).
+        #[arg(long, value_name = "FILE", conflicts_with = "fixture")]
+        labels: Option<PathBuf>,
+        /// Use the built-in synthetic set (LLM-written, D43; not yet
+        /// spot-checked). Its rows have no org: a jev call's consent is
+        /// decide.jev.unassigned.
+        #[arg(long)]
+        fixture: bool,
+        /// A provider to run: none, todo, rule, jev (repeat it). [default:
+        /// todo and rule]. jev sends each section's name and its board's
+        /// names to TypeSafe through the envelope's gate.
+        #[arg(long = "provider", value_parser = ["none", "todo", "rule", "jev"])]
+        providers: Vec<String>,
+        /// Jev calls at most in this run; later cases are skipped. [default: 500]
+        #[arg(long)]
+        max_calls: Option<usize>,
+        /// The database jev runs are gated by and recorded in, instead of
+        /// the hub's (only read with --provider jev).
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -124,12 +170,16 @@ pub async fn run(
             labels,
             export_unlinked,
             out: out_path,
+            shape,
         } => {
             let split = Split::parse(split.as_deref().unwrap_or("test"))
                 .ok_or("--split is dev, test or all")?;
+            let shape = Shape::parse(shape.as_deref().unwrap_or("choice"))
+                .ok_or("--shape is choice or choice+noul")?;
             let providers = parse_providers(&providers)?;
             let o = BenchOptions::new(days, org, max_cases, split, providers, max_calls, now())
-                .map_err(|e| e.message)?;
+                .map_err(|e| e.message)?
+                .with_shape(shape);
             let path = db_path(db.as_deref(), opts, env)?;
 
             if let (Some(n), Some(file)) = (export_unlinked, out_path) {
@@ -197,7 +247,101 @@ pub async fn run(
             }
             Ok(ExitCode::SUCCESS)
         }
+        BenchCmd::StatusMap {
+            labels,
+            fixture,
+            providers,
+            max_calls,
+            db,
+            json,
+        } => {
+            let report = status_map(
+                labels.as_deref(),
+                fixture,
+                &providers,
+                max_calls,
+                db.as_deref(),
+                opts,
+                env,
+            )
+            .await?;
+            if json {
+                out::line(&serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
+            } else {
+                for l in report.lines() {
+                    out::line(&l);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+fn parse_sm_providers(v: &[String]) -> Result<Vec<sm::Provider>, String> {
+    let mut ps: Vec<sm::Provider> = v
+        .iter()
+        .map(|p| sm::Provider::parse(p).ok_or_else(|| format!("unknown provider {p:?}")))
+        .collect::<Result<_, _>>()?;
+    if ps.is_empty() {
+        ps = vec![sm::Provider::Todo, sm::Provider::Rule];
+    }
+    ps.sort();
+    ps.dedup();
+    Ok(ps)
+}
+
+/// `decide bench status-map`: the labeled sections (or the built-in set)
+/// through the providers. Only `--provider jev` opens a database — for
+/// writing, as the envelope records every call.
+async fn status_map(
+    labels: Option<&Path>,
+    fixture: bool,
+    providers: &[String],
+    max_calls: Option<usize>,
+    db: Option<&Path>,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<sm::Report, String> {
+    let raw = match (labels, fixture) {
+        (Some(file), _) => {
+            std::fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?
+        }
+        (None, true) => sm::FIXTURE.to_string(),
+        (None, false) => {
+            return Err(
+                "give the labeled sections with --labels FILE, or --fixture for the built-in \
+                 synthetic set"
+                    .into(),
+            )
+        }
+    };
+    let rows = sm::parse_labels(&raw).map_err(|e| match labels {
+        Some(f) => format!("{}: {e}", f.display()),
+        None => format!("the built-in set: {e}"),
+    })?;
+    let (cases, dropped) = sm::cases(&rows);
+    let providers = parse_sm_providers(providers)?;
+    let max_calls = max_calls.unwrap_or(sm::DEFAULT_MAX_CALLS);
+    let outs = if providers.contains(&sm::Provider::Jev) {
+        let path = db_path(db, opts, env)?;
+        let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        out::error(&format!(
+            "jev: asking only for sections whose org (or, with none, decide.jev.unassigned) passes \
+             the gate, at most {max_calls} calls; each call is recorded in decision_runs"
+        ));
+        let ctx = DecideCtx::jev(Arc::new(Mutex::new(store)));
+        sm::run_providers(&cases, &providers, Some(&ctx), max_calls).await
+    } else {
+        sm::run_providers(&cases, &providers, None, max_calls).await
+    };
+    Ok(sm::report(
+        &cases,
+        &outs,
+        rows.len(),
+        dropped,
+        labels.is_none(),
+    ))
 }
 
 #[cfg(test)]
@@ -240,8 +384,13 @@ mod tests {
             org,
             max_calls,
             json,
+            shape,
             ..
-        } = c;
+        } = c
+        else {
+            panic!("work-link");
+        };
+        assert_eq!(shape, None);
         assert_eq!(split.as_deref(), Some("all"));
         assert_eq!(providers, vec!["bm25", "jev"]);
         assert_eq!((org, max_calls, json), (Some(3), Some(20), true));
@@ -255,6 +404,109 @@ mod tests {
     fn unknown_values_are_refused() {
         assert!(parse(&["work-link", "--split", "train"]).is_err());
         assert!(parse(&["work-link", "--provider", "haiku"]).is_err());
+        assert!(parse(&["work-link", "--shape", "noul"]).is_err());
+        assert!(parse(&["status-map", "--provider", "bm25"]).is_err());
+        assert!(parse(&["status-map", "--fixture", "--labels", "x.jsonl"]).is_err());
+    }
+
+    #[test]
+    fn the_shapes_parse() {
+        let Ok(BenchCmd::WorkLink { shape, .. }) =
+            parse(&["work-link", "--shape", "choice+noul", "--provider", "jev"])
+        else {
+            panic!("work-link");
+        };
+        assert_eq!(shape.as_deref(), Some("choice+noul"));
+        assert_eq!(Shape::parse("choice+noul"), Some(Shape::ChoiceNoul));
+    }
+
+    #[tokio::test]
+    async fn status_map_runs_offline_on_the_fixture_or_a_labels_file() {
+        let opts = HubOptions::default();
+        let env = HashMap::new();
+        // Neither: an error that names both.
+        let e = status_map(None, false, &[], None, None, &opts, &env)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--labels") && e.contains("--fixture"), "{e}");
+        // The fixture, no database anywhere.
+        let r = status_map(
+            None,
+            true,
+            &[],
+            None,
+            Some(Path::new("/nonexistent/state.db")),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.providers, vec!["todo", "rule"]);
+        assert_eq!(r.source, "fixture");
+        assert!(r.sizes.cases >= 300);
+        // A labels file.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sections.jsonl");
+        std::fs::write(
+            &file,
+            "{\"section\":\"Hotovo\",\"project_sections\":[\"Nové\",\"Hotovo\"],\"expect\":\"done\",\"lang\":\"sk\"}\n",
+        )
+        .unwrap();
+        let r = status_map(
+            Some(&file),
+            false,
+            &["rule".into(), "none".into()],
+            None,
+            None,
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!((r.source, r.sizes.cases), ("labels", 1));
+        assert_eq!(r.providers, vec!["none", "rule"]);
+        std::fs::write(&file, "{\"section\":\"x\",\"expect\":\"soon\"}\n").unwrap();
+        let e = status_map(Some(&file), false, &[], None, None, &opts, &env)
+            .await
+            .unwrap_err();
+        assert!(e.contains("sections.jsonl") && e.contains("line 1"), "{e}");
+        // jev needs a database to gate and record in.
+        let e = status_map(
+            None,
+            true,
+            &["jev".into()],
+            None,
+            Some(Path::new("/nonexistent/state.db")),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("/nonexistent/state.db"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn status_map_with_jev_is_gated_by_the_database() {
+        // A fresh hub database: the flag is off, so every case is skipped
+        // and nothing is sent.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        drop(Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus)).unwrap());
+        let r = status_map(
+            None,
+            true,
+            &["jev".into(), "rule".into()],
+            Some(10),
+            Some(&path),
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let jev = r.metrics.iter().find(|m| m.provider == "jev").unwrap();
+        assert_eq!(jev.cases, 0);
+        assert_eq!(jev.calls, 0);
+        assert_eq!(jev.skipped.get("flag_off").copied(), Some(r.sizes.cases));
     }
 
     #[test]

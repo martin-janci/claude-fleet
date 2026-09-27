@@ -8,11 +8,22 @@
 //!
 //! - [`work_link`]: card J1, choosing a work item for a session
 //!   (`fleet-hub decide bench work-link`).
+//! - [`status_map`]: card J3, an Asana section's status category
+//!   (`fleet-hub decide bench status-map`).
+//!
+//! Shared here: the bootstrap on differences, percentiles, calibration (ECE
+//! and Brier, test map §4) and the acceptance verdicts both benches print.
 
 pub mod bm25;
+pub mod status_map;
+#[cfg(test)]
+mod status_map_tests;
 pub mod work_link;
 #[cfg(test)]
 mod work_link_tests;
+
+use crate::service::nl::census::{Shown, SUPPRESS_BELOW};
+use serde::Serialize;
 
 /// A deterministic generator (splitmix64) for the bootstrap: the same seed
 /// gives the same intervals on every machine.
@@ -121,9 +132,260 @@ pub fn bootstrap_acc_diff(obs: &[Paired], resamples: usize, seed: u64) -> Option
     ))
 }
 
+// --- calibration (test map §4) ---------------------------------------------------
+
+/// Equal-width bins of the expected calibration error.
+pub const ECE_BINS: usize = 10;
+
+fn unit_clamp(c: f64) -> f64 {
+    if c.is_finite() {
+        c.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// PURE: the expected calibration error of `obs` — each a stated
+/// confidence in 0..=1 and whether the answer was right — over `bins`
+/// equal-width bins of the confidence (`[0, 0.1)`, …, `[0.9, 1]`): the sum
+/// over bins of (the bin's share of answers) × |its accuracy − its mean
+/// confidence|. `None` without observations (or bins). A confidence
+/// outside 0..=1 is clamped.
+pub fn ece(obs: &[(f64, bool)], bins: usize) -> Option<f64> {
+    if obs.is_empty() || bins == 0 {
+        return None;
+    }
+    let mut n = vec![0u64; bins];
+    let mut conf = vec![0f64; bins];
+    let mut right = vec![0u64; bins];
+    for &(c, ok) in obs {
+        let c = unit_clamp(c);
+        let b = ((c * bins as f64).floor() as usize).min(bins - 1);
+        n[b] += 1;
+        conf[b] += c;
+        right[b] += u64::from(ok);
+    }
+    let total = obs.len() as f64;
+    Some(
+        (0..bins)
+            .filter(|&b| n[b] > 0)
+            .map(|b| {
+                let k = n[b] as f64;
+                (k / total) * (right[b] as f64 / k - conf[b] / k).abs()
+            })
+            .sum(),
+    )
+}
+
+/// PURE: the Brier score of `obs` (the confidence of the given answer
+/// against whether it was right): the mean of (confidence − 1 if right,
+/// else 0)². 0 is perfect; always saying 0.5 scores 0.25. `None` without
+/// observations.
+pub fn brier(obs: &[(f64, bool)]) -> Option<f64> {
+    if obs.is_empty() {
+        return None;
+    }
+    let sum: f64 = obs
+        .iter()
+        .map(|&(c, ok)| {
+            let y = if ok { 1.0 } else { 0.0 };
+            (unit_clamp(c) - y).powi(2)
+        })
+        .sum();
+    Some(sum / obs.len() as f64)
+}
+
+/// Calibration of the answers that carried a confidence.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Calibration {
+    /// Answers with a confidence.
+    pub n: Shown,
+    /// Expected calibration error over [`ECE_BINS`] equal-width bins.
+    pub ece: Option<f64>,
+    pub brier: Option<f64>,
+}
+
+impl Calibration {
+    /// PURE: [`ece`] and [`brier`] of `obs`, rounded to 3 places. Under
+    /// [`SUPPRESS_BELOW`] observations neither is shown (the count shows
+    /// as `<5`).
+    pub fn of(obs: &[(f64, bool)]) -> Calibration {
+        let n = obs.len() as u64;
+        let shown = n >= SUPPRESS_BELOW;
+        let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+        Calibration {
+            n: Shown(n),
+            ece: ece(obs, ECE_BINS).filter(|_| shown).map(r3),
+            brier: brier(obs).filter(|_| shown).map(r3),
+        }
+    }
+
+    /// `ECE 0.041 Brier 0.120 (n 212)`, or `-` without answers.
+    pub fn line(&self) -> String {
+        if self.n.0 == 0 {
+            return "-".into();
+        }
+        let f = |x: Option<f64>| x.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into());
+        format!("ECE {} Brier {} (n {})", f(self.ece), f(self.brier), self.n)
+    }
+}
+
+// --- acceptance ------------------------------------------------------------------
+
+/// A registered threshold, judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Pass,
+    Fail,
+    /// Too few cases (test map §3), or what it compares against is not
+    /// built or was not run.
+    NotJudged,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Pass => "PASS",
+            Verdict::Fail => "FAIL",
+            Verdict::NotJudged => "NOT JUDGED",
+        }
+    }
+
+    /// PURE: `value ≥ threshold`, or not judged when `value` is unknown or
+    /// `judged` is false.
+    pub fn at_least(value: Option<f64>, threshold: f64, judged: bool) -> Verdict {
+        match value {
+            Some(v) if judged => {
+                if v + 1e-9 >= threshold {
+                    Verdict::Pass
+                } else {
+                    Verdict::Fail
+                }
+            }
+            _ => Verdict::NotJudged,
+        }
+    }
+
+    /// PURE: every one of `vs` passes → pass; any fails → fail; else not
+    /// judged.
+    pub fn all(vs: &[Verdict]) -> Verdict {
+        if vs.contains(&Verdict::Fail) {
+            Verdict::Fail
+        } else if !vs.is_empty() && vs.iter().all(|v| *v == Verdict::Pass) {
+            Verdict::Pass
+        } else {
+            Verdict::NotJudged
+        }
+    }
+}
+
+/// One line of a card's acceptance: the registered criterion, what was
+/// measured, and the verdict.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Criterion {
+    pub criterion: String,
+    pub measured: String,
+    pub verdict: Verdict,
+}
+
+impl Criterion {
+    pub fn new(
+        criterion: impl Into<String>,
+        measured: impl Into<String>,
+        verdict: Verdict,
+    ) -> Self {
+        Criterion {
+            criterion: criterion.into(),
+            measured: measured.into(),
+            verdict,
+        }
+    }
+
+    pub fn line(&self) -> String {
+        format!(
+            "  {:<10} {} — {}",
+            self.verdict.as_str(),
+            self.criterion,
+            self.measured
+        )
+    }
+}
+
+/// PURE: `x` to three places, `-` for none.
+pub fn f3(x: Option<f64>) -> String {
+    x.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ece_of_a_calibrated_model_is_zero_and_of_an_overconfident_one_is_the_gap() {
+        // 10 answers at 0.8, 8 right: calibrated.
+        let cal: Vec<(f64, bool)> = (0..10).map(|i| (0.8, i < 8)).collect();
+        assert!(ece(&cal, 10).unwrap().abs() < 1e-12);
+        // 10 answers at 0.9, 6 right: |0.6 − 0.9| = 0.3.
+        let over: Vec<(f64, bool)> = (0..10).map(|i| (0.9, i < 6)).collect();
+        assert!((ece(&over, 10).unwrap() - 0.3).abs() < 1e-12);
+        // Two bins weighted by their share: 4 at 0.25 all wrong (gap 0.25),
+        // 4 at 0.95 all right (gap 0.05) → 0.5·0.25 + 0.5·0.05 = 0.15.
+        let two: Vec<(f64, bool)> = (0..8)
+            .map(|i| if i < 4 { (0.25, false) } else { (0.95, true) })
+            .collect();
+        assert!((ece(&two, 10).unwrap() - 0.15).abs() < 1e-12);
+        // 1.0 falls in the last bin, 0.0 in the first.
+        assert!(ece(&[(1.0, true), (0.0, false)], 10).unwrap().abs() < 1e-12);
+        assert_eq!(ece(&[], 10), None);
+        assert_eq!(ece(&[(0.5, true)], 0), None);
+    }
+
+    #[test]
+    fn brier_is_the_mean_squared_gap() {
+        assert!(brier(&[(1.0, true), (0.0, false)]).unwrap().abs() < 1e-12);
+        assert!((brier(&[(0.5, true), (0.5, false)]).unwrap() - 0.25).abs() < 1e-12);
+        // (0.8 − 1)² = 0.04, (0.6 − 0)² = 0.36 → 0.2.
+        assert!((brier(&[(0.8, true), (0.6, false)]).unwrap() - 0.2).abs() < 1e-12);
+        assert_eq!(brier(&[]), None);
+    }
+
+    #[test]
+    fn calibration_hides_its_numbers_under_five_answers() {
+        let few = Calibration::of(&[(0.9, true), (0.9, false)]);
+        assert_eq!(few.n.0, 2);
+        assert_eq!((few.ece, few.brier), (None, None));
+        assert_eq!(few.line(), "ECE - Brier - (n <5)");
+        let many: Vec<(f64, bool)> = (0..10).map(|i| (0.9, i < 6)).collect();
+        let c = Calibration::of(&many);
+        assert_eq!(c.ece, Some(0.3));
+        // 6 × 0.01 + 4 × 0.81 = 3.3 over 10.
+        assert_eq!(c.brier, Some(0.33));
+        assert_eq!(Calibration::of(&[]).line(), "-");
+    }
+
+    #[test]
+    fn verdicts() {
+        assert_eq!(Verdict::at_least(Some(0.97), 0.97, true), Verdict::Pass);
+        assert_eq!(Verdict::at_least(Some(0.96), 0.97, true), Verdict::Fail);
+        assert_eq!(
+            Verdict::at_least(Some(0.99), 0.97, false),
+            Verdict::NotJudged
+        );
+        assert_eq!(Verdict::at_least(None, 0.97, true), Verdict::NotJudged);
+        assert_eq!(Verdict::all(&[Verdict::Pass, Verdict::Pass]), Verdict::Pass);
+        assert_eq!(
+            Verdict::all(&[Verdict::Pass, Verdict::NotJudged]),
+            Verdict::NotJudged
+        );
+        assert_eq!(
+            Verdict::all(&[Verdict::NotJudged, Verdict::Fail]),
+            Verdict::Fail
+        );
+        assert_eq!(Verdict::all(&[]), Verdict::NotJudged);
+        let c = Criterion::new("done precision ≥ 0.97", "0.980 over 50", Verdict::Pass);
+        assert!(c.line().contains("PASS") && c.line().contains("0.980"));
+    }
 
     #[test]
     fn the_generator_is_deterministic() {

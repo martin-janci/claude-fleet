@@ -4,12 +4,14 @@
 //! the D39 export / labels round trip, and that no report carries text.
 
 use super::work_link::*;
+use super::Verdict;
 use crate::service::decide::{
     BackendError, DecideCtx, DecisionBackend, JevRequest, JevResponse, Question,
 };
 use crate::service::nl::{NlBucket, Ranker};
 use crate::service::settings;
 use crate::store::{DecisionRunFilter, Secret, Store, WorkTarget};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -968,4 +970,300 @@ fn options_are_bounded() {
     assert_eq!(o.providers, vec![Provider::Bm25, Provider::Jev]);
     assert_eq!(Provider::parse("jev"), Some(Provider::Jev));
     assert_eq!(Provider::parse("haiku"), None);
+}
+
+// --- card J1's acceptance, calibration and the choice+noul shape -----------------
+
+/// A synthetic A set big enough to judge: 2500 truth cases (the oldest 60%
+/// dev) and their none-cases; every fifth case is Slovak. BM25 is right on
+/// half, always at score 1 (and at 0.5 on a none-case). Jev is right on 7
+/// of 8 English cases (the wrong one at confidence 0.6, the rest at 0.9),
+/// on half the Slovak ones (all at 0.9), and says `none` on none-cases.
+fn judged_world() -> (Loaded, Outcomes) {
+    let n = 2500;
+    let mk = |id: String, truth: Option<&str>, dev: bool, sk: bool| BenchCase {
+        id,
+        dataset: Dataset::A,
+        at: 0,
+        org_id: None,
+        tracker: "jira".into(),
+        state: String::new(),
+        candidates: vec![],
+        truth: truth.map(String::from),
+        dev,
+        nl_prompt: if sk { "sk" } else { "en" },
+        nl_title: "en",
+        code: "none",
+        guard: Default::default(),
+    };
+    let out = |pick: Option<&str>, score: f64| Outcome {
+        ran: true,
+        pick: pick.map(String::from),
+        score: Some(score),
+        choice_confidence: Some(score),
+        calls: 1,
+        ..Default::default()
+    };
+    let mut cases = Vec::new();
+    let (mut bm, mut jev) = (HashMap::new(), HashMap::new());
+    for i in 0..n {
+        let dev = i < n * DEV_SHARE_PCT / 100;
+        let sk = i % 5 == 0;
+        let id = format!("a{i}");
+        cases.push(mk(id.clone(), Some("i1"), dev, sk));
+        cases.push(mk(format!("{id}n"), None, dev, sk));
+        bm.insert(
+            id.clone(),
+            out(Some(if i % 2 == 0 { "i1" } else { "i2" }), 1.0),
+        );
+        bm.insert(format!("{id}n"), out(Some("i9"), 0.5));
+        let j = match i % 10 {
+            1 => out(Some("i2"), 0.6),
+            5 => out(Some("i2"), 0.9),
+            _ => out(Some("i1"), 0.9),
+        };
+        jev.insert(id.clone(), j);
+        jev.insert(format!("{id}n"), out(None, 0.8));
+    }
+    let loaded = Loaded {
+        schema_version: 99,
+        cases,
+        sizes: Default::default(),
+        recall: Default::default(),
+        org_names: Default::default(),
+    };
+    let outs: Outcomes = [(Provider::Bm25, bm), (Provider::Jev, jev)]
+        .into_iter()
+        .collect();
+    (loaded, outs)
+}
+
+#[test]
+fn jev_is_judged_against_bm25_at_bm25s_coverage() {
+    let (loaded, outs) = judged_world();
+    let o = opts(Split::Test, vec![Provider::Bm25, Provider::Jev]);
+    let r = report(&loaded, &o, &outs);
+    // BM25 abstains below 1 (every truth case answered on dev); Jev's
+    // threshold at that coverage is its lowest confidence.
+    assert_eq!(r.thresholds.bm25_abstain, Some(1.0));
+    assert_eq!(r.thresholds.bm25_dev_coverage, Some(1.0));
+    assert_eq!(r.thresholds.jev_at_bm25_coverage, Some(0.6));
+    let a = &r.datasets[0];
+    let e = a.equal_coverage.as_ref().unwrap();
+    assert_eq!(e.cases.0, 1000);
+    assert_eq!((e.bm25_accuracy, e.bm25_coverage), (Some(0.5), Some(1.0)));
+    // 7 of 8 English right, 1 of 2 Slovak: 0.7 + 0.1.
+    assert_eq!((e.jev_accuracy, e.jev_coverage), (Some(0.8), Some(1.0)));
+    assert_eq!(e.gap, Some(0.3));
+    assert!(e.lo.unwrap() > 0.1, "{e:?}");
+
+    let verdict = |prefix: &str| {
+        a.acceptance
+            .iter()
+            .find(|c| c.criterion.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix}: {:?}", a.acceptance))
+            .verdict
+    };
+    // Dev never reaches 0.9 over 5+ answers (8 of 9 at 0.9): fail.
+    assert_eq!(verdict("accuracy on answered"), Verdict::Fail);
+    assert_eq!(verdict("≥ 10 points above bm25"), Verdict::Pass);
+    assert_eq!(verdict("not worse than claude"), Verdict::NotJudged);
+    assert_eq!(verdict("abstention quality"), Verdict::Pass);
+    assert_eq!(a.acceptance_overall, Some(Verdict::Fail));
+    // The Slovak cell is 37.5 points below English at equal coverage.
+    let sk = a
+        .acceptance
+        .iter()
+        .find(|c| c.criterion.contains("sk×en"))
+        .unwrap();
+    assert_eq!(sk.verdict, Verdict::Fail);
+    assert!(sk.measured.contains("falls back"), "{}", sk.measured);
+    assert!(sk.measured.contains("37.5"), "{}", sk.measured);
+
+    // Calibration of Jev's choice confidence: every usable test case.
+    let jm = a.providers.iter().find(|p| p.provider == "jev").unwrap();
+    let cal = jm.calibration.as_ref().unwrap();
+    assert_eq!(cal.n.0, 2000);
+    assert!(cal.ece.is_some() && cal.brier.is_some());
+    assert!(jm.noul_calibration.is_none());
+    assert!(a
+        .providers
+        .iter()
+        .find(|p| p.provider == "bm25")
+        .unwrap()
+        .calibration
+        .is_none());
+    let nl_sk = a
+        .breakdown
+        .iter()
+        .find(|c| c.dimension == "nl" && c.value == "sk×en")
+        .unwrap();
+    assert!(nl_sk.judged);
+    let jc = nl_sk
+        .providers
+        .iter()
+        .find(|p| p.provider == "jev")
+        .unwrap();
+    // Slovak: truth cases half right at 0.9 (gap 0.4), none-cases all
+    // right at 0.8 (gap 0.2), half each → ECE 0.3.
+    assert_eq!(jc.calibration.as_ref().unwrap().ece, Some(0.3));
+    let lines = r.lines().join("\n");
+    assert!(lines.contains("acceptance, card J1"), "{lines}");
+    assert!(lines.contains("at bm25's coverage"), "{lines}");
+    assert!(lines.contains("calibration jev"), "{lines}");
+}
+
+#[test]
+fn a_small_set_is_not_judged_and_without_bm25_the_gap_is_not_either() {
+    let (mut loaded, mut outs) = judged_world();
+    loaded.cases.truncate(100);
+    outs.remove(&Provider::Bm25);
+    let o = opts(Split::Test, vec![Provider::Jev]);
+    let r = report(&loaded, &o, &outs);
+    let a = &r.datasets[0];
+    assert!(a.equal_coverage.is_none());
+    assert!(
+        a.acceptance.iter().all(|c| c.verdict == Verdict::NotJudged),
+        "{:?}",
+        a.acceptance
+    );
+    assert_eq!(a.acceptance_overall, Some(Verdict::NotJudged));
+    // No jev: no acceptance at all.
+    let o = opts(Split::Test, vec![Provider::None]);
+    let none: Outcomes = [(Provider::None, HashMap::new())].into_iter().collect();
+    let r = report(&loaded, &o, &none);
+    assert!(r.datasets[0].acceptance.is_empty());
+    assert_eq!(r.datasets[0].acceptance_overall, None);
+}
+
+/// A Choice answers its first option at 0.8; a Noul answers 0.7.
+#[derive(Default)]
+struct ChoiceThenNoul {
+    calls: AtomicUsize,
+    seen: Mutex<Vec<JevRequest>>,
+}
+
+#[async_trait::async_trait]
+impl DecisionBackend for ChoiceThenNoul {
+    fn provider(&self) -> &'static str {
+        crate::service::decide::PROVIDER_JEV
+    }
+    async fn ask(
+        &self,
+        _key: &Secret,
+        _model: &str,
+        req: &JevRequest,
+        _timeout: Duration,
+    ) -> Result<JevResponse, BackendError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen.lock().unwrap().push(req.clone());
+        let answer = match &req.question {
+            Question::Choice { criteria, .. } => serde_json::json!({
+                "type": "choice",
+                "choice": criteria.keys().next().unwrap(),
+                "confidence": 0.8
+            }),
+            Question::Noul { .. } => serde_json::json!({ "type": "noul", "noul": 0.7 }),
+            Question::Score { .. } => return Err(BackendError::Unreadable("a score".into())),
+        };
+        Ok(serde_json::from_value(serde_json::json!({
+            "model": "jev-1.13.0",
+            "answers": { "q": answer },
+            "usage": { "input_tokens": 100, "output_tokens": 2 },
+        }))
+        .unwrap())
+    }
+}
+
+#[tokio::test]
+async fn choice_then_noul_asks_twice_and_thresholds_the_noul_on_dev() {
+    let w = seeded();
+    let acme = w.acme;
+    let store = Arc::new(Mutex::new(w.s));
+    {
+        let s = store.lock().unwrap();
+        settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
+        settings::set(&s, settings::DECIDE_JEV_WORK_LINK, "shadow").unwrap();
+        s.set_decision_credential(Some(&Secret::new(KEY)), None)
+            .unwrap();
+        s.set_org_jev_allowed(acme, true).unwrap();
+    }
+    let fake = Arc::new(ChoiceThenNoul::default());
+    let ctx = DecideCtx::new(Arc::clone(&store), fake.clone());
+    let o = opts(Split::All, vec![Provider::Bm25, Provider::Jev]).with_shape(Shape::ChoiceNoul);
+    assert_eq!(o.shape, Shape::ChoiceNoul);
+    let loaded = load(&store.lock().unwrap(), &Words, &o, None).unwrap();
+    let outs = run_providers(&loaded, &o, Some(&ctx)).await;
+    let jev = &outs[&Provider::Jev];
+    // The first option is always an item (ids sort before "none"): every
+    // case is checked by a noul.
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 2 * loaded.cases.len());
+    for c in &loaded.cases {
+        let x = &jev[&c.id];
+        assert!(x.usable(), "{x:?}");
+        assert_eq!(x.calls, 2);
+        assert_eq!(x.choice_confidence, Some(0.8));
+        assert_eq!((x.noul, x.score), (Some(0.7), Some(0.7)));
+        assert_eq!(x.input_tokens, 200);
+    }
+    // The check names the chosen item's title, and nothing else is new.
+    {
+        let seen = fake.seen.lock().unwrap();
+        let nouls: Vec<&JevRequest> = seen
+            .iter()
+            .filter(|r| matches!(r.question, Question::Noul { .. }))
+            .collect();
+        assert_eq!(nouls.len(), loaded.cases.len());
+        for r in nouls {
+            let Question::Noul { instructions, .. } = &r.question else {
+                unreachable!()
+            };
+            let text = instructions.as_str().unwrap();
+            assert!(text.starts_with(NOUL_INSTRUCTIONS), "{text}");
+            assert!(!r.state.to_string().contains("PAY-"));
+        }
+    }
+    let runs = store
+        .lock()
+        .unwrap()
+        .list_decision_runs(&DecisionRunFilter {
+            limit: 1000,
+            ..Default::default()
+        })
+        .unwrap();
+    let noul_runs: Vec<_> = runs
+        .iter()
+        .filter(|r| r.question_version == NOUL_QUESTION_VERSION)
+        .collect();
+    assert_eq!(noul_runs.len(), loaded.cases.len());
+    assert!(noul_runs.iter().all(|r| r.subject_id.ends_with(":noul")
+        && r.subject_kind == SUBJECT_KIND
+        && r.candidates.is_empty()));
+
+    let r = report(&loaded, &o, &outs);
+    assert_eq!(r.shape, "choice+noul");
+    assert!(r.thresholds.jev_noul.is_some());
+    let jm = r.datasets[0]
+        .providers
+        .iter()
+        .find(|p| p.provider == "jev")
+        .unwrap();
+    assert_eq!(jm.calls.0, 2 * loaded.cases.len() as u64);
+    assert_eq!(jm.threshold, r.thresholds.jev_noul);
+    assert!(jm.noul_calibration.is_some());
+    assert!(r.lines().join("\n").contains("jev noul ≥"));
+
+    // The cap counts both calls: the second case's check does not fit.
+    let capped = BenchOptions {
+        max_calls: 3,
+        ..o.clone()
+    };
+    let before = fake.calls.load(Ordering::SeqCst);
+    let outs = run_providers(&loaded, &capped, Some(&ctx)).await;
+    assert_eq!(fake.calls.load(Ordering::SeqCst) - before, 3);
+    let x = &outs[&Provider::Jev];
+    assert_eq!(x.values().filter(|o| o.calls == 2).count(), 1);
+    assert!(x
+        .values()
+        .any(|o| o.calls == 1 && o.reason.as_deref() == Some("max_calls")));
 }

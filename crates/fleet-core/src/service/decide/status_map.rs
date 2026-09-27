@@ -173,14 +173,32 @@ pub fn board_of(row: &TrackerRow, name: &str) -> Vec<String> {
     else {
         return Vec::new();
     };
+    board_window(names, name)
+}
+
+/// PURE: at most [`MAX_PROJECT_SECTIONS`] of a board's `names`: all of them,
+/// or a window around `name` when longer (from the start when `name` is not
+/// among them).
+pub fn board_window(names: &[String], name: &str) -> Vec<String> {
     if names.len() <= MAX_PROJECT_SECTIONS {
-        return names.clone();
+        return names.to_vec();
     }
     let at = names.iter().position(|x| x == name).unwrap_or(0);
     let start = at
         .saturating_sub(MAX_PROJECT_SECTIONS / 2)
         .min(names.len() - MAX_PROJECT_SECTIONS);
     names[start..start + MAX_PROJECT_SECTIONS].to_vec()
+}
+
+/// PURE: the request for one section: its (lower-case) name and its
+/// board's section names in order ([`board_window`]), and [`question`].
+/// What the adapter sends, and what the offline benchmark
+/// (`bench::status_map`) sends for a labeled section.
+pub fn question_for(section: &str, project_sections: &[String]) -> JevRequest {
+    JevRequest {
+        state: state(section, &board_window(project_sections, section)),
+        question: question(),
+    }
 }
 
 /// PURE: the sections to ask about in `mode`, with their baselines: the
@@ -296,10 +314,7 @@ pub async fn propose_for_tracker(ctx: &DecideCtx, tracker_id: i64) -> Result<Run
         )?;
         let mut asks = Vec::new();
         for (name, baseline) in sections {
-            let request = JevRequest {
-                state: state(&name, &board_of(&row, &name)),
-                question: question(),
-            };
+            let request = question_for(&name, &board_of(&row, &name));
             let subject = subject_id(tracker_id, &section_id(&fp_key, tracker_id, &name));
             let fp = fingerprint(&fp_key, &request.redacted());
             let seen = recent.iter().any(|r| {

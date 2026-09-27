@@ -1291,17 +1291,34 @@ fleet-hub decide bench work-link --split all --json
 fleet-hub decide bench work-link --export-unlinked 150 --out h.jsonl   # D39: a person labels it
 fleet-hub decide bench work-link --labels h.jsonl      # adds the labels as dataset H
 fleet-hub decide bench work-link --split all --provider bm25 --provider jev --max-calls 200
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev --shape choice+noul
 ```
 
-Without `--provider jev` it opens the database read-only and sends
-nothing. With it, each case goes through the envelope's gate (so only
-orgs that consented, with the flag on and `decide.jev.work_link` at
-`shadow` or `assist`) and every call is recorded in `decision_runs`
-(subject `bench`), which is why that run opens the database for writing.
-It prints counts, rates, thresholds, latency and cost — never a prompt or a
-title; `--export-unlinked` writes the one file that holds text (`0600`,
+Both reports end in the card's acceptance lines (PASS / FAIL / NOT JUDGED
+against the thresholds the test map registered) and carry Jev's
+calibration (ECE, Brier). The `status_map` benchmark (card J3) reads
+labeled Asana sections — the owner's file, or the built-in synthetic set
+(LLM-written, not yet spot-checked) — and opens no database unless
+`--provider jev`:
+
+```bash
+fleet-hub decide bench status-map --fixture                      # todo + rule, offline
+fleet-hub decide bench status-map --labels sections.jsonl --provider rule --provider jev
+```
+
+Without `--provider jev` neither sends anything (`work-link` opens the
+database read-only). With it, each case goes through the envelope's gate
+(so only orgs that consented — or, for a row with no org,
+`decide.jev.unassigned` — with the flag on and `decide.jev.work_link` /
+`decide.jev.status_map` at `shadow` or `assist`) and every call is recorded
+in `decision_runs` (subject `bench`), which is why that run opens the
+database for writing. They print counts, rates, thresholds, latency and
+cost — never a prompt, a title or a section name; `--export-unlinked`
+writes the one file that holds text (`0600`,
 never over an existing file). What it measures and approximates:
-[`decisions.md`](decisions.md) → *Benchmarking work_link*.
+[`decisions.md`](decisions.md) → *Benchmarking work_link* and
+*Benchmarking status_map*; the order to run it all in is *How to run
+phase 0* there.
 
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
