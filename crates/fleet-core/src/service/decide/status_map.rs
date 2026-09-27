@@ -32,6 +32,12 @@
 //!   section, its latest answered run is marked `confirmed` (same category)
 //!   or `corrected` (to theirs) — [`record_followups`], called where the
 //!   settings are updated.
+//! * **Deciding one proposal** ([`decide_proposal`], by its run id):
+//!   *apply* (its category — `not_planned` applies as `done`), *apply as*
+//!   another category (a correction), both through `work_admin update`
+//!   like any section map change, or *reject* (`rejected`; the section
+//!   stays unmapped, and the answer is not proposed again until a new one
+//!   exists on another input, question version or model).
 //!
 //! Jira, Linear and GitHub carry exact status categories from the tracker
 //! itself: a rule wins there and this adapter never looks at them.
@@ -71,6 +77,10 @@ pub const NO_RULE: &str = "none";
 pub const UNSURE: &str = "unsure";
 /// The provider this adapter reads.
 pub const PROVIDER: &str = "asana";
+/// The categories a section map takes (what a person may apply).
+pub const SECTION_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
+/// The follow-up of a proposal a person said "not this" to.
+pub const FOLLOWUP_REJECTED: &str = "rejected";
 
 /// The instruction, read literally: the exact condition and what to use.
 pub const INSTRUCTIONS: &str = "state.section is the name of one section (a column) of an Asana \
@@ -263,6 +273,10 @@ pub struct RunReport {
     pub usable: usize,
     /// Sections not asked: decided recently on the same input.
     pub skipped_recent: usize,
+    /// Sections not asked (assist): a person rejected the answer on the
+    /// same input, question version and pinned model.
+    #[serde(default)]
+    pub skipped_rejected: usize,
     /// Sections left for the next run (over [`MAX_ASKS_PER_RUN`]).
     pub deferred: usize,
     /// The fallback that stopped the run early.
@@ -306,27 +320,50 @@ pub async fn propose_for_tracker(ctx: &DecideCtx, tracker_id: i64) -> Result<Run
         }
         let fp_key = s.decision_fp_key()?;
         let model = settings::get_string(&s, settings::DECIDE_JEV_MODEL);
-        let recent = s.decision_runs_for_subjects(
+        // Every run of the tracker's sections: the recent ones decide a
+        // re-ask; a rejection holds (in assist) for as long as the input,
+        // the question and the pinned model stay the same.
+        let runs = s.decision_runs_for_subjects(
             Feature::StatusMap.as_str(),
             SUBJECT_KIND,
             &subject_prefix(tracker_id),
-            Some(now - REASK_DAYS * 86_400),
+            None,
         )?;
+        let since = now - REASK_DAYS * 86_400;
         let mut asks = Vec::new();
         for (name, baseline) in sections {
             let request = question_for(&name, &board_of(&row, &name));
             let subject = subject_id(tracker_id, &section_id(&fp_key, tracker_id, &name));
             let fp = fingerprint(&fp_key, &request.redacted());
-            let seen = recent.iter().any(|r| {
+            let same_input = |r: &DecisionRunRow| {
                 r.subject_id == subject
                     && r.input_fp.as_deref() == Some(fp.as_str())
                     && r.question_version == QUESTION_VERSION
+            };
+            let seen = runs.iter().any(|r| {
+                r.at >= since
+                    && same_input(r)
                     && r.mode == mode.as_str()
                     && decided(r)
                     && (model == "jev-latest" || r.model_version.as_deref() == Some(model.as_str()))
             });
             if seen {
                 report.skipped_recent += 1;
+                continue;
+            }
+            // A person said "not this" to an answer on the same input: with
+            // a pinned model the same answer would come back. (Under
+            // `jev-latest` the section is asked on the usual schedule, and
+            // the proposals view hides an answer of the rejected model.)
+            let rejected = mode == Mode::Assist
+                && model != "jev-latest"
+                && runs.iter().any(|r| {
+                    same_input(r)
+                        && r.followup.as_deref() == Some(FOLLOWUP_REJECTED)
+                        && r.model_version.as_deref() == Some(model.as_str())
+                });
+            if rejected {
+                report.skipped_rejected += 1;
                 continue;
             }
             asks.push(Ask {
@@ -474,6 +511,31 @@ pub struct SectionProposal {
     /// The person's category, when their map already holds the section.
     pub person: Option<String>,
     pub followup: Option<String>,
+    /// The why: the answer's two most probable options, most probable
+    /// first (empty when the answer carried no distribution).
+    #[serde(default)]
+    pub top: Vec<(String, f64)>,
+}
+
+impl SectionProposal {
+    /// Still up to a person: not in their map, no follow-up yet.
+    pub fn pending(&self) -> bool {
+        self.person.is_none() && self.followup.is_none()
+    }
+}
+
+/// PURE: the two most probable options of `run`, most probable first
+/// (ties by name).
+fn top_two(run: &DecisionRunRow) -> Vec<(String, f64)> {
+    let mut all: Vec<(String, f64)> = run
+        .probabilities
+        .iter()
+        .flatten()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    all.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    all.truncate(2);
+    all
 }
 
 /// One shadow comparison: the keyword rule and the model on a section.
@@ -516,6 +578,10 @@ pub struct TrackerProposals {
     pub shadow: Vec<ShadowLine>,
     /// Runs about sections the tracker's config no longer names.
     pub unknown_sections: usize,
+    /// Sections whose latest answer a person rejected (on the same input,
+    /// question version and model): not shown until a new answer exists.
+    #[serde(default)]
+    pub rejected: usize,
     /// Present when a proposal is pending (not `unsure`, not in the
     /// person's map yet).
     pub apply: Option<ApplyCommand>,
@@ -595,8 +661,22 @@ impl TrackerProposals {
                 self.unknown_sections
             ));
         }
+        if self.rejected > 0 {
+            out.push(format!(
+                "  {} rejected proposal(s) hidden until a new answer (another input, question or \
+                 model)",
+                self.rejected
+            ));
+        }
         if let Some(a) = &self.apply {
             out.push(format!("  apply (a person decides): {}", a.cli));
+        }
+        if self.proposals.iter().any(SectionProposal::pending) {
+            out.push(
+                "  or one at a time: fleet-hub decide proposals apply <run> [--as CATEGORY] | \
+                 reject <run>"
+                    .into(),
+            );
         }
         out
     }
@@ -610,6 +690,37 @@ pub fn apply_cli(tracker_id: i64, sets: &[(String, String)]) -> String {
         cli.push_str(&crate::shell::quote(&format!("{name}={cat}")));
     }
     cli
+}
+
+/// PURE: subject id → section name, for every section `row`'s stored
+/// config or its person's map names. The only way back from a run to a
+/// name: the record holds none.
+fn section_names(fp_key: &Secret, row: &TrackerRow) -> HashMap<String, String> {
+    row.config
+        .unmapped_sections
+        .iter()
+        .chain(row.config.section_map.keys())
+        .chain(row.settings.section_map.keys())
+        .map(|n| {
+            (
+                subject_id(row.id, &section_id(fp_key, row.id, n)),
+                n.clone(),
+            )
+        })
+        .collect()
+}
+
+/// PURE: a person rejected `r`'s answer — `r` itself, or another run of the
+/// same section on the same input, question version and model (the same
+/// answer again). A new input, question or model is a new answer.
+fn was_rejected(runs: &[DecisionRunRow], r: &DecisionRunRow) -> bool {
+    runs.iter().any(|x| {
+        x.followup.as_deref() == Some(FOLLOWUP_REJECTED)
+            && x.subject_id == r.subject_id
+            && x.input_fp == r.input_fp
+            && x.question_version == r.question_version
+            && x.model_version == r.model_version
+    })
 }
 
 /// Read-only: every Asana tracker's (or just `tracker`'s) latest proposals
@@ -637,6 +748,7 @@ pub fn proposals(s: &Store, tracker: Option<i64>) -> Result<Vec<TrackerProposals
             proposals: Vec::new(),
             shadow: Vec::new(),
             unknown_sections: 0,
+            rejected: 0,
             apply: None,
         };
         if runs.is_empty() {
@@ -646,19 +758,7 @@ pub fn proposals(s: &Store, tracker: Option<i64>) -> Result<Vec<TrackerProposals
         // Runs exist, so the key does (the envelope made it): a read-only
         // store reads it without writing.
         let fp_key = s.decision_fp_key()?;
-        let mut names: HashMap<String, String> = HashMap::new();
-        for n in row
-            .config
-            .unmapped_sections
-            .iter()
-            .chain(row.config.section_map.keys())
-            .chain(row.settings.section_map.keys())
-        {
-            names.insert(
-                subject_id(row.id, &section_id(&fp_key, row.id, n)),
-                n.clone(),
-            );
-        }
+        let names = section_names(&fp_key, &row);
         let assist = latest_per_subject(&runs, |r| r.mode == "assist" && answered(r));
         let shadow = latest_per_subject(&runs, |r| {
             r.mode == "shadow" && answered(r) && r.baseline_answer.is_some()
@@ -669,6 +769,10 @@ pub fn proposals(s: &Store, tracker: Option<i64>) -> Result<Vec<TrackerProposals
                 unknown.insert(subject);
                 continue;
             };
+            if was_rejected(&runs, r) {
+                tp.rejected += 1;
+                continue;
+            }
             let answer = r.answer.clone().unwrap_or_default();
             tp.proposals.push(SectionProposal {
                 section: name.clone(),
@@ -679,6 +783,7 @@ pub fn proposals(s: &Store, tracker: Option<i64>) -> Result<Vec<TrackerProposals
                 at: r.at,
                 person: row.settings.section_map.get(name).cloned(),
                 followup: r.followup.clone(),
+                top: top_two(r),
             });
         }
         for (subject, r) in &shadow {
@@ -700,7 +805,7 @@ pub fn proposals(s: &Store, tracker: Option<i64>) -> Result<Vec<TrackerProposals
         let sets: Vec<(String, String)> = tp
             .proposals
             .iter()
-            .filter(|p| p.person.is_none())
+            .filter(|p| p.pending())
             .filter_map(|p| Some((p.section.clone(), p.applies_as.clone()?)))
             .collect();
         if !sets.is_empty() {
@@ -712,6 +817,297 @@ pub fn proposals(s: &Store, tracker: Option<i64>) -> Result<Vec<TrackerProposals
         out.push(tp);
     }
     Ok(out)
+}
+
+// --- a person decides one proposal (assist) -------------------------------------
+
+/// What a person does with one proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposalAction {
+    /// Its category into their section map (`not_planned` → `done`).
+    Apply,
+    /// Another category into their map: a correction.
+    ApplyAs(String),
+    /// "Not this": the section stays unmapped.
+    Reject,
+}
+
+impl ProposalAction {
+    /// `apply` | `apply_as` (with `category`) | `reject`.
+    pub fn parse(action: &str, category: Option<&str>) -> Result<Self, IpcError> {
+        let category = category.map(str::trim).filter(|c| !c.is_empty());
+        match (action, category) {
+            ("apply", None) => Ok(Self::Apply),
+            ("reject", None) => Ok(Self::Reject),
+            ("apply_as", Some(c)) => Ok(Self::ApplyAs(section_category(c)?.to_string())),
+            ("apply_as", None) => Err(invalid("apply_as needs a category")),
+            ("apply" | "reject", Some(_)) => Err(invalid(format!(
+                "{action} takes no category (apply_as does)"
+            ))),
+            _ => Err(invalid(format!(
+                "action is apply, apply_as or reject, not {action:?}"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::ApplyAs(_) => "apply_as",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+fn invalid(msg: impl Into<String>) -> IpcError {
+    IpcError::new(crate::ipc_error::codes::E_INVALID, msg)
+}
+
+fn conflict(msg: impl Into<String>) -> IpcError {
+    IpcError::new(crate::ipc_error::codes::E_INVALID_STATE, msg)
+}
+
+/// PURE: `c` if a section map takes it (todo | in_progress | done).
+pub fn section_category(c: &str) -> Result<&'static str, IpcError> {
+    SECTION_CATEGORIES
+        .iter()
+        .find(|x| **x == c)
+        .copied()
+        .ok_or_else(|| {
+            invalid(format!(
+                "a section map takes todo, in_progress or done, not {c:?}"
+            ))
+        })
+}
+
+/// A proposal a person may decide, read back from its run: the section's
+/// name comes from the tracker's stored config, never from a caller.
+#[derive(Debug, Clone)]
+pub struct PendingProposal {
+    pub run: DecisionRunRow,
+    pub tracker: TrackerRow,
+    pub section: String,
+}
+
+impl PendingProposal {
+    /// The model's option.
+    pub fn answer(&self) -> &str {
+        self.run.answer.as_deref().unwrap_or_default()
+    }
+
+    /// The category `action` puts into the map; `None` for a rejection.
+    /// Applying an `unsure` answer is refused: it proposes nothing.
+    pub fn category(&self, action: &ProposalAction) -> Result<Option<String>, IpcError> {
+        match action {
+            ProposalAction::Reject => Ok(None),
+            ProposalAction::ApplyAs(c) => Ok(Some(section_category(c)?.to_string())),
+            ProposalAction::Apply => applied_category(self.answer())
+                .map(|c| Some(c.to_string()))
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "run {} is {}: it proposes nothing; apply_as a category, or reject it",
+                        self.run.id,
+                        self.answer()
+                    ))
+                }),
+        }
+    }
+
+    /// The follow-up applying `category` records: `confirmed` when it is
+    /// what the answer applies as, else `corrected` to it.
+    pub fn followup_for(&self, category: &str) -> (&'static str, Option<String>) {
+        if applied_category(self.answer()) == Some(category) {
+            ("confirmed", None)
+        } else {
+            ("corrected", Some(category.to_string()))
+        }
+    }
+}
+
+/// Read the proposal of run `run_id` for a person to decide: a
+/// `status_map` run about a tracker section, answered in assist and usable
+/// (no fallback), the latest such answer for its section, not decided yet,
+/// about a section the tracker's stored config (or map) still names and
+/// that is not in the person's map already. Anything else is refused.
+pub fn pending_proposal(s: &Store, run_id: i64) -> Result<PendingProposal, IpcError> {
+    let run = s.get_decision_run(run_id)?.ok_or_else(|| {
+        IpcError::new(
+            crate::ipc_error::codes::E_NOTFOUND,
+            format!("no decision run {run_id}"),
+        )
+    })?;
+    if run.feature != Feature::StatusMap.as_str() || run.subject_kind != SUBJECT_KIND {
+        return Err(invalid(format!(
+            "run {run_id} is not a status_map proposal"
+        )));
+    }
+    if run.mode != Mode::Assist.as_str() || !answered(&run) {
+        return Err(invalid(format!(
+            "run {run_id} is not a usable assist answer (mode {}, {})",
+            run.mode,
+            run.fallback.as_deref().unwrap_or("no answer")
+        )));
+    }
+    let tracker_id = run
+        .subject_id
+        .split_once(':')
+        .and_then(|(t, _)| t.parse::<i64>().ok())
+        .ok_or_else(|| invalid(format!("run {run_id} names no tracker")))?;
+    let tracker = s.require_tracker(tracker_id)?;
+    if tracker.provider != PROVIDER {
+        return Err(invalid(format!(
+            "tracker {tracker_id} is {}; a section map is an Asana setting",
+            tracker.provider
+        )));
+    }
+    let fp_key = s.decision_fp_key()?;
+    let section = section_names(&fp_key, &tracker)
+        .remove(&run.subject_id)
+        .ok_or_else(|| {
+            conflict(format!(
+                "run {run_id} is about a section tracker {tracker_id} no longer lists \
+                 (test the tracker to refresh its sections)"
+            ))
+        })?;
+    if let Some(c) = tracker.settings.section_map.get(&section) {
+        return Err(conflict(format!(
+            "{section:?} is already in your section map as {c}"
+        )));
+    }
+    if let Some(f) = &run.followup {
+        return Err(conflict(format!("run {run_id} is already {f}")));
+    }
+    let runs = s.decision_runs_for_subjects(
+        Feature::StatusMap.as_str(),
+        SUBJECT_KIND,
+        &run.subject_id,
+        None,
+    )?;
+    if let Some(newer) = runs
+        .iter()
+        .find(|r| r.subject_id == run.subject_id && r.mode == Mode::Assist.as_str() && answered(r))
+    {
+        if newer.id != run.id {
+            return Err(conflict(format!(
+                "run {run_id} is not the latest proposal for this section (run {} is)",
+                newer.id
+            )));
+        }
+    }
+    if was_rejected(&runs, &run) {
+        return Err(conflict(format!(
+            "the same answer was rejected before (run {run_id} is hidden)"
+        )));
+    }
+    Ok(PendingProposal {
+        run,
+        tracker,
+        section,
+    })
+}
+
+/// PURE: the `work_admin update` arguments that put `section` → `category`
+/// into `row`'s section map and confirm it — the inferred map kept under
+/// the person's entries, as Settings → Work's Confirm and `fleet-hub
+/// tracker section-map` do.
+pub fn apply_one_args(row: &TrackerRow, section: &str, category: &str) -> Value {
+    apply_args(
+        row,
+        &merged_section_map(row, &[(section.to_string(), category.to_string())]),
+    )
+}
+
+/// What deciding one proposal did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposalOutcome {
+    pub run_id: i64,
+    pub tracker_id: i64,
+    /// The section's name, from the tracker's stored config.
+    pub section: String,
+    /// apply | apply_as | reject.
+    pub action: String,
+    /// What the person's map now holds for the section (`None`: rejected,
+    /// left unmapped).
+    pub category: Option<String>,
+    /// The run's follow-up: confirmed | corrected | rejected.
+    pub followup: Option<String>,
+    pub corrected_to: Option<String>,
+}
+
+/// After an apply went through `work_admin update` (whose
+/// [`record_followups`] marks the latest answered run of the section):
+/// make sure run `p` carries its follow-up — `record_followups` leaves an
+/// `unsure` answer alone, and a newer shadow answer would take its mark.
+/// Returns the outcome as the record now reads.
+pub fn record_applied(
+    s: &Store,
+    p: &PendingProposal,
+    action: &ProposalAction,
+    category: &str,
+    now: i64,
+) -> Result<ProposalOutcome, IpcError> {
+    let current = s.get_decision_run(p.run.id)?;
+    if current.as_ref().is_some_and(|r| r.followup.is_none()) {
+        let (f, to) = p.followup_for(category);
+        s.set_decision_followup(p.run.id, f, to.as_deref(), now)?;
+    }
+    let run = s.get_decision_run(p.run.id)?;
+    Ok(ProposalOutcome {
+        run_id: p.run.id,
+        tracker_id: p.tracker.id,
+        section: p.section.clone(),
+        action: action.as_str().into(),
+        category: Some(category.to_string()),
+        followup: run.as_ref().and_then(|r| r.followup.clone()),
+        corrected_to: run.and_then(|r| r.corrected_to),
+    })
+}
+
+/// "Not this": mark run `run_id` `rejected`. Writes nothing but the run's
+/// follow-up: the section stays unmapped, and the proposals view hides the
+/// answer until a new one exists (another input, question version or
+/// model).
+pub fn reject_proposal(s: &Store, run_id: i64, now: i64) -> Result<ProposalOutcome, IpcError> {
+    let p = pending_proposal(s, run_id)?;
+    s.set_decision_followup(p.run.id, FOLLOWUP_REJECTED, None, now)?;
+    Ok(ProposalOutcome {
+        run_id: p.run.id,
+        tracker_id: p.tracker.id,
+        section: p.section,
+        action: ProposalAction::Reject.as_str().into(),
+        category: None,
+        followup: Some(FOLLOWUP_REJECTED.into()),
+        corrected_to: None,
+    })
+}
+
+/// A person decides the proposal of run `run_id` (the standalone desktop;
+/// the hub's operator has `fleet-hub decide proposals apply|reject`). An
+/// apply is a `work_admin update` of the tracker's settings — the same
+/// path, validation, event and follow-up as any section map change; a
+/// rejection writes the run's follow-up only.
+pub fn decide_proposal(
+    store: &Mutex<Store>,
+    run_id: i64,
+    action: &ProposalAction,
+    now: i64,
+) -> Result<ProposalOutcome, IpcError> {
+    if *action == ProposalAction::Reject {
+        return reject_proposal(&*lock(store)?, run_id, now);
+    }
+    let (p, category) = {
+        let s = lock(store)?;
+        let p = pending_proposal(&s, run_id)?;
+        let category = p
+            .category(action)?
+            .ok_or_else(|| invalid("an apply needs a category"))?;
+        (p, category)
+    };
+    let args: crate::service::trackers::admin::WorkAdminArgs =
+        serde_json::from_value(apply_one_args(&p.tracker, &p.section, &category))
+            .map_err(|e| IpcError::new(crate::ipc_error::codes::E_SERIALIZE, e.to_string()))?;
+    crate::service::trackers::admin::admin_sync(&args, store)?;
+    record_applied(&*lock(store)?, &p, action, &category, now)
 }
 
 /// The sync tick's hook: after a pass, the Asana trackers that synced

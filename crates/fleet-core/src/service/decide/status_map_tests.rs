@@ -600,6 +600,271 @@ async fn proposals_read_a_read_only_database() {
     assert!(p[0].apply.is_some());
 }
 
+// --- a person decides one proposal ------------------------------------------------
+
+impl World {
+    /// Assist, one run: backlog → todo, ideas → unsure, parked →
+    /// not_planned. Returns the run id per section.
+    async fn three_proposals(&self) -> HashMap<String, i64> {
+        self.on("assist");
+        let fake = Fake::answering(vec![
+            says("todo", 0.91),
+            says("unsure", 0.8),
+            says("not_planned", 0.85),
+        ]);
+        self.run(&fake).await;
+        self.proposals()
+            .proposals
+            .into_iter()
+            .map(|p| (p.section, p.run_id))
+            .collect()
+    }
+    fn decide(&self, run: i64, action: ProposalAction) -> Result<ProposalOutcome, IpcError> {
+        decide_proposal(&self.store, run, &action, NOON)
+    }
+    fn row(&self) -> TrackerRow {
+        self.store
+            .lock()
+            .unwrap()
+            .require_tracker(self.tracker)
+            .unwrap()
+    }
+    fn run_row(&self, id: i64) -> DecisionRunRow {
+        self.store
+            .lock()
+            .unwrap()
+            .get_decision_run(id)
+            .unwrap()
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn apply_puts_the_category_in_the_persons_map_and_confirms_the_run() {
+    let w = world();
+    let runs = w.three_proposals().await;
+    // The why: the two most probable options, most probable first.
+    let p = w.proposals();
+    let backlog = p.proposals.iter().find(|x| x.section == "backlog").unwrap();
+    let top: Vec<(&str, String)> = backlog
+        .top
+        .iter()
+        .map(|(k, v)| (k.as_str(), format!("{v:.2}")))
+        .collect();
+    assert_eq!(
+        top,
+        vec![("todo", "0.91".into()), ("unsure", "0.09".into())]
+    );
+    assert!(backlog.pending());
+
+    let out = w.decide(runs["backlog"], ProposalAction::Apply).unwrap();
+    assert_eq!(
+        (
+            out.section.as_str(),
+            out.category.as_deref(),
+            out.followup.as_deref()
+        ),
+        ("backlog", Some("todo"), Some("confirmed"))
+    );
+    // Through work_admin update: the map is confirmed, the inferred one
+    // kept under the person's entry, the other proposals untouched.
+    let row = w.row();
+    assert!(row.settings.section_map_confirmed);
+    assert_eq!(
+        row.settings.section_map,
+        [
+            ("backlog", "todo"),
+            ("done", "done"),
+            ("in progress", "in_progress")
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+    );
+    assert!(w.run_row(runs["parked"]).followup.is_none());
+    // not_planned applies as done.
+    let out = w.decide(runs["parked"], ProposalAction::Apply).unwrap();
+    assert_eq!(out.category.as_deref(), Some("done"));
+    assert_eq!(out.followup.as_deref(), Some("confirmed"));
+    assert_eq!(w.row().settings.section_map["parked"], "done");
+    // Decided: not pending, and not decidable twice.
+    let p = w.proposals();
+    assert!(p.proposals.iter().filter(|x| x.pending()).count() == 1);
+    let e = w
+        .decide(runs["backlog"], ProposalAction::Apply)
+        .unwrap_err();
+    assert!(e.message.contains("already in your section map"), "{e:?}");
+}
+
+#[tokio::test]
+async fn apply_as_is_a_correction_and_unsure_can_only_be_applied_as() {
+    let w = world();
+    let runs = w.three_proposals().await;
+    let e = w.decide(runs["ideas"], ProposalAction::Apply).unwrap_err();
+    assert!(e.message.contains("proposes nothing"), "{e:?}");
+    let out = w
+        .decide(runs["ideas"], ProposalAction::ApplyAs("in_progress".into()))
+        .unwrap();
+    assert_eq!(
+        (out.followup.as_deref(), out.corrected_to.as_deref()),
+        (Some("corrected"), Some("in_progress"))
+    );
+    assert_eq!(w.row().settings.section_map["ideas"], "in_progress");
+    let out = w
+        .decide(runs["backlog"], ProposalAction::ApplyAs("done".into()))
+        .unwrap();
+    assert_eq!(out.followup.as_deref(), Some("corrected"));
+    assert_eq!(
+        w.run_row(runs["backlog"]).corrected_to.as_deref(),
+        Some("done")
+    );
+    // apply_as the answer's own category is a confirmation.
+    let out = w
+        .decide(runs["parked"], ProposalAction::ApplyAs("done".into()))
+        .unwrap();
+    assert_eq!(
+        (out.followup.as_deref(), out.corrected_to),
+        (Some("confirmed"), None)
+    );
+}
+
+#[tokio::test]
+async fn reject_leaves_the_section_unmapped_and_hides_the_answer_until_a_new_one() {
+    let w = world();
+    let runs = w.three_proposals().await;
+    let out = w.decide(runs["backlog"], ProposalAction::Reject).unwrap();
+    assert_eq!(
+        (out.category, out.followup.as_deref()),
+        (None, Some("rejected"))
+    );
+    let row = w.row();
+    assert!(row.settings.section_map.is_empty() && !row.settings.section_map_confirmed);
+    let p = w.proposals();
+    assert_eq!(p.rejected, 1);
+    assert!(!p.proposals.iter().any(|x| x.section == "backlog"));
+    assert!(!p.apply.as_ref().unwrap().cli.contains("backlog"));
+    assert!(p
+        .lines()
+        .join("\n")
+        .contains("1 rejected proposal(s) hidden"));
+    let e = w
+        .decide(runs["backlog"], ProposalAction::Apply)
+        .unwrap_err();
+    assert!(e.message.contains("already rejected"), "{e:?}");
+
+    // After the re-ask window, the same input and pinned model are not
+    // asked again: the answer would be the same one.
+    w.advance(REASK_DAYS * 86_400 + 1);
+    let fake = Fake::answering(vec![says("unsure", 0.8), says("not_planned", 0.85)]);
+    let r = w.run(&fake).await;
+    assert_eq!((r.asked, r.skipped_rejected), (2, 1));
+    assert_eq!(w.proposals().rejected, 1);
+    // A new input (the board changed) is a new answer: proposed again.
+    {
+        let s = w.store.lock().unwrap();
+        let mut cfg = s.require_tracker(w.tracker).unwrap().config;
+        cfg.project_sections[0].1.push("archive".into());
+        s.set_tracker_probe(w.tracker, None, &cfg).unwrap();
+    }
+    let fake = Fake::answering(vec![says("todo", 0.9); 3]);
+    let r = w.run(&fake).await;
+    assert_eq!((r.asked, r.skipped_rejected), (3, 0));
+    let p = w.proposals();
+    assert_eq!(p.rejected, 0);
+    let again = p.proposals.iter().find(|x| x.section == "backlog").unwrap();
+    assert!(again.pending() && again.run_id != runs["backlog"]);
+}
+
+#[tokio::test]
+async fn only_the_latest_usable_assist_answer_of_a_listed_section_is_decided() {
+    let w = world();
+    // Not a run at all, and a shadow run.
+    assert_eq!(
+        w.decide(9_999, ProposalAction::Reject).unwrap_err().code,
+        crate::ipc_error::codes::E_NOTFOUND
+    );
+    w.on("shadow");
+    w.run(&Fake::answering(vec![says("todo", 0.9); 5])).await;
+    let shadow = w.runs()[0].id;
+    let e = w.decide(shadow, ProposalAction::Reject).unwrap_err();
+    assert!(e.message.contains("not a usable assist answer"), "{e:?}");
+    // A low-confidence assist answer.
+    w.on("assist");
+    w.advance(60);
+    w.run(&Fake::answering(vec![
+        says("todo", 0.3),
+        says("todo", 0.9),
+        says("done", 0.9),
+    ]))
+    .await;
+    let low = w
+        .runs()
+        .into_iter()
+        .find(|r| r.fallback.as_deref() == Some("low_confidence"))
+        .unwrap()
+        .id;
+    assert!(w.decide(low, ProposalAction::Apply).is_err());
+    // Another feature's run.
+    let other = w
+        .store
+        .lock()
+        .unwrap()
+        .insert_decision_run(&crate::store::NewDecisionRun {
+            at: NOON,
+            feature: "work_link".into(),
+            subject_kind: "session".into(),
+            subject_id: format!("{}:x", w.tracker),
+            mode: "assist".into(),
+            provider: "jev".into(),
+            question_version: "wl.1".into(),
+            answer: Some("todo".into()),
+            called: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let e = w.decide(other, ProposalAction::Apply).unwrap_err();
+    assert!(e.message.contains("not a status_map proposal"), "{e:?}");
+    // An older answer, once a newer one exists for the section.
+    let ideas_old = w
+        .proposals()
+        .proposals
+        .iter()
+        .find(|p| p.section == "ideas")
+        .unwrap()
+        .run_id;
+    w.advance(REASK_DAYS * 86_400 + 1);
+    w.run(&Fake::answering(vec![says("todo", 0.9); 3])).await;
+    let e = w.decide(ideas_old, ProposalAction::Apply).unwrap_err();
+    assert!(e.message.contains("not the latest proposal"), "{e:?}");
+    // A section the tracker no longer lists.
+    let ideas = w
+        .proposals()
+        .proposals
+        .iter()
+        .find(|p| p.section == "ideas")
+        .unwrap()
+        .run_id;
+    {
+        let s = w.store.lock().unwrap();
+        let mut cfg = s.require_tracker(w.tracker).unwrap().config;
+        cfg.unmapped_sections.retain(|n| n != "ideas");
+        s.set_tracker_probe(w.tracker, None, &cfg).unwrap();
+    }
+    let e = w.decide(ideas, ProposalAction::Apply).unwrap_err();
+    assert!(e.message.contains("no longer lists"), "{e:?}");
+    // A category outside the section map's vocabulary.
+    assert!(ProposalAction::parse("apply_as", Some("not_planned")).is_err());
+    assert!(ProposalAction::parse("apply_as", None).is_err());
+    assert!(ProposalAction::parse("apply", Some("done")).is_err());
+    assert!(ProposalAction::parse("maybe", None).is_err());
+    assert_eq!(
+        ProposalAction::parse("apply_as", Some(" done ")).unwrap(),
+        ProposalAction::ApplyAs("done".into())
+    );
+    // Nothing above wrote the tracker.
+    assert!(w.row().settings.section_map.is_empty());
+}
+
 // --- pure parts and the trigger ---------------------------------------------------
 
 #[test]
