@@ -202,7 +202,11 @@
       "provider",
       "reason",
       "state",
-      "tracker_id"
+      "tracker_id",
+      "webhook_enabled",
+      "webhook_last_delivery_at",
+      "webhook_rejected",
+      "write_failures"
     ],
     "HostRow": [
       "account_uuid",

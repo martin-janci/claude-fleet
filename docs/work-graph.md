@@ -182,8 +182,10 @@ Trackers give you:
 - ticket cards with acceptance criteria;
 - the "done" signal that tidy-up uses.
 
-Fleet writes nothing back to a tracker (decision D3) and has no inbound
-webhook (D13).
+Fleet writes one thing back, and only where you turn it on (decision D3):
+a session's pull request as a link on its Jira ticket (see *Write-back*
+below). On a hub with a public URL, a tracker can also nudge fleet with a
+webhook (D13, *Webhook nudges* below); polling stays either way.
 
 ### Connecting one
 
@@ -229,6 +231,38 @@ host: `--via-host <host>`, the token piped on stdin. A key prefix that two
 trackers both claim (`ENG` in Jira and Linear) is never bound automatically.
 The full details are in [hub.md → Trackers](hub.md#trackers).
 
+### Write-back: the PR link (Jira, off by default)
+
+For a Jira tracker (Cloud or Data Center), Settings → Work has **Add a
+session's pull request to its ticket as a link**. With it on, when the PR
+probe sees a pull request on a session, fleet adds that PR to the linked
+ticket once, as a Jira remote link titled `PR: owner/repo#n`. Nothing else
+is ever written: no transition, no worklog, no comment (D29), and nothing a
+transcript or a tracker wrote.
+
+- **Only work a person linked.** The link must be confirmed and made by
+  hand or by *Start* (`manual` / `started`). A detection guess or an agent's
+  suggestion never writes.
+- **Only your own org's tracker.** A session in one org never writes to
+  another org's tracker, even a link made with `force_cross_org`; the org is
+  checked again just before sending.
+- **Once per PR.** The link's global id is the PR's URL, so Jira updates
+  the same link rather than adding a second one, and fleet queues each PR
+  once.
+- **Through the sync.** Writes wait in an outbox and go out with the next
+  sync pass, on the tracker's own credential. A rate limit waits (without
+  counting as a failure); other failures retry with backoff, and after five
+  tries, or at once for a refusal (403, 404), fleet gives up. Given-up
+  writes show in `fleet_health` as `write_failures` and in the footer as
+  "N writes not sent"; they never make the tracker `degraded`.
+- **The token needs write permission** (to edit issues). A read-only token
+  is enough for everything else; with one, the writes are refused and given
+  up.
+
+Turning it off stops sending at once; writes already queued wait, and go
+out if you turn it on again. Settled writes are dropped after the journal's
+retention window (`work.retention.journal_days`).
+
 ### Sync
 
 The sync runs every `work.sync_interval_secs` (300 s by default; `0` turns
@@ -241,6 +275,38 @@ its links stay. A tracker's state is one of `ok`, `auth_failed`
 once in a browser), `rate_limited` and `unreachable` (both retry on their
 own). See [troubleshooting.md](troubleshooting.md#work-and-trackers) when a
 sync fails.
+
+### Webhook nudges (a public hub; off by default)
+
+Polling is the source of truth. On a hub with a public URL, Jira Cloud,
+GitHub and Linear (D28) can also call the hub when an issue changes, so it
+shows up in seconds instead of at the next pass:
+
+```sh
+fleet-hub tracker webhook 1            # prints the URL and a new secret, once
+fleet-hub tracker webhook 1 --rotate   # a new secret; the old one stops at once
+fleet-hub tracker webhook 1 --off
+```
+
+Register the URL (`https://<public-url>/hooks/tracker/<id>`) and the secret
+on the tracker, for issue events. A delivery only **nudges**:
+
+- it must carry the provider's HMAC-SHA256 signature made with that secret
+  (GitHub `X-Hub-Signature-256`, Jira `X-Hub-Signature`, Linear
+  `Linear-Signature` within a minute of its timestamp); anything else is
+  refused (401) and counted;
+- fleet reads only the issue's key from it, and only refreshes an issue it
+  already has for that tracker, from the tracker's own API. A delivery can
+  never add, change or reach anything else;
+- deliveries for one issue within 5 seconds make one refresh, and the route
+  is rate-limited and takes at most 64 KiB;
+- without a public URL or a secret, the route is not there (404). The
+  desktop never serves it.
+
+`fleet_health` shows, per tracker, `webhook_enabled`,
+`webhook_last_delivery_at` and `webhook_rejected` (the footer says "N
+webhooks refused" — a wrong secret on the tracker's side, or someone
+knocking).
 
 ## Starting work
 
@@ -324,6 +390,20 @@ There are two kinds:
   `handover_requested`, then `handover_written`, `handover_missing` or
   `handover_send_failed`. Fleet never spends a turn on this by itself, not
   even at safe kill (decision D9).
+- **A summary of a past session, on demand.** A session that has ended
+  cannot write its own hand-off, so each past-work row in the sidebar has
+  **Summarise**. It runs one print-mode fork of that session's last
+  conversation on the session's own host, under its own Claude account,
+  with the model `work.summary_model` names (`haiku` by default). The fork
+  has no tools and no MCP servers, fleet's hooks are off for it, and it
+  leaves no transcript behind; the original conversation is not touched.
+  Claude's answer is shown below the row and kept in the journal (redacted,
+  at most 4,000 characters, one per conversation: asking again replaces
+  it), and the next resume brief shows it inside the untrusted fence, after
+  a live session's own hand-off. It needs the transcript and the directory
+  the conversation ran in to still be on the host; otherwise it says so and
+  runs nothing. Only one summary runs per host at a time. It is never
+  automatic (decisions D10, D30).
 
 ## Today and standup
 
@@ -474,7 +554,8 @@ state and the store. It never calls a tracker or a host. For each tracker:
   skipped), `consecutive_partial` (passes in a row that skipped some),
   `last_error` (redacted, one line, at most 300 characters, fenced as
   untrusted; for skipped items, why the last one failed), `last_success_at`,
-  `last_pass_at`, and its org.
+  `last_pass_at`, its org, and `write_failures` (PR links fleet gave up
+  sending, *Write-back*; never part of `health`).
 
 Fleet-wide it also counts `failing`, `degraded`, and the **detection
 backlog**: link suggestions on live sessions that have waited more than 7
@@ -565,8 +646,11 @@ token:
   *Send*;
 - org labels and an org filter.
 
-What stays on the desktop: multi-start (D15), naming or renaming local work
-(D20), tracker and org administration, and retention. A **readonly** token
+- with a **full** token, **Name this work…** for a session with no work,
+  and **Rename** for local work (D20; fleet-mobile M13.4a).
+
+What stays on the desktop: multi-start (D15), tracker and org
+administration, and retention. A **readonly** token
 is served `work` but not `work_link`, so it only reads. No client token ever
 reaches `work_admin`. Which of these screens your phone shows depends on its
 fleet-mobile release; the hub gates each action by the token, not by the
@@ -605,6 +689,7 @@ table.
 | `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
 | `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |
 | `work.classify_nudge` | `false` | on / off | one note per conversation asking Claude to name its work after three unlinked turns |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | the model a dead session's on-demand *Summarise* runs on, on the session's own host and account |
 | `work.tidy_done_days` | `2` | 1–365 days | how long a linked ticket must be done before tidy-up suggests its session |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | how long a session must be idle before any tidy reason suggests it |
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | idle and unprompted days before a session with no work is suggested (`idle_unlinked`) |

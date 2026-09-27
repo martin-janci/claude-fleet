@@ -811,6 +811,35 @@ else
   check "a ticket carries its title and status from the tracker" 'jt "$tk" ".. | objects | select(.key? == \"E2E-1\")" | jq -e "select(.title == \"Fix the login redirect\" and .status_category == \"todo\")" >/dev/null' "${tk:0:600}"
   check "the sync read the views over search/jql" 'jira /_e2e/log | grep -q "POST /rest/api/3/search/jql"' "$(jira /_e2e/log)"
 
+  # --- 1b. webhook nudges (M13.4f): a signed delivery refreshes one item ---
+  echo "-- 1b. webhook"
+  wh=$("$WBIN" tracker webhook "${TID:-0}" --data-dir "$ROOT/w" 2>&1)
+  WSEC=$(printf '%s\n' "$wh" | sed -n 's/^secret: //p')
+  check "tracker webhook prints the public URL and a new secret, once" 'printf "%s" "$wh" | grep -q "url:    https://$PUB/hooks/tracker/$TID" && [ ${#WSEC} = 64 ]' "$wh"
+  wh2=$("$WBIN" tracker webhook "${TID:-0}" --data-dir "$ROOT/w" 2>&1)
+  check "asking again does not show the secret" '! printf "%s" "$wh2" | grep -q "$WSEC" && printf "%s" "$wh2" | grep -q "not shown again"' "$wh2"
+  # whook TRACKER BODY SIGNATURE -> the HTTP status of one delivery.
+  whook() { curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.1:$PW/hooks/tracker/$1" \
+    -H "Host: $PUB" -H 'Content-Type: application/json' -H "X-Hub-Signature: $3" -d "$2"; }
+  wsig() { python3 -c 'import hmac,hashlib,sys; print("sha256="+hmac.new(sys.argv[1].encode(),sys.argv[2].encode(),hashlib.sha256).hexdigest())' "$WSEC" "$1"; }
+  status3() { jt "$(wcall "$TOKW" work "{\"action\":\"tickets\"}")" '.. | objects | select(.key? == "E2E-3") | .status_category' | head -1; }
+  jira /_e2e/status -X POST -d '{"key":"E2E-3","status":"In Progress"}' >/dev/null
+  WB='{"webhookEvent":"jira:issue_updated","issue":{"id":"10003","key":"E2E-3"}}'
+  check "a delivery with a forged signature is refused (401)" '[ "$(whook "$TID" "$WB" "sha256=$(printf "0%.0s" $(seq 64))")" = 401 ]' ""
+  sleep 1
+  check "a delivery signed with the tracker's secret is accepted (202)" '[ "$(whook "$TID" "$WB" "$(wsig "$WB")")" = 202 ]' ""
+  until_ok 60 '[ "$(status3)" = in_progress ]'
+  check "and refreshes that item from the tracker, without a sync pass" '[ "$(status3)" = in_progress ]' "E2E-3 is $(status3)"
+  sleep 1
+  check "an unknown tracker id is not there (404)" '[ "$(whook 999 "$WB" "$(wsig "$WB")")" = 404 ]' ""
+  wfh=$(wcall "$TOKW" fleet_health '{}')
+  check "fleet_health reports the webhook on, a delivery and a refusal" 'jt "$wfh" ".. | objects | select(.tracker_id? == $TID)" | jq -e "select(.webhook_enabled == true and .webhook_last_delivery_at != null and .webhook_rejected >= 1)" >/dev/null' "${wfh:0:600}"
+  # Back to To Do, the same way, so later scenarios see what they always saw.
+  jira /_e2e/status -X POST -d '{"key":"E2E-3","status":"To Do"}' >/dev/null
+  sleep 6
+  whook "$TID" "$WB" "$(wsig "$WB")" >/dev/null
+  until_ok 60 '[ "$(status3)" = todo ]'
+
   wcall "$TOKW" refresh_projects '{}' >/dev/null
   wprojs=$(wcall "$TOKW" list_projects '{}')
   PAPI=$(jt "$wprojs" '.. | objects | select(.repo? == "wg-api") | .id' | head -1)

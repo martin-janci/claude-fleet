@@ -762,7 +762,8 @@ Plan: `plans/2026-09-26-work-graph-m13-live-use.md`.
   nothing leaves the machine (D24).
 - **M13.3** triage of the owner's M10.3 run (waits on the run).
 - **M13.4** the decision-gated builds, each only on a "yes": D20, D5, D10,
-  D15, D3.
+  D15, D3, and D13 (M13.4f). The user said yes to D3, D10, D13 and D20 on
+  2026-09-27; build notes in `plans/2026-09-26-work-graph-m13-decided-yes.md`.
 - **M13.5** close-out: the work graph is *operating* (D26).
 
 **Value:** the roadmap matches `main`, partial sync failures are visible,
@@ -770,8 +771,11 @@ and every open decision gets an answer backed by usage.
 
 **Status (2026-09-26):**
 - **M13.0 done** (this revision).
-- M13.1 and M13.2 are not started. M13.3 waits on the owner's run; M13.4
-  waits on the decisions.
+- M13.1 and M13.2 are not started. M13.3 waits on the owner's run.
+- M13.4: D3, D10, D13 and D20 are yes (2026-09-27). **M13.4c (D10),
+  M13.4e (D3) and M13.4f (D13) built** on `claude/cloud-fleet-work-graph-m13`;
+  **M13.4a (D20) built** on fleet-mobile's
+  `claude/work-graph-m13-4a-name-work`. D5 and D15 wait on the decisions.
 
 ## Critical path and parallelism
 
@@ -806,30 +810,34 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 |---|---|---|---|
 | D1 | Provider order after Jira | GitHub → Asana → Linear, or Asana first (Company B is real work) | GitHub first (no credentials, a quick check of the abstraction), then Asana immediately. **Done** in that order (M6, #266) |
 | D2 | Can "done" ever kill a live session automatically? | never · opt-in per org via safe kill | Never by default; opt-in per org. **Built** (M7, #267): `work.auto_tidy` off, `orgs.auto_tidy` per org, safe kill only |
-| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-25: none.** M9.5 stays planned, not built. M12.6 recommends keeping it; the smallest "yes" is the PR remote link (M13.4e). Revisit after M10.3 |
+| D3 | Write-back to trackers | none · transition on start · plus a PR remote link · plus worklog | **Decided 2026-09-26: yes, the PR remote link only** (Jira Cloud / DC, opt-in per tracker, through an outbox): M13.4e. Transition on start and worklog stay out (D29) |
 | D4 | Must org isolation for host tokens exist before the second tracker? | yes · later | Yes, if both companies' hosts share one hub. **Done** (M5.3, #264) |
 | D5 | Can a synchronous SessionStart hook cost up to about 2 s at start-up when the hub is down? | yes · no (keep the brief via UserPromptSubmit only) | Measure in M4, then decide. Local numbers in the M4 plan; the remote ones are the user's to take (`scripts/measure-session-start.sh`, M10.4). Off until the remote numbers are under ~300 ms p95. **Waits on the user** (M10.3 step; M13.4b) |
 | D6 | Jira Data Center needed? | yes (which companies) · no | No; Cloud only. **Built anyway** (M6.5, #266): the M6 brief asked for it |
 | D7 | Isolate sessions (list, message, dispatch) across orgs? (M5 plan) | off per org · on per org | Off per org; the user turns it on per org. **Built** (M5.3, #264): `orgs.isolate_sessions`, off |
 | D8 | — | — | **Unused**: no decision was ever numbered D8 in the work graph |
 | D9 | May fleet spend a turn of a session's model to write its handover (M9.3)? | on demand · also at safe kill · never | **Decided 2026-09-25: on demand only** (a button; never at safe kill). Built (M9.3, #268) |
-| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-25: off.** M9.4 stays planned, not built. **Waits on the user** after M10.3 (M12.6; M13.4c) |
+| D10 | Summarise dead sessions with `claude -p --fork-session` (M9.4)? Which model? | off · on (small model) | **Decided 2026-09-26: yes, on demand only** (*Summarise* on a past-work row; `work.summary_model`, default `haiku`, D27; never automatic, D30): M13.4c, **built** |
 | D11 | Multi-repo start (M9.6): one branch name in every repo; which projects are offered? | same `{key}-{slug}` · per repo | **Decided 2026-09-25: the same name; projects the key ran in before.** Built (M9.6, #268) |
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always.** Built (M9.7, #268) |
-| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-25: no.** M9.8 stays planned, not built; M12.6 keeps it, M13 does not reopen it |
+| D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **Decided 2026-09-26: yes, a nudge only** (HMAC per tracker, the payload never trusted, polling stays; GitHub, Jira Cloud and Linear, D28): M13.4f |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25)**: `work.classify_nudge`. Opened as #273 (closed unmerged); the commit reached `main` with #270 |
 | D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | Desktop only. **Waits on the user** after M10.3 (M13.4d) |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done.** hub-e2e runs in CI's `hub-headless` job (`.github/workflows/ci.yml`, every PR and `main` push). Since #314 the job also builds an `e2e`-feature hub into `target/e2e` and passes it as `WBIN`, so the M10.2 work-graph leg runs on every PR; with `CI=true` a missing `WBIN` fails instead of skipping (`scripts/hub-e2e.sh`) |
 | D17 | Support `acli` (Atlassian CLI) as a Jira transport? (M11 plan) | yes · decided against | **Decided against:** REST and `via_host` (`gh`, `curl`) cover it. M12.6 keeps it; M13 does not reopen it |
 | D18 | First sync of a new tracker: suppress per-item frames? (M11 plan) | accept the flood · suppress (design change) | **Accept** (the M10.6 report, `reviews/2026-09-25-replay-ring-pressure.md`); nothing suppresses them on `main` |
 | D19 | May auto-tidy ever act on `idle_unlinked`? (M11 plan) | never · per org | **Never.** Enforced (M11.3, #291) in `TidyReason::auto_allowed`, `auto_selection` and the executor |
-| D20 | Local work items on the phone (name / rename)? (M11 plan) | no (read-only phone) · yes | No. **Waits on the user** after M10.3 (M12.6; M13.4a) |
+| D20 | Local work items on the phone (name / rename)? (M11 plan) | no (read-only phone) · yes | **Decided 2026-09-26: yes**, fleet-mobile only, no hub change: M13.4a |
 | D21 | Retention defaults: journal / done items / work timeline events (M12 plan) | 365 / 180 / 180 days · keep forever | **Built** (M12.3, #299): `work.retention.journal_days` 365, `…tracker_items_days` 180, `…timeline_work_events_days` 180; `0` = forever |
 | D22 | Should a failing tracker raise an Attention item, not only a health row? (M12 plan) | yes · health only | **Yes, built** (M12.4, #303): one "Reconnect …" item per tracker, deduplicated |
 | D23 | Per-org retention override (needs a migration)? (M12 plan) | now · later | **Later:** settings only (M12.3, #299); no migration |
 | D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2 |
 | D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1 |
 | D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | Yes (default); M13.5 |
+| D27 | Which model summarises a dead session, on whose quota? (M13.4c) | a small model · the session's configured model | `haiku` (`work.summary_model`: haiku / sonnet / opus), on the session's own host and account |
+| D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | GitHub, Jira Cloud, Linear (Asana needs a handshake; Jira DC later) |
+| D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
+| D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
 
 ## Risks to watch
 
@@ -970,3 +978,9 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   every row; D16 corrected (the work-graph leg runs in CI since #314); D14
   corrected (#273 was closed; M4.6 reached `main` with #270). The critical
   path covers M9–M13.
+- 2026-09-27: the user said **yes** to D3, D10, D13 and D20 (in a session
+  that planned them as a separate M13 before this plan's M13 reached
+  `main`; that plan is folded in here). Their rows record it, and D27–D30
+  hold the defaults for their details. M13.4c (D10) is built; M13.4e (D3)
+  is next. D13 had no slot in M13.4 ("M13 does not reopen it"), so it gets
+  **M13.4f**. D5 and D15 are unchanged.
