@@ -12,6 +12,8 @@
 //! * `status` and `runs` open the database read-only, like `fleet-hub
 //!   census`: no running hub needed, nothing written, and nothing printed
 //!   but ids, words and numbers — never the key.
+//! * `proposals` (J3, `status_map`) reads the same way; the section names it
+//!   prints come from the trackers' stored config, never from the runs.
 
 use crate::config::{self, HubOptions};
 use crate::out;
@@ -64,6 +66,21 @@ pub enum DecideCmd {
         /// Rows to show (1-1000). [default: 50]
         #[arg(long)]
         limit: Option<u32>,
+        /// Read this database file instead of the hub's (a desktop's).
+        #[arg(long, value_name = "FILE")]
+        db: Option<PathBuf>,
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The status_map proposals (J3): per Asana tracker, the latest assist
+    /// answer per section as `section → category (confidence)`, with the
+    /// command a person runs to apply them, and in shadow the agreement
+    /// with the keyword rule. Reads the database only; applies nothing.
+    Proposals {
+        /// Only this tracker.
+        #[arg(long)]
+        tracker: Option<i64>,
         /// Read this database file instead of the hub's (a desktop's).
         #[arg(long, value_name = "FILE")]
         db: Option<PathBuf>,
@@ -269,6 +286,19 @@ pub fn run(
                 }
             }
         }
+        DecideCmd::Proposals { tracker, db, json } => {
+            let store = open_read_only(&db_path(db, opts, env)?)?;
+            let all = decide::status_map::proposals(&store, tracker).map_err(|e| e.message)?;
+            if json {
+                out::line(&serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?);
+            } else if all.is_empty() {
+                out::line("no Asana trackers");
+            } else {
+                for l in all.iter().flat_map(|t| t.lines()) {
+                    out::line(&l);
+                }
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -403,5 +433,57 @@ mod tests {
         assert!(e.contains("--limit"), "{e}");
         let e = run(parse(&["status", "--days", "0"]).unwrap(), &opts, &env).unwrap_err();
         assert!(e.contains("--days"), "{e}");
+    }
+
+    #[test]
+    fn proposals_name_sections_from_the_tracker_and_print_the_apply_line() {
+        use fleet_core::service::decide::status_map;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let tracker;
+        {
+            let s =
+                Store::open_with_bus(&path, std::sync::Arc::new(fleet_core::events::NoopEventBus))
+                    .unwrap();
+            tracker = s
+                .add_tracker("asana", "B", "https://app.asana.com")
+                .unwrap()
+                .id;
+            let cfg = fleet_core::store::TrackerConfig {
+                unmapped_sections: vec!["ideas".into()],
+                ..Default::default()
+            };
+            s.set_tracker_probe(tracker, None, &cfg).unwrap();
+            let key = s.decision_fp_key().unwrap();
+            s.insert_decision_run(&fleet_core::store::NewDecisionRun {
+                at: now(),
+                feature: "status_map".into(),
+                subject_kind: status_map::SUBJECT_KIND.into(),
+                subject_id: status_map::subject_id(
+                    tracker,
+                    &status_map::section_id(&key, tracker, "ideas"),
+                ),
+                mode: "assist".into(),
+                provider: "jev".into(),
+                question_version: status_map::QUESTION_VERSION.into(),
+                answer: Some("todo".into()),
+                confidence: Some(0.9),
+                baseline_answer: Some("none".into()),
+                called: true,
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let ro = open_read_only(&path).unwrap();
+        let all = status_map::proposals(&ro, Some(tracker)).unwrap();
+        let text = all[0].lines().join("\n");
+        assert!(text.contains("\"ideas\" → todo (0.90)"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "fleet-hub tracker section-map {tracker} --set 'ideas=todo'"
+            )),
+            "{text}"
+        );
+        assert!(parse(&["proposals", "--tracker", "3", "--json"]).is_ok());
     }
 }
