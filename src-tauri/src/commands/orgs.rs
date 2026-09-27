@@ -41,6 +41,10 @@ pub struct UpdateOrgArgs {
     /// Work graph M7: `on` | `off` | `inherit` (`work.auto_tidy`).
     #[serde(default)]
     pub auto_tidy: Option<String>,
+    /// Jev evaluation (D31): `on` | `off`, the org's consent to decision-
+    /// model calls (`orgs.jev_allowed`).
+    #[serde(default)]
+    pub jev: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -131,6 +135,7 @@ pub async fn update_org(
             color: args.color,
             isolate_sessions: args.isolate_sessions,
             auto_tidy: args.auto_tidy,
+            jev: args.jev,
             ..Default::default()
         },
         &store,

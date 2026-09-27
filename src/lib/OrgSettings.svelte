@@ -114,6 +114,7 @@
         <strong>{o.name}</strong>
         {#if o.isolate_sessions}<span class="badge" data-testid="org-isolated">isolates sessions</span>{/if}
         {#if o.auto_tidy != null}<span class="badge" data-testid="org-auto-tidy-badge">auto-tidy {o.auto_tidy ? 'on' : 'off'}</span>{/if}
+        {#if o.jev_allowed}<span class="badge" data-testid="org-jev-badge">sends to Jev</span>{/if}
         {#if owns}
           <input
             type="color"
@@ -236,6 +237,19 @@
               <option value="on">on</option>
               <option value="off">off</option>
             </select>
+          </label>
+          <label class="isolate" title="Let this org's redacted prompts and ticket titles go to TypeSafe's decision model (Jev) when Settings → Decisions (Jev) is on. Off by default. Only ids and numbers are recorded; an answer is at most a suggestion.">
+            <input
+              type="checkbox"
+              data-testid="org-jev"
+              checked={o.jev_allowed ?? false}
+              onchange={(e) =>
+                void run(
+                  updateOrg(o.id, { jev: (e.currentTarget as HTMLInputElement).checked ? 'on' : 'off' }),
+                  'Update failed',
+                )}
+            />
+            send to Jev
           </label>
         </div>
         {#if o.isolate_sessions}
