@@ -1245,6 +1245,31 @@ The detector's language models add about 45 MB to `fleet-hub` (cargo
 feature `nl-detect` of `fleet-core`, which only the hub turns on; the
 desktop app is built without it).
 
+## Decisions (Jev) — experimental, off
+
+The hub is the one place a decision model may be called from (a desktop
+paired to it, a phone and an agent host never call out). Everything is
+**off by default**: the kill switch `decide.jev.enabled`, each feature's
+mode (`decide.jev.status_map`, `decide.jev.work_link`: `off | shadow |
+assist`), each org's consent, and the global `decide.jev.unassigned` for
+rows with no org. With the defaults no request can leave the hub. Nothing
+in fleet asks the model yet; the envelope and its record are in place for
+the use cases that come next. The full guide — what is sent, what is
+recorded (never raw text), the fallbacks, retention, how to turn it off —
+is [`decisions.md`](decisions.md).
+
+```bash
+fleet-hub decide set-key < jev-key.txt          # or --from-env NAME / --ref file:/run/secrets/jev
+fleet-hub org set 2 --jev on                    # this org consents
+fleet-hub decide status                         # read-only: flag, modes, consent, breaker, spend
+fleet-hub decide runs --feature work_link --limit 20
+```
+
+The `decide.*` settings are set like the `work.*` ones, with `set_setting`
+(master token). `set-key` and `clear-key` write `state.db` directly, like
+`fleet-hub tracker webhook`; `status` and `runs` open it read-only and
+print ids, words and numbers — never the key.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a

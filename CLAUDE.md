@@ -285,9 +285,15 @@ only on the user's "yes".
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
-only in fleet-hub — the models add ~45 MB, kept there by D47). Nothing calls Jev yet; decisions
-D31–D47 and what is still open are in
-`docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+only in fleet-hub — the models add ~45 MB, kept there by D47). The decision
+envelope is built and OFF (D35–D37): `service::decide` (`gate` / `decide`,
+`DecisionBackend`, `jev.rs` fenced to api.typesafe.ai), `decide.*` settings,
+per-org consent `orgs.jev_allowed` (migration 064), the record
+`decision_runs` + key `decision_secrets` (065; the key is read ONLY by
+`Store::resolve_decision_credential`, never raw text in a run), `fleet-hub
+decide`; guide `docs/decisions.md` (every `decide.*` setting must be in its
+table). No use case calls it yet; decisions D31–D47 and what is still open
+are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

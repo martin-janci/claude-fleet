@@ -27,7 +27,9 @@ from what the store already keeps.
 | Known weak spots: literal reading, numbers and dates, indirection, a large state full of unrelated detail, **adversarial content**, no text generation | [Jev 1.13 jaggedness](https://docs.typesafe.ai/model-jaggedness/jev-1.13.md) |
 | No Rust SDK (Python, JS); fleet would call the HTTP API directly | [SDKs](https://docs.typesafe.ai/sdk.md) |
 
-Nothing about Jev has been tested **in fleet**; no code calls it.
+Nothing about Jev has been tested **in fleet**. The envelope every call
+will go through is built (D35–D37 below), off by default; no use case calls
+it yet.
 
 ## Decisions so far
 
@@ -40,9 +42,9 @@ never collide. The roadmap's table points here.
 | D32 | First use case | Open (proposed: tracker status-mapping proposals first, work-link choice in offline benchmark and shadow) |
 | D33 | Baselines | **`claude -p --model haiku` on the host is a baseline and the generative fallback** (asynchronous decisions only) |
 | D34 | Label hygiene before any benchmark (agent `link` overwrites a person's rejection; confirmations always recorded `manual`; withdrawn suggestions deleted; impressions not recorded) | Open (proposed: fix first, separate PRs) |
-| D35 | Architecture | Open (proposed: a shared envelope — flag, redaction, timeout, breaker, budget, record — with thin per-use-case adapters; only in the process that owns the fleet) |
-| D36 | Feature flag | Open in detail (proposed: `decide.jev.enabled` kill switch in Settings, a mode per feature `off/shadow/assist/auto`, an org override; the phone only shows) |
-| D37 | What a decision records | Open (proposed: `decision_runs`, HMAC fingerprint of the input, never raw text by default) |
+| D35 | Architecture | **Built** (`fleet-core::service::decide`): one envelope — `gate()` (owner process only: a store with `hub.remote_url` never calls out; flag, mode, org consent, key, breaker, budget), redaction of every text (`redact_state`: URLs, emails, `logging::redact`), one call under `decide.jev.timeout_ms` with no retry, answer checks (`jev::validate_answer`), an optional confidence floor, and a record in every case — with thin per-use-case adapters to come. The seam is `DecisionBackend` (`JevBackend` over `net::https::HttpTransport`, fenced to exactly `api.typesafe.ai`; a fake in tests). 429/529 are `rate_limited` and count toward the breaker; the breaker and the daily budget are derived from `decision_runs`, so `fleet-hub decide status` sees them. |
+| D36 | Feature flag | **Built**: `decide.jev.enabled` (off) in the Settings dialog's "Decisions (Jev)" section; `decide.jev.status_map` / `decide.jev.work_link` = `off / shadow / assist` (off; `auto` not offered until a feature passes acceptance); per-org consent `orgs.jev_allowed` (migration 064, off; `fleet-hub org set <id> --jev on\|off`, `work_admin update_org { jev }`, Settings → Organisations); `decide.jev.unassigned` (off) for rows with no org; `decide.jev.timeout_ms` 1500, `breaker_failures` 5, `breaker_open_secs` 300, `daily_token_budget` 2,000,000, `model` `jev-1.13.0` (pinned). The phone is unchanged. Guide: `docs/decisions.md`. |
+| D37 | What a decision records | **Built**: `decision_runs` (migration 065), one row per `decide()` call including every fallback (`not_owner flag_off org_off mode_off no_key breaker_open budget timeout http_error rate_limited invalid_answer low_confidence`); ids, vocabulary words and numbers only (the store refuses anything else); `input_fp` = HMAC-SHA256 of the canonical redacted request under a local key in `decision_secrets` (`fp_key`); followups (`confirmed rejected corrected ignored`, `corrected_to`) filled by adapters; `decide.retention_days` 90 swept by the GC tick. The API key is `decision_secrets.jev_api_key`, read only by `Store::resolve_decision_credential`, set by `fleet-hub decide set-key` (stdin / `--from-env` / `--ref`). |
 | D38 | Language as an axis | **Yes**, detailed by D40–D46 |
 | D39 | Hand labels (~150 sessions without a link) | Open |
 | D40 | Measure the languages locally first | **Yes: this census** |
