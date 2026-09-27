@@ -439,6 +439,22 @@ this design's.
 
 ## Revisions
 
+- 2026-09-27 (M14.1d, desktop commands and events): the eighteen commands
+  above, each `Routed` to its `work` / `work_link` action (no `LocalOnly`
+  row), and `link_session_work` / `confirm_session_work` take `primary`
+  and `expected_version`, `reject_session_work` / `unlink_session_work`
+  `expected_version`. `delete_work_view` takes the optional
+  `expected_version` M14.1c gave `view_delete`. `work:changed` is emitted
+  by the store after the write commits: `placement` (`task_id`), `rule`
+  (`rule_id`, on save and delete), `view` (`view_id`, on save and delete)
+  and `org` (`task_id`, a local task's org; its sessions' rows also go out
+  as `session:updated`). The desktop's hub bridge never resumes a stream
+  (every connection, the one after `lagged` included, re-lists), so its
+  resync ends with a desktop-only `work:changed { what: "resync" }` —
+  emitted only when the hub answered the re-list — which the Work view
+  reads as "reload whole"; a hub never sends it. `SessionRow.work_rev`
+  (*Events* above) is not built: neither #342 nor #345 has it, and it is
+  service logic, which M14.1d does not add.
 - 2026-09-27 (M14.1c, the writes): no migration (066's columns carry every
   version). `E_CONFLICT` is a new `IpcError` code. A link's version is
   compared only after the link is known to be the caller's to name (this

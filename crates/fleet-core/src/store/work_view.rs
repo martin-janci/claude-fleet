@@ -9,6 +9,7 @@
 
 use super::work::{link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, LINK_COLUMN_COUNT};
 use super::{now_unix, ItemMeta, Store, WorkItemRow, WorkLinkRow};
+use crate::events::{EventBus as _, RowChange, WorkChanged};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -286,7 +287,20 @@ impl Store {
         for sid in sessions {
             self.emit_session(sid)?;
         }
+        self.emit_work_changed(WorkChanged {
+            what: "org".into(),
+            task_id: Some(format!("item:{item_id}")),
+            rule_id: None,
+            view_id: None,
+        });
         Ok(())
+    }
+
+    /// Emit `work:changed` (work graph M14.1d): ids only, kind `work`, so a
+    /// host-bound or org-bound stream never carries it; a client re-reads
+    /// what it shows.
+    pub fn emit_work_changed(&self, change: WorkChanged) {
+        self.bus.emit(&RowChange::WorkChanged(change));
     }
 
     // --- placements ---------------------------------------------------------
@@ -353,6 +367,12 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        self.emit_work_changed(WorkChanged {
+            what: "placement".into(),
+            task_id: Some(task_id.to_string()),
+            rule_id: None,
+            view_id: None,
+        });
         self.work_placement(task_id)
     }
 
@@ -441,6 +461,12 @@ impl Store {
                 id
             }
         };
+        self.emit_work_changed(WorkChanged {
+            what: "rule".into(),
+            task_id: None,
+            rule_id: Some(id),
+            view_id: None,
+        });
         self.work_rule(id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "rule vanished after write"))
     }
@@ -459,6 +485,12 @@ impl Store {
             "DELETE FROM work_rules WHERE id = ?1 AND version = ?2",
             rusqlite::params![id, cur.version],
         )?;
+        self.emit_work_changed(WorkChanged {
+            what: "rule".into(),
+            task_id: None,
+            rule_id: Some(id),
+            view_id: None,
+        });
         Ok(())
     }
 
@@ -559,6 +591,12 @@ impl Store {
                 id
             }
         };
+        self.emit_work_changed(WorkChanged {
+            what: "view".into(),
+            task_id: None,
+            rule_id: None,
+            view_id: Some(id),
+        });
         self.work_view(id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "view vanished after write"))
     }
@@ -587,6 +625,12 @@ impl Store {
             "DELETE FROM work_views WHERE id = ?1 AND version = ?2",
             rusqlite::params![id, cur.version],
         )?;
+        self.emit_work_changed(WorkChanged {
+            what: "view".into(),
+            task_id: None,
+            rule_id: None,
+            view_id: Some(id),
+        });
         Ok(())
     }
 }

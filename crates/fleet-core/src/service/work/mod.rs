@@ -408,6 +408,25 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
     ("summarize_past_work", "work_link", "summarize"),
+    // Work graph M14.1d: the Work view's desktop commands.
+    ("work_tree", "work", "tree"),
+    ("work_task", "work", "task"),
+    ("work_session_tasks", "work", "session_tasks"),
+    ("work_review", "work", "review"),
+    ("work_rules", "work", "rules"),
+    ("work_rule_preview", "work", "rule_preview"),
+    ("work_views", "work", "views"),
+    ("work_org_impact", "work", "org_impact"),
+    ("set_primary_work", "work_link", "set_primary"),
+    ("reconsider_work_link", "work_link", "reconsider"),
+    ("ack_work_link", "work_link", "ack"),
+    ("decide_work_batch", "work_link", "decide_batch"),
+    ("place_work", "work_link", "place"),
+    ("assign_work_org", "work_link", "assign_org"),
+    ("save_work_rule", "work_link", "rule_save"),
+    ("delete_work_rule", "work_link", "rule_delete"),
+    ("save_work_view", "work_link", "view_save"),
+    ("delete_work_view", "work_link", "view_delete"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph

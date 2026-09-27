@@ -831,8 +831,16 @@ and rebased on `main`; it does not redesign it.
 - **M14.4** the phone's *My work* tab (fleet-mobile), read, then edits.
 - **M14.5** acceptance (Part R), the user guide, close-out.
 
-**Status (2026-09-27): planned; M14.0 done.** D31–D36 are answered (the
-table below). M14 is the one milestone after M13's close-out, by the
+**Status (2026-09-27): M14.0–M14.4 built.** M14.1a–d are on `main`
+(#341, #342, #345, #347); M14.2 / M14.3 (the desktop Work view, its edits
+and Review) and M14.4 (fleet-mobile's *My work*) came from
+`claude/fleet-dynamic-work-view-kwc3r9`, merged over that backend, with
+`scripts/hub-e2e.sh` hub W section 10 running the contract on a real hub
+(tree, session tasks, the primary's compare-and-set, placement,
+`work:changed`, Acme- and Beta-bound and readonly clients). Open: D31's
+per-org switch has no desktop control yet (`work_admin` sets it), and
+M14.5, the acceptance run (Part R), waits on the owner. D31–D36 are
+answered (the table below). M14 is the one milestone after M13's close-out, by the
 owner's choice (D36); D26's "operating" applies again once it is done. The
 two open items carried from M13 (the acceptance run, D5) stay where
 *Operating* puts them; M14 neither absorbs nor blocks them.
@@ -1072,6 +1080,11 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   section naming what M13 changed for users, and `scripts/release.sh` now
   turns that section into the release's own instead of stacking the
   release above it.
+- 2026-09-27: **M14.2–M14.4.** The desktop Work view (tree, task detail,
+  Review, placement and rules, saved views, the org dialog) and the phone's
+  *My work* merged over M14.1's backend from
+  `claude/fleet-dynamic-work-view-kwc3r9`; the desktop follows
+  `work:changed` through `onWorkChanged` (a `resync` re-reads too).
 - 2026-09-27: **M14.0** (docs only; facts from `main` `f10d0b92` and its
   merge history). M14 (the Work view) added, with its plan and the design
   spec brought to `main`; D31–D36 added with the owner's answers. The M13

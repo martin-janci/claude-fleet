@@ -3968,3 +3968,143 @@ fn the_classification_nudge_offers_only_the_hosts_own_tickets() {
     assert!(b.contains("BB-9"), "{b}");
     assert!(!b.contains("AA-9"), "{b}");
 }
+
+/// Work graph M14.1d: `work:changed` is emitted — ids only — on a
+/// placement, a rule, a saved view and a local task's org change, and on
+/// `/events` it reaches only a caller that reads every org. A per-host
+/// token and an org-bound client never receive it (kind `work`): a frame
+/// naming a task, rule or view carries no session to fence it by, so they
+/// re-read what they may see through `work { … }` on their own
+/// `session:*` frames instead.
+#[test]
+fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
+    use crate::events::BroadcastEventBus;
+    use crate::mcp::events_route::{fence_frame, fence_host_bound, matches};
+    use crate::service::work::structure::{self as st, RuleInput, ViewInput};
+    use crate::store::RuleConditions;
+
+    let bus = std::sync::Arc::new(BroadcastEventBus::default());
+    // Subscribed first: the bus renders nothing nobody listens for.
+    let mut rx = bus.subscribe();
+    let store = std::sync::Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let local = {
+        let s = store.lock().unwrap();
+        for h in ["h-a", "h-b", "h-n"] {
+            s.upsert_host(h).unwrap();
+        }
+        let a = s.add_org("Alpha", None, false).unwrap();
+        let b = s.add_org("Bravo", None, false).unwrap();
+        assert_eq!((a.id, b.id), (ORG_A, ORG_B), "the callers' org ids");
+        s.set_host_org("h-a", Some(ORG_A)).unwrap();
+        s.set_host_org("h-b", Some(ORG_B)).unwrap();
+        let sid = s
+            .upsert_session("one", "h-a", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.name_session_work(sid, Some("LOC-1"), "SECRET-A billing")
+            .unwrap()
+            .0
+            .id
+    };
+    let tid = format!("item:{local}");
+    while rx.try_recv().is_ok() {}
+
+    st::place(
+        &store,
+        &OrgScope::All,
+        &tid,
+        Some("Payments"),
+        Some("SECRET-A note"),
+        Some(0),
+        "master",
+    )
+    .unwrap();
+    let rule = st::rule_save(
+        &store,
+        &OrgScope::All,
+        &RuleInput {
+            name: "Pay".into(),
+            conditions: RuleConditions {
+                key_prefix: Some("LOC".into()),
+                ..Default::default()
+            },
+            group: "Payments".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    st::rule_delete(&store, &OrgScope::All, rule.id, Some(rule.version)).unwrap();
+    let view = st::view_save(
+        &store,
+        &OrgScope::All,
+        &ViewInput {
+            name: "SECRET-A view".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    st::view_delete(&store, &OrgScope::All, view.id, Some(view.version)).unwrap();
+    let imp = st::org_impact(&store, &OrgScope::All, &tid, Some(ORG_B)).unwrap();
+    st::assign_org(
+        &store,
+        &OrgScope::All,
+        &tid,
+        Some(ORG_B),
+        Some(&imp.impact_token),
+    )
+    .unwrap();
+
+    let mut frames = Vec::new();
+    while let Ok(m) = rx.try_recv() {
+        if m.name == "work:changed" {
+            frames.push(m);
+        }
+    }
+    let whats: Vec<&str> = frames
+        .iter()
+        .map(|f| f.payload["what"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        whats,
+        ["placement", "rule", "rule", "view", "view", "org"],
+        "one frame per structural write"
+    );
+    assert_eq!(
+        frames[0].payload,
+        json!({ "what": "placement", "task_id": tid })
+    );
+    assert_eq!(
+        frames[1].payload,
+        json!({ "what": "rule", "rule_id": rule.id })
+    );
+    assert_eq!(
+        frames[3].payload,
+        json!({ "what": "view", "view_id": view.id })
+    );
+    assert_eq!(frames[5].payload, json!({ "what": "org", "task_id": tid }));
+    for f in &frames {
+        let text = f.payload.to_string();
+        assert!(!text.contains("SECRET"), "ids only: {text}");
+    }
+
+    for &who in EVERYONE {
+        let c = who.caller();
+        let kinds = fence_host_bound(&c, None);
+        let asked = fence_host_bound(&c, Some(vec!["work".into()]));
+        let scope = {
+            let s = store.lock().unwrap();
+            c.org_scope(&s).unwrap()
+        };
+        for f in &frames {
+            for k in [&kinds, &asked] {
+                let delivered =
+                    matches(k.as_ref(), f) && fence_frame(&scope, f, &|_| None).is_some();
+                assert_eq!(
+                    delivered,
+                    who.is_unbound(),
+                    "{who:?}: work:changed {} (asked {k:?})",
+                    f.payload
+                );
+            }
+        }
+    }
+}

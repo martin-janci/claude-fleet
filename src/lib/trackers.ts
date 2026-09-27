@@ -8,6 +8,7 @@
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
+import { bumpWorkChanged } from './work';
 
 /** `trackers.state`. Anything else a newer hub sends is treated as not ok. */
 export type TrackerState =
@@ -179,7 +180,10 @@ export interface StartWorkArgs {
  *  (details.session_id) means the key already has a live session. */
 export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('start_work', { args });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 
