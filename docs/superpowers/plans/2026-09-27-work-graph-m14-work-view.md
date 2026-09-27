@@ -2,11 +2,11 @@
 
 **Date:** 2026-09-27
 **Roadmap:** `../2026-09-24-work-graph-roadmap.md`. M14 is new on `main`; M14.0 adds it there.
-**Design (binding):** `../specs/2026-09-27-work-view-design.md`. It lives on the branch `claude/fleet-dynamic-work-view-kwc3r9`, and M14.1 brings it to `main`.
+**Design (binding):** `../specs/2026-09-27-work-view-design.md`. It was written on the branch `claude/fleet-dynamic-work-view-kwc3r9`; M14.0 brings it to `main` (the spec only, no code).
 **Depends on:**
 - claude-fleet: M0–M13 on `main` (`f10d0b92`: M13.0–M13.2, M13.4a/c/d/e, the review fixes #331 and #332, and #334's tests).
 - fleet-mobile: `main` (`8ca9afa`, with #50 and #51).
-**Input:** the Work view backend commit `defe19c3` on that branch (69 files, +8,590 lines, one commit).
+**Input:** the Work view backend commit `defe19c3` on that branch (69 files, +8,590 lines), plus the three commits after it (see *Facts*).
 
 ## Goal
 
@@ -42,14 +42,20 @@
 
 **The branch's claims vs its content:**
 - The roadmap text on the branch says M14 is "built" and marks D31–D35 as "default, built".
-- The commit has **no Svelte, TS UI or Kotlin files**. It carries:
+- The backend commit `defe19c3` has **no Svelte, TS UI or Kotlin files**. It carries:
   - the backend: `work { tree | task | session_tasks | review | rules | rule_preview | views | org_impact }`, ten new `work_link` actions with compare-and-set, `store/work_view.rs`, `service/work/view.rs` and `structure.rs`;
   - org-bound pairing (`fleet-hub pair --org`);
   - the `work:changed` event;
   - 18 routed Tauri commands;
   - the verdicts, the isolation rows (+614 lines) and a scale test.
 
-  The desktop Work view and the phone's *My work* tab do not exist yet.
+  The phone's *My work* tab does not exist yet (no Kotlin anywhere on the branch).
+- **The branch did not stop at `defe19c3`.** Three more commits followed it (2026-09-27, 14:39–14:54 UTC):
+  - `fc61943` fences `fleet_health` for org-bound clients (4 files, +64). It belongs with M14.1b.
+  - `11606ea` is a **WIP desktop Work view UI checkpoint** (37 files, +7,225: `WorkTree`, `WorkTaskDetail`, `WorkReview`, `WorkRules`, `WorkRuleEditor`, `WorkFiltersBar`, `WorkOrgDialog`, `WorkPlaceDialog`, `SessionTasks`, the sidebar switch, with Vitest). Its own message says "review fix pass in progress".
+  - `5988203` fixes review findings in that desktop UI (7 files, +224).
+
+  So a desktop Work view exists on the branch, unreviewed and unfinished. It is input for M14.2 / M14.3 under design decision 1 (land, don't rebuild), and like the backend it is rebased and checked against the spec, not taken as done. M14.1 does not carry it.
 - Its acceptance section is **Part R, steps 60–72**. The spec says **Part P**, but on `main` Part P is GHES. Part R is the right one.
 
 **A real bug the spec found, still on `main`:** `work_link start` re-checks only after the SSH spawn. When two devices start the same ticket at once, the loser's session stays up, unlinked. `resume` already avoids this with an in-flight registry.
@@ -100,8 +106,9 @@
 - Bring `docs/superpowers/specs/2026-09-27-work-view-design.md` to `main` from the branch, with fixes:
   - acceptance section Part **R**;
   - migration `0NN`;
-  - base `f10d0b92`.
-- Add **M14** to the roadmap. Add D31–D36 to the decisions table as **proposed defaults, not built**, waiting on the owner (see *Decisions*).
+  - base `f10d0b92`;
+  - D31 as the per-org setting, D32–D35 answered with their defaults.
+- Add **M14** to the roadmap. Add D31–D36 to the decisions table with the owner's answers (see *Decisions*); none is built on `main`.
 - Fix the M13 truth debt listed under *Facts*: the roadmap's M13 status, the M9 line, CLAUDE.md, `work-graph.md:305` and the acceptance headings.
 - Add one line to the live-instance README saying its migration reservations are void (design decision 3).
 - Docs only. **Done** when the roadmap, CLAUDE.md and the guide match `main`.
@@ -230,5 +237,6 @@ M14.0 ──► M14.1a ──► M14.1b ──► M14.1c ──► M14.1d
 - M13.3, M13.4b and M13.5 are independent of all of this.
 
 ## Revisions
+- 2026-09-27 (M14.0): *Facts* corrected. The branch holds four commits, not one: after `defe19c3` came `fc61943` (the `fleet_health` fence for org-bound clients), `11606ea` (a WIP desktop Work view UI, +7,225) and `5988203` (its review fixes), so "the desktop Work view does not exist yet" was wrong; it exists on the branch, unfinished. The header now says M14.0 (not M14.1) brings the spec to `main`, and M14.0's task list says D31–D36 are answered, not proposed. Everything else in *Facts* re-checked at `f10d0b92` and true: 36 commits behind, based on `be0e2bc5`; migrations 061–064 taken, 065 next; `BUDGET_BYTES` 59,114 on the branch vs 57,050; `CONTRACT_REVISION` 4 on both; Part R is steps 60–72 on the branch; 0 of 59 acceptance results filled.
 - 2026-09-27: the owner answered D31 (per-org setting, default on), D32–D35 (defaults) and D36 (yes; this session drives M14).
 - 2026-09-27: written at `main` `f10d0b92`, from the spec and the backend commit on `claude/fleet-dynamic-work-view-kwc3r9` (`defe19c3`).

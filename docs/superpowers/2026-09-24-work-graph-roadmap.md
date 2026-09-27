@@ -621,8 +621,10 @@ acceptance is still to do.
 - **M9.6 multi-repo start** (D11): `work_link start { project_ids }`, one
   sibling per repo on one branch, per-repo duplicate guard; *Also start in*
   in the New-session dialog.
-- **Not built, by decision:** write-back (D3 none), dead-session summaries
-  (D10 off), webhook nudges (D13 no).
+- **Not built in M9, by decision then:** write-back (D3), dead-session
+  summaries (D10) and webhook nudges (D13). The owner later said yes to D3
+  (the PR remote link only) and D10 (on demand only); both were built in
+  M13.4e / M13.4c. D13 stays no (M13.4f was built and removed, #330).
 - **On `main`:** M9.1 / M9.2 and M9.3 / M9.6 / M9.7 with #268, the M7
   follow-ups with #271, the handover fix (idle REPL only) with #274.
 - **Follow-ups on M7** (after #268): Today's **Stale** section opens M7's
@@ -771,14 +773,47 @@ Plan: `plans/2026-09-26-work-graph-m13-live-use.md`.
 **Value:** the roadmap matches `main`, partial sync failures are visible,
 and every open decision gets an answer backed by usage.
 
-**Status (2026-09-26):**
-- **M13.0 done** (this revision).
-- M13.1 and M13.2 are not started. M13.3 waits on the owner's run.
-- M13.4: D3, D10 and D20 are yes (2026-09-27). **M13.4c (D10) and
-  M13.4e (D3) are on `main`** (#327); **M13.4a (D20)** is on fleet-mobile's
-  `main` (martin-janci/fleet-mobile#51). M13.4f (webhooks, D13) reached
-  `main` with #327 and was **removed** again: the owner keeps D13 at no.
-  D5 and D15 wait on the decisions.
+**Status (2026-09-27, M14.0, verified at `main` `f10d0b92`):**
+- **On `main`:** M13.0; **M13.1** (partial sync failures, D25) #320;
+  **M13.2** (`work_admin { usage }`, D24) #323 / #324; **M13.4c** (D10)
+  and **M13.4e** (D3), built in #327 and fixed in #331 (M13.4c) and #332
+  (M13.4e), with their missing tests ported in #334.
+- **On fleet-mobile `main`:** **M13.4a** (D20, naming local work)
+  martin-janci/fleet-mobile#51 and **M13.4d** (D15, multi-start on the
+  phone) martin-janci/fleet-mobile#50.
+- **Removed:** M13.4f (webhook nudges, D13) reached `main` with #327 and was
+  removed in #330; D13 stays no.
+- **Open, waiting on the owner:** **M13.3** (triage of the owner's M10.3
+  run; no result in `docs/work-graph-acceptance.md` is filled yet),
+  **M13.4b** (D5: off until the remote SessionStart numbers are in) and
+  **M13.5** (the close-out). M14 does not absorb them (M14 plan, design
+  decision 7).
+
+### M14: the Work view
+
+Plan: `plans/2026-09-27-work-graph-m14-work-view.md`. Design (binding):
+`specs/2026-09-27-work-view-design.md`.
+
+The other direction through the same data: org → project / group → task →
+*every* session of that task (primary, secondary, suggested and past), and
+tasks with no session at all; one contract (`work { tree | task | … }`,
+`work_link { set_primary | … }`, no new tool, `CONTRACT_REVISION` 4) for
+the desktop and the phone, and a phone paired **to one org** that sees only
+that org (a new boundary, proved like M5's). M14 lands the backend already
+built on `claude/fleet-dynamic-work-view-kwc3r9`, cut into reviewable PRs
+and rebased on `main`; it does not redesign it.
+
+- **M14.0** the plan, the spec on `main`, the M13 truth pass (docs).
+- **M14.1a–d** the backend: the `start` race fix; migration `0NN_work_view`
+  (numbered at merge time) + reads + org-bound clients (D31); mutations with
+  compare-and-set; the desktop commands and `work:changed`.
+- **M14.2 / M14.3** the desktop Work view, read, then edits and Review.
+- **M14.4** the phone's *My work* tab (fleet-mobile), read, then edits.
+- **M14.5** acceptance (Part R), the user guide, close-out.
+
+**Status (2026-09-27): planned; M14.0 done.** D31–D36 are answered (the
+table below). By D36, M14 is the last work-graph milestone; D26 applies
+after it.
 
 ## Critical path and parallelism
 
@@ -790,7 +825,7 @@ M0 ─┬─> M1 ─> M2 ─┬─> M4 ─> M7
     └─ M0 PRs are independent of each other
 
 M4, M5, M6, M7, M8 ─> M9 ─> M10 ─┬─> M11 ─┐
-                                 └─> M12 ─┴─> M13 (live use)
+                                 └─> M12 ─┴─> M13 (live use) ─> M14 (the Work view)
                                         M10.3 (the owner's run) ─> M13.3 ─> M13.4
 ```
 
@@ -798,6 +833,8 @@ M4, M5, M6, M7, M8 ─> M9 ─> M10 ─┬─> M11 ─┐
   sync metrics.
 - In M13, M13.0–M13.2 do not wait on anything; M13.3 waits on the owner's
   M10.3 run, and each M13.4 item on its decision's "yes".
+- M14 follows M13's builds but not its open items: M13.3, M13.4b and M13.5
+  do not block it. Its order is in the M14 plan (M14.1a first).
 
 - M3 can start its transport spike and fixtures in parallel with M2.
 - M5's security boundary must land **before** a second org's tracker is
@@ -825,22 +862,28 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D12 | Must operator-initiated starts / kills always confirm, even with `mcp.confirm_destructive` off (M9.7)? | yes · follow the setting | **Decided 2026-09-25: yes, always.** Built (M9.7, #268) |
 | D13 | Expose an inbound webhook endpoint on a public hub (M9.8)? | no (poll) · yes (HMAC, targeted fetch only) | **No.** Recorded yes on 2026-09-26 and built as M13.4f (reached `main` with #327); **the owner reversed it on 2026-09-27 → no** (the M12.6 recommendation), and M13.4f was removed. Migration 062 stays in the chain, 064 drops its table (063 is another change, #333) |
 | D14 | Build M4.6, the opt-in classification nudge? | build (off by default) · decided against | **Built, off by default (2026-09-25)**: `work.classify_nudge`. Opened as #273 (closed unmerged); the commit reached `main` with #270 |
-| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | **Decided 2026-09-27 by the owner, before the M10.3 run: also on the phone** (M13.4d: multi-select with a confirm sheet, cross-org refused in words, full token only) |
+| D15 | Multi-start on the phone? (Restated 2026-09-26: handover is already on the phone, M8.6.3, for full tokens — on fleet-mobile `main` since martin-janci/fleet-mobile#35, first in v0.2.41; Today and the card are read-only, M10.5, fleet-mobile #36) | desktop only · also on the phone | **Decided 2026-09-27 by the owner, before the M10.3 run: also on the phone** (M13.4d: multi-select with a confirm sheet, cross-org refused in words, full token only), **built** (martin-janci/fleet-mobile#50) |
 | D16 | Run `hub-e2e` in GitHub CI, not only locally (M10.2)? | local opt-in · CI on `main` pushes | **Done.** hub-e2e runs in CI's `hub-headless` job (`.github/workflows/ci.yml`, every PR and `main` push). Since #314 the job also builds an `e2e`-feature hub into `target/e2e` and passes it as `WBIN`, so the M10.2 work-graph leg runs on every PR; with `CI=true` a missing `WBIN` fails instead of skipping (`scripts/hub-e2e.sh`) |
 | D17 | Support `acli` (Atlassian CLI) as a Jira transport? (M11 plan) | yes · decided against | **Decided against:** REST and `via_host` (`gh`, `curl`) cover it. M12.6 keeps it; M13 does not reopen it |
 | D18 | First sync of a new tracker: suppress per-item frames? (M11 plan) | accept the flood · suppress (design change) | **Accept** (the M10.6 report, `reviews/2026-09-25-replay-ring-pressure.md`); nothing suppresses them on `main` |
 | D19 | May auto-tidy ever act on `idle_unlinked`? (M11 plan) | never · per org | **Never.** Enforced (M11.3, #291) in `TidyReason::auto_allowed`, `auto_selection` and the executor |
-| D20 | Local work items on the phone (name / rename)? (M11 plan) | no (read-only phone) · yes | **Decided 2026-09-26: yes**, fleet-mobile only, no hub change: M13.4a |
+| D20 | Local work items on the phone (name / rename)? (M11 plan) | no (read-only phone) · yes | **Decided 2026-09-26: yes**, fleet-mobile only, no hub change: M13.4a, **built** (martin-janci/fleet-mobile#51) |
 | D21 | Retention defaults: journal / done items / work timeline events (M12 plan) | 365 / 180 / 180 days · keep forever | **Built** (M12.3, #299): `work.retention.journal_days` 365, `…tracker_items_days` 180, `…timeline_work_events_days` 180; `0` = forever |
 | D22 | Should a failing tracker raise an Attention item, not only a health row? (M12 plan) | yes · health only | **Yes, built** (M12.4, #303): one "Reconnect …" item per tracker, deduplicated |
 | D23 | Per-org retention override (needs a migration)? (M12 plan) | now · later | **Later:** settings only (M12.3, #299); no migration |
-| D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2 |
-| D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1 |
+| D24 | Build the usage summary, `work_admin { usage }`? (M13 plan) | yes (master-only, counts only, local) · no | Yes (default); M13.2, **built** (#323 / #324) |
+| D25 | May a partial sync failure alone make a tracker `failing` (after N passes)? (M13 plan) | yes · degraded only | Yes (default), with its own Attention wording ("Sync skipping items", not "Reconnect"); M13.1, **built** (#320) |
 | D26 | After M13, is the work graph "operating" (issues, not milestones)? (M13 plan) | yes · keep milestones | Yes (default); M13.5 |
 | D27 | Which model summarises a dead session, on whose quota? (M13.4c) | a small model · the session's configured model | `haiku` (`work.summary_model`: haiku / sonnet / opus), on the session's own host and account |
 | D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | **Moot**: D13 is no, and M13.4f was removed |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
 | D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
+| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · by setting | **Answered 2026-09-27: by setting.** A per-org flag `orgs.bound_sees_unassigned` (M14.1b's migration; `work_admin` org edit; Settings → Work → Organisations), **default on**. Off: the org's bound clients see only rows assigned to their org. An isolation row covers both values |
+| D32 | Does a forced cross-org link raise a review item until it is acknowledged? (M14) | yes · no | **Answered 2026-09-27: the default, yes** (`cross_org` review kind, cleared by `ack`) |
+| D33 | May a full, unbound phone change a local task's org? (M14) | yes, with the impact preview · no | **Answered 2026-09-27: the default, yes**, with the impact preview. Bound clients and hosts may not |
+| D34 | Placement rules only, or also link rules? (M14) | placement only · also link rules | **Answered 2026-09-27: the default, placement only.** Link rules would bypass detection's evidence and R9 |
+| D35 | Saved views: shared on the hub, or per device? (M14) | shared on the hub · per device | **Answered 2026-09-27: the default, shared on the hub.** A bound client's views are its org's |
+| D36 | M14 as a milestone, despite D26? Who drives it? (M14 plan) | yes · issues only | **Answered 2026-09-27: yes, M14 is the last work-graph milestone** (D26 applies after it); one driver session. The backend branch's session does not continue it |
 
 ## Risks to watch
 
@@ -1000,3 +1043,11 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   martin-janci/fleet-mobile#50). D5 stays off until the remote
   SessionStart numbers are in. M13.3 still waits on the run. D13 is set
   back to no with M13.4f's removal (#330).
+- 2026-09-27: **M14.0** (docs only; facts from `main` `f10d0b92` and its
+  merge history). M14 (the Work view) added, with its plan and the design
+  spec brought to `main`; D31–D36 added with the owner's answers. The M13
+  status block corrected: M13.1 (#320) and M13.2 (#323 / #324) are on
+  `main`, M13.4c / M13.4e with their fixes (#331, #332) and tests (#334),
+  M13.4a / M13.4d on fleet-mobile (#51, #50), M13.4f removed (#330); M13.3,
+  M13.4b and M13.5 are open. The M9 "not built" line no longer says D3 none
+  and D10 off. D15, D20, D24 and D25 name their PRs.
