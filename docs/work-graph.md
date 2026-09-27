@@ -76,7 +76,20 @@ and a rejection is sticky: fleet never suggests that pair again.
 
 Claude in the session can link its own work too (`work_link`, source
 `agent`), which is how the friendly-name skill records "I'm working on
-ABC-123".
+ABC-123". An agent cannot overturn your rejection: once you said *Not
+this* to a key for a session, Claude linking or confirming that key is
+refused (`E_FORBIDDEN`) and your rejection stands. Only you can link it
+again.
+
+Who decides is recorded by who is asking, not by what they claim. A link,
+confirmation or rejection made through a per-host token (the host's own
+Claude) or by the operator (the agent panel's session) is recorded with
+source `agent`, even if it passes `source: manual`; one made from the
+desktop, the master token or a paired phone is recorded as yours
+(`manual`). An agent's confirmation therefore never counts as yours: it
+does not count toward a project's automatic trust, it is not written back
+to a tracker, and the usage summary counts it apart. When an agent
+decides the same way you already did, your decision is kept.
 
 ### Detection
 
@@ -105,8 +118,9 @@ decides what each sighting becomes:
   shown as a dashed chip with `?` and waits for a person.
 
 A project becomes trusted when you tick **Trust branch keys in this repo**
-in the popover, or automatically after three branch suggestions in it were
-confirmed. Settings → Limits → Lifecycle shows how many projects are trusted and has a
+in the popover, or automatically after you confirmed three branch
+suggestions in it (a suggestion only a pull request made, or one an agent
+confirmed, does not count). Settings → Limits → Lifecycle shows how many projects are trusted and has a
 **Trust none** button.
 
 ### The chip and its popover
@@ -241,8 +255,9 @@ is ever written: no transition, no worklog, no comment (D29), and nothing a
 transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
-  hand or by *Start* (`manual` / `started`). A detection guess or an agent's
-  suggestion never writes.
+  hand or by *Start* (`manual` / `started`). A detection guess, an agent's
+  suggestion, and a link or confirmation an agent made (`agent`) never
+  write.
 - **Only your own org's tracker.** A session in one org never writes to
   another org's tracker, even a link made with `force_cross_org`; the org is
   checked again just before sending.
@@ -491,7 +506,7 @@ it. `0` keeps a table forever.
 - `work.retention.tracker_items_days` (180): cached tickets in done. Kept
   while any link, live or ended, names one, and while it is the parent of a
   kept ticket.
-- `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
+- `work.retention.timeline_work_events_days` (180): handover, nudge, tidy and withdrawn-suggestion
   timeline events. The newest of each kind per session stays.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
@@ -600,8 +615,8 @@ title, key, path or error text.
 
 | Group | What it counts |
 |---|---|
-| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, …); a suggestion a person decided reads `manual` |
-| detection | suggestions made, confirmed by a person, promoted by detection itself, rejected, expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
+| links | links made, per `source` (`manual`, `started`, `branch`, `resumed`, `agent`, …); a suggestion a person decided reads `manual`, one an agent decided `agent` |
+| detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
 | handover | handovers requested and written, turns that ended without one, requests that could not be sent |
 | resume | resumes, with and without a brief |
 | journal | briefs queued and delivered, compaction summaries harvested |
@@ -612,9 +627,13 @@ Some things are not stored anywhere, so the answer lists them under
 `unrecorded` instead of guessing: suggestions *shown*, handovers refused as
 busy, `last` vs fresh resumes, the transcript probe's outcomes, Tidy-up's
 suggestions per reason before anything is applied, and multi-start runs.
-Suggestions that detection withdrew or let decay leave no row, so
-`suggested` is a floor. The counts are bounded by retention and by the
-timeline's cap per session (500 events).
+A suggestion that detection withdrew (its branch or PR moved on) or let
+decay (an event suggestion not seen again after a conversation boundary)
+loses its row, but leaves a `work_suggestion_withdrawn` event on the
+session's timeline, holding only ids and rule words; `withdrawn` counts
+those, and `suggested` includes them. The counts are bounded by retention
+and by the timeline's cap per session (500 events), so `suggested` and
+`withdrawn` are floors.
 
 Paste it into an acceptance run's record: that gives the decisions real
 numbers.
@@ -623,7 +642,7 @@ numbers.
 $ fleet-hub work usage --days 30
 work graph usage, last 30 d
 links: 41 made (branch 12, manual 20, resumed 3, started 6)
-detection: 18 suggested, 9 confirmed by a person, 4 promoted, 3 rejected, 1 expired; median decision 12 min; 2 nudges
+detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 2 withdrawn, 1 expired; median decision 12 min; 2 nudges
 handover: 5 requested, 4 written, 1 missing, 0 send failed
 resume: 3 (2 with a brief, 1 without)
 journal: 8 briefs queued, 7 delivered; 11 compaction summaries
@@ -697,7 +716,7 @@ table.
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | the reasons auto-tidy may act on |
 | `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | work journal retention |
 | `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | retention of done tickets no link names |
-| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | retention of handover, nudge and tidy timeline events |
+| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | retention of handover, nudge, tidy and withdrawn-suggestion timeline events |
 
 Per-org overrides: `auto_tidy` (`on` / `off` / `inherit`) and
 `isolate_sessions`, set on the org, not here.

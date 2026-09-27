@@ -3,13 +3,18 @@
 //! of its live links, and applying the resolver's changes. The rules are in
 //! `service::work::resolve`; this file only reads and writes.
 
-use super::{now_unix, Store, WorkLinkRow};
+use super::work::{agent_over_decision, AgentOver};
+use super::{now_unix, Decider, Store, WorkLinkRow};
 use crate::ipc_error::{codes, IpcError};
 use crate::service::work::resolve::{Evidence, LinkChange, NewState, PrimaryRef, EVIDENCE_MAX};
 use rusqlite::OptionalExtension;
 
 /// Longest stored branch name.
 const BRANCH_MAX_CHARS: usize = 255;
+
+/// Timeline kind of a suggestion detection withdrew (R7) or let decay (R6):
+/// the row is deleted, this event keeps the outcome (D34).
+pub const WORK_SUGGESTION_WITHDRAWN: &str = "work_suggestion_withdrawn";
 
 /// What the resolver needs to know about a session besides its links.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -266,10 +271,16 @@ impl Store {
                         self.end_live_link(*link_id, session_id, reason, now)?;
                     }
                     LinkChange::Withdraw { link_id } | LinkChange::Decay { link_id } => {
-                        self.conn.execute(
-                            "DELETE FROM work_links WHERE id = ?1 AND state = 'suggested' \
-                               AND ended_at IS NULL",
-                            rusqlite::params![link_id],
+                        let reason = if matches!(c, LinkChange::Withdraw { .. }) {
+                            "withdraw"
+                        } else {
+                            "decay"
+                        };
+                        self.withdraw_suggestion(
+                            session_id,
+                            conversation,
+                            *link_id,
+                            reason,
                         )?;
                     }
                     LinkChange::Promote {
@@ -414,6 +425,57 @@ impl Store {
         self.resolve_work_key(&key)
     }
 
+    /// Delete the live suggestion `link_id` (R7 withdrew it, or R6 let it
+    /// decay: `reason` is `withdraw` or `decay`), leaving a
+    /// [`WORK_SUGGESTION_WITHDRAWN`] timeline event on `session_id` so the
+    /// negative outcome is not lost with the row (D34). The event's detail
+    /// holds ids and vocabulary words only — `{link_id, item_id, rule,
+    /// reason}` — never a key, title or text. Nothing happens when the link
+    /// is no longer a live suggestion.
+    fn withdraw_suggestion(
+        &self,
+        session_id: i64,
+        conversation: Option<&str>,
+        link_id: i64,
+        reason: &str,
+    ) -> Result<(), IpcError> {
+        let gone: Option<(Option<i64>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT item_id, rule FROM work_links WHERE id = ?1 AND state = 'suggested' \
+                   AND ended_at IS NULL",
+                rusqlite::params![link_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((item_id, rule)) = gone else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "DELETE FROM work_links WHERE id = ?1 AND state = 'suggested' AND ended_at IS NULL",
+            rusqlite::params![link_id],
+        )?;
+        // A rule is a resolver word (R3b, R6 …); anything else is not
+        // carried.
+        let rule = rule
+            .filter(|r| (1..=8).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric()));
+        let detail = serde_json::json!({
+            "link_id": link_id,
+            "item_id": item_id,
+            "rule": rule,
+            "reason": reason,
+        })
+        .to_string();
+        // Quiet: a bookkeeping row for the timeline and `work_admin usage`,
+        // not news for every connected client.
+        self.insert_session_event_quietly(
+            session_id,
+            conversation,
+            WORK_SUGGESTION_WITHDRAWN,
+            Some(&detail),
+        )
+    }
+
     fn link_evidence(&self, link_id: i64) -> Result<Vec<serde_json::Value>, IpcError> {
         let raw: Option<String> = self
             .conn
@@ -464,32 +526,50 @@ impl Store {
         Ok(())
     }
 
-    /// A person decides one suggestion by id: `confirm` makes it a confirmed
-    /// manual link and the session's primary; otherwise it is rejected
-    /// (sticky, R9). `E_NOTFOUND` when the link is not this session's live
-    /// link.
+    /// `decider` decides one suggestion by id: `confirm` makes it a
+    /// confirmed link and the session's primary; otherwise it is rejected
+    /// (sticky, R9). The link records the decider's source (`manual` for a
+    /// person, `agent` for an agent), so an agent's confirmation never reads
+    /// as a person's. An agent cannot confirm a link a person rejected
+    /// (`E_FORBIDDEN`), and deciding the way a person already did keeps the
+    /// person's decision. `E_NOTFOUND` when the link is not this session's
+    /// live link.
     pub fn decide_work_link(
         &self,
         session_id: i64,
         link_id: i64,
         confirm: bool,
+        decider: Decider,
     ) -> Result<WorkLinkRow, IpcError> {
-        let participant: Option<i64> = self
+        let found: Option<(i64, String, String)> = self
             .conn
             .query_row(
-                "SELECT l.participant_id FROM work_links l JOIN participants p \
-                   ON p.id = l.participant_id AND p.retired_at IS NULL \
+                "SELECT l.participant_id, l.state, l.source FROM work_links l \
+                   JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  WHERE l.id = ?1 AND l.ended_at IS NULL AND p.session_id = ?2",
                 rusqlite::params![link_id, session_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some(participant) = participant else {
+        let Some((participant, old_state, old_source)) = found else {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
                 format!("session {session_id} has no live work link {link_id}"),
             ));
         };
+        let new_state = if confirm { "confirmed" } else { "rejected" };
+        let keep = match decider {
+            Decider::Person => AgentOver::Write,
+            Decider::Agent => {
+                agent_over_decision(session_id, link_id, &old_state, &old_source, new_state)?
+            }
+        };
+        if keep == AgentOver::KeepPersons && !confirm {
+            // A person rejected it already: nothing to write.
+            return self
+                .get_work_link(link_id)?
+                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"));
+        }
         let conv: Option<String> = self
             .conn
             .query_row(
@@ -508,21 +588,30 @@ impl Store {
                 rusqlite::params![participant],
             )?;
         }
-        // A decision keeps the evidence and the rule that proposed it, so
-        // "why" still reads after the person agreed.
-        self.conn.execute(
-            "UPDATE work_links SET state = ?2, source = 'manual', is_primary = ?3, \
-               decided_at = ?4, claude_session_id = COALESCE(?5, claude_session_id), \
-               strength = 'explicit', preselected = 0 \
-             WHERE id = ?1",
-            rusqlite::params![
-                link_id,
-                if confirm { "confirmed" } else { "rejected" },
-                confirm as i64,
-                now,
-                conv
-            ],
-        )?;
+        if keep == AgentOver::KeepPersons {
+            // A person confirmed it already: primary again, still theirs.
+            self.conn.execute(
+                "UPDATE work_links SET is_primary = 1 WHERE id = ?1",
+                rusqlite::params![link_id],
+            )?;
+        } else {
+            // A decision keeps the evidence and the rule that proposed it,
+            // so "why" still reads after the decider agreed.
+            self.conn.execute(
+                "UPDATE work_links SET state = ?2, source = ?6, is_primary = ?3, \
+                   decided_at = ?4, claude_session_id = COALESCE(?5, claude_session_id), \
+                   strength = 'explicit', preselected = 0 \
+                 WHERE id = ?1",
+                rusqlite::params![
+                    link_id,
+                    new_state,
+                    confirm as i64,
+                    now,
+                    conv,
+                    decider.source()
+                ],
+            )?;
+        }
         self.conn.execute(
             "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
             rusqlite::params![session_id],
@@ -549,8 +638,11 @@ impl Store {
         )?)
     }
 
-    /// Project ids whose sessions have at least `n` branch links a person
-    /// confirmed from a suggestion (the auto-trust count): live or ended.
+    /// How many BRANCH suggestions of `project_id`'s sessions a person
+    /// confirmed (the auto-trust count): live or ended. A state suggestion
+    /// (R3b / R4) counts only when a branch signal is in its evidence — one
+    /// only a pull request proposed says nothing about the repo's branch
+    /// names.
     pub fn confirmed_branch_suggestions(&self, project_id: i64) -> Result<i64, IpcError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM work_links l \
@@ -558,6 +650,9 @@ impl Store {
              LEFT JOIN sessions s ON s.id = p.session_id \
              WHERE l.state = 'confirmed' AND l.source = 'manual' \
                AND l.rule IN ('R3b', 'R4') \
+               AND EXISTS (SELECT 1 FROM json_each( \
+                     CASE WHEN json_valid(l.evidence) THEN l.evidence ELSE '[]' END) j \
+                   WHERE json_extract(j.value, '$.signal') = 'branch') \
                AND COALESCE(s.project_id, l.snap_project_id) = ?1",
             rusqlite::params![project_id],
             |r| r.get(0),

@@ -45,6 +45,9 @@ impl Store {
     /// - GC sweeper (`service::gc`): `gc_killed`, `gc_failed`.
     /// - tidy-up (`service::work::tidy`): `gc_tidied`, and `tidy_kept` (detail
     ///   is the unix second a person's keep holds until, work graph M11.3).
+    /// - work detection (`Store::apply_link_changes`):
+    ///   `work_suggestion_withdrawn` (detail is JSON of ids and vocabulary
+    ///   words only: `link_id`, `item_id`, `rule`, `reason` withdraw|decay).
     /// - hooks (`service::hooks`): `notification`.
     /// - playbooks (`Store::record_playbook_applied` et al.): `playbook_applied`.
     /// - MCP call audit (`mcp::tools::support`): `mcp_call`.

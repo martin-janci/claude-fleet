@@ -15,7 +15,7 @@
 use crate::ipc_error::{codes, IpcError};
 use crate::service::gc::tidy::TidyReason;
 use crate::service::trackers::sync::SyncMetrics;
-use crate::store::{Store, WORK_LINK_SOURCES};
+use crate::store::{Store, PERSON_SOURCES, WORK_SUGGESTION_WITHDRAWN};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -56,7 +56,11 @@ const HANDOVER_KINDS: &[&str] = &[
     "handover_missing",
     "handover_send_failed",
 ];
-const OTHER_KINDS: &[&str] = &["tidy_kept", "work_classify_nudge"];
+const OTHER_KINDS: &[&str] = &[
+    "tidy_kept",
+    "work_classify_nudge",
+    WORK_SUGGESTION_WITHDRAWN,
+];
 
 /// The window, in days: [`DEFAULT_DAYS`] when absent, `1..=`[`MAX_DAYS`].
 pub fn parse_days(days: Option<i64>) -> Result<u32, IpcError> {
@@ -102,23 +106,39 @@ pub struct LinkUsage {
     /// Links made in the window.
     #[serde(default)]
     pub created: u64,
-    /// Per `source` (a suggestion a person decided reads `manual`).
+    /// Per `source` (a suggestion a person decided reads `manual`, one an
+    /// agent decided `agent`).
     #[serde(default)]
     pub by_source: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectionUsage {
-    /// Suggestions made (at least: withdrawn and decayed ones leave no row).
+    /// Suggestions made: the stored ones made in the window, plus those
+    /// detection withdrew or let decay in it (their row is gone; a timeline
+    /// event counts them). A floor still: retention and the timeline's cap
+    /// per session bound the events.
     #[serde(default)]
     pub suggested: u64,
+    /// Decided by a person (`manual` / `started`).
     #[serde(default)]
     pub confirmed_by_person: u64,
-    /// Suggestions detection confirmed later by itself (R2 / R8).
+    /// Confirmed by an agent — a per-host token or the operator (`agent`,
+    /// D34); never counted as a person's.
+    #[serde(default)]
+    pub confirmed_by_agent: u64,
+    /// Suggestions detection confirmed later by itself: a sole state
+    /// candidate in a trusted project (R3) or a first prompt's sole ticket
+    /// URL (R5).
     #[serde(default)]
     pub promoted: u64,
     #[serde(default)]
     pub rejected: u64,
+    /// Suggestions detection took back undecided: its state signal moved on
+    /// (R7) or an event suggestion decayed at a conversation boundary (R6).
+    /// Counted from `work_suggestion_withdrawn` timeline events (D34).
+    #[serde(default)]
+    pub withdrawn: u64,
     /// Suggestions whose session ended undecided.
     #[serde(default)]
     pub expired: u64,
@@ -220,18 +240,23 @@ pub fn usage(
         *links.by_source.entry(key).or_default() += n;
     }
 
-    let d = s.usage_detection(since, until, auto, WORK_LINK_SOURCES)?;
-    let secs = s.usage_decision_secs(since, until, WORK_LINK_SOURCES)?;
+    let d = s.usage_detection(since, until, auto, PERSON_SOURCES)?;
+    let secs = s.usage_decision_secs(since, until, PERSON_SOURCES)?;
     let events: BTreeMap<String, u64> = s
         .usage_event_kinds(since, until, &[HANDOVER_KINDS, OTHER_KINDS].concat())?
         .into_iter()
         .collect();
     let ev = |k: &str| events.get(k).copied().unwrap_or(0);
+    // Withdrawn and decayed suggestions have no row left: their event is
+    // the only trace, so they are made AND taken back here.
+    let withdrawn = ev(WORK_SUGGESTION_WITHDRAWN);
     let detection = DetectionUsage {
-        suggested: d.suggested,
+        suggested: d.suggested + withdrawn,
         confirmed_by_person: d.confirmed_by_person,
+        confirmed_by_agent: d.confirmed_by_agent,
         promoted: d.promoted,
         rejected: d.rejected,
+        withdrawn,
         expired: d.expired,
         median_decision_secs: median(&secs),
         nudges: ev("work_classify_nudge"),
@@ -337,12 +362,15 @@ impl UsageSummary {
                 pairs(&self.links.by_source)
             ),
             format!(
-                "detection: {} suggested, {} confirmed by a person, {} promoted, {} rejected, \
-                 {} expired; median decision {}; {} nudges",
+                "detection: {} suggested, {} confirmed by a person, {} confirmed by an agent, \
+                 {} promoted, {} rejected, {} withdrawn, {} expired; median decision {}; \
+                 {} nudges",
                 d.suggested,
                 d.confirmed_by_person,
+                d.confirmed_by_agent,
                 d.promoted,
                 d.rejected,
+                d.withdrawn,
                 d.expired,
                 d.median_decision_secs.map_or("n/a".into(), duration),
                 d.nudges
@@ -455,6 +483,10 @@ mod tests {
         let spot = link("SECRET-7", "manual");
         // A link from long ago: outside the window.
         let ancient = link("SECRET-8", "manual");
+        // A suggestion an agent confirmed after two hours (D34): not a
+        // person's decision, and not in the person's median.
+        let by_agent = link("SECRET-9", "manual");
+        set(&s, "UPDATE work_links SET created_at = ?1, decided_at = ?1 + 7200, rule = 'R3b', source = 'agent' WHERE id = ?2", &[&in_window, &by_agent]);
         for id in [manual, started] {
             set(
                 &s,
@@ -493,6 +525,19 @@ mod tests {
                 Some("auto:SECRET-REASON:kill:killed"),
                 in_window,
             ),
+            // Two suggestions detection took back (their rows are gone),
+            // one long ago.
+            (
+                "work_suggestion_withdrawn",
+                Some(r#"{"link_id":90,"item_id":null,"rule":"R3b","reason":"withdraw"}"#),
+                in_window,
+            ),
+            (
+                "work_suggestion_withdrawn",
+                Some(r#"{"link_id":91,"item_id":4,"rule":"R6","reason":"decay"}"#),
+                in_window,
+            ),
+            ("work_suggestion_withdrawn", None, old),
             ("handover_requested", None, old),
         ] {
             set(
@@ -545,10 +590,11 @@ mod tests {
 
         let u = usage(&s, 30, NOW, &metrics).unwrap();
         assert_eq!((u.days, u.until - u.since), (30, 30 * 86_400 + 1));
-        assert_eq!(u.links.created, 7, "{:?}", u.links);
+        assert_eq!(u.links.created, 8, "{:?}", u.links);
         assert_eq!(
             u.links.by_source,
             BTreeMap::from([
+                ("agent".into(), 1),
                 ("branch".into(), 1),
                 ("manual".into(), 3),
                 ("pr".into(), 1),
@@ -559,13 +605,18 @@ mod tests {
         assert_eq!(
             u.detection,
             DetectionUsage {
-                // confirmed, promoted, rejected, expired — not the spot one.
-                suggested: 4,
+                // confirmed (by a person and by an agent), promoted,
+                // rejected, expired — not the spot one — and the two
+                // withdrawn.
+                suggested: 7,
                 confirmed_by_person: 1,
+                confirmed_by_agent: 1,
                 promoted: 1,
                 rejected: 1,
+                withdrawn: 2,
                 expired: 1,
-                // the person's two decisions: 600 s and 3600 s.
+                // the person's two decisions: 600 s and 3600 s (the
+                // agent's 7200 s is not a person's).
                 median_decision_secs: Some(600),
                 nudges: 1,
             }

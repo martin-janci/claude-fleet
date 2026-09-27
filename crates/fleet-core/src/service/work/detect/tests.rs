@@ -1,7 +1,7 @@
 //! Detection end to end over an in-memory store: signals in, links out.
 
 use super::*;
-use crate::store::{StartSource, TrackerConfig, WorkTarget};
+use crate::store::{Decider, StartSource, TrackerConfig, WorkTarget};
 
 struct Fx {
     s: Store,
@@ -103,7 +103,7 @@ fn not_this_is_final_for_every_signal() {
     let sid = session(&f, "dev", "c1");
     on_prompt(&f.s, sid, "see ABC-99", true).unwrap();
     let id = f.s.session_work_links(sid).unwrap()[0].id;
-    decide(&f.s, sid, id, false).unwrap();
+    decide(&f.s, sid, id, false, Decider::Person).unwrap();
     // Again from a prompt, a URL, the branch and the PR: never re-proposed.
     on_prompt(&f.s, sid, "ABC-99 again", false).unwrap();
     on_prompt(&f.s, sid, "https://acme.atlassian.net/browse/ABC-99", false).unwrap();
@@ -269,7 +269,7 @@ fn an_untrusted_branch_is_a_suggestion_and_three_confirmations_trust_the_project
                 .unwrap();
         assert_eq!(sg.rule.as_deref(), Some("R3b"));
         assert!(sg.preselected);
-        let became = decide(&f.s, sid, sg.link_id, true).unwrap();
+        let became = decide(&f.s, sid, sg.link_id, true, Decider::Person).unwrap();
         assert_eq!(became, i == 2, "trusted after the third");
     }
     assert!(trusted_projects(&f.s).contains(&f.project));
@@ -278,6 +278,47 @@ fn an_untrusted_branch_is_a_suggestion_and_three_confirmations_trust_the_project
     resolve_session(&f.s, sid).unwrap();
     let w = f.s.get_session_by_id(sid).unwrap().unwrap().work.unwrap();
     assert_eq!(w.rule.as_deref(), Some("R3"));
+}
+
+/// Auto-trust counts only BRANCH suggestions a PERSON confirmed: three a
+/// pull request alone proposed, or three an agent confirmed, trust nothing.
+#[test]
+fn only_a_persons_branch_confirmations_count_toward_trust() {
+    let f = fx();
+    for i in 0..3 {
+        let name = format!("pr{i}");
+        let sid = session(&f, &name, &format!("c{i}"));
+        let sig = PrSignals {
+            head: Some(format!("abc-{}-x", i + 1)),
+            ..Default::default()
+        };
+        f.s.set_pr_signals("h", &name, Some(&serde_json::to_string(&sig).unwrap()))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let sg =
+            f.s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+                .unwrap();
+        assert_eq!(sg.rule.as_deref(), Some("R3b"), "a sole PR head");
+        assert!(!decide(&f.s, sid, sg.link_id, true, Decider::Person).unwrap());
+    }
+    for i in 3..6 {
+        let sid = session(&f, &format!("ag{i}"), &format!("c{i}"));
+        f.s.set_current_branch(sid, &format!("abc-{}-y", i + 1))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let sg =
+            f.s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+                .unwrap();
+        assert!(!decide(&f.s, sid, sg.link_id, true, Decider::Agent).unwrap());
+    }
+    assert_eq!(f.s.confirmed_branch_suggestions(f.project).unwrap(), 0);
+    assert!(!trusted_projects(&f.s).contains(&f.project));
 }
 
 #[test]
@@ -328,6 +369,87 @@ fn a_weak_suggestion_decays_at_the_next_conversation_unless_seen_again() {
             .map(|l| l.ref_key)
             .collect();
     assert_eq!(keys, vec![Some("ABC-9".to_string())]);
+}
+
+/// D34: a suggestion detection takes back (R6 decay, R7 withdraw) loses its
+/// row, but leaves a timeline event with ids and vocabulary words only —
+/// the negative a label set would otherwise lose.
+#[test]
+fn a_withdrawn_or_decayed_suggestion_leaves_an_event_of_ids_only() {
+    let withdrawn = |s: &Store, sid: i64| -> Vec<serde_json::Value> {
+        s.list_session_events(sid, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+            .map(|e| serde_json::from_str(e.detail.as_deref().unwrap()).unwrap())
+            .collect()
+    };
+    // Decay: ABC-8, mentioned in c1, not again in c2.
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    on_prompt(&f.s, sid, "first task", true).unwrap();
+    on_prompt(&f.s, sid, "also ABC-8 and ABC-9", false).unwrap();
+    let abc8 =
+        f.s.session_work_links(sid)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.ref_key.as_deref() == Some("ABC-8"))
+            .unwrap();
+    assert!(withdrawn(&f.s, sid).is_empty(), "nothing taken back yet");
+    f.s.rebind_conversation(sid, "c2", StartSource::Clear, None, None)
+        .unwrap();
+    on_prompt(&f.s, sid, "keep going on ABC-9", true).unwrap();
+    let ev = withdrawn(&f.s, sid);
+    assert_eq!(
+        ev,
+        vec![serde_json::json!({
+            "link_id": abc8.id, "item_id": null, "rule": "R6", "reason": "decay"
+        })]
+    );
+    let event = f.s.list_session_events(sid, 100).unwrap();
+    let e = event
+        .iter()
+        .find(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+        .unwrap();
+    assert_eq!(e.claude_session_id.as_deref(), Some("c2"));
+    assert!(!e.detail.as_deref().unwrap().contains("ABC"), "no key");
+
+    // Withdraw: the PR's state and text suggestions go with the PR.
+    let sid = session(&f, "pr", "c3");
+    let sig = PrSignals {
+        head: Some("feature/login".into()),
+        closing: vec!["acme/api#42".into()],
+        text: vec!["ABC-5".into()],
+        trailers: vec![],
+        state: None,
+    };
+    f.s.set_pr_signals("h", "pr", Some(&serde_json::to_string(&sig).unwrap()))
+        .unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    f.s.set_pr_signals("h", "pr", None).unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let mut rules: Vec<(String, String)> = withdrawn(&f.s, sid)
+        .into_iter()
+        .map(|v| {
+            assert_eq!(
+                v.as_object().unwrap().keys().collect::<Vec<_>>(),
+                vec!["item_id", "link_id", "reason", "rule"]
+            );
+            (
+                v["rule"].as_str().unwrap().to_string(),
+                v["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    rules.sort();
+    assert_eq!(
+        rules,
+        vec![
+            ("R3u".to_string(), "withdraw".to_string()),
+            ("R6".to_string(), "withdraw".to_string())
+        ]
+    );
+    assert!(f.s.session_work_links(sid).unwrap().is_empty());
 }
 
 #[test]
@@ -776,7 +898,7 @@ fn a_session_with_confirmed_work_surfaces_only_strong_suggestions() {
         .work_suggested
         .expect("weak suggestions show while no work is confirmed");
     assert_eq!(sg.suggestions, 3);
-    decide(&f.s, sid, sg.link_id, true).unwrap();
+    decide(&f.s, sid, sg.link_id, true, Decider::Person).unwrap();
     let row = f.s.get_session_by_id(sid).unwrap().unwrap();
     assert!(row.work.is_some());
     assert_eq!(row.work_suggested, None, "the other mentions stay quiet");

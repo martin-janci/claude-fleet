@@ -22,6 +22,77 @@ use std::collections::HashMap;
 /// (branch, pr, url, prompt …) arrive with roadmap M4.
 pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent"];
 
+/// The sources that record a PERSON's decision: `manual` (a person linked,
+/// confirmed or rejected it) and `started` (a person started the session
+/// for it). Every other source is fleet's or an agent's. Only a person may
+/// overturn a person's rejection.
+pub const PERSON_SOURCES: &[&str] = &["manual", "started"];
+
+/// Who makes a link decision. The decider, not what a caller claims,
+/// decides the `source` a decision records: work-link labels must say
+/// whether a person or an agent decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decider {
+    /// A person: the desktop, the master token, a paired person's client.
+    /// Records `manual`.
+    Person,
+    /// An agent: a per-host token (the host's own Claude) or the operator
+    /// (the UX agent's client). Records `agent`.
+    Agent,
+}
+
+impl Decider {
+    /// The `source` a decision by this decider records.
+    pub fn source(self) -> &'static str {
+        match self {
+            Decider::Person => "manual",
+            Decider::Agent => "agent",
+        }
+    }
+}
+
+/// What an agent's decision does to a live link a decision already settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentOver {
+    /// Nothing a person decided is in the way: write the agent's decision.
+    Write,
+    /// A person already decided the same way: keep their decision (its
+    /// source and time) — a confirm only makes it primary again.
+    KeepPersons,
+}
+
+/// An AGENT deciding `new_state` over the live link `link_id` (now
+/// `old_state` by `old_source`): `E_FORBIDDEN` when that would turn a
+/// person's rejection ("Not this") into a link, [`AgentOver::KeepPersons`]
+/// when a person already decided the same way. The one rule both decision
+/// paths share (`decide_session_work`, `decide_work_link`).
+pub(super) fn agent_over_decision(
+    session_id: i64,
+    link_id: i64,
+    old_state: &str,
+    old_source: &str,
+    new_state: &str,
+) -> Result<AgentOver, IpcError> {
+    if !PERSON_SOURCES.contains(&old_source) {
+        return Ok(AgentOver::Write);
+    }
+    if old_state == "rejected" && new_state == "confirmed" {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "a person rejected this work for session {session_id} (work link {link_id}); \
+                 an agent cannot overturn a person's rejection — ask the person to link it"
+            ),
+        )
+        .with_details(serde_json::json!({ "link_id": link_id, "reason": "rejected_by_person" })));
+    }
+    Ok(if old_state == new_state {
+        AgentOver::KeepPersons
+    } else {
+        AgentOver::Write
+    })
+}
+
 /// Longest accepted work key / free-form work reference.
 pub const WORK_REF_MAX_CHARS: usize = 64;
 
@@ -103,7 +174,7 @@ pub struct WorkLinkRow {
     pub ref_key: Option<String>,
     #[serde(default)]
     pub participant_id: Option<i64>,
-    /// `confirmed` | `rejected`.
+    /// `confirmed` | `suggested` | `rejected`.
     pub state: String,
     pub source: String,
     #[serde(default)]
@@ -588,6 +659,12 @@ impl Store {
     /// primary). Idempotent per (session, target): re-deciding updates the
     /// one live link instead of adding another. Emits `session_updated`, so
     /// the row's `work` follows.
+    ///
+    /// A person's rejection is overturned only by a person: confirming a
+    /// target whose live link a person rejected, with a source outside
+    /// [`PERSON_SOURCES`] (an agent's `link`), is `E_FORBIDDEN` and writes
+    /// nothing. Such a decision the same way a person already decided keeps
+    /// the person's (a confirm only makes it primary again).
     fn decide_session_work(
         &self,
         session_id: i64,
@@ -610,17 +687,30 @@ impl Store {
         let primary = state == "confirmed";
 
         let tx = self.conn.unchecked_transaction()?;
-        let existing: Option<i64> = self
+        let existing: Option<(i64, String, String)> = self
             .conn
             .query_row(
-                "SELECT id FROM work_links \
+                "SELECT id, state, source FROM work_links \
                  WHERE participant_id = ?1 AND ended_at IS NULL \
                    AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
                  ORDER BY id LIMIT 1",
                 rusqlite::params![participant, item_id, ref_key],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        let mut keep = AgentOver::Write;
+        if let Some((id, old_state, old_source)) = &existing {
+            if !PERSON_SOURCES.contains(&source) {
+                keep = agent_over_decision(session_id, *id, old_state, old_source, state)?;
+            }
+        }
+        let existing = existing.map(|(id, _, _)| id);
+        if let (AgentOver::KeepPersons, Some(id), false) = (keep, existing, primary) {
+            // A person rejected it already: nothing to write.
+            return self
+                .get_work_link(id)?
+                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"));
+        }
         if primary {
             self.conn.execute(
                 "UPDATE work_links SET is_primary = 0 \
@@ -629,6 +719,15 @@ impl Store {
             )?;
         }
         let id = match existing {
+            // A person confirmed it already: it becomes primary again, and
+            // stays the person's decision.
+            Some(id) if keep == AgentOver::KeepPersons => {
+                self.conn.execute(
+                    "UPDATE work_links SET is_primary = 1 WHERE id = ?1",
+                    rusqlite::params![id],
+                )?;
+                id
+            }
             // A decision over a suggestion keeps its evidence and rule, so
             // the link can still say what proposed it.
             Some(id) => {
@@ -672,7 +771,9 @@ impl Store {
 
     /// Say that `session_id` works on `target`; it becomes the session's
     /// primary work. `source`: `manual` (a person), `started` (the session
-    /// was created for it), `agent` (the in-session agent declared it).
+    /// was created for it), `agent` (the in-session agent declared it). An
+    /// `agent` link never overturns a person's rejection of the same target
+    /// (`E_FORBIDDEN`).
     pub fn link_session_work(
         &self,
         session_id: i64,
@@ -682,14 +783,25 @@ impl Store {
         self.decide_session_work(session_id, target, "confirmed", source)
     }
 
-    /// Say that `session_id` does NOT work on `target`. Sticky: detection
-    /// must never re-propose it; only a later explicit link overrides it.
+    /// Say that `session_id` does NOT work on `target` (a person's "Not
+    /// this"). Sticky: detection must never re-propose it; only a later
+    /// explicit link by a person overrides it.
     pub fn reject_session_work(
         &self,
         session_id: i64,
         target: WorkTarget<'_>,
     ) -> Result<WorkLinkRow, IpcError> {
-        self.decide_session_work(session_id, target, "rejected", "manual")
+        self.reject_session_work_by(session_id, target, Decider::Person)
+    }
+
+    /// [`Self::reject_session_work`] recorded as `decider`'s decision.
+    pub fn reject_session_work_by(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        decider: Decider,
+    ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_session_work(session_id, target, "rejected", decider.source())
     }
 
     /// Remove one live link of `session_id` (a mistaken link, not a
@@ -1204,6 +1316,53 @@ mod tests {
             .unwrap();
         assert_eq!(back.id, r.id);
         assert_eq!(back.state, "confirmed");
+    }
+
+    /// D34 label hygiene: an in-session agent's `link` must not turn a
+    /// person's "Not this" into the session's primary work. A person (and
+    /// only a person) may still correct their own rejection.
+    #[test]
+    fn an_agent_cannot_overturn_a_persons_rejection() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "dev");
+        let r = s
+            .reject_session_work(sid, WorkTarget::Key("ABC-1"))
+            .unwrap();
+
+        let err = s
+            .link_session_work(sid, WorkTarget::Key("abc-1"), "agent")
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN, "{}", err.message);
+        assert!(err.message.contains("person rejected"), "{}", err.message);
+        let links = s.session_work_links(sid).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            (
+                links[0].id,
+                links[0].state.as_str(),
+                links[0].source.as_str()
+            ),
+            (r.id, "rejected", "manual"),
+            "nothing written"
+        );
+        assert!(!links[0].is_primary);
+
+        // An agent's link to OTHER work is unaffected, and its refusal left
+        // no primary cleared behind it.
+        let other = s
+            .link_session_work(sid, WorkTarget::Key("DEF-2"), "agent")
+            .unwrap();
+        assert!(other.is_primary);
+        assert!(s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "agent")
+            .is_err());
+        assert!(s.get_work_link(other.id).unwrap().unwrap().is_primary);
+
+        // The person's correction still wins.
+        let back = s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        assert_eq!((back.id, back.state.as_str()), (r.id, "confirmed"));
     }
 
     #[test]

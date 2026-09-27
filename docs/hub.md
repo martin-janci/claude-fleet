@@ -1689,7 +1689,7 @@ it is ended or done, older than its window, and nothing live points at it.
   keeps forever and an old window longer than 365 still stands.
 - `tracker_items_days`: cached tickets in `done`. Kept while any link, live
   or ended, names one, and while it is the parent of a kept ticket.
-- `timeline_work_events_days`: handover, nudge and tidy events. The newest
+- `timeline_work_events_days`: handover, nudge, tidy and withdrawn-suggestion events. The newest
   of each kind per session stays.
 
 At most 2,000 rows per table per tick, 200 per store lock.

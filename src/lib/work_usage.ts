@@ -16,8 +16,10 @@ export interface UsageSummary {
   detection?: {
     suggested?: number;
     confirmed_by_person?: number;
+    confirmed_by_agent?: number;
     promoted?: number;
     rejected?: number;
+    withdrawn?: number;
     expired?: number;
     median_decision_secs?: number | null;
     nudges?: number;
@@ -64,8 +66,10 @@ export function usageRows(u: UsageSummary): [string, string][] {
     ['links', `${n(u.links?.created)} made (${pairs(u.links?.by_source)})`],
     [
       'detection',
-      `${n(d.suggested)} suggested, ${n(d.confirmed_by_person)} confirmed by a person, ${n(d.promoted)} promoted, ` +
-        `${n(d.rejected)} rejected, ${n(d.expired)} expired; median decision ${median}; ${n(d.nudges)} nudges`,
+      `${n(d.suggested)} suggested, ${n(d.confirmed_by_person)} confirmed by a person, ` +
+        `${n(d.confirmed_by_agent)} confirmed by an agent, ${n(d.promoted)} promoted, ` +
+        `${n(d.rejected)} rejected, ${n(d.withdrawn)} withdrawn, ${n(d.expired)} expired; ` +
+        `median decision ${median}; ${n(d.nudges)} nudges`,
     ],
     [
       'handover',
