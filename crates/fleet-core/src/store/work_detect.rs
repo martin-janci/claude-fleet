@@ -638,8 +638,11 @@ impl Store {
         )?)
     }
 
-    /// Project ids whose sessions have at least `n` branch links a person
-    /// confirmed from a suggestion (the auto-trust count): live or ended.
+    /// How many BRANCH suggestions of `project_id`'s sessions a person
+    /// confirmed (the auto-trust count): live or ended. A state suggestion
+    /// (R3b / R4) counts only when a branch signal is in its evidence — one
+    /// only a pull request proposed says nothing about the repo's branch
+    /// names.
     pub fn confirmed_branch_suggestions(&self, project_id: i64) -> Result<i64, IpcError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM work_links l \
@@ -647,6 +650,9 @@ impl Store {
              LEFT JOIN sessions s ON s.id = p.session_id \
              WHERE l.state = 'confirmed' AND l.source = 'manual' \
                AND l.rule IN ('R3b', 'R4') \
+               AND EXISTS (SELECT 1 FROM json_each( \
+                     CASE WHEN json_valid(l.evidence) THEN l.evidence ELSE '[]' END) j \
+                   WHERE json_extract(j.value, '$.signal') = 'branch') \
                AND COALESCE(s.project_id, l.snap_project_id) = ?1",
             rusqlite::params![project_id],
             |r| r.get(0),

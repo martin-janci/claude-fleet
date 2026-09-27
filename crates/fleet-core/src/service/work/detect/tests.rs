@@ -280,6 +280,47 @@ fn an_untrusted_branch_is_a_suggestion_and_three_confirmations_trust_the_project
     assert_eq!(w.rule.as_deref(), Some("R3"));
 }
 
+/// Auto-trust counts only BRANCH suggestions a PERSON confirmed: three a
+/// pull request alone proposed, or three an agent confirmed, trust nothing.
+#[test]
+fn only_a_persons_branch_confirmations_count_toward_trust() {
+    let f = fx();
+    for i in 0..3 {
+        let name = format!("pr{i}");
+        let sid = session(&f, &name, &format!("c{i}"));
+        let sig = PrSignals {
+            head: Some(format!("abc-{}-x", i + 1)),
+            ..Default::default()
+        };
+        f.s.set_pr_signals("h", &name, Some(&serde_json::to_string(&sig).unwrap()))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let sg =
+            f.s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+                .unwrap();
+        assert_eq!(sg.rule.as_deref(), Some("R3b"), "a sole PR head");
+        assert!(!decide(&f.s, sid, sg.link_id, true, Decider::Person).unwrap());
+    }
+    for i in 3..6 {
+        let sid = session(&f, &format!("ag{i}"), &format!("c{i}"));
+        f.s.set_current_branch(sid, &format!("abc-{}-y", i + 1))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let sg =
+            f.s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+                .unwrap();
+        assert!(!decide(&f.s, sid, sg.link_id, true, Decider::Agent).unwrap());
+    }
+    assert_eq!(f.s.confirmed_branch_suggestions(f.project).unwrap(), 0);
+    assert!(!trusted_projects(&f.s).contains(&f.project));
+}
+
 #[test]
 fn two_trackers_sharing_a_prefix_never_link_automatically() {
     let f = fx();

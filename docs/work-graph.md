@@ -118,8 +118,9 @@ decides what each sighting becomes:
   shown as a dashed chip with `?` and waits for a person.
 
 A project becomes trusted when you tick **Trust branch keys in this repo**
-in the popover, or automatically after three branch suggestions in it were
-confirmed. Settings → Limits → Lifecycle shows how many projects are trusted and has a
+in the popover, or automatically after you confirmed three branch
+suggestions in it (a suggestion only a pull request made, or one an agent
+confirmed, does not count). Settings → Limits → Lifecycle shows how many projects are trusted and has a
 **Trust none** button.
 
 ### The chip and its popover
