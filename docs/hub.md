@@ -1928,6 +1928,10 @@ causes are:
 - no client token is stored;
 - the token cannot be read, for example because the macOS keychain was locked
   at launch or its prompt was denied;
+- the client token could not be read in time — the keychain was locked and
+  its prompt did not answer within 10 s. The app logs `startup: resolving
+  backend` … `startup: backend resolved elapsed_ms=…` around this step;
+  unlock the keychain and relaunch;
 - the URL is plain `http://` to a host that is not loopback, and
   `hub.client_plaintext_token` is not set;
 - `hub.remote_url` does not parse;
