@@ -808,7 +808,10 @@ sessions (active, past, suggested), next to the Sessions view's host → repo
   same branch).
 
 **Status (2026-09-27):** built on `claude/fleet-dynamic-work-view-kwc3r9`
-in both repositories; acceptance Part R (steps 60–72) waits on the owner.
+in both repositories. `scripts/hub-e2e.sh` hub W section 10 runs it on a
+real hub (tree, session tasks, the primary's compare-and-set, placement,
+`work:changed`, Acme- and Beta-bound and readonly clients); acceptance
+Part R (steps 60–72) waits on the owner.
 D31–D35 hold the defaults the build took.
 
 ## Critical path and parallelism

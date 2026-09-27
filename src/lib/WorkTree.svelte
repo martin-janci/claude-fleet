@@ -42,6 +42,7 @@
     taskLabel,
     taskStatus,
     trackerDown,
+    trackerDownLabel,
     workChanged,
     workExpanded,
     workReview,
@@ -478,7 +479,7 @@
                               <span class="counts" data-testid="work-task-counts" title="active / past sessions"
                                 >{t.counts?.active ?? 0} active · {t.counts?.ended ?? 0} past</span
                               >
-                              {#if trackerDown(t)}<span class="down" data-testid="work-task-tracker-down" title={`tracker: ${t.tracker_state}`}>tracker down</span>{/if}
+                              {#if trackerDown(t)}<span class="down" data-testid="work-task-tracker-down" title={`tracker state: ${t.tracker_state}`}>{trackerDownLabel(t)}</span>{/if}
                             </div>
                             {#if (t.sessions ?? []).length > 0}
                               <ul class="occurrences">
@@ -704,10 +705,15 @@
   }
   .task-meta {
     display: flex;
-    gap: 0.4rem;
+    flex-wrap: wrap;
+    gap: 0 0.4rem;
     padding-left: 1.6rem;
     color: var(--fg-muted);
     font-size: 0.72rem;
+  }
+  /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
+  .task-meta > span {
+    white-space: nowrap;
   }
   .down {
     color: var(--usage-warn, #b45309);

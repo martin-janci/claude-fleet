@@ -51,6 +51,7 @@ import {
   tasksShowingSession,
   toggleSidebarView,
   trackerDown,
+  trackerDownLabel,
   undoOf,
   workChanged,
   workOrgImpact,
@@ -349,6 +350,8 @@ describe('occurrences and provenance', () => {
     expect(trackerDown(task({ tracker_state: 'unreachable' }))).toBe(true);
     expect(trackerDown(task())).toBe(false);
     expect(trackerDown(task({ kind: 'local', tracker_state: null }))).toBe(false);
+    expect(trackerDownLabel(task({ tracker_state: 'unconfigured' }))).toBe('tracker: not tested yet');
+    expect(trackerDownLabel(task({ tracker_state: 'auth_failed' }))).toBe('tracker: token expired or wrong');
   });
 
   it('groups a session’s links: primary first, past newest first', () => {

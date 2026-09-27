@@ -23,6 +23,7 @@ import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from '
 import { bumpWorkChanged, workChanged, type WorkEvidence } from './work';
 import { onSessionOpened } from './selection';
 import { todayOpen } from './today';
+import { trackerStateBadge } from './trackers';
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -915,6 +916,13 @@ export function placementNote(g: GroupRef, t: Pick<WorkTask, 'provider'>): strin
 /** A tracker state that is not `ok`: "tracker down". */
 export function trackerDown(t: Pick<WorkTask, 'tracker_state' | 'kind'>): boolean {
   return t.kind === 'tracker' && !!t.tracker_state && t.tracker_state !== 'ok';
+}
+
+/** What is wrong with a task's tracker, in the tracker settings' own words
+ *  ("tracker: not tested yet", "tracker: token expired or wrong", …): a
+ *  tracker that was never tested is not "down". */
+export function trackerDownLabel(t: Pick<WorkTask, 'tracker_state'>): string {
+  return `tracker: ${trackerStateBadge(t.tracker_state ?? '').label}`;
 }
 
 /** A review kind as a badge. */

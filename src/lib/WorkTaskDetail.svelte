@@ -33,6 +33,7 @@
     selectedTaskId,
     taskStatus,
     trackerDown,
+    trackerDownLabel,
     workChanged,
     workRules,
     workTask,
@@ -259,7 +260,7 @@
       {#if task.tracker_name}<span>{task.tracker_name}</span>{/if}
       {#if taskStatus(task)}<span class="status" data-testid="work-task-status">{taskStatus(task)}</span>{/if}
       {#if task.resolution}<span class="muted">({task.resolution})</span>{/if}
-      {#if trackerDown(task)}<span class="warn" data-testid="work-task-tracker-down">tracker down ({task.tracker_state}) — what is shown is the last sync</span>{/if}
+      {#if trackerDown(task)}<span class="warn" data-testid="work-task-tracker-down">{trackerDownLabel(task)} — what is shown is the last sync</span>{/if}
       {#if task.url}
         <button class="btn btn--quiet" type="button" data-testid="work-task-open-url" onclick={() => void openExternal(task.url ?? '')}
           >Open in tracker</button

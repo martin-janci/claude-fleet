@@ -1031,6 +1031,60 @@ else
   ujs=$("$WBIN" work usage --days 7 --json --data-dir "$ROOT/w" --port "$PW" 2>&1)
   check "and --json is the tool's answer" '[ "$(printf "%s" "$ujs" | jq -r .days)" = 7 ] && [ "$(printf "%s" "$ujs" | jq -r .links.created)" = "$(jt "$us" .links.created)" ]' "${ujs:0:400}"
 
+  # --- 10. the Work view (M14) ---------------------------------------------
+  # SWEB is on E2E-2 (primary) and the local item LID (section 8): one
+  # session under two tasks, read, re-primaried and placed through a real hub.
+  echo "-- 10. the Work view"
+  tr=$(wcall "$TOKW" work '{"action":"tree","limit":200}')
+  check "work { tree } lists SWEB under E2E-2 and under the local item, one id, one primary" '[ "$(jt "$tr" "[.tasks[] | select(.key == \"E2E-2\" or .task_id == \"item:${LID:-0}\") | .sessions[] | select(.session_id == ${SWEB:-0})] | length")" = 2 ] && [ "$(jt "$tr" "[.tasks[] | .sessions[] | select(.session_id == ${SWEB:-0} and .primary)] | length")" = 1 ]' "${tr:0:800}"
+  st=$(wcall "$TOKW" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")
+  LP=$(jt "$st" '.primary_link_id')
+  LL=$(jt "$st" ".links[] | select(.task.task_id == \"item:${LID:-0}\") | .link_id")
+  check "work { session_tasks } names both links and which is primary" '[ "$(jt "$st" ".links | length")" -ge 2 ] && [ "$(jt "$st" ".links[] | select(.primary) | .task.key")" = E2E-2 ] && [ -n "$LL" ]' "${st:0:800}"
+  sp=$(wcall "$TOKW" work_link "{\"action\":\"set_primary\",\"session_id\":${SWEB:-0},\"link_id\":${LL:-0},\"expected_primary\":${LP:-0}}")
+  st2=$(wcall "$TOKW" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")
+  check "set_primary moves the primary to the local item and keeps E2E-2 linked" '[ "$(jt "$st2" .primary_link_id)" = "$LL" ] && [ "$(jt "$st2" "[.links[] | select(.link_id == ${LP:-0})] | length")" = 1 ]' "${sp:0:400} | ${st2:0:600}"
+  stale=$(wcall "$TOKW" work_link "{\"action\":\"set_primary\",\"session_id\":${SWEB:-0},\"link_id\":${LP:-0},\"expected_primary\":${LP:-0}}")
+  check "a second device acting on the old primary gets E_CONFLICT, and nothing moves" 'echo "$stale" | grep -q E_CONFLICT && [ "$(jt "$(wcall "$TOKW" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")" .primary_link_id)" = "$LL" ]' "${stale:0:400}"
+  back=$(wcall "$TOKW" work_link "{\"action\":\"set_primary\",\"session_id\":${SWEB:-0},\"link_id\":${LP:-0},\"expected_primary\":${LL:-0}}")
+  check "and with the current primary named it moves back" '[ "$(jt "$back" .work.key)" = E2E-2 ]' "${back:0:400}"
+  SSEV="$ROOT/w-events-view.sse"
+  curl -sN -m 30 "http://127.0.0.1:$PW/events" -H "Host: $PUB" -H "Authorization: Bearer $TOKW" >"$SSEV" 2>/dev/null &
+  EVV=$!; WEV_PIDS="$EVV"
+  until_ok 50 'grep -q "^event: ready" "$SSEV"'
+  pl=$(wcall "$TOKW" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"Security\",\"note\":\"e2e\",\"expected_version\":0}")
+  check "place puts the local item in a group of its own, marked manual" '[ "$(jt "$pl" .group.label)" = Security ] && [ "$(jt "$pl" .group.source)" = manual ]' "${pl:0:600}"
+  pl2=$(wcall "$TOKW" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"Other\",\"expected_version\":0}")
+  check "a placement over a version someone else changed is E_CONFLICT" 'echo "$pl2" | grep -q E_CONFLICT' "${pl2:0:400}"
+  until_ok 50 'grep -q "^event: work:changed" "$SSEV"'
+  check "the master's /events carries work:changed with ids only" 'grep -A1 "^event: work:changed" "$SSEV" | grep -q "\"what\":\"placement\"" && ! grep -A1 "^event: work:changed" "$SSEV" | grep -q "Security"' "$(grep -A1 "^event: work" "$SSEV" | head -6)"
+  kill $EVV 2>/dev/null; wait $EVV 2>/dev/null; WEV_PIDS=""
+  # Org-bound paired clients (pair_client { org_id }): Acme's reads Acme's
+  # work; Beta's reads none of it, not even on the session they share a hub with.
+  # /pair allows one attempt per address every 6 s; from loopback the hub
+  # believes X-Forwarded-For's last hop, so each pairing here is its own
+  # "phone" and the operator section below keeps its own budget.
+  redeem_as() { # code address -> token
+    curl -s -m 10 -X POST "http://127.0.0.1:$PW/pair" -H "Host: $PUB" -H "X-Forwarded-For: $2" \
+      -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}" | jq -r .token 2>/dev/null
+  }
+  pair_org() { # name org address -> token
+    redeem_as "$(jt "$(wcall "$TOKW" pair_client "{\"name\":\"$1\",\"mode\":\"full\",\"org_id\":$2}")" .code)" "$3"
+  }
+  TOKBA=$(pair_org e2e-acme "${OA:-0}" 10.99.0.1); TOKBB=$(pair_org e2e-beta "${OB:-0}" 10.99.0.2)
+  ta=$(wcall "$TOKBA" work '{"action":"tree","limit":200}')
+  check "a client bound to Acme reads Acme's tasks in the tree" '[ -n "$TOKBA" ] && [ "$TOKBA" != null ] && [ "$(jt "$ta" "[.tasks[] | select(.key == \"E2E-2\")] | length")" = 1 ]' "${ta:0:600}"
+  tb=$(wcall "$TOKBB" work '{"action":"tree","limit":200}')
+  sb=$(wcall "$TOKBB" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")
+  check "a client bound to Beta reads none of Acme's tasks, titles or sessions" '[ -n "$(jt "$tb" .total)" ] && ! echo "$tb$sb" | grep -qE "E2E-[0-9]|E2E local cleanup|Security" && echo "$sb" | grep -q E_NOTFOUND' "${tb:0:400} | ${sb:0:300}"
+  pb=$(wcall "$TOKBB" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"Beta\",\"expected_version\":1}")
+  check "nor may it place Acme's task" 'echo "$pb" | grep -qE "E_NOTFOUND|E_FORBIDDEN"' "${pb:0:300}"
+  rc=$(jt "$(wcall "$TOKW" pair_client '{"name":"e2e-ro","mode":"readonly"}')" .code)
+  TOKRO=$(redeem_as "$rc" 10.99.0.3)
+  ro=$(wcall "$TOKRO" work '{"action":"tree","limit":5}')
+  rw=$(wcall "$TOKRO" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"RO\",\"expected_version\":1}")
+  check "a readonly client reads the tree and may not place" '[ -n "$(jt "$ro" .total)" ] && echo "$rw" | grep -qE "E_FORBIDDEN|readonly|read-only"' "${ro:0:300} | ${rw:0:300}"
+
   # --- operator confirm (M9.7): no approver on a hub -------------------------
   echo "-- operator"
   opc=$(wcall "$TOKW" pair_client '{"name":"ux-agent","mode":"full"}')
