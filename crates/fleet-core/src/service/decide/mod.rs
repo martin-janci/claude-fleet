@@ -35,6 +35,7 @@
 
 #[cfg(feature = "nl-detect")]
 pub mod bench;
+pub mod haiku;
 pub mod jev;
 pub mod status_map;
 #[cfg(test)]

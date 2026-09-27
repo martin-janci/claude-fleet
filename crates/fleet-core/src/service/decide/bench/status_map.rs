@@ -25,7 +25,10 @@
 //! confidence floor: `unsure` and an answer under the floor are
 //! abstentions). A case whose org the gate refuses is skipped with that
 //! fallback and nothing is sent for it; the built-in set has no org, so it
-//! follows `decide.jev.unassigned`.
+//! follows `decide.jev.unassigned`. `haiku` (D33) asks the same request —
+//! the same redacted state and options — of `claude -p` on a host the
+//! operator names ([`crate::service::decide::haiku`]), at the same floor;
+//! an answer outside the options is an abstention counted as `invalid`.
 //!
 //! **No threshold is tuned on the set** — the rule is fixed and Jev runs at
 //! the adapter's floor — so there is no dev/test split.
@@ -34,6 +37,7 @@
 
 use super::{bootstrap_acc_diff, f3, percentile, Calibration, Criterion, Paired, Verdict};
 use crate::ipc_error::lock;
+use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
 use crate::service::decide::{decide, gate_at, DecideCtx, DecideRequest, Fallback, Feature};
 use crate::service::trackers::asana::{infer_section, section_key};
@@ -78,14 +82,18 @@ pub enum Provider {
     Rule,
     /// Jev, through the decision envelope (network).
     Jev,
+    /// `claude -p --model haiku` on a named host (D33; network, through
+    /// that host's Claude account).
+    Haiku,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 4] = [
+    pub const ALL: [Provider; 5] = [
         Provider::None,
         Provider::Todo,
         Provider::Rule,
         Provider::Jev,
+        Provider::Haiku,
     ];
 
     pub fn parse(s: &str) -> Option<Provider> {
@@ -98,7 +106,13 @@ impl Provider {
             Provider::Todo => "todo",
             Provider::Rule => "rule",
             Provider::Jev => "jev",
+            Provider::Haiku => "haiku",
         }
+    }
+
+    /// Asks a model over the network (its latency, tokens and cost count).
+    pub fn is_model(self) -> bool {
+        matches!(self, Provider::Jev | Provider::Haiku)
     }
 }
 
@@ -228,6 +242,10 @@ pub struct Outcome {
     pub latency_ms: Option<i64>,
     pub input_tokens: i64,
     pub cost_microusd: i64,
+    /// Haiku: it answered, but not with one of the options (an abstention).
+    pub invalid: bool,
+    /// Haiku: the call ran and its envelope reported no usage.
+    pub usage_unknown: bool,
 }
 
 impl Outcome {
@@ -251,13 +269,14 @@ impl Outcome {
     }
 }
 
-/// PURE: an offline provider's outcome (`jev` is not offline: skipped).
+/// PURE: an offline provider's outcome (`jev` and `haiku` are not
+/// offline: skipped).
 pub fn offline_outcome(p: Provider, c: &SectionCase) -> Outcome {
     match p {
         Provider::None => Outcome::answers(None),
         Provider::Todo => Outcome::answers(Some("todo")),
         Provider::Rule => Outcome::answers(c.rule),
-        Provider::Jev => Outcome::skipped("no_backend"),
+        Provider::Jev | Provider::Haiku => Outcome::skipped("no_backend"),
     }
 }
 
@@ -328,6 +347,54 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[SectionCase], max_calls: usize) -
     out
 }
 
+/// Ask `claude -p` (D33) about each case, one call at a time on the
+/// configured host, with the adapter's own request — the same redacted
+/// state and options Jev gets — and the same confidence floor: `unsure`,
+/// an answer under the floor and an answer outside the options
+/// (`invalid`) are abstentions; a failed call (timeout, SSH, `claude`) is
+/// skipped with its reason. An answer without a confidence stands (no
+/// floor to apply) and is left out of calibration. A case whose org is not
+/// the host's is skipped as `other_org` and nothing is sent for it (the
+/// built-in set has no org: it needs a host with no org). At most
+/// `max_calls` calls; nothing is recorded in `decision_runs`.
+pub async fn run_haiku(h: &Haiku<'_>, cases: &[SectionCase], max_calls: usize) -> Vec<Outcome> {
+    let mut out = Vec::with_capacity(cases.len());
+    let mut calls = 0usize;
+    for c in cases {
+        // Never across the org boundary: a case goes only to a host of its
+        // own org (no org on both sides is the same).
+        if !h.may_ask(c.org_id) {
+            out.push(Outcome::skipped(OTHER_ORG));
+            continue;
+        }
+        if calls >= max_calls {
+            out.push(Outcome::skipped("max_calls"));
+            continue;
+        }
+        let r = h.ask(&sm::question_for(&c.key, &c.board)).await;
+        calls += usize::from(r.ran);
+        let mut o = Outcome {
+            ran: r.ran,
+            reason: r.error.map(str::to_string),
+            latency_ms: r.latency_ms,
+            input_tokens: r.input_tokens.unwrap_or_default(),
+            cost_microusd: r.cost_microusd.unwrap_or_default(),
+            invalid: r.invalid,
+            usage_unknown: r.ran && r.error.is_none() && r.input_tokens.is_none(),
+            model: r.choice.clone(),
+            confidence: r.confidence,
+            ..Default::default()
+        };
+        if let Some(choice) = r.choice.filter(|_| o.reason.is_none()) {
+            let floor_ok = r.confidence.is_none_or(|x| x + 1e-9 >= MIN_CONFIDENCE);
+            o.answer = (choice != UNSURE && CATEGORIES.contains(&choice.as_str()) && floor_ok)
+                .then_some(choice);
+        }
+        out.push(o);
+    }
+    out
+}
+
 /// Every provider's outcome, in the order of the cases.
 pub type Outcomes = BTreeMap<Provider, Vec<Outcome>>;
 
@@ -339,10 +406,24 @@ pub async fn run_providers(
     jev: Option<&DecideCtx>,
     max_calls: usize,
 ) -> Outcomes {
+    run_providers_with(cases, providers, jev, None, max_calls).await
+}
+
+/// [`run_providers`], and the haiku baseline when asked for (with `haiku`
+/// given; without it every case is skipped as `no_backend`). `max_calls`
+/// bounds each network provider's calls.
+pub async fn run_providers_with(
+    cases: &[SectionCase],
+    providers: &[Provider],
+    jev: Option<&DecideCtx>,
+    haiku: Option<&Haiku<'_>>,
+    max_calls: usize,
+) -> Outcomes {
     let mut all = Outcomes::new();
     for &p in providers {
-        let v = match (p, jev) {
-            (Provider::Jev, Some(ctx)) => run_jev(ctx, cases, max_calls).await,
+        let v = match (p, jev, haiku) {
+            (Provider::Jev, Some(ctx), _) => run_jev(ctx, cases, max_calls).await,
+            (Provider::Haiku, _, Some(h)) => run_haiku(h, cases, max_calls).await,
             _ => cases.iter().map(|c| offline_outcome(p, c)).collect(),
         };
         all.insert(p, v);
@@ -405,10 +486,15 @@ pub struct ProviderMetrics {
     pub done_precision_strict: Option<f64>,
     /// truth → answer (or `abstain`) → count.
     pub confusion: BTreeMap<String, BTreeMap<String, u64>>,
-    /// Jev: every valid category answer with a confidence (under the floor
-    /// too; `unsure` left out) against whether it was right.
+    /// Jev / haiku: every valid category answer with a confidence (under
+    /// the floor too; `unsure` left out) against whether it was right.
     pub calibration: Calibration,
     pub calls: u64,
+    /// Haiku: answers outside the options (counted as abstentions).
+    pub invalid: u64,
+    /// Haiku: calls whose envelope reported no tokens or cost (the totals
+    /// leave them out).
+    pub usage_unknown: u64,
     pub latency_p50_ms: Option<i64>,
     pub latency_p95_ms: Option<i64>,
     pub input_tokens: i64,
@@ -432,12 +518,14 @@ pub fn provider_metrics(p: Provider, rows: &[(&SectionCase, &Outcome)]) -> Provi
     let mut cal = Vec::new();
     let mut lat = Vec::new();
     let (mut calls, mut tokens, mut cost) = (0u64, 0i64, 0i64);
+    let (mut invalid, mut usage_unknown) = (0u64, 0u64);
     for (c, o) in rows {
-        if p == Provider::Jev && o.ran {
+        if p.is_model() && o.ran {
             calls += 1;
             lat.extend(o.latency_ms);
             tokens += o.input_tokens;
             cost += o.cost_microusd;
+            usage_unknown += u64::from(o.usage_unknown);
         }
         if !o.usable() {
             *skipped
@@ -445,6 +533,7 @@ pub fn provider_metrics(p: Provider, rows: &[(&SectionCase, &Outcome)]) -> Provi
                 .or_default() += 1;
             continue;
         }
+        invalid += u64::from(o.invalid);
         let a = o.answer.as_deref();
         all.add(c.expect, a);
         if c.rule.is_none() {
@@ -486,6 +575,8 @@ pub fn provider_metrics(p: Provider, rows: &[(&SectionCase, &Outcome)]) -> Provi
         confusion,
         calibration: Calibration::of(&cal),
         calls,
+        invalid,
+        usage_unknown,
         latency_p50_ms: percentile(&lat, 50.0),
         latency_p95_ms: percentile(&lat, 95.0),
         input_tokens: tokens,
@@ -577,10 +668,129 @@ pub struct Report {
     pub notes: Vec<String>,
 }
 
-/// PURE: card J3's acceptance for one provider's metrics. Not judged under
-/// [`JUDGE_MIN_CASES`] usable cases; the `claude -p haiku` comparison is
-/// never judged here (the baseline is not built, D33).
-pub fn acceptance(m: &ProviderMetrics) -> Acceptance {
+/// The haiku line of card J3: "beats `claude -p haiku`, or ties it at
+/// under 1/10 of its latency".
+pub const HAIKU_CRITERION: &str = "beats claude -p haiku, or ties it at < 1/10 of its latency";
+/// "Ties at under 1/10 of its latency": the provider's p50 times this is
+/// under haiku's p50.
+pub const HAIKU_LATENCY_FACTOR: i64 = 10;
+
+/// PURE: card J3's haiku line for provider `p`, paired with `haiku` over
+/// the sections where the keyword rule abstains (the ones the adapter asks
+/// in assist) that both answered usably. Accuracy on answered, `p` minus
+/// haiku, with its bootstrap interval: above 0 **beats** (PASS); across 0
+/// is a **tie**, which passes when `p`'s p50 latency over the same cases
+/// is under a tenth of haiku's (an offline provider's is 0) and fails
+/// otherwise; below 0 FAILS. NOT JUDGED when haiku did not run, when it is
+/// `p` itself, or under [`JUDGE_MIN_CASES`] paired cases — the reason is
+/// in `measured`.
+pub fn haiku_criterion(p: Provider, cases: &[SectionCase], outs: &Outcomes) -> Criterion {
+    let not = |why: String| Criterion::new(HAIKU_CRITERION, why, Verdict::NotJudged);
+    if p == Provider::Haiku {
+        return not("this is the haiku baseline".into());
+    }
+    let (Some(op), Some(oh)) = (outs.get(&p), outs.get(&Provider::Haiku)) else {
+        return not(
+            "claude -p haiku was not run (--provider haiku --haiku-host ALIAS, D33)".into(),
+        );
+    };
+    let paired: Vec<usize> = (0..cases.len())
+        .filter(|&i| cases[i].rule.is_none() && op[i].usable() && oh[i].usable())
+        .collect();
+    let n = paired.len() as u64;
+    if n == 0 {
+        return not("no rule-abstained section both answered usably".into());
+    }
+    let obs: Vec<Paired> = paired
+        .iter()
+        .map(|&i| {
+            let (xa, xb) = (op[i].answer.as_deref(), oh[i].answer.as_deref());
+            Paired {
+                a_answered: xa.is_some(),
+                a_correct: xa == Some(cases[i].expect),
+                b_answered: xb.is_some(),
+                b_correct: xb == Some(cases[i].expect),
+            }
+        })
+        .collect();
+    let cov = |o: &[Outcome]| {
+        ratio(
+            paired.iter().filter(|&&i| o[i].answer.is_some()).count() as u64,
+            n,
+        )
+    };
+    let acc = |o: &[Outcome]| {
+        let answered: Vec<usize> = paired
+            .iter()
+            .copied()
+            .filter(|&i| o[i].answer.is_some())
+            .collect();
+        ratio(
+            answered
+                .iter()
+                .filter(|&&i| o[i].answer.as_deref() == Some(cases[i].expect))
+                .count() as u64,
+            answered.len() as u64,
+        )
+    };
+    let p50 = |o: &[Outcome], model: bool| {
+        if model {
+            percentile(
+                &paired
+                    .iter()
+                    .filter_map(|&i| o[i].latency_ms)
+                    .collect::<Vec<_>>(),
+                50.0,
+            )
+        } else {
+            Some(0)
+        }
+    };
+    let (lp, lh) = (p50(op, p.is_model()), p50(oh, true));
+    let ci = bootstrap_acc_diff(&obs, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED);
+    let judged = n >= JUDGE_MIN_CASES;
+    let ms = |x: Option<i64>| x.map(|v| format!("{v} ms")).unwrap_or_else(|| "-".into());
+    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    let (verdict, what) = match ci {
+        None => (Verdict::NotJudged, "not comparable (no paired answers)"),
+        Some((_, lo, _)) if lo > 0.0 => (Verdict::Pass, "beats haiku"),
+        Some((_, _, hi)) if hi < 0.0 => (Verdict::Fail, "worse than haiku"),
+        Some(_) => match (lp, lh) {
+            (Some(a), Some(b)) if a * HAIKU_LATENCY_FACTOR < b => {
+                (Verdict::Pass, "ties haiku at < 1/10 of its latency")
+            }
+            (Some(_), Some(_)) => (Verdict::Fail, "ties haiku at ≥ 1/10 of its latency"),
+            _ => (Verdict::NotJudged, "ties haiku; a latency is unknown"),
+        },
+    };
+    let verdict = if judged { verdict } else { Verdict::NotJudged };
+    let small = if judged {
+        String::new()
+    } else {
+        format!(" (n {n} < {JUDGE_MIN_CASES}: not judged)")
+    };
+    Criterion::new(
+        HAIKU_CRITERION,
+        format!(
+            "where the rule abstains, acc@ans {} vs haiku {} (coverage {} vs {}): {} [{}, {}] over {n} paired cases; p50 {} vs {} → {what}{small}",
+            f3(acc(op)),
+            f3(acc(oh)),
+            f3(cov(op)),
+            f3(cov(oh)),
+            f3(ci.map(|x| r3(x.0))),
+            f3(ci.map(|x| r3(x.1))),
+            f3(ci.map(|x| r3(x.2))),
+            ms(lp),
+            ms(lh),
+        ),
+        verdict,
+    )
+}
+
+/// PURE: card J3's acceptance for one provider's metrics, with its haiku
+/// line ([`haiku_criterion`]). Not judged under [`JUDGE_MIN_CASES`] usable
+/// cases.
+pub fn acceptance(m: &ProviderMetrics, haiku: Criterion) -> Acceptance {
     let judged = m.cases >= JUDGE_MIN_CASES;
     let small = if judged {
         String::new()
@@ -621,11 +831,7 @@ pub fn acceptance(m: &ProviderMetrics) -> Acceptance {
                 judged && ra.cases > 0,
             ),
         ),
-        Criterion::new(
-            "beats claude -p haiku, or ties it at < 1/10 of its latency",
-            "the haiku baseline (D33) is not built",
-            Verdict::NotJudged,
-        ),
+        haiku,
     ];
     let overall = Verdict::all(&criteria.iter().map(|c| c.verdict).collect::<Vec<_>>());
     Acceptance {
@@ -768,10 +974,11 @@ pub fn report(
     cell("labels", "clear".into(), &|c: &SectionCase| !c.ambiguous);
     cell("labels", "ambiguous".into(), &|c: &SectionCase| c.ambiguous);
 
-    let acceptance_rows: Vec<Acceptance> = metrics
+    let acceptance_rows: Vec<Acceptance> = providers
         .iter()
-        .filter(|m| m.provider != Provider::None.as_str())
-        .map(acceptance)
+        .zip(&metrics)
+        .filter(|(p, _)| **p != Provider::None)
+        .map(|(&p, m)| acceptance(m, haiku_criterion(p, cases, outs)))
         .collect();
 
     let mut notes = vec![
@@ -886,6 +1093,16 @@ impl Report {
                 "  calibration {}: {} (10 equal-width bins; every category answer with a confidence)",
                 m.provider,
                 m.calibration.line()
+            ));
+        }
+        for m in self
+            .metrics
+            .iter()
+            .filter(|m| m.invalid > 0 || m.usage_unknown > 0)
+        {
+            v.push(format!(
+                "  {}: {} answers outside the options (invalid: counted as abstentions); {} calls reported no usage (the tokens and cost leave them out)",
+                m.provider, m.invalid, m.usage_unknown
             ));
         }
         for m in &self.metrics {

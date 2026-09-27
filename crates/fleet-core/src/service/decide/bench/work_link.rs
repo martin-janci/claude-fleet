@@ -41,17 +41,24 @@
 //! with the gate's fallback). With [`Shape::ChoiceNoul`] a chosen item is
 //! checked by a second call, one Noul ("does this session work on …?"),
 //! and the answer is kept when the noul reaches a threshold chosen on dev.
+//! `haiku` (D33) asks Jev's Choice — the same redacted state and options —
+//! of `claude -p` on a host the operator names
+//! ([`crate::service::decide::haiku`]); it answers at its own operating
+//! point (its `none`), and an answer outside the options is an abstention
+//! counted as `invalid`. It is never recorded in `decision_runs`.
 //!
 //! **Acceptance** (card J1, when `jev` ran): accuracy on answered at the
 //! precision-0.9 point, Jev against BM25 at BM25's coverage (Jev's
-//! threshold chosen on dev to match it), abstention quality, calibration,
-//! and the per-language-cell rule — each PASS, FAIL or NOT JUDGED.
+//! threshold chosen on dev to match it), Jev against haiku at haiku's
+//! coverage (the same way), abstention quality, calibration, and the
+//! per-language-cell rule — each PASS, FAIL or NOT JUDGED.
 //!
 //! The report holds ids, words and numbers only: no prompt and no title.
 
 use super::bm25::{self, Bm25};
 use super::{bootstrap_acc_diff, mix, percentile, Calibration, Criterion, Paired, Verdict};
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::{
     decide, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
 };
@@ -74,6 +81,9 @@ pub const ACCEPT_ACCURACY: f64 = 0.90;
 pub const ACCEPT_COVERAGE: f64 = 0.40;
 pub const ACCEPT_ABOVE_BM25: f64 = 0.10;
 pub const ACCEPT_ABSTENTION: f64 = 0.85;
+/// "Not worse than `claude -p haiku` by more than 3 points" (at haiku's
+/// coverage).
+pub const ACCEPT_BELOW_HAIKU: f64 = 0.03;
 /// A language cell this far below English at equal coverage falls back.
 pub const ACCEPT_CELL_BELOW_ENGLISH: f64 = 0.10;
 /// The English cell the language rule compares against.
@@ -169,10 +179,18 @@ pub enum Provider {
     Bm25,
     /// Jev, through the decision envelope (network).
     Jev,
+    /// `claude -p --model haiku` on a named host (D33; network, through
+    /// that host's Claude account).
+    Haiku,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::None, Provider::Bm25, Provider::Jev];
+    pub const ALL: [Provider; 4] = [
+        Provider::None,
+        Provider::Bm25,
+        Provider::Jev,
+        Provider::Haiku,
+    ];
 
     pub fn parse(s: &str) -> Option<Provider> {
         Provider::ALL.into_iter().find(|p| p.as_str() == s)
@@ -183,7 +201,14 @@ impl Provider {
             Provider::None => "none",
             Provider::Bm25 => "bm25",
             Provider::Jev => "jev",
+            Provider::Haiku => "haiku",
         }
+    }
+
+    /// Asks a model over the network (its calls, latency, tokens and cost
+    /// count, and its confidence is calibrated).
+    pub fn is_model(self) -> bool {
+        matches!(self, Provider::Jev | Provider::Haiku)
     }
 }
 
@@ -1065,6 +1090,10 @@ pub struct Outcome {
     pub latency_ms: Option<i64>,
     pub input_tokens: i64,
     pub cost_microusd: i64,
+    /// Haiku: it answered, but not with one of the options (an abstention).
+    pub invalid: bool,
+    /// Haiku: the call ran and its envelope reported no usage.
+    pub usage_unknown: bool,
 }
 
 impl Outcome {
@@ -1304,6 +1333,53 @@ pub async fn run_jev(
     out
 }
 
+/// Ask `claude -p` (D33) about each case, one call at a time on the
+/// configured host, with Jev's Choice ([`jev_request`]: the same redacted
+/// state, the candidates' ids and titles, and `none`). Its pick is the
+/// answer (`none` abstains) and its confidence the score; an answer outside
+/// the options is an abstention counted as `invalid`, a failed call
+/// (timeout, SSH, `claude`) is skipped with its reason. A case whose org
+/// is not the host's is skipped as `other_org` and nothing is sent for it.
+/// At most `max_calls` calls; nothing is recorded in `decision_runs`.
+pub async fn run_haiku(h: &Haiku<'_>, cases: &[&BenchCase], max_calls: usize) -> Vec<Outcome> {
+    let mut out = Vec::with_capacity(cases.len());
+    let mut calls = 0usize;
+    for case in cases {
+        // Never across the org boundary: a case goes only to a host of its
+        // own org (no org on both sides is the same).
+        if !h.may_ask(case.org_id) {
+            out.push(Outcome::skipped(OTHER_ORG));
+            continue;
+        }
+        if case.candidates.is_empty() {
+            out.push(Outcome::skipped("no_candidates"));
+            continue;
+        }
+        if calls >= max_calls {
+            out.push(Outcome::skipped("max_calls"));
+            continue;
+        }
+        let r = h.ask(&jev_request(case)).await;
+        calls += usize::from(r.ran);
+        let usable = r.error.is_none();
+        out.push(Outcome {
+            ran: r.ran,
+            pick: r.choice.clone().filter(|c| usable && c != NONE_OPTION),
+            score: r.confidence.filter(|_| usable),
+            choice_confidence: r.confidence.filter(|_| usable),
+            reason: r.error.map(str::to_string),
+            calls: u32::from(r.ran),
+            latency_ms: r.latency_ms,
+            input_tokens: r.input_tokens.unwrap_or_default(),
+            cost_microusd: r.cost_microusd.unwrap_or_default(),
+            invalid: r.invalid,
+            usage_unknown: r.ran && usable && r.input_tokens.is_none(),
+            ..Default::default()
+        });
+    }
+    out
+}
+
 /// Every provider's outcome per case id.
 pub type Outcomes = BTreeMap<Provider, HashMap<String, Outcome>>;
 
@@ -1313,6 +1389,18 @@ pub async fn run_providers(
     loaded: &Loaded,
     opts: &BenchOptions,
     jev: Option<&DecideCtx>,
+) -> Outcomes {
+    run_providers_with(loaded, opts, jev, None).await
+}
+
+/// [`run_providers`], and the haiku baseline (when asked for and `haiku`
+/// is given) on the same cases as Jev. `max_calls` bounds each network
+/// provider's calls.
+pub async fn run_providers_with(
+    loaded: &Loaded,
+    opts: &BenchOptions,
+    jev: Option<&DecideCtx>,
+    haiku: Option<&Haiku<'_>>,
 ) -> Outcomes {
     let mut all: Outcomes = BTreeMap::new();
     for p in &opts.providers {
@@ -1335,15 +1423,18 @@ pub async fn run_providers(
                 .iter()
                 .map(|c| (c.id.clone(), bm25_outcome(c)))
                 .collect(),
-            Provider::Jev => {
+            Provider::Jev | Provider::Haiku => {
                 let wanted: Vec<&BenchCase> = loaded
                     .cases
                     .iter()
                     .filter(|c| c.dataset == Dataset::H || opts.split.keeps(c.dev))
                     .collect();
-                let outs = match jev {
-                    Some(ctx) => run_jev(ctx, &wanted, opts.max_calls, opts.shape).await,
-                    None => wanted
+                let outs = match (p, jev, haiku) {
+                    (Provider::Jev, Some(ctx), _) => {
+                        run_jev(ctx, &wanted, opts.max_calls, opts.shape).await
+                    }
+                    (Provider::Haiku, _, Some(h)) => run_haiku(h, &wanted, opts.max_calls).await,
+                    _ => wanted
                         .iter()
                         .map(|_| Outcome::skipped("no_backend"))
                         .collect(),
@@ -1401,8 +1492,8 @@ pub struct ProviderMetrics {
     /// Abstentions on none-cases ÷ none-cases.
     pub abstention_quality: Option<f64>,
     pub at_precision: AtPrecision,
-    /// Jev: the Choice's confidence against whether its answer (an item or
-    /// `none`) was right, over every usable case.
+    /// Jev / haiku: the Choice's confidence against whether its answer (an
+    /// item or `none`) was right, over every usable case that had one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calibration: Option<Calibration>,
     /// Jev with the noul check: the noul against whether the chosen item
@@ -1411,6 +1502,11 @@ pub struct ProviderMetrics {
     pub noul_calibration: Option<Calibration>,
     /// Calls made (Jev: two for a case the check was asked for).
     pub calls: Shown,
+    /// Haiku: answers outside the options (counted as abstentions).
+    pub invalid: Shown,
+    /// Haiku: calls whose envelope reported no tokens or cost (the totals
+    /// leave them out).
+    pub usage_unknown: Shown,
     /// Per case, both calls together.
     pub latency_p50_ms: Option<i64>,
     pub latency_p95_ms: Option<i64>,
@@ -1440,6 +1536,33 @@ pub struct EqualCoverage {
     pub hi: Option<f64>,
 }
 
+/// Jev against `claude -p haiku` at haiku's coverage (card J1: "not worse
+/// than haiku by more than 3 points"). Haiku answers at its own operating
+/// point (its `none`); Jev at the score threshold whose dev coverage is
+/// closest to haiku's dev coverage — the same construction as
+/// [`EqualCoverage`]. Both applied to the reported truth cases both
+/// answered usably.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VsHaiku {
+    pub haiku_dev_coverage: Option<f64>,
+    /// Chosen on dev.
+    pub jev_threshold: Option<f64>,
+    pub jev_dev_coverage: Option<f64>,
+    /// Truth cases both have a usable outcome for.
+    pub cases: Shown,
+    pub haiku_accuracy: Option<f64>,
+    pub haiku_coverage: Option<f64>,
+    pub jev_accuracy: Option<f64>,
+    pub jev_coverage: Option<f64>,
+    /// Jev − haiku accuracy on answered, with its bootstrap interval.
+    pub gap: Option<f64>,
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
+    /// Per case, over the paired cases.
+    pub jev_latency_p50_ms: Option<i64>,
+    pub haiku_latency_p50_ms: Option<i64>,
+}
+
 /// Accuracy-on-answered difference of two providers, with its bootstrap
 /// interval.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1463,7 +1586,7 @@ pub struct CellMetrics {
     pub accuracy_on_answered: Option<f64>,
     pub coverage: Option<f64>,
     pub abstention_quality: Option<f64>,
-    /// Jev only (see [`ProviderMetrics::calibration`]).
+    /// Jev / haiku only (see [`ProviderMetrics::calibration`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calibration: Option<Calibration>,
 }
@@ -1495,6 +1618,8 @@ pub struct DatasetReport {
     pub breakdown: Vec<Cell>,
     /// When both `jev` and `bm25` ran.
     pub equal_coverage: Option<EqualCoverage>,
+    /// When both `jev` and `haiku` ran.
+    pub vs_haiku: Option<VsHaiku>,
     /// Card J1's acceptance, when `jev` ran: the four registered criteria,
     /// then one line per language cell.
     pub acceptance: Vec<Criterion>,
@@ -1517,6 +1642,10 @@ pub struct Thresholds {
     /// coverage is closest to it ([`EqualCoverage`]).
     pub bm25_dev_coverage: Option<f64>,
     pub jev_at_bm25_coverage: Option<f64>,
+    /// Haiku's coverage on dev, and the Jev score threshold whose dev
+    /// coverage is closest to it ([`VsHaiku`]).
+    pub haiku_dev_coverage: Option<f64>,
+    pub jev_at_haiku_coverage: Option<f64>,
 }
 
 /// The whole benchmark.
@@ -1683,23 +1812,26 @@ fn provider_metrics(
     let mut skipped: BTreeMap<String, Shown> = BTreeMap::new();
     let mut lat = Vec::new();
     let (mut calls, mut tokens, mut cost) = (0u64, 0i64, 0i64);
+    let (mut invalid, mut usage_unknown) = (0u64, 0u64);
     let (mut pn, mut pk, mut pc) = (0u64, 0u64, 0u64);
     let (mut cal, mut noul_cal) = (Vec::new(), Vec::new());
     for (c, o) in rows {
-        if o.ran && p == Provider::Jev {
+        if o.ran && p.is_model() {
             calls += u64::from(o.calls.max(1));
             if let Some(l) = o.latency_ms {
                 lat.push(l);
             }
             tokens += o.input_tokens;
             cost += o.cost_microusd;
+            usage_unknown += u64::from(o.usage_unknown);
         }
         if !o.usable() {
             let r = o.reason.clone().unwrap_or_else(|| "not_run".into());
             skipped.entry(r).or_default().0 += 1;
             continue;
         }
-        if p == Provider::Jev {
+        invalid += u64::from(o.invalid);
+        if p.is_model() {
             if let Some(conf) = o.choice_confidence {
                 cal.push((conf, o.pick == c.truth));
             }
@@ -1736,9 +1868,11 @@ fn provider_metrics(
             accuracy_on_answered: at_p.and_then(|_| pct(pk, pn)),
             answered: Shown(pn),
         },
-        calibration: (p == Provider::Jev).then(|| Calibration::of(&cal)),
+        calibration: p.is_model().then(|| Calibration::of(&cal)),
         noul_calibration: (!noul_cal.is_empty()).then(|| Calibration::of(&noul_cal)),
         calls: Shown(calls),
+        invalid: Shown(invalid),
+        usage_unknown: Shown(usage_unknown),
         latency_p50_ms: percentile(&lat, 50.0),
         latency_p95_ms: percentile(&lat, 95.0),
         input_tokens: tokens,
@@ -1831,21 +1965,39 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
             .iter()
             .any(|(_, o)| o.usable());
     let both = providers.contains(&Provider::Bm25) && providers.contains(&Provider::Jev);
-    if both {
+    let with_haiku = providers.contains(&Provider::Haiku) && providers.contains(&Provider::Jev);
+    // A baseline's dev coverage at its own operating point, the Jev
+    // threshold whose dev coverage comes closest to it, and that coverage.
+    let at_coverage_of = |base: Provider| -> (Option<f64>, Option<f64>, Option<f64>) {
         let truth_dev = |p: Provider| -> Vec<(&BenchCase, &Outcome)> {
             rows_of(p, &is_dev)
                 .into_iter()
                 .filter(|(c, o)| o.usable() && c.truth.is_some())
                 .collect()
         };
-        let bm = tally_at(&truth_dev(Provider::Bm25), abstain[&Provider::Bm25]);
-        th.bm25_dev_coverage = bm.coverage();
-        if let Some(target) = bm.coverage() {
-            let jev = truth_dev(Provider::Jev);
-            eq_threshold = choose_for_coverage(&jev, target);
-            th.jev_at_bm25_coverage = eq_threshold.map(round3);
-            eq_jev_dev_coverage = eq_threshold.and_then(|t| tally_at(&jev, Some(t)).coverage());
-        }
+        let target = tally_at(&truth_dev(base), abstain[&base]).coverage();
+        let jev = truth_dev(Provider::Jev);
+        let t = target.and_then(|target| choose_for_coverage(&jev, target));
+        (
+            target,
+            t,
+            t.and_then(|t| tally_at(&jev, Some(t)).coverage()),
+        )
+    };
+    if both {
+        let (target, t, cov) = at_coverage_of(Provider::Bm25);
+        th.bm25_dev_coverage = target;
+        eq_threshold = t;
+        th.jev_at_bm25_coverage = t.map(round3);
+        eq_jev_dev_coverage = cov;
+    }
+    let (mut haiku_threshold, mut haiku_jev_dev_coverage) = (None, None);
+    if with_haiku {
+        let (target, t, cov) = at_coverage_of(Provider::Haiku);
+        th.haiku_dev_coverage = target;
+        haiku_threshold = t;
+        th.jev_at_haiku_coverage = t.map(round3);
+        haiku_jev_dev_coverage = cov;
     }
     if opts.split != Split::Test {
         notes.push(format!(
@@ -1925,7 +2077,11 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                 ("candidates", c.size_bucket().to_string()),
             ]
         };
-        type CellAcc = (Tally, BTreeMap<Provider, Tally>, Vec<(f64, bool)>);
+        type CellAcc = (
+            Tally,
+            BTreeMap<Provider, Tally>,
+            BTreeMap<Provider, Vec<(f64, bool)>>,
+        );
         let mut cells: BTreeMap<Key, CellAcc> = BTreeMap::new();
         for c in &cases {
             for k in dims(c) {
@@ -1937,9 +2093,9 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                 for &p in &providers {
                     if let Some(o) = outcomes[&p].get(&c.id).filter(|o| o.usable()) {
                         e.1.entry(p).or_default().add(c, answer_at(o, abstain[&p]));
-                        if p == Provider::Jev {
+                        if p.is_model() {
                             if let Some(conf) = o.choice_confidence {
-                                e.2.push((conf, o.pick == c.truth));
+                                e.2.entry(p).or_default().push((conf, o.pick == c.truth));
                             }
                         }
                     }
@@ -1968,7 +2124,9 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                                 } else {
                                     None
                                 },
-                                calibration: (*p == Provider::Jev).then(|| Calibration::of(&cal)),
+                                calibration: p.is_model().then(|| {
+                                    Calibration::of(cal.get(p).map(Vec::as_slice).unwrap_or(&[]))
+                                }),
                             })
                             .collect()
                     } else {
@@ -1994,11 +2152,20 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
                 eq_jev_dev_coverage,
             )
         });
+        let vs_haiku = with_haiku.then(|| {
+            vs_haiku(
+                &cases,
+                outcomes,
+                haiku_threshold,
+                th.haiku_dev_coverage,
+                haiku_jev_dev_coverage,
+            )
+        });
         let (acceptance, acceptance_overall) =
             match pm.iter().find(|m| m.provider == Provider::Jev.as_str()) {
                 Some(jm) => {
                     let (mut crit, overall) =
-                        j1_acceptance(jm, equal_coverage.as_ref(), jev_dev_ran);
+                        j1_acceptance(jm, equal_coverage.as_ref(), vs_haiku.as_ref(), jev_dev_ran);
                     crit.extend(language_cells(
                         &cases,
                         &outcomes[&Provider::Jev],
@@ -2017,6 +2184,7 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
             diffs,
             breakdown,
             equal_coverage,
+            vs_haiku,
             acceptance,
             acceptance_overall,
         });
@@ -2055,28 +2223,8 @@ fn equal_coverage(
     bm25_dev_coverage: Option<f64>,
     jev_dev_coverage: Option<f64>,
 ) -> EqualCoverage {
-    let (bm, jv) = (&outcomes[&Provider::Bm25], &outcomes[&Provider::Jev]);
-    let (mut tb, mut tj) = (Tally::default(), Tally::default());
-    let mut obs = Vec::new();
-    for c in cases.iter().filter(|c| c.truth.is_some()) {
-        let (Some(ob), Some(oj)) = (bm.get(&c.id), jv.get(&c.id)) else {
-            continue;
-        };
-        if !ob.usable() || !oj.usable() {
-            continue;
-        }
-        let xb = answer_at(ob, bm25_t);
-        let xj = jev_t.and_then(|t| answer_at(oj, Some(t)));
-        tb.add(c, xb);
-        tj.add(c, xj);
-        obs.push(Paired {
-            a_answered: xj.is_some(),
-            a_correct: xj.is_some() && xj == c.truth.as_ref(),
-            b_answered: xb.is_some(),
-            b_correct: xb.is_some() && xb == c.truth.as_ref(),
-        });
-    }
-    let ci = jev_t.and_then(|_| bootstrap_acc_diff(&obs, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED));
+    let p = paired_with(cases, outcomes, Provider::Bm25, bm25_t, jev_t);
+    let (tb, tj, obs, ci) = (p.base, p.jev, p.obs, p.ci);
     EqualCoverage {
         bm25_dev_coverage,
         jev_threshold: jev_t.map(round3),
@@ -2092,12 +2240,97 @@ fn equal_coverage(
     }
 }
 
+/// Jev against a baseline over the truth cases both answered usably.
+struct PairedWith {
+    base: Tally,
+    jev: Tally,
+    obs: Vec<Paired>,
+    /// Jev − the baseline, with its bootstrap interval (none without a Jev
+    /// threshold).
+    ci: Option<(f64, f64, f64)>,
+    base_latency: Vec<i64>,
+    jev_latency: Vec<i64>,
+}
+
+/// PURE: the baseline `base` at `base_t` and Jev at `jev_t` (chosen on
+/// dev; without it Jev's side is empty) over the truth cases of `cases`
+/// both answered usably.
+fn paired_with(
+    cases: &[&BenchCase],
+    outcomes: &Outcomes,
+    base: Provider,
+    base_t: Option<f64>,
+    jev_t: Option<f64>,
+) -> PairedWith {
+    let (bm, jv) = (&outcomes[&base], &outcomes[&Provider::Jev]);
+    let mut p = PairedWith {
+        base: Tally::default(),
+        jev: Tally::default(),
+        obs: Vec::new(),
+        ci: None,
+        base_latency: Vec::new(),
+        jev_latency: Vec::new(),
+    };
+    for c in cases.iter().filter(|c| c.truth.is_some()) {
+        let (Some(ob), Some(oj)) = (bm.get(&c.id), jv.get(&c.id)) else {
+            continue;
+        };
+        if !ob.usable() || !oj.usable() {
+            continue;
+        }
+        let xb = answer_at(ob, base_t);
+        let xj = jev_t.and_then(|t| answer_at(oj, Some(t)));
+        p.base.add(c, xb);
+        p.jev.add(c, xj);
+        p.base_latency.extend(ob.latency_ms);
+        p.jev_latency.extend(oj.latency_ms);
+        p.obs.push(Paired {
+            a_answered: xj.is_some(),
+            a_correct: xj.is_some() && xj == c.truth.as_ref(),
+            b_answered: xb.is_some(),
+            b_correct: xb.is_some() && xb == c.truth.as_ref(),
+        });
+    }
+    p.ci = jev_t.and_then(|_| bootstrap_acc_diff(&p.obs, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED));
+    p
+}
+
+/// PURE: Jev against haiku at haiku's coverage ([`VsHaiku`]): haiku at its
+/// own operating point, Jev at `jev_t`.
+fn vs_haiku(
+    cases: &[&BenchCase],
+    outcomes: &Outcomes,
+    jev_t: Option<f64>,
+    haiku_dev_coverage: Option<f64>,
+    jev_dev_coverage: Option<f64>,
+) -> VsHaiku {
+    let p = paired_with(cases, outcomes, Provider::Haiku, None, jev_t);
+    VsHaiku {
+        haiku_dev_coverage,
+        jev_threshold: jev_t.map(round3),
+        jev_dev_coverage,
+        cases: Shown(p.obs.len() as u64),
+        haiku_accuracy: p.base.accuracy(),
+        haiku_coverage: p.base.coverage(),
+        jev_accuracy: jev_t.and(p.jev.accuracy()),
+        jev_coverage: jev_t.and(p.jev.coverage()),
+        gap: p.ci.map(|x| round3(x.0)),
+        lo: p.ci.map(|x| round3(x.1)),
+        hi: p.ci.map(|x| round3(x.2)),
+        jev_latency_p50_ms: percentile(&p.jev_latency, 50.0),
+        haiku_latency_p50_ms: percentile(&p.base_latency, 50.0),
+    }
+}
+
 /// PURE: card J1's four registered criteria for Jev's metrics on one
 /// dataset, and their overall verdict. `jev_dev_ran`: Jev answered dev
-/// cases, so its thresholds could be chosen.
+/// cases, so its thresholds could be chosen. The haiku line is judged on
+/// `vs` (when haiku ran): the gap at haiku's coverage no lower than
+/// −[`ACCEPT_BELOW_HAIKU`] over at least [`JUDGE_MIN_CASES`] paired cases.
 fn j1_acceptance(
     m: &ProviderMetrics,
     eq: Option<&EqualCoverage>,
+    vs: Option<&VsHaiku>,
     jev_dev_ran: bool,
 ) -> (Vec<Criterion>, Verdict) {
     let judged = m.cases.0 >= JUDGE_MIN_CASES;
@@ -2154,6 +2387,38 @@ fn j1_acceptance(
             ),
         ),
     };
+    let ms = |x: Option<i64>| x.map(|v| format!("{v} ms")).unwrap_or_else(|| "-".into());
+    let (haiku, haiku_measured) = match vs {
+        None => (
+            Verdict::NotJudged,
+            "claude -p haiku was not run (--provider haiku --haiku-host ALIAS, D33)".to_string(),
+        ),
+        Some(e) if e.haiku_dev_coverage.is_none() || e.jev_threshold.is_none() => (
+            Verdict::NotJudged,
+            "no jev threshold at haiku's dev coverage (--split all)".to_string(),
+        ),
+        Some(e) => (
+            Verdict::at_least(
+                e.gap,
+                -ACCEPT_BELOW_HAIKU,
+                e.cases.0 >= JUDGE_MIN_CASES,
+            ),
+            format!(
+                "jev {} at coverage {} vs haiku {} at {}: {} [{}, {}] over {} paired cases; p50 {} vs {}{}",
+                f3(e.jev_accuracy),
+                f3(e.jev_coverage),
+                f3(e.haiku_accuracy),
+                f3(e.haiku_coverage),
+                f3(e.gap),
+                f3(e.lo),
+                f3(e.hi),
+                e.cases,
+                ms(e.jev_latency_p50_ms),
+                ms(e.haiku_latency_p50_ms),
+                small(e.cases)
+            ),
+        ),
+    };
     let criteria = vec![
         Criterion::new(
             format!("accuracy on answered ≥ {ACCEPT_ACCURACY} at coverage ≥ {ACCEPT_COVERAGE}"),
@@ -2169,9 +2434,12 @@ fn j1_acceptance(
             above,
         ),
         Criterion::new(
-            "not worse than claude -p haiku by more than 3 points",
-            "the haiku baseline (D33) is not built",
-            Verdict::NotJudged,
+            format!(
+                "not worse than claude -p haiku by more than {} points at haiku's coverage",
+                (ACCEPT_BELOW_HAIKU * 100.0).round()
+            ),
+            haiku_measured,
+            haiku,
         ),
         Criterion::new(
             format!("abstention quality ≥ {ACCEPT_ABSTENTION}"),
@@ -2340,6 +2608,13 @@ impl BenchReport {
                 String::new()
             }
         ));
+        if th.haiku_dev_coverage.is_some() {
+            v.push(format!(
+                "thresholds (chosen on dev): jev at haiku's dev coverage {}: ≥ {}",
+                f3(th.haiku_dev_coverage),
+                f3(th.jev_at_haiku_coverage)
+            ));
+        }
         v.push("counts from 1 to 4 show as <5; no prompt or title is printed".into());
         v.push(String::new());
         let r = &self.recall;
@@ -2438,6 +2713,32 @@ impl BenchReport {
                         c.line()
                     ));
                 }
+            }
+            for p in d
+                .providers
+                .iter()
+                .filter(|p| p.invalid.0 > 0 || p.usage_unknown.0 > 0)
+            {
+                v.push(format!(
+                    "  {}: {} answers outside the options (invalid: counted as abstentions); {} calls reported no usage (the tokens and cost leave them out)",
+                    p.provider, p.invalid, p.usage_unknown
+                ));
+            }
+            if let Some(e) = &d.vs_haiku {
+                v.push(format!(
+                    "  at haiku's coverage (dev {}; jev ≥ {} gave {} on dev): jev {} at coverage {} vs haiku {} at {} over {} paired cases: {} [{}, {}]",
+                    f3(e.haiku_dev_coverage),
+                    f3(e.jev_threshold),
+                    f3(e.jev_dev_coverage),
+                    f3(e.jev_accuracy),
+                    f3(e.jev_coverage),
+                    f3(e.haiku_accuracy),
+                    f3(e.haiku_coverage),
+                    e.cases,
+                    f3(e.gap),
+                    f3(e.lo),
+                    f3(e.hi)
+                ));
             }
             if let Some(e) = &d.equal_coverage {
                 v.push(format!(

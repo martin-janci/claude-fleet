@@ -359,7 +359,7 @@ async fn jev_is_asked_only_through_the_gate_with_the_adapters_request() {
     assert_eq!(acc.criteria[0].verdict, Verdict::Pass);
     assert_eq!(acc.criteria[1].verdict, Verdict::Pass);
     assert_eq!(acc.criteria[2].verdict, Verdict::Pass);
-    // The haiku comparison is not built: the whole is not judged.
+    // haiku was not run: its line, and so the whole, is not judged.
     assert_eq!(acc.overall, Verdict::NotJudged);
     assert!(r.diffs.iter().any(|d| d.a == "jev" && d.b == "rule"));
     assert!(r.notes.iter().any(|n| n.contains("decide.jev.unassigned")));
@@ -388,4 +388,341 @@ async fn jev_is_asked_only_through_the_gate_with_the_adapters_request() {
     one.org_id = Some(org);
     let outs = run_jev(&ctx, &[one], 5).await;
     assert_eq!(outs[0].reason.as_deref(), Some("org_off"));
+}
+
+// --- claude -p haiku (D33) --------------------------------------------------------
+
+use crate::service::decide::canonical_json;
+use crate::service::decide::haiku::testing::{state_of, ScriptedSsh};
+use crate::service::decide::haiku::{prompt_for, Haiku, HaikuConfig};
+
+/// The right answer per rendered state (as the prompt carries it).
+fn truth_by_prompt_state(cases: &[SectionCase]) -> HashMap<String, (&'static str, bool)> {
+    cases
+        .iter()
+        .map(|c| {
+            (
+                canonical_json(&sm::question_for(&c.key, &c.board).redacted().state),
+                (c.expect, c.ambiguous),
+            )
+        })
+        .collect()
+}
+
+/// Knows the right answer; says `unsure` for the ambiguous ones, `todo`
+/// (wrong unless the truth is todo) on every fourth call, an option that
+/// was never offered on every 25th, and no confidence on every 7th.
+fn haiku_oracle(cases: &[SectionCase]) -> ScriptedSsh {
+    let truth = truth_by_prompt_state(cases);
+    let n = AtomicUsize::new(0);
+    ScriptedSsh::new(move |prompt| {
+        let i = n.fetch_add(1, Ordering::SeqCst);
+        let state = canonical_json(&state_of(prompt).expect("a state"));
+        let (expect, ambiguous) = truth.get(&state).copied().expect("a known state");
+        let choice = if i % 25 == 24 {
+            "shipped"
+        } else if ambiguous {
+            "unsure"
+        } else if i % 4 == 3 {
+            "todo"
+        } else {
+            expect
+        };
+        if i % 7 == 6 {
+            format!("{{\"choice\": \"{choice}\"}}")
+        } else {
+            format!("Here you go:\n{{\"choice\": \"{choice}\", \"confidence\": 0.9}}")
+        }
+    })
+}
+
+/// Haiku on a host with no org (the fixture's rows have none).
+fn haiku_on(exec: &ScriptedSsh) -> Haiku<'_> {
+    haiku_in(exec, None)
+}
+
+fn haiku_in(exec: &ScriptedSsh, host_org: Option<i64>) -> Haiku<'_> {
+    Haiku {
+        exec,
+        cfg: HaikuConfig::new("bench-host", None, None).unwrap(),
+        host_org,
+    }
+}
+
+#[tokio::test]
+async fn haiku_never_sends_a_case_across_the_org_boundary() {
+    let (labels, mut cases) = fixture();
+    let ssh = haiku_oracle(&cases);
+    let run = |cases: Vec<SectionCase>, host_org: Option<i64>| {
+        let ssh = &ssh;
+        async move {
+            let before = ssh.calls();
+            let outs = run_haiku(&haiku_in(ssh, host_org), &cases, DEFAULT_MAX_CALLS).await;
+            (ssh.calls() - before, outs)
+        }
+    };
+    // The fixture has no org: a host of an org gets none of it.
+    let (sent, outs) = run(cases.clone(), Some(7)).await;
+    assert_eq!(sent, 0);
+    assert!(outs
+        .iter()
+        .all(|o| !o.ran && o.reason.as_deref() == Some("other_org")));
+    // Three rows of org 7, two of org 8, the rest with none.
+    for c in cases.iter_mut().take(3) {
+        c.org_id = Some(7);
+    }
+    for c in cases.iter_mut().skip(3).take(2) {
+        c.org_id = Some(8);
+    }
+    // To org 7's host: only org 7's rows.
+    let (sent, outs) = run(cases.clone(), Some(7)).await;
+    assert_eq!(sent, 3);
+    for (c, o) in cases.iter().zip(&outs) {
+        if c.org_id == Some(7) {
+            assert!(o.ran && o.usable(), "{o:?}");
+        } else {
+            assert_eq!(o.reason.as_deref(), Some("other_org"), "{c:?}");
+        }
+    }
+    // To a host with no org: only the rows with none (no org on both
+    // sides is the same).
+    let (sent, outs) = run(cases.clone(), None).await;
+    assert_eq!(sent, cases.len() - 5);
+    for (c, o) in cases.iter().zip(&outs) {
+        assert_eq!(o.ran, c.org_id.is_none(), "{c:?}");
+    }
+    // The skips are counted and shown like any other.
+    let outcomes: Outcomes = [(Provider::Haiku, outs)].into_iter().collect();
+    let r = report(&cases, &outcomes, labels.len(), 0, false);
+    let m = metric(&r, "haiku");
+    assert_eq!(m.skipped.get("other_org").copied(), Some(5));
+    assert!(r.lines().join("\n").contains("other_org 5"));
+}
+
+#[tokio::test]
+async fn haiku_is_asked_the_adapters_request_on_the_named_host() {
+    let (labels, cases) = fixture();
+    let ssh = haiku_oracle(&cases);
+    let h = haiku_on(&ssh);
+    let outs = run_providers_with(
+        &cases,
+        &[Provider::Rule, Provider::Haiku],
+        None,
+        Some(&h),
+        DEFAULT_MAX_CALLS,
+    )
+    .await;
+    assert_eq!(ssh.calls(), cases.len());
+    assert!(ssh.hosts.lock().unwrap().iter().all(|h| h == "bench-host"));
+    // Each prompt is the adapter's request, redacted, rendered: nothing
+    // else about the case (its label's note) is in it.
+    {
+        let prompts = ssh.prompts.lock().unwrap();
+        for ((c, p), l) in cases.iter().zip(prompts.iter()).zip(&labels) {
+            assert_eq!(
+                p,
+                &prompt_for(&sm::question_for(&c.key, &c.board)).unwrap().0
+            );
+            if let Some(note) = &l.note {
+                assert!(!p.contains(note.as_str()), "{p}");
+            }
+        }
+    }
+    let ho = &outs[&Provider::Haiku];
+    assert!(ho.iter().all(|o| o.ran && o.usable()));
+    let invalid = ho.iter().filter(|o| o.invalid).count();
+    assert_eq!(invalid, cases.len() / 25);
+    for (c, o) in cases.iter().zip(ho) {
+        if o.invalid {
+            assert_eq!((o.answer.as_deref(), o.model.as_deref()), (None, None));
+        } else if c.ambiguous {
+            assert_eq!(o.answer, None);
+            assert_eq!(o.model.as_deref(), Some(sm::UNSURE));
+        }
+    }
+    let r = report(&cases, &outs, labels.len(), 0, true);
+    let m = metric(&r, "haiku");
+    assert_eq!(m.calls, cases.len() as u64);
+    assert_eq!(m.invalid, invalid as u64);
+    assert_eq!(m.usage_unknown, 0);
+    assert_eq!(m.input_tokens, 100 * cases.len() as i64);
+    assert_eq!(m.cost_microusd, 500 * cases.len() as i64);
+    assert!(m.latency_p50_ms.is_some());
+    // Calibration leaves out the answers without a confidence and unsure.
+    let with_conf = ho
+        .iter()
+        .filter(|o| o.confidence.is_some() && o.model.as_deref().is_some_and(|x| x != sm::UNSURE))
+        .count() as u64;
+    assert!(with_conf < cases.len() as u64);
+    assert_eq!(m.calibration.n.0, with_conf);
+    // Haiku's own row has no haiku line to judge; the rule's is not judged
+    // (it never answers where it abstains).
+    let own = r.acceptance.iter().find(|a| a.provider == "haiku").unwrap();
+    assert_eq!(own.criteria[3].verdict, Verdict::NotJudged);
+    assert!(own.criteria[3].measured.contains("baseline"));
+    let rule = r.acceptance.iter().find(|a| a.provider == "rule").unwrap();
+    assert_eq!(rule.criteria[3].verdict, Verdict::NotJudged);
+    let lines = r.lines().join("\n");
+    assert!(
+        lines.contains("haiku: ") && lines.contains("invalid"),
+        "{lines}"
+    );
+    assert!(r.diffs.iter().any(|d| d.a == "haiku" && d.b == "rule"));
+
+    // The call cap.
+    let before = ssh.calls();
+    let outs = run_providers_with(&cases, &[Provider::Haiku], None, Some(&h), 3).await;
+    assert_eq!(ssh.calls() - before, 3);
+    assert_eq!(
+        outs[&Provider::Haiku]
+            .iter()
+            .filter(|o| !o.ran && o.reason.as_deref() == Some("max_calls"))
+            .count(),
+        cases.len() - 3
+    );
+    // Without a transport, haiku is skipped like jev without a backend.
+    let outs = run_providers(&cases, &[Provider::Haiku], None, 3).await;
+    assert!(outs[&Provider::Haiku]
+        .iter()
+        .all(|o| o.reason.as_deref() == Some("no_backend")));
+}
+
+#[tokio::test]
+async fn with_jev_and_haiku_on_the_same_cases_j3s_haiku_line_is_judged() {
+    let (labels, cases) = fixture();
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    {
+        let s = store.lock().unwrap();
+        settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
+        settings::set(&s, settings::DECIDE_JEV_STATUS_MAP, "shadow").unwrap();
+        settings::set(&s, settings::DECIDE_JEV_UNASSIGNED, "true").unwrap();
+        s.set_decision_credential(Some(&Secret::new(KEY)), None)
+            .unwrap();
+    }
+    let oracle = Arc::new(Oracle {
+        truth: cases
+            .iter()
+            .map(|c| {
+                (
+                    sm::question_for(&c.key, &c.board).state.to_string(),
+                    (c.expect, c.ambiguous),
+                )
+            })
+            .collect(),
+        calls: AtomicUsize::new(0),
+        seen: Mutex::new(Vec::new()),
+    });
+    let ctx = DecideCtx::new(Arc::clone(&store), oracle.clone());
+    let ssh = haiku_oracle(&cases);
+    let h = haiku_on(&ssh);
+    let outs = run_providers_with(
+        &cases,
+        &[Provider::Rule, Provider::Jev, Provider::Haiku],
+        Some(&ctx),
+        Some(&h),
+        DEFAULT_MAX_CALLS,
+    )
+    .await;
+    assert_eq!(oracle.calls.load(Ordering::SeqCst), cases.len());
+    assert_eq!(ssh.calls(), cases.len());
+    // Haiku is never recorded: the runs are jev's alone.
+    let runs = store
+        .lock()
+        .unwrap()
+        .list_decision_runs(&DecisionRunFilter {
+            limit: 10_000,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(runs.len(), cases.len());
+    assert!(runs.iter().all(|r| r.provider == "jev"));
+
+    let r = report(&cases, &outs, labels.len(), 0, true);
+    let jev = r.acceptance.iter().find(|a| a.provider == "jev").unwrap();
+    let line = &jev.criteria[3];
+    assert_eq!(line.criterion, HAIKU_CRITERION);
+    // Jev is right on every answer; haiku is wrong on a quarter: beats.
+    assert_eq!(line.verdict, Verdict::Pass, "{}", line.measured);
+    assert!(line.measured.contains("beats haiku"), "{}", line.measured);
+    assert!(line.measured.contains("paired cases"), "{}", line.measured);
+    assert_eq!(jev.overall, Verdict::Pass);
+    assert!(r
+        .diffs
+        .iter()
+        .any(|d| d.scope == "rule_abstained" && d.a == "haiku" && d.b == "jev"));
+}
+
+/// `n` rule-abstained cases, all `todo`.
+fn plain_cases(n: usize) -> Vec<SectionCase> {
+    (0..n)
+        .map(|i| SectionCase {
+            id: format!("s{i}"),
+            key: format!("s{i}"),
+            board: vec![format!("s{i}")],
+            expect: "todo",
+            lang: "en".into(),
+            ambiguous: false,
+            org_id: None,
+            rule: None,
+        })
+        .collect()
+}
+
+/// Every answer `todo` on every `right_every`-th case, else `a`.
+fn answered(a: &str, right_every: usize, latency: Option<i64>, n: usize) -> Vec<Outcome> {
+    (0..n)
+        .map(|i| Outcome {
+            ran: true,
+            answer: Some(if i % right_every == 0 { "todo" } else { a }.to_string()),
+            latency_ms: latency,
+            ..Default::default()
+        })
+        .collect()
+}
+
+#[test]
+fn the_haiku_line_beats_ties_or_fails_on_paired_cases() {
+    let cases = plain_cases(300);
+    let judge = |p_out: Vec<Outcome>, haiku: Vec<Outcome>, p: Provider| {
+        let outs: Outcomes = [(p, p_out), (Provider::Haiku, haiku)].into_iter().collect();
+        haiku_criterion(p, &cases, &outs)
+    };
+    let all_right = |lat| answered("todo", 1, lat, 300);
+    let half_right = |lat| answered("done", 2, lat, 300);
+    // Beats.
+    let c = judge(all_right(Some(900)), half_right(Some(100)), Provider::Jev);
+    assert_eq!(c.verdict, Verdict::Pass, "{}", c.measured);
+    // Worse.
+    let c = judge(half_right(Some(10)), all_right(Some(900)), Provider::Jev);
+    assert_eq!(c.verdict, Verdict::Fail, "{}", c.measured);
+    assert!(c.measured.contains("worse"), "{}", c.measured);
+    // A tie passes under a tenth of haiku's latency, and fails at it.
+    let c = judge(all_right(Some(80)), all_right(Some(900)), Provider::Jev);
+    assert_eq!(c.verdict, Verdict::Pass, "{}", c.measured);
+    assert!(
+        c.measured.contains("ties haiku at < 1/10"),
+        "{}",
+        c.measured
+    );
+    let c = judge(all_right(Some(90)), all_right(Some(900)), Provider::Jev);
+    assert_eq!(c.verdict, Verdict::Fail, "{}", c.measured);
+    // An offline provider's latency is 0: a tie passes.
+    let c = judge(all_right(None), all_right(Some(900)), Provider::Todo);
+    assert_eq!(c.verdict, Verdict::Pass, "{}", c.measured);
+    // A model's unknown latency leaves a tie not judged.
+    let c = judge(all_right(None), all_right(Some(900)), Provider::Jev);
+    assert_eq!(c.verdict, Verdict::NotJudged, "{}", c.measured);
+    // Under 200 paired cases: not judged, whatever the gap.
+    let mut few = all_right(Some(1));
+    for o in few.iter_mut().skip(150) {
+        o.reason = Some("timeout".into());
+    }
+    let c = judge(few, half_right(Some(900)), Provider::Jev);
+    assert_eq!(c.verdict, Verdict::NotJudged, "{}", c.measured);
+    assert!(c.measured.contains("150 paired"), "{}", c.measured);
+    // Haiku not run.
+    let outs: Outcomes = [(Provider::Jev, all_right(Some(1)))].into_iter().collect();
+    let c = haiku_criterion(Provider::Jev, &cases, &outs);
+    assert_eq!(c.verdict, Verdict::NotJudged);
+    assert!(c.measured.contains("--haiku-host"), "{}", c.measured);
 }

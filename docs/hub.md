@@ -1292,6 +1292,8 @@ fleet-hub decide bench work-link --export-unlinked 150 --out h.jsonl   # D39: a 
 fleet-hub decide bench work-link --labels h.jsonl      # adds the labels as dataset H
 fleet-hub decide bench work-link --split all --provider bm25 --provider jev --max-calls 200
 fleet-hub decide bench work-link --split all --provider bm25 --provider jev --shape choice+noul
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev \
+    --provider haiku --haiku-host gpu1 [--haiku-model haiku] [--haiku-timeout 120]   # D33 baseline
 ```
 
 Both reports end in the card's acceptance lines (PASS / FAIL / NOT JUDGED
@@ -1304,10 +1306,22 @@ labeled Asana sections — the owner's file, or the built-in synthetic set
 ```bash
 fleet-hub decide bench status-map --fixture                      # todo + rule, offline
 fleet-hub decide bench status-map --labels sections.jsonl --provider rule --provider jev
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1
 ```
 
-Without `--provider jev` neither sends anything (`work-link` opens the
-database read-only). With it, each case goes through the envelope's gate
+Without `--provider jev` or `--provider haiku` neither sends anything
+(`work-link` opens the database read-only). `--provider haiku` (decision
+D33) asks the same question — the same redacted state and options — of
+`claude -p --model haiku` (no tools, no MCP, no hooks, no transcript) on
+the host `--haiku-host` names, which is required: each case leaves the hub
+over SSH for that host — the prompt on stdin, never in argv — and reaches
+Anthropic through its Claude account, a note on stderr says so before the
+first call, and nothing is recorded in `decision_runs`. It never crosses
+the org boundary: the host's org is read from the database, and a case of
+any other org (a case with no org counts as one, unless the host has none
+either) is skipped as `other_org` — so `--fixture`, which has no org,
+needs a host with no org. One call at a time, `--haiku-timeout` each, `--max-calls`
+at most; with it the haiku lines of the acceptance are judged. With it, each case goes through the envelope's gate
 (so only orgs that consented — or, for a row with no org,
 `decide.jev.unassigned` — with the flag on and `decide.jev.work_link` /
 `decide.jev.status_map` at `shadow` or `assist`) and every call is recorded

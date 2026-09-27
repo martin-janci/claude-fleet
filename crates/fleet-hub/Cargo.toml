@@ -46,6 +46,9 @@ rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
+# A canned `SshExec` for `decide bench --provider haiku` (`bench.rs` tests):
+# already in the tree as `fleet-core`'s dependency, not a new crate.
+async-trait = "0.1"
 rcgen = "0.13"
 tempfile = "3"
 # `test-util` only: `#[tokio::test(start_paused = true)]` for the
