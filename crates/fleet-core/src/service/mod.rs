@@ -18,6 +18,7 @@ pub mod bg_sessions;
 pub mod catalog;
 pub mod clipboard;
 pub mod context;
+pub mod decide;
 pub mod delivery;
 pub mod diagnostics;
 pub mod fresh;

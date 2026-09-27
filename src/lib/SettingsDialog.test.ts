@@ -598,3 +598,50 @@ describe('SettingsDialog — tidy: unlinked for (work graph M11.3)', () => {
     );
   });
 });
+
+describe('SettingsDialog — Decisions (Jev), experimental and off (D36)', () => {
+  it('is off by default, says what is sent where, and offers no auto mode', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    expect(screen.getByTestId('decide-section')).toBeInTheDocument();
+    expect(screen.getByTestId('decide-jev-enabled')).not.toBeChecked();
+    expect(screen.getByTestId('decide-jev-unassigned')).not.toBeChecked();
+    const wl = screen.getByTestId('decide-jev-work-link') as HTMLSelectElement;
+    const sm = screen.getByTestId('decide-jev-status-map') as HTMLSelectElement;
+    expect(wl.value).toBe('off');
+    expect(sm.value).toBe('off');
+    expect(Array.from(wl.querySelectorAll('option'), (o) => o.value)).toEqual(['off', 'shadow', 'assist']);
+    expect((screen.getByTestId('decide-jev-model') as HTMLSelectElement).value).toBe('jev-1.13.0');
+    expect((screen.getByTestId('decide-jev-timeout-ms') as HTMLInputElement).value).toBe('1500');
+    expect((screen.getByTestId('decide-retention-days') as HTMLInputElement).value).toBe('90');
+    const text = (screen.getByTestId('decide-explainer').textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain('only for organisations that opted in');
+    expect(text).toContain('never grants a permission');
+  });
+
+  it('writes the kill switch, a mode and a number through set_fleet_setting', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('decide-jev-enabled'));
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'decide.jev.enabled', value: 'true' }),
+    );
+    await fireEvent.change(screen.getByTestId('decide-jev-work-link'), { target: { value: 'shadow' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'decide.jev.work_link', value: 'shadow' }),
+    );
+    await fireEvent.change(screen.getByTestId('decide-jev-daily-token-budget'), { target: { value: '500000' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'decide.jev.daily_token_budget',
+        value: '500000',
+      }),
+    );
+  });
+});
