@@ -1,9 +1,9 @@
 //! The Work view's read model (work graph M14.1b), one test per use case of
 //! the spec (`docs/superpowers/specs/2026-09-27-work-view-design.md`) where
-//! the hub owns the behaviour. The writes a person makes (placement, rules,
-//! a local item's org, a secondary link) are M14.1c's: until they land, the
-//! rows they would write are seeded (`Store::seed_*`). The org boundary per
-//! caller is the isolation matrix's (`mcp/tools/tests_isolation.rs`).
+//! the hub owns the behaviour. Some rows the reads answer are seeded
+//! (`Store::seed_*`); the writes a person makes through the hub (M14.1c)
+//! are `view_write_tests.rs`. The org boundary per caller is the isolation
+//! matrix's (`mcp/tools/tests_isolation.rs`).
 
 use super::*;
 use crate::service::work::structure::{self, RuleInput};
@@ -119,35 +119,19 @@ fn wl(w: &W, action: &str, sid: i64) -> WorkLinkArgs {
     }
 }
 
-/// Link `sid` to `item`; `primary: false` makes it a secondary link and
-/// hands the primary back to the session's previous one (M14.1c's
-/// `link { primary: false }`, seeded).
+/// Link `sid` to `item`; `primary: false` makes it a secondary link
+/// (M14.1c's `link { primary: false }`).
 fn link(w: &W, sid: i64, item: i64, primary: bool) -> SessionRow {
-    let before =
-        w.st.lock()
-            .unwrap()
-            .get_session_by_id(sid)
-            .unwrap()
-            .unwrap();
-    let row = work_link(
+    work_link(
         &WorkLinkArgs {
             item_id: Some(item),
+            primary: Some(primary),
             ..wl(w, "link", sid)
         },
         &w.st,
         &OrgScope::All,
     )
-    .unwrap();
-    if primary {
-        return row;
-    }
-    let s = w.st.lock().unwrap();
-    let new = row.work.as_ref().map(|l| l.link_id).unwrap();
-    match before.work.as_ref().map(|l| l.link_id) {
-        Some(old) => s.seed_link_primary(old, true),
-        None => s.seed_link_primary(new, false),
-    }
-    s.get_session_by_id(sid).unwrap().unwrap()
+    .unwrap()
 }
 
 fn bound(org: i64) -> OrgScope {
@@ -1030,3 +1014,6 @@ fn a_cursor_is_stable_under_concurrent_change() {
     let err = review(&w.st, &OrgScope::All, Some("bogus"), None).unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
 }
+
+#[path = "view_write_tests.rs"]
+mod writes;

@@ -1549,7 +1549,15 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         })
         .map(|r| r.id)
         .collect();
-    let placement = g.placements.get(&task.task_id).cloned();
+    // Who placed it is the unrestricted caller's to read: a device name is
+    // not a scoped caller's to learn (an unassigned task is placed by
+    // bound clients of several orgs, M14.1c).
+    let placement = g.placements.get(&task.task_id).cloned().map(|mut p| {
+        if !scope.is_all() {
+            p.updated_by = None;
+        }
+        p
+    });
     Ok(TaskDetail {
         task,
         aliases,

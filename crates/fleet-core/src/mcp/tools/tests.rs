@@ -3571,16 +3571,23 @@ fn the_served_definition_budget_stays_bounded() {
     // parameters (the nested `filters` / `rule` served as a bare object),
     // `pair_client`'s `org_id` and `work_admin`'s `bound_sees_unassigned`
     // (D31); no new tool. Measured at 57,859 on 2026-09-27; plus 100.
+    // Work graph M14.1c (the Work view's writes): 10 `work_link` actions,
+    // 14 optional parameters (the nested `rule` / `view` / `decisions`
+    // served as a bare object / array) and one description clause; no new
+    // tool. Measured at 58,977 on 2026-09-27; plus 100.
     // `rewind_conversation` (reply actions): one tool with a `mode` rather
     // than separate fork/rewind/retry tools, so this is a single addition.
-    // Trimming the tool description to one sentence was done first and
-    // freed 79 bytes; the five field docs are mandatory and are not slack.
-    // RE-MEASURED on each merge with main, because main's baseline has moved
-    // three times under this branch (56,660 -> 56,829 -> 56,950 -> 57,859):
-    // Merged over main again (this branch's fourth re-measurement): measured
-    // at 58,778 on 2026-09-27 (+919 over the 57,859 baseline). Raised to
-    // that measurement plus 100.
-    const BUDGET_BYTES: usize = 58_878;
+    // Trimming the tool description to one sentence was done first and freed
+    // 79 bytes; the five field docs are mandatory and are not slack. The
+    // tool's own cost is a stable 919 bytes; what keeps moving is the
+    // baseline under it, five times during this branch's life
+    // (56,660 -> 56,829 -> 56,950 -> 57,859 -> 58,977), which is why this is
+    // re-MEASURED on every merge rather than carried over or computed.
+    // Merged with `feat/reply-actions` (4-commit merge): measured at 59,896
+    // on 2026-09-27, 919 bytes over main's 58,977 baseline — exactly
+    // `rewind_conversation`'s stable cost. Raised to that measurement plus
+    // 100.
+    const BUDGET_BYTES: usize = 59_996;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
