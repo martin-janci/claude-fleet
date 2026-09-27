@@ -25,7 +25,7 @@
     },
     "title": "Login fails after token refresh",
     "updated": 1789983000,
-    "url": "https://github.com/Acme/api/issues/42"
+    "url": "https://ghe.corp.example:8443/Acme/api/issues/42"
   },
   {
     "aliases": [],
@@ -52,7 +52,7 @@
     },
     "title": "Rate-limit the export endpoint",
     "updated": 1789977600,
-    "url": "https://github.com/acme/api/issues/43"
+    "url": "https://ghe.corp.example:8443/acme/api/issues/43"
   },
   {
     "aliases": [],
@@ -79,7 +79,7 @@
     },
     "title": "Add a regression test for #42",
     "updated": 1789905600,
-    "url": "https://github.com/acme/api/issues/44"
+    "url": "https://ghe.corp.example:8443/acme/api/issues/44"
   },
   {
     "aliases": [],
@@ -106,7 +106,7 @@
     },
     "title": "Dark mode toggle",
     "updated": 1789812000,
-    "url": "https://github.com/acme/web/issues/7"
+    "url": "https://ghe.corp.example:8443/acme/web/issues/7"
   },
   {
     "aliases": [],
@@ -131,7 +131,7 @@
     },
     "title": "IE11 support",
     "updated": 1789725600,
-    "url": "https://github.com/acme/web/issues/8"
+    "url": "https://ghe.corp.example:8443/acme/web/issues/8"
   },
   {
     "aliases": [],
@@ -158,6 +158,6 @@
     },
     "title": "Dark theme",
     "updated": 1789722000,
-    "url": "https://github.com/acme/web/issues/9"
+    "url": "https://ghe.corp.example:8443/acme/web/issues/9"
   }
 ]
