@@ -80,7 +80,7 @@ fn open(path: &Path) -> Result<Store, String> {
 }
 
 /// Create `path` for the sample: new only, owner-only on unix.
-fn create_private(path: &Path) -> Result<std::fs::File, String> {
+pub(crate) fn create_private(path: &Path) -> Result<std::fs::File, String> {
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
@@ -90,10 +90,7 @@ fn create_private(path: &Path) -> Result<std::fs::File, String> {
     }
     o.open(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => {
-            format!(
-                "{} exists; the sample is never written over a file",
-                path.display()
-            )
+            format!("{} exists; this file is never written over", path.display())
         }
         _ => format!("create {}: {e}", path.display()),
     })
