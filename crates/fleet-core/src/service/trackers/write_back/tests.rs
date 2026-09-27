@@ -592,9 +592,11 @@ async fn a_stored_error_never_carries_the_credential() {
 }
 
 /// Settled writes go once they are older than the journal's retention
-/// window; a pending one stays, and a window of `0` keeps them all.
+/// window; a pending one stays, and a window of `0` keeps them all. The GC
+/// retention sweep (M12.3) does it, not the drain, so a failing tracker's
+/// outbox shrinks too.
 #[tokio::test]
-async fn a_drain_sweeps_settled_writes_past_the_journal_window() {
+async fn the_gc_sweep_drops_settled_writes_past_the_journal_window() {
     let f = fx("manual", true);
     on_pr(&f.s, f.session, PR).unwrap();
     on_pr(&f.s, f.session, "https://github.com/acme/api/pull/43").unwrap();
@@ -617,7 +619,8 @@ async fn a_drain_sweeps_settled_writes_past_the_journal_window() {
     let store = Mutex::new(f.s);
     let fake = FakeTransport::new();
     let now = crate::store::now_unix();
-    drain(&t, &cloud(&fake), &store, now).await;
+    let sweep = |store: &Mutex<Store>| crate::service::work::retention::sweep(store, now);
+    assert_eq!(sweep(&store).tracker_writes, 0);
     assert_eq!(outbox(&store.lock().unwrap()).len(), 2, "0 keeps forever");
     crate::service::settings::set(
         &store.lock().unwrap(),
@@ -625,7 +628,15 @@ async fn a_drain_sweeps_settled_writes_past_the_journal_window() {
         "365",
     )
     .unwrap();
+    // The drain sends nothing here (the pending one is not due) and sweeps
+    // nothing: retention is the GC's.
     drain(&t, &cloud(&fake), &store, now).await;
+    assert_eq!(
+        outbox(&store.lock().unwrap()).len(),
+        2,
+        "the drain never sweeps"
+    );
+    assert_eq!(sweep(&store).tracker_writes, 1);
     let left = outbox(&store.lock().unwrap());
     assert_eq!(left.len(), 1, "{left:?}");
     assert_eq!((left[0].id, left[0].state.as_str()), (ids[1], "pending"));

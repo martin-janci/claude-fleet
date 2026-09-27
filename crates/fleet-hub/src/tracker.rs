@@ -202,8 +202,12 @@ fn retention_lines(r: &Value) -> Vec<String> {
     out.push(if s.is_null() {
         "retention: no sweep since the hub started keeping a record".to_string()
     } else {
+        let outbox = match s["tracker_writes"].as_u64().unwrap_or_default() {
+            0 => String::new(),
+            n => format!(", {n} PR links"),
+        };
         format!(
-            "retention: last sweep {} deleted {} journal, {} tickets, {} events",
+            "retention: last sweep {} deleted {} journal, {} tickets, {} events{outbox}",
             fmt_time(s["at"].as_i64()),
             s["journal"].as_u64().unwrap_or_default(),
             s["tracker_items"].as_u64().unwrap_or_default(),
