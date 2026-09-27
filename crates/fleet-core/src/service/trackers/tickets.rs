@@ -28,6 +28,7 @@ use super::ItemRef;
 use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
+use crate::service::work::resume::InFlight;
 use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -929,6 +930,20 @@ where
     F: FnOnce(crate::service::sessions::NewSessionArgs) -> Fut,
     Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
 {
+    // Work graph M14: hold the key in the registry `resume` uses from
+    // before the spawn until the link is written (dropped on every exit),
+    // so a second device's start of the same ticket, or a resume of it, is
+    // refused here instead of spawning a session that loses the race.
+    let _claim = {
+        let s = lock(store)?;
+        let claim = InFlight::claim(&s, &plan.key)?;
+        // `plan_start`'s guard ran before the claim: a start that claimed,
+        // linked and released since is caught here, before the spawn.
+        if let Some(other) = rival(&s, plan, None)? {
+            return Err(already_running(&plan.key, &other, scope, "", "jump to it"));
+        }
+        claim
+    };
     let one = start_one(store, plan, brief, scope, spawn).await?;
     match one.warning {
         Some(e) => {
@@ -996,6 +1011,18 @@ where
     }
 }
 
+/// A live session of `plan`'s key other than `except` (in `plan`'s project
+/// for a multi-repo sibling): the start that would make a second one.
+fn rival(s: &Store, plan: &StartPlan, except: Option<i64>) -> Result<Option<SessionRow>, IpcError> {
+    let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
+    Ok(live_work_on(s, &plan.key, item_org)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .find(|r| {
+            Some(r.id) != except && (!plan.per_project || r.project_id == Some(plan.project_id))
+        }))
+}
+
 /// Link a spawned session `started` and queue its brief. Returns the
 /// re-read row and whether the brief was queued.
 fn link_started(
@@ -1007,15 +1034,10 @@ fn link_started(
 ) -> Result<(Option<SessionRow>, bool), IpcError> {
     let s = lock(store)?;
     // The guard `plan_start` checked under is long gone (the spawn is an
-    // SSH round trip): another start of the same key may have won since.
-    // Re-check under the guard that writes the link.
-    let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
-    if let Some((_, other)) = live_work_on(&s, &plan.key, item_org)?
-        .into_iter()
-        .find(|(_, r)| {
-            r.id != row.id && (!plan.per_project || r.project_id == Some(plan.project_id))
-        })
-    {
+    // SSH round trip): the claim fences other starts and resumes, but not a
+    // person's own link of the key meanwhile. Re-check under the guard that
+    // writes the link.
+    if let Some(other) = rival(&s, plan, Some(row.id))? {
         // The same two-branch refusal as `plan_start`'s (D7): a winner the
         // caller may not see is not named.
         return Err(already_running(
@@ -1266,6 +1288,10 @@ where
 {
     let ids = multi_start_ids(args.project_id, project_ids)?;
     let ticket = resolve_start(store, args, scope, net).await?;
+    // One claim for the whole batch (work graph M14), taken before the
+    // siblings are planned so their guards see any start that won before
+    // it: another start or resume of the key waits for the batch to end.
+    let _claim = InFlight::claim(&*lock(store)?, &ticket.key)?;
     let mut out = MultiStart {
         key: ticket.key.clone(),
         ..Default::default()
