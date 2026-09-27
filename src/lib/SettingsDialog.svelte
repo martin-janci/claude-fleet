@@ -1188,7 +1188,7 @@
           aria-describedby="work-retention-timeline-days-desc"
           data-testid="work-retention-timeline-days"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTimelineWorkEventsDays, 'Retention: work timeline', e)} />
-        <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge and tidy events are kept; the newest of each per session stays (0 = forever)</span>
+        <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge, tidy and withdrawn-suggestion events are kept; the newest of each per session stays (0 = forever)</span>
       </div>
       <WorkRetention />
       <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>

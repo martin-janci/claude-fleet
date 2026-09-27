@@ -84,7 +84,9 @@ impl Store {
     /// agent's to `agent`; a
     /// promotion keeps an `auto` source and is decided after it was made;
     /// an expired suggestion is one whose session ended undecided. Withdrawn
-    /// and decayed suggestions are deleted, so `suggested` is a floor.
+    /// and decayed suggestions are deleted, so this `suggested` counts only
+    /// the stored ones: the caller adds their `work_suggestion_withdrawn`
+    /// timeline events.
     pub fn usage_detection(
         &self,
         since: i64,

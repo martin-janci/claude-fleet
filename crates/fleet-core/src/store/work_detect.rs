@@ -12,6 +12,10 @@ use rusqlite::OptionalExtension;
 /// Longest stored branch name.
 const BRANCH_MAX_CHARS: usize = 255;
 
+/// Timeline kind of a suggestion detection withdrew (R7) or let decay (R6):
+/// the row is deleted, this event keeps the outcome (D34).
+pub const WORK_SUGGESTION_WITHDRAWN: &str = "work_suggestion_withdrawn";
+
 /// What the resolver needs to know about a session besides its links.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DetectionState {
@@ -267,10 +271,16 @@ impl Store {
                         self.end_live_link(*link_id, session_id, reason, now)?;
                     }
                     LinkChange::Withdraw { link_id } | LinkChange::Decay { link_id } => {
-                        self.conn.execute(
-                            "DELETE FROM work_links WHERE id = ?1 AND state = 'suggested' \
-                               AND ended_at IS NULL",
-                            rusqlite::params![link_id],
+                        let reason = if matches!(c, LinkChange::Withdraw { .. }) {
+                            "withdraw"
+                        } else {
+                            "decay"
+                        };
+                        self.withdraw_suggestion(
+                            session_id,
+                            conversation,
+                            *link_id,
+                            reason,
                         )?;
                     }
                     LinkChange::Promote {
@@ -413,6 +423,57 @@ impl Store {
             return Ok((Some(id), None));
         }
         self.resolve_work_key(&key)
+    }
+
+    /// Delete the live suggestion `link_id` (R7 withdrew it, or R6 let it
+    /// decay: `reason` is `withdraw` or `decay`), leaving a
+    /// [`WORK_SUGGESTION_WITHDRAWN`] timeline event on `session_id` so the
+    /// negative outcome is not lost with the row (D34). The event's detail
+    /// holds ids and vocabulary words only — `{link_id, item_id, rule,
+    /// reason}` — never a key, title or text. Nothing happens when the link
+    /// is no longer a live suggestion.
+    fn withdraw_suggestion(
+        &self,
+        session_id: i64,
+        conversation: Option<&str>,
+        link_id: i64,
+        reason: &str,
+    ) -> Result<(), IpcError> {
+        let gone: Option<(Option<i64>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT item_id, rule FROM work_links WHERE id = ?1 AND state = 'suggested' \
+                   AND ended_at IS NULL",
+                rusqlite::params![link_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((item_id, rule)) = gone else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "DELETE FROM work_links WHERE id = ?1 AND state = 'suggested' AND ended_at IS NULL",
+            rusqlite::params![link_id],
+        )?;
+        // A rule is a resolver word (R3b, R6 …); anything else is not
+        // carried.
+        let rule = rule
+            .filter(|r| (1..=8).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric()));
+        let detail = serde_json::json!({
+            "link_id": link_id,
+            "item_id": item_id,
+            "rule": rule,
+            "reason": reason,
+        })
+        .to_string();
+        // Quiet: a bookkeeping row for the timeline and `work_admin usage`,
+        // not news for every connected client.
+        self.insert_session_event_quietly(
+            session_id,
+            conversation,
+            WORK_SUGGESTION_WITHDRAWN,
+            Some(&detail),
+        )
     }
 
     fn link_evidence(&self, link_id: i64) -> Result<Vec<serde_json::Value>, IpcError> {

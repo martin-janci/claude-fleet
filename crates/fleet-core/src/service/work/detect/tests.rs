@@ -330,6 +330,87 @@ fn a_weak_suggestion_decays_at_the_next_conversation_unless_seen_again() {
     assert_eq!(keys, vec![Some("ABC-9".to_string())]);
 }
 
+/// D34: a suggestion detection takes back (R6 decay, R7 withdraw) loses its
+/// row, but leaves a timeline event with ids and vocabulary words only —
+/// the negative a label set would otherwise lose.
+#[test]
+fn a_withdrawn_or_decayed_suggestion_leaves_an_event_of_ids_only() {
+    let withdrawn = |s: &Store, sid: i64| -> Vec<serde_json::Value> {
+        s.list_session_events(sid, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+            .map(|e| serde_json::from_str(e.detail.as_deref().unwrap()).unwrap())
+            .collect()
+    };
+    // Decay: ABC-8, mentioned in c1, not again in c2.
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    on_prompt(&f.s, sid, "first task", true).unwrap();
+    on_prompt(&f.s, sid, "also ABC-8 and ABC-9", false).unwrap();
+    let abc8 =
+        f.s.session_work_links(sid)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.ref_key.as_deref() == Some("ABC-8"))
+            .unwrap();
+    assert!(withdrawn(&f.s, sid).is_empty(), "nothing taken back yet");
+    f.s.rebind_conversation(sid, "c2", StartSource::Clear, None, None)
+        .unwrap();
+    on_prompt(&f.s, sid, "keep going on ABC-9", true).unwrap();
+    let ev = withdrawn(&f.s, sid);
+    assert_eq!(
+        ev,
+        vec![serde_json::json!({
+            "link_id": abc8.id, "item_id": null, "rule": "R6", "reason": "decay"
+        })]
+    );
+    let event = f.s.list_session_events(sid, 100).unwrap();
+    let e = event
+        .iter()
+        .find(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+        .unwrap();
+    assert_eq!(e.claude_session_id.as_deref(), Some("c2"));
+    assert!(!e.detail.as_deref().unwrap().contains("ABC"), "no key");
+
+    // Withdraw: the PR's state and text suggestions go with the PR.
+    let sid = session(&f, "pr", "c3");
+    let sig = PrSignals {
+        head: Some("feature/login".into()),
+        closing: vec!["acme/api#42".into()],
+        text: vec!["ABC-5".into()],
+        trailers: vec![],
+        state: None,
+    };
+    f.s.set_pr_signals("h", "pr", Some(&serde_json::to_string(&sig).unwrap()))
+        .unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    f.s.set_pr_signals("h", "pr", None).unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let mut rules: Vec<(String, String)> = withdrawn(&f.s, sid)
+        .into_iter()
+        .map(|v| {
+            assert_eq!(
+                v.as_object().unwrap().keys().collect::<Vec<_>>(),
+                vec!["item_id", "link_id", "reason", "rule"]
+            );
+            (
+                v["rule"].as_str().unwrap().to_string(),
+                v["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    rules.sort();
+    assert_eq!(
+        rules,
+        vec![
+            ("R3u".to_string(), "withdraw".to_string()),
+            ("R6".to_string(), "withdraw".to_string())
+        ]
+    );
+    assert!(f.s.session_work_links(sid).unwrap().is_empty());
+}
+
 #[test]
 fn after_clear_the_new_tasks_link_is_primary_and_the_old_one_stays() {
     let f = fx();

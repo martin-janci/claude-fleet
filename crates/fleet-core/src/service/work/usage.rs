@@ -15,7 +15,7 @@
 use crate::ipc_error::{codes, IpcError};
 use crate::service::gc::tidy::TidyReason;
 use crate::service::trackers::sync::SyncMetrics;
-use crate::store::{Store, PERSON_SOURCES};
+use crate::store::{Store, PERSON_SOURCES, WORK_SUGGESTION_WITHDRAWN};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -56,7 +56,11 @@ const HANDOVER_KINDS: &[&str] = &[
     "handover_missing",
     "handover_send_failed",
 ];
-const OTHER_KINDS: &[&str] = &["tidy_kept", "work_classify_nudge"];
+const OTHER_KINDS: &[&str] = &[
+    "tidy_kept",
+    "work_classify_nudge",
+    WORK_SUGGESTION_WITHDRAWN,
+];
 
 /// The window, in days: [`DEFAULT_DAYS`] when absent, `1..=`[`MAX_DAYS`].
 pub fn parse_days(days: Option<i64>) -> Result<u32, IpcError> {
@@ -110,7 +114,10 @@ pub struct LinkUsage {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectionUsage {
-    /// Suggestions made (at least: withdrawn and decayed ones leave no row).
+    /// Suggestions made: the stored ones made in the window, plus those
+    /// detection withdrew or let decay in it (their row is gone; a timeline
+    /// event counts them). A floor still: retention and the timeline's cap
+    /// per session bound the events.
     #[serde(default)]
     pub suggested: u64,
     /// Decided by a person (`manual` / `started`).
@@ -127,6 +134,11 @@ pub struct DetectionUsage {
     pub promoted: u64,
     #[serde(default)]
     pub rejected: u64,
+    /// Suggestions detection took back undecided: its state signal moved on
+    /// (R7) or an event suggestion decayed at a conversation boundary (R6).
+    /// Counted from `work_suggestion_withdrawn` timeline events (D34).
+    #[serde(default)]
+    pub withdrawn: u64,
     /// Suggestions whose session ended undecided.
     #[serde(default)]
     pub expired: u64,
@@ -235,12 +247,16 @@ pub fn usage(
         .into_iter()
         .collect();
     let ev = |k: &str| events.get(k).copied().unwrap_or(0);
+    // Withdrawn and decayed suggestions have no row left: their event is
+    // the only trace, so they are made AND taken back here.
+    let withdrawn = ev(WORK_SUGGESTION_WITHDRAWN);
     let detection = DetectionUsage {
-        suggested: d.suggested,
+        suggested: d.suggested + withdrawn,
         confirmed_by_person: d.confirmed_by_person,
         confirmed_by_agent: d.confirmed_by_agent,
         promoted: d.promoted,
         rejected: d.rejected,
+        withdrawn,
         expired: d.expired,
         median_decision_secs: median(&secs),
         nudges: ev("work_classify_nudge"),
@@ -347,12 +363,14 @@ impl UsageSummary {
             ),
             format!(
                 "detection: {} suggested, {} confirmed by a person, {} confirmed by an agent, \
-                 {} promoted, {} rejected, {} expired; median decision {}; {} nudges",
+                 {} promoted, {} rejected, {} withdrawn, {} expired; median decision {}; \
+                 {} nudges",
                 d.suggested,
                 d.confirmed_by_person,
                 d.confirmed_by_agent,
                 d.promoted,
                 d.rejected,
+                d.withdrawn,
                 d.expired,
                 d.median_decision_secs.map_or("n/a".into(), duration),
                 d.nudges
@@ -507,6 +525,19 @@ mod tests {
                 Some("auto:SECRET-REASON:kill:killed"),
                 in_window,
             ),
+            // Two suggestions detection took back (their rows are gone),
+            // one long ago.
+            (
+                "work_suggestion_withdrawn",
+                Some(r#"{"link_id":90,"item_id":null,"rule":"R3b","reason":"withdraw"}"#),
+                in_window,
+            ),
+            (
+                "work_suggestion_withdrawn",
+                Some(r#"{"link_id":91,"item_id":4,"rule":"R6","reason":"decay"}"#),
+                in_window,
+            ),
+            ("work_suggestion_withdrawn", None, old),
             ("handover_requested", None, old),
         ] {
             set(
@@ -575,12 +606,14 @@ mod tests {
             u.detection,
             DetectionUsage {
                 // confirmed (by a person and by an agent), promoted,
-                // rejected, expired — not the spot one.
-                suggested: 5,
+                // rejected, expired — not the spot one — and the two
+                // withdrawn.
+                suggested: 7,
                 confirmed_by_person: 1,
                 confirmed_by_agent: 1,
                 promoted: 1,
                 rejected: 1,
+                withdrawn: 2,
                 expired: 1,
                 // the person's two decisions: 600 s and 3600 s (the
                 // agent's 7200 s is not a person's).
