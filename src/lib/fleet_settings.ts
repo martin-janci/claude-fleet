@@ -8,6 +8,7 @@ import { invokeCmd, type Result } from './result';
 
 export const SETTING_KEYS = {
   reconcileIntervalSecs: 'reconcile.interval_secs',
+  reconcileStaleWorkingSecs: 'reconcile.stale_working_secs',
   sessionsLostTtlSecs: 'sessions.lost_ttl_secs',
   restoreBatchSize: 'restore.batch_size',
   restoreStaggerMs: 'restore.stagger_ms',
@@ -120,6 +121,7 @@ export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
  *  `get_fleet_settings` round-trip completes. */
 export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'reconcile.interval_secs': '20',
+  'reconcile.stale_working_secs': '1800',
   'sessions.lost_ttl_secs': '1209600',
   'restore.batch_size': '4',
   'restore.stagger_ms': '3000',

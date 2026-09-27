@@ -472,6 +472,10 @@ impl Store {
                                 ELSE ?19 END,
                idle_since={idle},
                pending_input={new_pending},
+               -- A pane that shows a live turn lifts the stale-working
+               -- demotion (F2); anything else keeps the stamp.
+               stale_working_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
+                                     ELSE stale_working_at END,
                -- The freshness stamp (Task H / the BE-3 guard's evidence),
                -- folded in here so a pass is ONE physical UPDATE per row —
                -- one `row_version` bump — instead of this upsert plus a
@@ -944,6 +948,7 @@ mod tests {
             ci_status: None,
             turn_seq: 0,
             last_stop_at: None,
+            stale_working_at: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),

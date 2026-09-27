@@ -958,6 +958,15 @@
           onchange={(e) => onSecsChange(SETTING_KEYS.reconcileIntervalSecs, e)} />
         <span class="hook-desc">seconds between reconcile passes (0 disables; restart to apply)</span>
       </div>
+      <div class="mcp-field">
+        <span class="lbl">stale working</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileStaleWorkingSecs)}
+          disabled={automationBusy}
+          data-testid="reconcile-stale-working-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingSecs, e)} />
+        <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth or pane output before it reads idle (0 = never)</span>
+      </div>
       {#if automationError}<p class="err">{automationError}</p>{/if}
     </section>
 

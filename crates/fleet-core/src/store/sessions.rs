@@ -1226,7 +1226,8 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
-                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL{END_COMPACTING} \
+                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
+                     stale_working_at = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1265,7 +1266,7 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
-                     pending_input = NULL{END_COMPACTING} WHERE id = ?1"
+                     pending_input = NULL, stale_working_at = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -1313,7 +1314,8 @@ impl Store {
         let changed = self.conn.execute(
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
-                 stuck_kind = NULL, stuck_since = NULL, pending_input = NULL \
+                 stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
+                 stale_working_at = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;
@@ -1340,7 +1342,8 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
-                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL{END_COMPACTING} \
+                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
+                     stale_working_at = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1349,6 +1352,55 @@ impl Store {
             return Ok(None);
         }
         Ok(self.emit_session(row_id)?)
+    }
+
+    /// The tick's stale-`working` rule (lifecycle F2): a live tmux row that
+    /// says `working` but has had no hook, no turn, no transcript growth
+    /// (`context_at`, `usage_updated_at`) and no pane output
+    /// (`last_activity_at`) for `stale_secs` is demoted to `idle` and stamped
+    /// `stale_working_at = now`, which is what the attention model reads.
+    /// Pane-less and `shell` rows are never judged (no hooks or turns to
+    /// miss); a stamped row is not judged twice; `stale_secs <= 0` is off.
+    /// Returns the demoted rows; each gets `session_updated`, a
+    /// `status_change idle` and a `stale_working` timeline entry.
+    pub fn age_out_stale_working(
+        &self,
+        now: i64,
+        stale_secs: i64,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        if stale_secs <= 0 {
+            return Ok(Vec::new());
+        }
+        let cutoff = now - stale_secs;
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, stale_working_at = ?1 \
+                 WHERE status = 'running' AND claude_status = 'working' \
+                   AND kind NOT IN ('bg','external','shell') AND stale_working_at IS NULL \
+                   AND COALESCE(last_hook_at, 0) < ?2 AND COALESCE(last_turn_at, 0) < ?2 \
+                   AND COALESCE(context_at, 0) < ?2 AND COALESCE(usage_updated_at, 0) < ?2 \
+                   AND last_activity_at < ?2 AND created_at < ?2 \
+                 RETURNING id",
+            )?
+            .query_map(rusqlite::params![now, cutoff], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out = Vec::with_capacity(ids.len());
+        let detail = format!("no hook, turn, transcript growth or pane output for {stale_secs}s");
+        for id in ids {
+            for (kind, d) in [
+                ("status_change", "idle"),
+                ("stale_working", detail.as_str()),
+            ] {
+                if let Err(e) = self.insert_session_event(id, kind, Some(d)) {
+                    tracing::warn!(session_id = id, kind, error = %e, "[reconcile] session_event insert failed");
+                }
+            }
+            if let Some(row) = self.emit_session(id)? {
+                out.push(row);
+            }
+        }
+        Ok(out)
     }
 
     /// The Notification hook's write. `status` is the mapped status;
@@ -1379,7 +1431,7 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             idle_since = {idle}{stuck_sql} WHERE id = ?1",
+             stale_working_at = NULL, idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
         let kind = match stuck {
@@ -3434,6 +3486,83 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("oom:recreate")));
+    }
+
+    /// F2: two `working` rows on trn had not moved for ~40 h.
+    #[test]
+    fn age_out_stale_working_demotes_a_quiet_working_row_and_leaves_the_rest() {
+        let s = store();
+        let quiet = s
+            .upsert_session("quiet", "local", None, None, 1, 1_000, "running", None)
+            .unwrap();
+        let busy = s
+            .upsert_session("busy", "local", None, None, 1, 9_500, "running", None)
+            .unwrap();
+        let sh = s
+            .upsert_session("sh-term", "local", None, None, 1, 1_000, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'working' WHERE id IN (?1, ?2, ?3)",
+                rusqlite::params![quiet, busy, sh],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute("UPDATE sessions SET kind = 'shell' WHERE id = ?1", [sh])
+            .unwrap();
+
+        let demoted = s.age_out_stale_working(10_000, 1_800).unwrap();
+        assert_eq!(
+            demoted.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![quiet]
+        );
+        let q = s.get_session_by_id(quiet).unwrap().unwrap();
+        assert_eq!(q.claude_status.as_deref(), Some("idle"));
+        assert_eq!(q.stale_working_at, Some(10_000));
+        assert_eq!(q.idle_since, Some(10_000));
+        assert_eq!(
+            s.get_session_by_id(busy)
+                .unwrap()
+                .unwrap()
+                .claude_status
+                .as_deref(),
+            Some("working"),
+            "pane output 500 s ago is not stale"
+        );
+        assert_eq!(
+            s.get_session_by_id(sh).unwrap().unwrap().stale_working_at,
+            None,
+            "a shell has no turns to miss"
+        );
+        let kinds: Vec<String> = s
+            .list_session_events(quiet, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(kinds.contains(&"stale_working".to_string()));
+        assert!(kinds.contains(&"status_change".to_string()));
+        // Stamped rows are not judged again: a later sweep demotes only
+        // `busy` (unstamped, and quiet since 9_500 by then), never `quiet`
+        // a second time; `0` turns the rule off.
+        assert_eq!(
+            s.age_out_stale_working(20_000, 1_800)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![busy]
+        );
+        assert!(s.age_out_stale_working(40_000, 0).unwrap().is_empty());
+        // The next prompt clears the stamp.
+        s.record_prompt_submit_hook_for_row(quiet).unwrap();
+        assert_eq!(
+            s.get_session_by_id(quiet)
+                .unwrap()
+                .unwrap()
+                .stale_working_at,
+            None
+        );
     }
 
     #[test]

@@ -59,6 +59,10 @@ pub struct Spec {
 
 // ── keys ──
 pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
+/// A `working` row with no hook, no turn, no transcript growth and no pane
+/// output for this long is demoted to `idle` by the tick (lifecycle F2).
+/// `0` turns the rule off.
+pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
 /// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
 /// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
 /// is kept before Phase 2
@@ -242,6 +246,11 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: RECONCILE_INTERVAL_SECS,
         default: "20",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: RECONCILE_STALE_WORKING_SECS,
+        default: "1800",
         kind: Kind::Secs,
     },
     Spec {

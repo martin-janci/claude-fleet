@@ -334,6 +334,7 @@
       "safe_kill_nonce",
       "safe_kill_requested_at",
       "safe_kill_state",
+      "stale_working_at",
       "started_at",
       "status",
       "stuck_kind",
