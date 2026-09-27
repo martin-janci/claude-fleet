@@ -301,6 +301,39 @@ describe('Settings → Work, other providers (work graph M6)', () => {
     expect((cred[1] as { args: Record<string, unknown> }).args).toMatchObject({ tracker_id: 9, secret: TOKEN });
   });
 
+  it('turns a Jira tracker’s PR write-back on without touching its other settings (M13.4e)', async () => {
+    const dc = row({
+      id: 9,
+      provider: 'jira_dc',
+      name: 'corp',
+      site_url: 'https://jira.corp.example',
+      state: 'ok',
+      has_credential: true,
+      settings: { extra_ca: 'PEM' },
+    });
+    const inv = route([dc], {
+      update_tracker: { ...dc, settings: { extra_ca: 'PEM', write_back: { pr_remote_link: true } } },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    const box = screen.getByTestId('tracker-write-back-pr') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await fireEvent.click(box);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_tracker')).toBe(true));
+    const up = inv.mock.calls.find((c) => c[0] === 'update_tracker')!;
+    expect((up[1] as { args: Record<string, unknown> }).args).toEqual({
+      tracker_id: 9,
+      settings: { extra_ca: 'PEM', write_back: { pr_remote_link: true } },
+    });
+  });
+
+  it('offers PR write-back only for Jira trackers', async () => {
+    route([row({ id: 3, provider: 'github', name: 'gh', site_url: 'https://github.com', state: 'ok' })], {});
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    expect(screen.queryByTestId('tracker-write-back-pr')).toBeNull();
+  });
+
   it('re-connecting an existing GitHub site with another gh host updates its transport', async () => {
     const { hosts } = await import('./hosts');
     hosts.set([

@@ -160,6 +160,22 @@ pub struct TrackerHealth {
     /// The last sync pass that ran, ok or not (unix seconds, in memory).
     #[serde(default)]
     pub last_pass_at: Option<i64>,
+    /// Writes to this tracker fleet gave up on (work graph M13.4e: a PR
+    /// remote link refused or failing past its retries). Reads are
+    /// unaffected, so it never changes `health`.
+    #[serde(default)]
+    pub write_failures: u64,
+    /// Webhook nudges are on for this tracker (work graph M13.4f: it has a
+    /// webhook secret). Polling runs either way.
+    #[serde(default)]
+    pub webhook_enabled: bool,
+    /// The last delivery whose signature verified (unix seconds, in memory).
+    #[serde(default)]
+    pub webhook_last_delivery_at: Option<i64>,
+    /// Deliveries refused for their signature since the hub started: a
+    /// wrong secret on the tracker's side, or someone knocking.
+    #[serde(default)]
+    pub webhook_rejected: u64,
 }
 
 /// A tracker's health level from its stored state and the sync's counts:
@@ -252,6 +268,10 @@ pub fn tracker_health(
         last_error,
         last_success_at: t.last_sync_at,
         last_pass_at: m.and_then(|m| m.last_pass_at),
+        write_failures: 0,
+        webhook_enabled: false,
+        webhook_last_delivery_at: None,
+        webhook_rejected: 0,
     }
 }
 
@@ -296,7 +316,14 @@ pub fn trackers_from_store(
         .iter()
         .map(|t| {
             let org = t.org_id.and_then(|o| orgs.get(&o).cloned());
-            tracker_health(t, by_id.get(&t.id), org)
+            let hook = crate::service::trackers::webhook::hook_metrics(t.id);
+            TrackerHealth {
+                write_failures: s.tracker_write_failures(t.id).unwrap_or(0),
+                webhook_enabled: s.tracker_webhook_since(t.id).ok().flatten().is_some(),
+                webhook_last_delivery_at: hook.last_delivery_at,
+                webhook_rejected: hook.rejected,
+                ..tracker_health(t, by_id.get(&t.id), org)
+            }
         })
         .collect();
     let count = |level: &str| trackers.iter().filter(|t| t.health == level).count() as u32;
@@ -1225,6 +1252,39 @@ mod tests {
         );
         // `health_from_store` fills it (the clock is real: a year-old one).
         assert_eq!(health_from_store(&s).trackers.detection_backlog, 1);
+    }
+
+    /// Work graph M13.4e: a write fleet gave up on is counted per tracker
+    /// from the outbox, and never changes the tracker's health.
+    #[test]
+    fn write_failures_are_counted_and_leave_health_alone() {
+        let s = Store::open_in_memory().unwrap();
+        let t = s
+            .add_tracker("jira", "J", "https://acme.atlassian.net")
+            .unwrap();
+        s.conn_ref()
+            .execute("UPDATE trackers SET state = 'ok' WHERE id = ?1", [t.id])
+            .unwrap();
+        let none = |_: &[i64]| Vec::new();
+        let h = trackers_from_store(&s, &OrgScope::All, &none, 1_000);
+        assert_eq!(h.trackers[0].write_failures, 0);
+        s.enqueue_tracker_write(&crate::store::NewTrackerWrite {
+            tracker_id: t.id,
+            item_key: "ABC-1",
+            op: crate::store::WRITE_OP_PR_REMOTE_LINK,
+            url: "https://github.com/o/r/pull/1",
+            title: "PR: o/r#1",
+            link_id: None,
+            claude_session_id: None,
+            session_org_id: None,
+        })
+        .unwrap();
+        let id = s.due_tracker_writes(t.id, i64::MAX, 1).unwrap()[0].id;
+        s.retry_tracker_write(id, "forbidden", None, true).unwrap();
+        let h = trackers_from_store(&s, &OrgScope::All, &none, 1_000);
+        assert_eq!(h.trackers[0].write_failures, 1);
+        assert_eq!(h.trackers[0].health, "ok");
+        assert_eq!((h.failing, h.degraded), (0, 0));
     }
 
     #[test]

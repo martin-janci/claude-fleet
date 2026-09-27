@@ -474,8 +474,19 @@ impl TrackerSync {
             return Err(TrackerError::Unconfigured);
         }
         let provider = provider_for(t, cred, &self.net)?;
-        self.run_provider(t, provider.as_ref(), views, store, now, pass)
-            .await
+        let read = self
+            .run_provider(t, provider.as_ref(), views, store, now, pass)
+            .await;
+        // Write-back (M13.4e): after a pass that worked, with the same
+        // provider and credential. Its failures are per write, never the
+        // pass's.
+        if read.is_ok() && provider.caps().write {
+            let r = super::write_back::drain(t, provider.as_ref(), store, now).await;
+            if r != super::write_back::DrainReport::default() {
+                tracing::debug!(tracker = t.id, ?r, "[write-back] drained");
+            }
+        }
+        read
     }
 
     /// The pass proper, over the provider `run_tracker` built (tests hand

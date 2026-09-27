@@ -52,6 +52,8 @@ export interface TrackerSettings {
   /** GitHub Enterprise Server (work graph M11.4): the instance `gh
    *  --hostname` is pointed at, `host[:port]`. Absent: github.com. */
   hostname?: string | null;
+  /** Jira (work graph M13.4e, D3): what fleet may write. Absent: nothing. */
+  write_back?: { pr_remote_link?: boolean };
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */
