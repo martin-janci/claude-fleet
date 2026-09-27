@@ -251,8 +251,13 @@ impl GitHub {
             key: Some(self.key(&repo, number)),
             aliases: Vec::new(),
             title: n["title"].as_str().unwrap_or_default().to_string(),
+            // On the tracker's own instance: an enterprise hostname is
+            // validated when the tracker is added, never taken from here.
             url: Some(format!(
-                "https://github.com/{name_with_owner}/issues/{number}"
+                "https://{}/{name_with_owner}/issues/{number}",
+                self.enterprise
+                    .as_ref()
+                    .map_or("github.com", |(host, _)| host.as_str())
             )),
             kind: Some(
                 n["issueType"]["name"]

@@ -345,6 +345,22 @@ fn the_issue_url_is_built_not_taken_from_the_answer() {
     assert!(github(&f).snapshot(&n).is_none());
 }
 
+/// An enterprise item's URL is on its own instance. The builder above was
+/// written before GitHub Enterprise (M11.4) and kept `github.com`, so an
+/// issue on `ghe.corp.example` linked to the same path on github.com —
+/// someone else's repository, or nothing — from the ticket card, Today and
+/// the start brief, on the desktop and the phone alike.
+#[test]
+fn an_enterprise_issue_url_is_on_its_own_instance() {
+    let f = FakeTransport::new();
+    let n = fixture("github", "nodes_two.json")["data"]["nodes"][0].clone();
+    let s = ghes::ghes(&f).snapshot(&n).unwrap();
+    assert_eq!(
+        s.url.as_deref(),
+        Some("https://ghe.corp.example:8443/Acme/api/issues/42")
+    );
+}
+
 /// End to end through `via_cli`: the provider, `TrackerNet`'s transport
 /// selection and `gh` on the host, answered by a scripted SSH.
 #[tokio::test]
