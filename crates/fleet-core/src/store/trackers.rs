@@ -793,14 +793,14 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
 /// Read a credential reference. `None` when it cannot be read (unset
 /// variable, missing file, empty value); the reason is logged without the
 /// value.
-fn read_credential_ref(r: &str) -> Option<String> {
+pub(super) fn read_credential_ref(r: &str) -> Option<String> {
     let value = if let Some(name) = r.strip_prefix("env:") {
         std::env::var(name).ok()
     } else if let Some(path) = r.strip_prefix("file:") {
         match std::fs::read_to_string(path) {
             Ok(v) => Some(v),
             Err(e) => {
-                tracing::warn!("tracker credential file {path} unreadable: {}", e.kind());
+                tracing::warn!("credential file {path} unreadable: {}", e.kind());
                 None
             }
         }

@@ -507,7 +507,7 @@ Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `
 
 Trackers, orgs, retention and usage counts; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `jev`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
