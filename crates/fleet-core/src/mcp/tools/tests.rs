@@ -7232,6 +7232,87 @@ async fn a_hub_with_no_approver_refuses_the_operator_s_start_outright() {
     assert!(t.guards.confirms.pending_tools().is_empty());
 }
 
+/// M13.4c: the operator's `summarize` spends a model call, so it waits for a
+/// person like a start (approve / deny), is refused outright on a hub with no
+/// approver, and a phone's own request is not gated.
+#[tokio::test]
+async fn an_operator_summary_is_confirmed_and_refused_without_an_approver() {
+    use crate::service::work::WorkLinkArgs;
+    let args = |nonce: Option<String>| WorkLinkArgs {
+        action: "summarize".into(),
+        key: Some("PAY-7".into()),
+        // An unknown link: the summary itself fails locally, after the gate.
+        link_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let phone = t
+        .work_link(
+            Extension(client_caller("phone", TokenMode::Full)),
+            Parameters(args(None)),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !phone.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        phone.message
+    );
+
+    let asked = t
+        .work_link(Extension(operator()), Parameters(args(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let after = t
+        .work_link(Extension(operator()), Parameters(args(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        !after.message.starts_with("E_CONFIRM_REQUIRED"),
+        "{}",
+        after.message
+    );
+    assert!(
+        !after.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        after.message
+    );
+
+    let asked = t
+        .work_link(Extension(operator()), Parameters(args(None)))
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, false));
+    let denied = t
+        .work_link(Extension(operator()), Parameters(args(Some(nonce))))
+        .await
+        .unwrap_err();
+    assert!(
+        denied.message.starts_with("E_FORBIDDEN"),
+        "{}",
+        denied.message
+    );
+
+    let (s, _, _) = two_host_store();
+    let hub = guarded_tools(s, false);
+    let e = hub
+        .work_link(Extension(operator()), Parameters(args(None)))
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("no approver"),
+        "{}",
+        e.message
+    );
+    assert!(hub.guards.confirms.pending_tools().is_empty());
+}
+
 fn operator() -> Caller {
     client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
