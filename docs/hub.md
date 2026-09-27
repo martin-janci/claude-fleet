@@ -768,7 +768,7 @@ What a client may do:
   organisation: it reads that org's work **and sessions** only — the Work
   view (`work { tree | task | session_tasks | review | rules | rule_preview
   | views }`), tickets, Today, conversations, `list_sessions`, every
-  session-addressed tool, `fleet_health`'s trackers and per-host spend, and
+  session-addressed tool, `fleet_health`'s trackers, spend and counts, and
   every `/events` frame. Whether it also sees *unassigned* work and sessions
   (no org) is the org's switch `bound_sees_unassigned` (decision D31): on by
   default, as a host sees them; `fleet-hub`'s master turns it off with

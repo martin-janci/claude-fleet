@@ -315,7 +315,14 @@ pub fn trackers_from_store(
     TrackersHealth {
         failing: count("failing"),
         degraded: count("degraded"),
-        detection_backlog: s.detection_backlog(before, scope.host()).unwrap_or(0),
+        detection_backlog: match scope {
+            // A bound client (M14): the hosts it sees, not the fleet.
+            OrgScope::Org { .. } => hosts_in_scope(s, scope)
+                .iter()
+                .map(|h| s.detection_backlog(before, Some(&h.alias)).unwrap_or(0))
+                .sum(),
+            _ => s.detection_backlog(before, scope.host()).unwrap_or(0),
+        },
         detection_backlog_days: DETECTION_BACKLOG_DAYS,
         trackers,
     }
@@ -453,15 +460,73 @@ pub fn scope_usage_to_host(h: &mut Health, s: &Store, host: &str) {
     h.usage_by_day = usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, Some(host));
 }
 
-/// Restrict the per-host spend to the hosts an org-bound client sees (work
-/// graph M14): another org's host is not named to it. The daily roll-up is
-/// fleet-wide totals with no host in it and stays.
-pub fn scope_usage_to_org(h: &mut Health, s: &Store, scope: &OrgScope) {
-    h.usage_by_host.retain(|host, _| {
-        s.host_org(host)
-            .map(|org| scope.sees_session(host, org))
-            .unwrap_or(false)
+/// The hosts an org-bound client sees (work graph M14): its org's, and
+/// unassigned ones while the org's `bound_sees_unassigned` is on (D31) —
+/// [`OrgScope::sees_org`] over the host's org. Empty on a read error, and a
+/// host the store no longer has is never in it (fail closed).
+pub fn hosts_in_scope(s: &Store, scope: &OrgScope) -> Vec<HostRow> {
+    s.list_hosts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|h| scope.sees_org(h.org_id))
+        .collect()
+}
+
+/// Re-derive every roll-up that sums across hosts for an org-bound client
+/// (work graph M14), so nothing in `fleet_health` counts another org's
+/// hosts or sessions: host counts and the tunnels over
+/// [`hosts_in_scope`]; session counts over the sessions the client may
+/// list ([`OrgScope::sees_row`]); per-host spend over those sessions on
+/// those hosts; the daily spend over those hosts' `usage_daily` rows. The
+/// trackers are [`scope_trackers`]'. `peer_links_down` is the hub's own
+/// links, not a sum over hosts, and stays.
+pub fn scope_to_org(h: &mut Health, s: &Store, scope: &OrgScope) {
+    let hosts = hosts_in_scope(s, scope);
+    let visible: std::collections::BTreeSet<String> =
+        hosts.iter().map(|x| x.alias.clone()).collect();
+    let sessions: Vec<SessionRow> = s
+        .list_all_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| scope.sees_row(r))
+        .collect();
+    let summary = summarize(&sessions, &hosts);
+    h.hosts_reachable = summary.hosts_reachable;
+    h.hosts_total = summary.hosts_total;
+    h.sessions_total = summary.sessions_total;
+    h.by_status = summary.by_status;
+    h.ghosts = summary.ghosts;
+    h.context_red = summary.context_red;
+    h.stuck = summary.stuck;
+    h.usage_by_host = summary.usage_by_host;
+    h.usage_by_host.retain(|host, _| visible.contains(host));
+    h.usage_by_day = usage::recent_days_on(s, now_unix(), usage::HEALTH_DAYS, &|host| {
+        visible.contains(host)
     });
+    let tunnels = std::mem::take(&mut h.tunnels);
+    h.set_tunnels(
+        tunnels
+            .into_iter()
+            .filter(|(host, _)| visible.contains(host))
+            .collect(),
+    );
+}
+
+/// Every roll-up blanked, for an org-bound client whose scope could not be
+/// read: it is told nothing rather than the whole fleet.
+pub fn blank_rollups(h: &mut Health) {
+    h.hosts_reachable = 0;
+    h.hosts_total = 0;
+    h.sessions_total = 0;
+    h.by_status.clear();
+    h.ghosts = 0;
+    h.context_red = 0;
+    h.stuck = 0;
+    h.usage_by_host.clear();
+    h.usage_by_day.clear();
+    h.tunnels.clear();
+    h.tunnels_flapping = 0;
+    h.trackers = Default::default();
 }
 
 fn now_unix() -> i64 {

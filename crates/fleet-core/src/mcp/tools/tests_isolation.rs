@@ -2950,6 +2950,106 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
     }
 }
 
+/// Work graph M14: every roll-up in `fleet_health` that sums across hosts
+/// (spend by host and by day, host and session counts) is taken over the
+/// hosts an org-bound client sees — its org's, and unassigned ones only
+/// while D31 is on — so B's spend never reaches A's client, not even as a
+/// fleet-wide total. Everyone else reads as before.
+#[tokio::test]
+async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
+    let fx = fixture(false);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    {
+        let s = fx.t.store.lock().unwrap();
+        for (id, host, cost) in [
+            (fx.s_a, "h-a", 100),
+            (fx.s_b, "h-b", 20_000),
+            (fx.s_n, "h-n", 3_000),
+        ] {
+            s.apply_usage(
+                id,
+                host,
+                &crate::store::UsageDelta {
+                    reset: false,
+                    totals: crate::store::UsageTotals {
+                        input_tokens: cost,
+                        cost_micros: cost,
+                        ..Default::default()
+                    },
+                    model: None,
+                    offset: 1,
+                    source: "x.jsonl".into(),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now,
+                },
+            )
+            .unwrap();
+        }
+    }
+    // (daily cost, usage_by_host keys, hosts_total, sessions_total)
+    let read = |a: &Answer| -> (i64, Vec<String>, i64, i64) {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        let day: i64 = v["usage_by_day"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["cost_micros"].as_i64().unwrap())
+            .sum();
+        let hosts = v["usage_by_host"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        (
+            day,
+            hosts,
+            v["hosts_total"].as_i64().unwrap(),
+            v["sessions_total"].as_i64().unwrap(),
+        )
+    };
+    let names = |hs: &[&str]| hs.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+    let everything = (23_100, names(&["h-a", "h-b", "h-n"]), 3, 4);
+    for who in EVERYONE {
+        let a = call(&fx, *who, "fleet_health", json!({})).await;
+        assert_eq!(code(&a), "OK", "{who:?}: {a:?}");
+        let want = match who {
+            // D31 on (the default): the org's hosts and h-n. s_x is A's
+            // too; B's s_b and its 20 000 are nowhere.
+            Who::BoundA => (3_100, names(&["h-a", "h-n"]), 2, 3),
+            Who::BoundB => (23_000, names(&["h-b", "h-n"]), 2, 2),
+            // As before: its own host's spend, fleet-wide counts.
+            Who::HostA => (100, names(&["h-a"]), 3, 4),
+            Who::HostB => (20_000, names(&["h-b"]), 3, 4),
+            Who::HostNone => (3_000, names(&["h-n"]), 3, 4),
+            _ => everything.clone(),
+        };
+        assert_eq!(read(&a), want, "{who:?}");
+    }
+    // D31 off: the unassigned host leaves a bound client's totals too.
+    for org in [ORG_A, ORG_B] {
+        let a = call(
+            &fx,
+            Who::Master,
+            "work_admin",
+            json!({ "action": "update_org", "org_id": org, "bound_sees_unassigned": false }),
+        )
+        .await;
+        is_ok(Who::Master, &a, "D31 off");
+    }
+    for (who, want) in [
+        (Who::BoundA, (100, names(&["h-a"]), 1, 2)),
+        (Who::BoundB, (20_000, names(&["h-b"]), 1, 1)),
+        (Who::Master, everything.clone()),
+        (Who::ClientReadonly, everything.clone()),
+    ] {
+        let a = call(&fx, who, "fleet_health", json!({})).await;
+        assert_eq!(read(&a), want, "{who:?} with D31 off");
+    }
+}
+
 /// Work graph M13.1: a tracker skipping items reads through the same org
 /// fence — a per-host token sees only its own org's trackers, their counts
 /// and the skipped item's reason, never another org's; and the reason is
