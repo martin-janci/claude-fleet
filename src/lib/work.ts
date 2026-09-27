@@ -77,9 +77,22 @@ export function sessionWorkLinks(sessionId: number): Promise<Result<WorkLink[]>>
   return invokeCmd<WorkLink[]>('session_work_links', { args: { session_id: sessionId } });
 }
 
+/** Bumped after every work write this window makes, and by `work:changed`
+ *  and session events that touch work; the Work view, the task detail and
+ *  the session's Tasks re-read what they show (debounced) when it moves.
+ *  (Re-exported by `work_view.ts`, where its readers live.) */
+export const workChanged = writable(0);
+
+export function bumpWorkChanged(): void {
+  workChanged.update((n) => n + 1);
+}
+
 async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>(cmd, { args });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 
@@ -373,7 +386,10 @@ export async function renameWorkItem(itemId: number, title: string): Promise<Res
   const r = await invokeCmd<WorkItemRow>('rename_work_item', {
     args: { item_id: itemId, title: title.trim() },
   });
-  if (r.ok) patchWorkItemTitle(itemId, r.value.title);
+  if (r.ok) {
+    patchWorkItemTitle(itemId, r.value.title);
+    bumpWorkChanged();
+  }
   return r;
 }
 
@@ -525,7 +541,10 @@ export async function resumeWork(a: ResumeWorkArgs): Promise<Result<SessionRow>>
       brief: a.brief ?? null,
     },
   });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 

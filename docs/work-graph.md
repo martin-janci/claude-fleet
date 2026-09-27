@@ -15,6 +15,7 @@ check the whole feature on your own installation, walk through the manual
 acceptance run, [work-graph-acceptance.md](work-graph-acceptance.md).
 
 - [What "work" is](#what-work-is)
+- [The Work view](#the-work-view)
 - [The Work view (reads)](#the-work-view-reads)
 - [Work view: edits](#work-view-edits)
 - [Linking and detection](#linking-and-detection)
@@ -65,12 +66,110 @@ in work mode *any / with session / past only*.
 > **[Screenshot placeholder]** The sidebar grouped by work, with a Done
 > section open and the ⚑ work filter chips showing.
 
+## The Work view
+
+The sidebar has two ways into the same work: **Sessions** (host / project →
+session → its tasks, as before) and **Work** (organisation → project or group
+→ task → its sessions). Switch at the top of the sidebar or with ⌘⇧W
+(Ctrl+Shift+W). Both are views of one graph of tasks, sessions and links; a
+session under several tasks is the same session everywhere, and opening any
+of its occurrences opens it.
+
+**The tree.** Each organisation has its sections; each section is a
+project or group with its count; each task shows its key and title, its
+tracker, its status, how many active and past sessions it has, a dot when a
+session needs you, **?** when something waits for review, a struck-through
+title when the tracker no longer answers for it, and what is wrong with its
+tracker when it is not answering (*tracker: token expired or wrong*,
+*tracker: not tested yet*, …), which is not the same as having no sessions. A task
+with no session at all stays in the tree. Under a task, each session says
+what its link is:
+
+| Mark | Meaning |
+|---|---|
+| ★ | the session's **primary** task (the one Sessions groups it by) |
+| (plain) | a secondary task of a live session |
+| dashed, `?` | a **suggestion** — fleet's guess, not a link |
+| dimmed, *ended* | a **past** session; never shown as active |
+
+Sections load page by page (*Load more*), so a fleet with thousands of
+tickets stays quick; expanded sections and the last selection are kept per
+view.
+
+**Filters and saved views.** Organisation, tracker (or *local* / *bare
+keys*), status (open, to do, in progress, done), *mine*, *with an active
+session*, *only past sessions*, *no session*, *suggested*, *to review*, and
+a search. **Views ▾** saves the current filters under a name (Save as…,
+Update, Delete); saved views live on the hub, so the phone has the same
+ones.
+
+**A task's detail** (select it) shows the tracker's data, where its org and
+its group come from, the repositories it ran in, every session with its
+state and *why* it is linked (the branch, the ticket URL in a prompt, a
+person), the last known outcome of its newest past session, and **Open**,
+**Continue** (resume the last conversation) and **Start new**.
+
+**Where things come from.** Every value that fleet did not get from a person
+says so:
+
+- **Organisation**: *from the tracker* (a ticket's org is its tracker's),
+  *set by a person* (a local task placed in an org), or *inferred from its
+  sessions* — a view only, not a boundary. The organisation is the access
+  boundary, so moving a task is a separate, previewed step (below).
+- **Group**: *placed by a person*, *by a rule* (named), *from the tracker*
+  (the Jira project, Linear team, GitHub repository, Asana project), *from
+  its repository*, or *from its key prefix*. Placing a task in a group is
+  local to fleet: it never changes the Jira or Asana ticket.
+
+**Correcting it.**
+
+- **Place in group…** puts one task in a group (pick one or type a new
+  name; a note is optional). Clearing it returns the task to where it would
+  sit by itself. If someone else placed it meanwhile you are told, with the
+  current value, instead of overwriting it.
+- **Make a rule for similar tasks…** is a separate step after a placement:
+  choose the conditions (tracker, project/container, key prefix, words in
+  the title, repository) and the group, **Preview** the tasks it would move
+  (and how many a person already placed, which it leaves alone), then save.
+  Rules are listed under the Work view's **⚙** (Rules), where each can
+  be edited, turned off (the tasks go back at once) or deleted.
+- **Assign org…** (local tasks only) first shows exactly what the move
+  changes: the sessions that would then carry a task of another org, the
+  hosts and org-bound devices that would stop or start seeing it, and how
+  many journal entries and summaries go with it. It is applied only while
+  that preview still holds. A ticket's org is its tracker's; move the
+  tracker instead (Settings → Work, or `fleet-hub org assign-tracker`).
+
+**A session's tasks.** A session's details list all its tasks — primary,
+secondary, suggested and past — each with *why*. **Make primary** moves the
+primary (every other link stays), **Remove** takes a mistaken link away,
+**Add task…** adds another task (it becomes primary only if the session has
+none), and **Show in Work view** jumps to the task.
+
+**Review.** The Work view's **Review · n** tab collects what needs a person:
+suggestions (with their reasons), a session linked to another org's task
+(kept deliberately with *Keep*, or removed), a link to a ticket the tracker
+no longer shows, and a session with tasks but no primary. **Confirm**,
+**Change…** (pick another task), **Reject** and **Keep** act on one item;
+select several to decide them together — each item is checked on its own
+and the ones that could not be applied stay, with the reason. The last
+confirm or reject can be undone.
+
+**Two devices at once.** A decision names the version of the link it was
+made on. If the desktop and the phone change the same link or the same
+primary, the second one is told what changed and gets the current value,
+instead of silently undoing the first. Two starts or resumes of one ticket
+make one session; the other device is pointed at it.
+
+> **[Screenshot placeholder]** The Work view with an org, two groups, a task
+> with a primary, a secondary and a past session, and the Review tab.
+
 ## The Work view (reads)
 
 The hub answers the other way into the work graph — organisation → group →
 task → *every* session of the task (primary, secondary, suggested and past),
 including tasks with no session at all — as reads of the `work` tool
-(work graph M14.1b; the desktop and phone views and the edits come later):
+(work graph M14.1b; the screens above and the phone's *My work* use them):
 
 - `work { action: tree, filters?, cursor?, limit?, per_task? }`: a page of
   tasks with their sessions, the section headers (`groups`, each with its
@@ -105,7 +204,7 @@ repo, key, none).
 ## Work view: edits
 
 The Work view's changes are `work_link` actions (work graph M14.1c; the
-desktop and phone screens come later). None of them is a new tool, and an
+desktop's and the phone's screens make them). None of them is a new tool, and an
 older device that sends none of the new parameters behaves as before.
 
 - **A second task on a session.** `link { primary: false }` and

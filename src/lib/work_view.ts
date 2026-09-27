@@ -1,195 +1,287 @@
-// The Work view's commands (work graph M14.1d): typed wrappers over the
-// eighteen Tauri commands of `commands/work_view.rs`, each routed to the
-// hub's `work { … }` / `work_link { … }` on a paired desktop, and the
-// `work:changed` frame. No UI here — that is M14.2 / M14.3. Shapes follow
-// `docs/superpowers/specs/2026-09-27-work-view-design.md` → *Contracts*.
+/**
+ * The Work view (work graph M14): organisation → group → task → every
+ * session of the task, the second projection of the same work graph the
+ * Sessions tree shows the other way round.
+ *
+ * Types mirror the wire contract in
+ * `docs/superpowers/specs/2026-09-27-work-view-design.md` ("Contracts"):
+ * the reads are `work { tree | task | session_tasks | review | rules |
+ * rule_preview | views | org_impact }`, the writes `work_link { … }`, and
+ * every desktop command takes `{ args: { …fields of the action… } }`. Every
+ * field a newer hub may add is optional or tolerated; an unknown value reads
+ * as its most cautious meaning (an unknown link state is never "active").
+ *
+ * Nothing here decides what anyone may see: the hub filters every answer by
+ * the caller's scope. The org filter below is a view, the org of a task is
+ * whatever the hub answered.
+ */
 
+import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
-import { acceptCommandRow, type SessionRow } from './sessions';
+import { readPref, writePref } from './prefs';
+import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
+import { bumpWorkChanged, workChanged, type WorkEvidence } from './work';
+import { onSessionOpened } from './selection';
+import { todayOpen } from './today';
+import { trackerStateBadge } from './trackers';
 
-// ── shared types ────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Wire types
 
-/** The same object for tree pages, saved views, desktop and phone. */
+/** `WorkTreeFilters`: one object for tree pages, saved views, desktop and
+ *  phone. Absent = no filter on that field. */
 export interface WorkTreeFilters {
-  /** An org id, or `"none"` (unassigned); absent: all visible. */
+  /** An org id, or `none` (unassigned). */
   org?: number | 'none';
-  /** A tracker id, `"local"` (local items) or `"ref"` (bare keys). */
+  /** A tracker id, `local` (local items) or `ref` (bare keys). */
   tracker?: number | 'local' | 'ref';
-  status?: 'any' | 'open' | 'todo' | 'in_progress' | 'done';
+  status?: WorkStatusFilter;
+  /** Assigned to me in its tracker. */
   mine?: boolean;
-  has?: 'any' | 'active' | 'past_only' | 'none' | 'suggested';
+  has?: WorkHasFilter;
+  /** Only tasks with something to review. */
   review?: boolean;
+  /** Case-insensitive substring of key or title. */
   query?: string;
   /** One group only (a section being expanded). */
   group?: string;
 }
 
+export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;
+export type WorkStatusFilter = (typeof STATUS_FILTERS)[number];
+export const STATUS_FILTER_LABELS: Record<WorkStatusFilter, string> = {
+  any: 'any status',
+  open: 'open',
+  todo: 'to do',
+  in_progress: 'in progress',
+  done: 'done',
+};
+
+export const HAS_FILTERS = ['any', 'active', 'past_only', 'none', 'suggested'] as const;
+export type WorkHasFilter = (typeof HAS_FILTERS)[number];
+export const HAS_FILTER_LABELS: Record<WorkHasFilter, string> = {
+  any: 'any sessions',
+  active: 'active session',
+  past_only: 'past sessions only',
+  none: 'no session',
+  suggested: 'suggested',
+};
+
+/** `manual` | `rule` | `tracker` | `repo` | `key` | `none`. */
+export type GroupSource = 'manual' | 'rule' | 'tracker' | 'repo' | 'key' | 'none';
+
 export interface GroupRef {
+  /** `label:<label>` (a manual or rule placement: `source` says which),
+   *  `tracker:<id>:<container>`, `repo:<owner/repo>`, `key:<PREFIX>`,
+   *  `none`. */
   id: string;
   label: string;
-  source: string;
-  rule_id?: number;
-  tracker_value?: string;
-  editable: boolean;
+  source: GroupSource | string;
+  rule_id?: number | null;
+  tracker_value?: string | null;
+  editable?: boolean;
 }
+
+/** `active` | `ended` | `suggested` | `rejected`. */
+export type WorkLinkState = 'active' | 'ended' | 'suggested' | 'rejected';
 
 /** One session under a task. */
 export interface WorkTaskLink {
   link_id: number;
   link_version: number;
-  state: 'active' | 'ended' | 'suggested' | 'rejected' | string;
-  primary: boolean;
-  session_id?: number;
-  name: string;
-  host?: string;
-  source: string;
-  strength?: string;
-  rule?: string;
-  why: string;
-  /** `task` / `session_tasks` only, never in a tree page. */
-  evidence?: unknown[];
-  created_at: number;
-  decided_at?: number;
-  ended_at?: number;
-  end_reason?: string;
-  claude_status?: string;
-  needs_you: boolean;
-  archived: boolean;
-  resumable: boolean;
-  branch?: string;
-  pr_url?: string;
-  cross_org: boolean;
-  other_tasks: number;
-  review_ack_at?: number;
+  state: WorkLinkState | string;
+  primary?: boolean;
+  /** The live session; absent when ended. */
+  session_id?: number | null;
+  name?: string | null;
+  host?: string | null;
+  source?: string | null;
+  strength?: string | null;
+  rule?: string | null;
+  /** One line, from the evidence. */
+  why?: string | null;
+  /** `task` / `session_tasks` only, never in `tree`. */
+  evidence?: WorkEvidence[];
+  created_at?: number | null;
+  decided_at?: number | null;
+  ended_at?: number | null;
+  end_reason?: string | null;
+  claude_status?: string | null;
+  needs_you?: boolean;
+  archived?: boolean;
+  resumable?: boolean;
+  branch?: string | null;
+  pr_url?: string | null;
+  cross_org?: boolean;
+  /** Other active tasks of this session the caller sees. */
+  other_tasks?: number;
 }
+
+/** `tracker` | `local` | `ref`. */
+export type WorkTaskKind = 'tracker' | 'local' | 'ref';
+/** `tracker` | `item` | `sessions` | `none`. */
+export type OrgSource = 'tracker' | 'item' | 'sessions' | 'none';
 
 export interface WorkTask {
+  /** `item:<id>` or `ref:<KEY>`. */
   task_id: string;
-  item_id?: number;
-  key?: string;
-  title: string;
-  url?: string;
-  kind: 'tracker' | 'local' | 'ref' | string;
-  tracker_id?: number;
-  tracker_name?: string;
-  provider?: string;
-  tracker_state?: string;
-  status_category?: string;
-  status_name?: string;
-  resolution?: string;
-  unavailable: boolean;
-  unavailable_reason?: string;
+  item_id?: number | null;
+  key?: string | null;
+  title?: string | null;
+  url?: string | null;
+  kind: WorkTaskKind | string;
+  tracker_id?: number | null;
+  tracker_name?: string | null;
+  provider?: string | null;
+  /** The tracker's sync state: an outage is not "no sessions". */
+  tracker_state?: string | null;
+  status_category?: string | null;
+  status_name?: string | null;
+  resolution?: string | null;
+  unavailable?: boolean;
+  unavailable_reason?: string | null;
   assignees?: string[];
-  mine: boolean;
-  org_id?: number;
-  org_source: 'tracker' | 'item' | 'sessions' | 'none' | string;
-  org_fenced: boolean;
-  org_mixed: boolean;
+  mine?: boolean;
+  org_id?: number | null;
+  org_source?: OrgSource | string;
+  /** The org is a boundary (tracker / item), not inferred. */
+  org_fenced?: boolean;
+  /** An unfenced task whose sessions span orgs. */
+  org_mixed?: boolean;
   group: GroupRef;
-  counts: { active: number; ended: number; suggested: number };
-  needs_you: boolean;
-  review: boolean;
-  last_activity_at?: number;
+  counts?: { active?: number; ended?: number; suggested?: number };
+  needs_you?: boolean;
+  review?: boolean;
+  last_activity_at?: number | null;
   repos?: string[];
-  /** 0: no placement. */
-  placement_version: number;
-  sessions: WorkTaskLink[];
-  sessions_more: number;
+  /** 0 = no placement. */
+  placement_version?: number;
+  /** Active (primary first), suggested, ended newest first. */
+  sessions?: WorkTaskLink[];
+  sessions_more?: number;
 }
 
-export interface TreeGroup {
-  org_id?: number;
-  org_name?: string;
+/** A section header: every group of the whole filtered result. */
+export interface WorkTreeGroup {
+  org_id: number | null;
+  org_name?: string | null;
   group: GroupRef;
   count: number;
 }
 
-export interface TreePage {
+export interface WorkTreeOrg {
+  id: number;
+  name: string;
+  color?: string | null;
+}
+
+export interface WorkTreeTracker {
+  id: number;
+  name: string;
+  provider: string;
+  state: string;
+  org_id?: number | null;
+}
+
+export interface WorkTreePage {
   tasks: WorkTask[];
-  groups: TreeGroup[];
-  orgs: { id: number; name: string; color?: string }[];
-  trackers: { id: number; name: string; provider: string; state: string; org_id?: number }[];
+  groups: WorkTreeGroup[];
+  orgs: WorkTreeOrg[];
+  trackers: WorkTreeTracker[];
   total: number;
-  next_cursor?: string;
-  generated_at: number;
+  next_cursor?: string | null;
+  generated_at?: number;
+}
+
+export interface LastOutcome {
+  at: number;
+  name?: string | null;
+  host?: string | null;
+  branch?: string | null;
+  pr_url?: string | null;
+  /** Claude's reading of a transcript: text, never markup. */
+  summary?: string | null;
 }
 
 export interface Placement {
-  task_id: string;
-  group?: string;
-  note?: string;
+  group: string;
+  note?: string | null;
   version: number;
-  updated_at: number;
-  updated_by?: string;
+  updated_at?: number | null;
+  updated_by?: string | null;
 }
 
+/** `work { task }`. */
 export interface TaskDetail {
   task: WorkTask;
+  /** Older ids of this task (a bare key a sync bound to an item). */
   aliases?: string[];
-  description?: string;
-  last_outcome?: {
-    at: number;
-    name: string;
-    host?: string;
-    branch?: string;
-    pr_url?: string;
-    end_reason?: string;
-    summary?: string;
-    summary_kind?: string;
-  };
-  placement?: Placement;
+  /** Tracker text (plain, fenced for an agent, ≤ 600 chars). */
+  description?: string | null;
+  last_outcome?: LastOutcome | null;
+  placement?: Placement | null;
+  /** Ids of the rules that match. */
   rules?: number[];
 }
 
-export interface TaskBrief {
+/** The task a `session_tasks` link is to. */
+export interface SessionTaskRef {
   task_id: string;
-  key?: string;
-  title: string;
-  kind: string;
-  status_category?: string;
-  status_name?: string;
-  url?: string;
-  unavailable: boolean;
-  org_id?: number;
-  tracker_name?: string;
+  key?: string | null;
+  title?: string | null;
+  kind?: string;
+  status_category?: string | null;
+  status_name?: string | null;
+  url?: string | null;
+  unavailable?: boolean;
+  org_id?: number | null;
+  tracker_name?: string | null;
 }
 
+export interface SessionTaskLink extends WorkTaskLink {
+  task: SessionTaskRef;
+}
+
+/** `work { session_tasks }`: every link of the session's participant. */
 export interface SessionTasks {
   session_id: number;
-  org_id?: number;
-  primary_link_id?: number;
-  links: (WorkTaskLink & { task: TaskBrief })[];
+  org_id?: number | null;
+  primary_link_id?: number | null;
+  links: SessionTaskLink[];
 }
+
+/** `suggestion` | `cross_org` | `unavailable` | `no_primary`. */
+export type ReviewKind = 'suggestion' | 'cross_org' | 'unavailable' | 'no_primary';
 
 export interface ReviewItem {
   review_id: string;
-  kind: 'suggestion' | 'cross_org' | 'unavailable' | 'no_primary' | string;
+  kind: ReviewKind | string;
   session_id: number;
-  session_name: string;
-  host: string;
+  session_name?: string | null;
+  host?: string | null;
   link_id: number;
-  link_version: number;
-  task: TaskBrief;
+  link_version?: number;
+  task: { task_id: string; key?: string | null; title?: string | null; org_id?: number | null };
   why?: string[];
-  strength?: string;
-  rule?: string;
-  preselected: boolean;
-  alternatives?: { link_id: number; task_id: string; key?: string; title: string }[];
-  created_at: number;
+  strength?: string | null;
+  rule?: string | null;
+  preselected?: boolean;
+  alternatives?: { link_id?: number | null; task_id: string; key?: string | null; title?: string | null }[];
+  created_at?: number;
 }
 
 export interface ReviewPage {
   items: ReviewItem[];
   total: number;
-  next_cursor?: string;
+  next_cursor?: string | null;
 }
 
-export interface RuleConditions {
-  tracker_id?: number;
-  container?: string;
-  key_prefix?: string;
-  title_contains?: string;
-  repo?: string;
+export interface WorkRuleConditions {
+  tracker_id?: number | null;
+  container?: string | null;
+  key_prefix?: string | null;
+  title_contains?: string | null;
+  repo?: string | null;
 }
 
 export interface WorkRule {
@@ -197,25 +289,26 @@ export interface WorkRule {
   name: string;
   enabled: boolean;
   version: number;
-  conditions: RuleConditions;
+  conditions: WorkRuleConditions;
   group: string;
-  created_at: number;
-  updated_at: number;
+  created_at?: number;
+  updated_at?: number;
 }
 
-/** A rule to preview or save: no `id` creates one. */
-export interface RuleInput {
+/** What `rule_save` and `rule_preview` take. */
+export interface WorkRuleDraft {
   id?: number;
   name: string;
-  enabled?: boolean;
-  conditions: RuleConditions;
+  enabled: boolean;
+  conditions: WorkRuleConditions;
   group: string;
   expected_version?: number;
 }
 
 export interface RulePreview {
-  affected: { task_id: string; key?: string; title: string; from: GroupRef; to: GroupRef }[];
+  affected: { task_id: string; key?: string | null; title?: string | null; from: GroupRef; to: GroupRef }[];
   total: number;
+  /** Tasks placed by a person that the rule leaves where they are. */
   kept_manual: number;
 }
 
@@ -223,87 +316,82 @@ export interface WorkView {
   id: number;
   name: string;
   filters: WorkTreeFilters;
-  owner_org?: number;
   version: number;
-  updated_at: number;
+  updated_at?: number;
 }
 
-/** A view to save: no `id` creates one. */
-export interface ViewInput {
-  id?: number;
-  name: string;
-  filters: WorkTreeFilters;
-  expected_version?: number;
+export interface OrgImpactLink {
+  link_id: number;
+  session_id?: number | null;
+  name?: string | null;
+  host?: string | null;
+  state: string;
+  session_org?: number | null;
+  becomes_cross_org?: boolean;
 }
 
 export interface OrgImpact {
   task_id: string;
-  from_org?: number;
-  to_org?: number;
+  from_org?: number | null;
+  to_org?: number | null;
   allowed: boolean;
-  reason?: string;
-  links: {
-    link_id: number;
-    session_id?: number;
-    name: string;
-    host?: string;
-    state: string;
-    session_org?: number;
-    becomes_cross_org: boolean;
-  }[];
+  /** Why not (`tracker_controlled` …). */
+  reason?: string | null;
+  links: OrgImpactLink[];
   hosts_losing: string[];
   hosts_gaining: string[];
   bound_clients_losing: number;
   bound_clients_gaining: number;
   journal_entries: number;
   summaries: number;
-  impact_token: string;
+  impact_token?: string | null;
 }
 
-export type LinkDecisionKind = 'confirm' | 'reject' | 'reconsider' | 'ack';
+export type Decision = 'confirm' | 'reject' | 'reconsider' | 'ack';
 
-export interface LinkDecision {
+export interface BatchDecision {
   session_id: number;
   link_id: number;
-  decision: LinkDecisionKind;
+  decision: Decision;
   expected_version?: number;
   primary?: boolean;
 }
 
-export interface DecisionResult {
+export interface BatchItemResult {
   link_id: number;
-  session_id: number;
   ok: boolean;
-  code?: string;
-  message?: string;
-  version?: number;
+  code?: string | null;
+  message?: string | null;
+  version?: number | null;
 }
 
 export interface BatchResult {
-  results: DecisionResult[];
+  results: BatchItemResult[];
 }
 
-// ── reads (`work { … }`) ────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Commands. Reads route to the hub's `work`, writes to its `work_link`.
 
-export interface TreeOpts {
+/** Drop `undefined` fields so the arguments are exactly what was meant. */
+function clean(o: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
+  return out;
+}
+
+export interface WorkTreeQuery {
   filters?: WorkTreeFilters;
-  cursor?: string;
+  cursor?: string | null;
   /** 1–200, default 50. */
   limit?: number;
   /** 0–50, default 8. */
-  perTask?: number;
+  per_task?: number;
 }
 
-/** One page of the Work view. A cursor is bound to the filters it came
- *  with: another filter set answers `E_INVALID`. */
-export function workTree(opts: TreeOpts = {}): Promise<Result<TreePage>> {
-  return invokeCmd<TreePage>('work_tree', {
-    args: {
-      ...(opts.filters ? { filters: opts.filters } : {}),
-      ...(opts.cursor !== undefined ? { cursor: opts.cursor } : {}),
-      ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
-      ...(opts.perTask !== undefined ? { per_task: opts.perTask } : {}),
-    },
+export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
+  const filters = q.filters ? normalizeFilters(q.filters) : undefined;
+  return invokeCmd<WorkTreePage>('work_tree', {
+    args: clean({ filters, cursor: q.cursor ?? undefined, limit: q.limit, per_task: q.per_task }),
   });
 }
 
@@ -315,160 +403,677 @@ export function workSessionTasks(sessionId: number): Promise<Result<SessionTasks
   return invokeCmd<SessionTasks>('work_session_tasks', { args: { session_id: sessionId } });
 }
 
-export function workReview(opts: { cursor?: string; limit?: number } = {}): Promise<Result<ReviewPage>> {
-  return invokeCmd<ReviewPage>('work_review', {
-    args: {
-      ...(opts.cursor !== undefined ? { cursor: opts.cursor } : {}),
-      ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
-    },
-  });
+export function workReview(q: { cursor?: string | null; limit?: number } = {}): Promise<Result<ReviewPage>> {
+  return invokeCmd<ReviewPage>('work_review', { args: clean({ cursor: q.cursor ?? undefined, limit: q.limit }) });
 }
 
 export function workRules(): Promise<Result<WorkRule[]>> {
   return invokeCmd<WorkRule[]>('work_rules', { args: {} });
 }
 
-export function workRulePreview(rule: RuleInput): Promise<Result<RulePreview>> {
-  return invokeCmd<RulePreview>('work_rule_preview', { args: { rule } });
+export function workRulePreview(rule: WorkRuleDraft): Promise<Result<RulePreview>> {
+  return invokeCmd<RulePreview>('work_rule_preview', { args: { rule: ruleWire(rule) } });
 }
 
 export function workViews(): Promise<Result<WorkView[]>> {
   return invokeCmd<WorkView[]>('work_views', { args: {} });
 }
 
-/** What moving a local task to `orgId` (`0`: no org) would change. Its
- *  `impact_token` is what `assignWorkOrg` must send back. */
+/** What moving a local task to `orgId` (0 = no org) would change. */
 export function workOrgImpact(taskId: string, orgId: number): Promise<Result<OrgImpact>> {
   return invokeCmd<OrgImpact>('work_org_impact', { args: { task_id: taskId, org_id: orgId } });
 }
 
-// ── writes (`work_link { … }`) ──────────────────────────────────────────────
-
-/** A decision answers the session's row: patch it in place, as every other
- *  work decision does (`work.ts`). */
-async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>(cmd, { args });
-  if (r.ok) acceptCommandRow(r.value);
+/** Every write below goes through here or `write`: on success the Work
+ *  view, the task detail and the session's Tasks re-read at once (a
+ *  secondary link's change moves no field they could diff). */
+async function write<T>(cmd: string, args: Record<string, unknown>): Promise<Result<T>> {
+  const r = await invokeCmd<T>(cmd, { args });
+  if (r.ok) bumpWorkChanged();
   return r;
 }
 
-/** Make `linkId` the session's primary. `expectedPrimary`: the primary the
- *  person saw (`0`: none); a stale one answers `E_CONFLICT`. */
+async function rowCmd(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>(cmd, { args: clean(args) });
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
+  return r;
+}
+
+/** Move the session's primary to `linkId`: a compare-and-set on the current
+ *  primary (`expectedPrimary`, 0 = none). Another link is never ended. */
 export function setPrimaryWork(
   sessionId: number,
   linkId: number,
-  expectedPrimary?: number,
+  expectedPrimary: number | null | undefined,
 ): Promise<Result<SessionRow>> {
-  return decide('set_primary_work', {
+  return rowCmd('set_primary_work', {
     session_id: sessionId,
     link_id: linkId,
-    ...(expectedPrimary !== undefined ? { expected_primary: expectedPrimary } : {}),
+    expected_primary: expectedPrimary ?? 0,
   });
 }
 
-/** Undo a person's confirm / reject: back to a suggestion. */
+/** A person's confirm / reject goes back to a suggestion (the Undo). */
 export function reconsiderWorkLink(
   sessionId: number,
   linkId: number,
   expectedVersion?: number,
 ): Promise<Result<SessionRow>> {
-  return decide('reconsider_work_link', {
+  return rowCmd('reconsider_work_link', {
     session_id: sessionId,
     link_id: linkId,
-    ...(expectedVersion !== undefined ? { expected_version: expectedVersion } : {}),
+    expected_version: expectedVersion,
   });
 }
 
 /** Keep a conflict (cross-org, unavailable) on purpose. */
-export function ackWorkLink(
-  sessionId: number,
-  linkId: number,
-  expectedVersion?: number,
-): Promise<Result<SessionRow>> {
-  return decide('ack_work_link', {
-    session_id: sessionId,
-    link_id: linkId,
-    ...(expectedVersion !== undefined ? { expected_version: expectedVersion } : {}),
-  });
+export function ackWorkLink(sessionId: number, linkId: number, expectedVersion?: number): Promise<Result<SessionRow>> {
+  return rowCmd('ack_work_link', { session_id: sessionId, link_id: linkId, expected_version: expectedVersion });
 }
 
-/** At most 100 decisions, each judged on its own; the answer says, per item
- *  and in order, which did what. */
-export function decideWorkBatch(decisions: LinkDecision[]): Promise<Result<BatchResult>> {
-  return invokeCmd<BatchResult>('decide_work_batch', { args: { decisions } });
+/** Up to 100 decisions, each checked on its own. */
+export function decideWorkBatch(decisions: readonly BatchDecision[]): Promise<Result<BatchResult>> {
+  return write<BatchResult>('decide_work_batch', { decisions: decisions.map((d) => clean({ ...d })) });
 }
 
-/** Put a task in a group; `group` empty and no `note` clears the placement.
- *  `expectedVersion`: the task's `placement_version` as shown (0: none). */
+/** Place a task in a group (`''` clears the placement). `expectedVersion`
+ *  is the task's `placement_version` (0: "I expect none"). */
 export function placeWork(
   taskId: string,
   group: string,
   expectedVersion: number,
-  note?: string,
+  note?: string | null,
 ): Promise<Result<WorkTask>> {
-  return invokeCmd<WorkTask>('place_work', {
-    args: {
-      task_id: taskId,
-      group,
-      expected_version: expectedVersion,
-      ...(note !== undefined ? { note } : {}),
-    },
-  });
+  const n = note?.trim();
+  return write<WorkTask>(
+    'place_work',
+    clean({ task_id: taskId, group: group.trim(), note: n ? n : undefined, expected_version: expectedVersion }),
+  );
 }
 
-/** Move a local task to `orgId` (`0`: none), with the token of a fresh
- *  `workOrgImpact`; a changed impact answers `E_CONFLICT` with the new one. */
+/** Move a local task to `orgId` (0 = none), with the token of a fresh
+ *  impact preview. */
 export function assignWorkOrg(taskId: string, orgId: number, impactToken: string): Promise<Result<WorkTask>> {
-  return invokeCmd<WorkTask>('assign_work_org', {
-    args: { task_id: taskId, org_id: orgId, impact_token: impactToken },
-  });
+  return write<WorkTask>('assign_work_org', { task_id: taskId, org_id: orgId, impact_token: impactToken });
 }
 
-export function saveWorkRule(rule: RuleInput): Promise<Result<WorkRule>> {
-  return invokeCmd<WorkRule>('save_work_rule', { args: { rule } });
+/** A draft as the wire takes it: trimmed, empty conditions dropped. */
+export function ruleWire(d: WorkRuleDraft): WorkRuleDraft {
+  const c = d.conditions ?? {};
+  const s = (v: string | null | undefined) => {
+    const t = v?.trim();
+    return t ? t : null;
+  };
+  return clean({
+    id: d.id,
+    name: d.name.trim(),
+    enabled: d.enabled,
+    conditions: {
+      tracker_id: c.tracker_id ?? null,
+      container: s(c.container),
+      key_prefix: s(c.key_prefix),
+      title_contains: s(c.title_contains),
+      repo: s(c.repo),
+    },
+    group: d.group.trim(),
+    expected_version: d.expected_version,
+  }) as unknown as WorkRuleDraft;
+}
+
+export function saveWorkRule(rule: WorkRuleDraft): Promise<Result<WorkRule>> {
+  return write<WorkRule>('save_work_rule', { rule: ruleWire(rule) });
 }
 
 export function deleteWorkRule(ruleId: number, expectedVersion?: number): Promise<Result<{ deleted: boolean }>> {
-  return invokeCmd<{ deleted: boolean }>('delete_work_rule', {
-    args: {
-      rule_id: ruleId,
-      ...(expectedVersion !== undefined ? { expected_version: expectedVersion } : {}),
-    },
+  return write<{ deleted: boolean }>('delete_work_rule', clean({ rule_id: ruleId, expected_version: expectedVersion }));
+}
+
+export function saveWorkView(view: {
+  id?: number;
+  name: string;
+  filters: WorkTreeFilters;
+  expected_version?: number;
+}): Promise<Result<WorkView>> {
+  const { group: _group, ...filters } = normalizeFilters(view.filters);
+  return write<WorkView>('save_work_view', {
+    view: clean({ id: view.id, name: view.name.trim(), filters, expected_version: view.expected_version }),
   });
 }
 
-export function saveWorkView(view: ViewInput): Promise<Result<WorkView>> {
-  return invokeCmd<WorkView>('save_work_view', { args: { view } });
+export function deleteWorkView(viewId: number): Promise<Result<{ deleted: boolean }>> {
+  return write<{ deleted: boolean }>('delete_work_view', { view_id: viewId });
 }
 
-export function deleteWorkView(viewId: number, expectedVersion?: number): Promise<Result<{ deleted: boolean }>> {
-  return invokeCmd<{ deleted: boolean }>('delete_work_view', {
-    args: {
-      view_id: viewId,
-      ...(expectedVersion !== undefined ? { expected_version: expectedVersion } : {}),
-    },
-  });
+// ---------------------------------------------------------------------------
+// Errors
+
+/** What an `E_CONFLICT` carries: the current value. */
+export interface Conflict {
+  link_id?: number;
+  version?: number;
+  state?: string;
+  primary?: number | boolean | null;
+  [k: string]: unknown;
 }
 
-// ── errors ──────────────────────────────────────────────────────────────────
-
-/** An `E_CONFLICT` answer's current value (a version, a primary, a fresh
- *  impact), or `null` for any other error. The UI shows it with *Reload* and
- *  never overwrites silently. */
-export function conflictOf(e: IpcError): Record<string, unknown> | null {
-  if (e.code !== 'E_CONFLICT') return null;
+/** The conflict of an error, or null when it is not one. */
+export function conflictOf(e: IpcError | null | undefined): Conflict | null {
+  if (!e || e.code !== 'E_CONFLICT') return null;
   const d = e.details;
-  return d && typeof d === 'object' && !Array.isArray(d) ? (d as Record<string, unknown>) : {};
+  return d && typeof d === 'object' ? (d as Conflict) : {};
 }
 
-/** An older hub, which does not list the Work view's actions, answers
- *  `E_INVALID unknown work(_link) action …`: the UI says "Needs a newer hub". */
-export function needsNewerHub(e: IpcError): boolean {
-  return e.code === 'E_INVALID' && /unknown work(_link)? action/.test(e.message);
+/** The sentence a conflict shows before the reload. */
+export function conflictSentence(what: string): string {
+  return `${what} changed elsewhere (another window or device) — reloaded, so check it and try again.`;
 }
 
-// ── the `work:changed` frame ────────────────────────────────────────────────
+/** "Needs a newer hub": the hub (or this build's backend) has no Work view. */
+export const NEWER_HUB = 'Needs a newer hub: update fleet-hub to use the Work view.';
 
+/** Whether an error means the backend does not know the action at all —
+ *  and only that: any other refusal (a bad cursor, a hub that is down, a
+ *  protocol hiccup) is the backend's own sentence, never "update the hub". */
+export function isOlderHub(e: IpcError | null | undefined): boolean {
+  if (!e) return false;
+  // The hub's `work` / `work_link` action enum: `unknown work action "tree";
+  // one of …`.
+  if (e.code === 'E_INVALID') return /\bunknown (?:work(?:_link)? )?action\b/i.test(e.message);
+  // A hub with no such tool at all (rmcp's dispatch refusal).
+  if (e.code === 'E_HUB_PROTOCOL') return /\btool\b.*\bnot found\b|\bunknown tool\b|\bno such tool\b/i.test(e.message);
+  // A desktop build older than the command: Tauri's own refusal.
+  return e.code === 'E_UNKNOWN' && /command\s+\S+\s+not found/i.test(e.message);
+}
+
+/** The error line a read shows. */
+export function readErrorText(e: IpcError): string {
+  return isOlderHub(e) ? NEWER_HUB : e.message;
+}
+
+// ---------------------------------------------------------------------------
+// Filters
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** A filters object with defaults and junk dropped: `status: any`, `has:
+ *  any`, empty `query`, `false` flags are all "no filter". */
+export function normalizeFilters(v: unknown): WorkTreeFilters {
+  if (!isObj(v)) return {};
+  const out: WorkTreeFilters = {};
+  const org = v.org;
+  if (org === 'none') out.org = 'none';
+  else if (typeof org === 'number' && Number.isInteger(org) && org > 0) out.org = org;
+  const tr = v.tracker;
+  if (tr === 'local' || tr === 'ref') out.tracker = tr;
+  else if (typeof tr === 'number' && Number.isInteger(tr) && tr > 0) out.tracker = tr;
+  if (typeof v.status === 'string' && (STATUS_FILTERS as readonly string[]).includes(v.status) && v.status !== 'any') {
+    out.status = v.status as WorkStatusFilter;
+  }
+  if (v.mine === true) out.mine = true;
+  if (typeof v.has === 'string' && (HAS_FILTERS as readonly string[]).includes(v.has) && v.has !== 'any') {
+    out.has = v.has as WorkHasFilter;
+  }
+  if (v.review === true) out.review = true;
+  if (typeof v.query === 'string' && v.query.trim() !== '') out.query = v.query.trim();
+  if (typeof v.group === 'string' && v.group !== '') out.group = v.group;
+  return out;
+}
+
+const FILTER_ORDER: (keyof WorkTreeFilters)[] = ['org', 'tracker', 'status', 'mine', 'has', 'review', 'query', 'group'];
+
+/** A stable string for a filters object (equal filters, equal keys). */
+export function filtersKey(f: WorkTreeFilters): string {
+  const n = normalizeFilters(f);
+  return JSON.stringify(FILTER_ORDER.filter((k) => n[k] !== undefined).map((k) => [k, n[k]]));
+}
+
+export function sameFilters(a: WorkTreeFilters, b: WorkTreeFilters): boolean {
+  return filtersKey(a) === filtersKey(b);
+}
+
+/** Filters as a URL-safe query string (`org=3&status=open&q=login`). */
+export function filtersToQuery(f: WorkTreeFilters): string {
+  const n = normalizeFilters(f);
+  const p = new URLSearchParams();
+  for (const k of FILTER_ORDER) {
+    const v = n[k];
+    if (v === undefined) continue;
+    p.set(k === 'query' ? 'q' : k, v === true ? '1' : String(v));
+  }
+  return p.toString();
+}
+
+/** The inverse of `filtersToQuery`; anything malformed is dropped. */
+export function filtersFromQuery(s: string): WorkTreeFilters {
+  const p = new URLSearchParams(s.startsWith('?') ? s.slice(1) : s);
+  const num = (v: string | null) => (v !== null && /^\d+$/.test(v) ? Number(v) : v);
+  return normalizeFilters({
+    org: num(p.get('org')),
+    tracker: num(p.get('tracker')),
+    status: p.get('status') ?? undefined,
+    mine: p.get('mine') === '1',
+    has: p.get('has') ?? undefined,
+    review: p.get('review') === '1',
+    query: p.get('q') ?? undefined,
+    group: p.get('group') ?? undefined,
+  });
+}
+
+/** How many filters are on (the chip's count); `group` is navigation. */
+export function activeFilterCount(f: WorkTreeFilters): number {
+  const n = normalizeFilters(f);
+  return FILTER_ORDER.filter((k) => k !== 'group' && n[k] !== undefined).length;
+}
+
+// ---------------------------------------------------------------------------
+// Sections: org → group → tasks, merged from pages
+
+/** A section's key: its org and its group (a group id can recur per org). */
+export function sectionKey(orgId: number | null | undefined, groupId: string): string {
+  return `${orgId ?? 'none'}|${groupId}`;
+}
+
+export function orgSectionKey(orgId: number | null | undefined): string {
+  return `org:${orgId ?? 'none'}`;
+}
+
+/** The tasks loaded for one section, and where its next page starts. */
+export interface SectionState {
+  tasks: WorkTask[];
+  /** The section's own cursor; null: no more, or not loaded by section. */
+  cursor: string | null;
+  /** Loaded with `filters.group` (so `cursor` is the section's). */
+  own: boolean;
+}
+
+export interface GroupSection {
+  key: string;
+  orgId: number | null;
+  group: GroupRef;
+  count: number;
+  tasks: WorkTask[];
+  /** More tasks exist than are loaded. */
+  more: boolean;
+}
+
+export interface OrgSection {
+  key: string;
+  orgId: number | null;
+  name: string;
+  color: string | null;
+  count: number;
+  groups: GroupSection[];
+}
+
+/** Append `add` to `base`, skipping task ids already there (a page is
+ *  stable, but a task that moved may show up twice across reads). */
+export function mergeTasks(base: readonly WorkTask[], add: readonly WorkTask[]): WorkTask[] {
+  const seen = new Set(base.map((t) => t.task_id));
+  const out = [...base];
+  for (const t of add) {
+    if (seen.has(t.task_id)) {
+      const i = out.findIndex((x) => x.task_id === t.task_id);
+      out[i] = t;
+    } else {
+      seen.add(t.task_id);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/** Spread a page's tasks into their sections' states (the first page of the
+ *  view fills the first sections). A section loaded by itself keeps its own
+ *  tasks and cursor. */
+export function distributeTasks(
+  page: Pick<WorkTreePage, 'tasks'>,
+  prev: ReadonlyMap<string, SectionState> = new Map(),
+): Map<string, SectionState> {
+  const out = new Map<string, SectionState>();
+  for (const [k, s] of prev) if (s.own) out.set(k, s);
+  for (const t of page.tasks ?? []) {
+    const k = sectionKey(t.org_id, t.group?.id ?? 'none');
+    const cur = out.get(k);
+    if (cur?.own) {
+      out.set(k, { ...cur, tasks: mergeTasks(cur.tasks, [t]) });
+    } else {
+      out.set(k, { tasks: mergeTasks(cur?.tasks ?? [], [t]), cursor: null, own: false });
+    }
+  }
+  return out;
+}
+
+/** The sections the view draws: every header from `groups` (in the hub's
+ *  order: named orgs by name, unassigned last), with the tasks loaded so
+ *  far. */
+export function buildSections(
+  groups: readonly WorkTreeGroup[],
+  orgs: readonly WorkTreeOrg[],
+  states: ReadonlyMap<string, SectionState>,
+): OrgSection[] {
+  const orgById = new Map(orgs.map((o) => [o.id, o]));
+  const out: OrgSection[] = [];
+  const byOrg = new Map<string, OrgSection>();
+  for (const g of groups) {
+    const ok = orgSectionKey(g.org_id);
+    let o = byOrg.get(ok);
+    if (!o) {
+      const meta = g.org_id != null ? orgById.get(g.org_id) : undefined;
+      o = {
+        key: ok,
+        orgId: g.org_id ?? null,
+        name: g.org_id == null ? 'Unassigned' : (meta?.name ?? g.org_name ?? `Organisation ${g.org_id}`),
+        color: meta?.color ?? null,
+        count: 0,
+        groups: [],
+      };
+      byOrg.set(ok, o);
+      out.push(o);
+    }
+    const k = sectionKey(g.org_id, g.group.id);
+    const st = states.get(k);
+    const tasks = st?.tasks ?? [];
+    o.count += g.count;
+    o.groups.push({
+      key: k,
+      orgId: g.org_id ?? null,
+      group: g.group,
+      count: g.count,
+      tasks,
+      more: st?.own ? st.cursor != null : tasks.length < g.count,
+    });
+  }
+  return out;
+}
+
+/** The filters that load exactly one section. */
+export function sectionFilters(base: WorkTreeFilters, orgId: number | null, groupId: string): WorkTreeFilters {
+  return { ...normalizeFilters(base), org: orgId ?? 'none', group: groupId };
+}
+
+// ---------------------------------------------------------------------------
+// Occurrences, states and provenance
+
+/** How an occurrence draws: `primary` ★, `secondary`, `suggested` (dashed,
+ *  "?"), `past` (dimmed, "ended"), `rejected`. An unknown state is past:
+ *  never shown as active. */
+export type OccurrenceKind = 'primary' | 'secondary' | 'suggested' | 'past' | 'rejected';
+
+export function occurrenceKind(l: Pick<WorkTaskLink, 'state' | 'primary'>): OccurrenceKind {
+  switch (l.state) {
+    case 'active':
+      return l.primary ? 'primary' : 'secondary';
+    case 'suggested':
+      return 'suggested';
+    case 'rejected':
+      return 'rejected';
+    default:
+      return 'past';
+  }
+}
+
+/** Whether `l` is an occurrence of the selected session (every one is
+ *  highlighted; an ended link names no live session). */
+export function isOccurrenceOf(l: Pick<WorkTaskLink, 'session_id' | 'state'>, sessionId: number | null | undefined): boolean {
+  return sessionId != null && l.session_id === sessionId && l.state !== 'ended' && l.state !== 'rejected';
+}
+
+/** Every task id (loaded) that shows `sessionId`. */
+export function tasksShowingSession(sections: readonly OrgSection[], sessionId: number | null | undefined): Set<string> {
+  const out = new Set<string>();
+  if (sessionId == null) return out;
+  for (const o of sections)
+    for (const g of o.groups)
+      for (const t of g.tasks) if ((t.sessions ?? []).some((l) => isOccurrenceOf(l, sessionId))) out.add(t.task_id);
+  return out;
+}
+
+/** A task's short status: the tracker's own name, else its category. */
+export function taskStatus(t: Pick<WorkTask, 'status_name' | 'status_category'>): string {
+  if (t.status_name) return t.status_name;
+  switch (t.status_category) {
+    case 'todo':
+      return 'to do';
+    case 'in_progress':
+      return 'in progress';
+    case 'done':
+      return 'done';
+    default:
+      return '';
+  }
+}
+
+/** `KEY title`, or the title alone, or the task id. */
+export function taskLabel(t: { key?: string | null; title?: string | null; task_id: string }): string {
+  const title = (t.title ?? '').trim();
+  if (t.key && title) return `${t.key} ${title}`;
+  return t.key || title || t.task_id;
+}
+
+/** Where a task's org comes from, as a sentence. */
+export function orgSourceText(t: Pick<WorkTask, 'org_source' | 'tracker_name' | 'org_mixed'>): string {
+  switch (t.org_source) {
+    case 'tracker':
+      return `from tracker ${t.tracker_name ?? 'its tracker'}`;
+    case 'item':
+      return 'set by a person';
+    case 'sessions':
+      return t.org_mixed
+        ? 'inferred from its sessions, which span several organisations — not a boundary'
+        : 'inferred from its sessions — not a boundary';
+    default:
+      return 'no organisation';
+  }
+}
+
+const PROVIDER_NAMES: Record<string, string> = {
+  jira: 'Jira',
+  jira_dc: 'Jira',
+  github: 'GitHub',
+  asana: 'Asana',
+  linear: 'Linear',
+};
+
+export function providerName(p: string | null | undefined): string {
+  return (p && PROVIDER_NAMES[p]) || 'the tracker';
+}
+
+/** Where a task's group comes from, as a sentence. */
+export function groupSourceText(
+  g: GroupRef,
+  t: Pick<WorkTask, 'tracker_name' | 'provider'>,
+  ruleName?: string | null,
+): string {
+  switch (g.source) {
+    case 'manual':
+      return 'placed here by a person';
+    case 'rule':
+      return ruleName ? `placed by the rule “${ruleName}”` : 'placed by a rule';
+    case 'tracker':
+      return `from the tracker: ${t.tracker_name ?? providerName(t.provider)} ${g.tracker_value ?? g.label}`;
+    case 'repo':
+      return `from the repository of its most recent session (${g.label})`;
+    case 'key':
+      return `from its key prefix ${g.label}`;
+    default:
+      return 'nothing known — no group';
+  }
+}
+
+/** What an edit of the group changes, for the placement note. */
+export function placementNote(g: GroupRef, t: Pick<WorkTask, 'provider'>): string | null {
+  if (g.source === 'tracker') {
+    return `Placing it elsewhere is local to fleet: it never changes ${providerName(t.provider)}.`;
+  }
+  if (g.source === 'rule') return 'Placing it by hand overrides the rule for this task only.';
+  if (g.source === 'manual') return 'Clearing the placement falls back to where fleet would put it.';
+  return 'Placing it is local to fleet navigation; it is never a boundary.';
+}
+
+/** A tracker state that is not `ok`: "tracker down". */
+export function trackerDown(t: Pick<WorkTask, 'tracker_state' | 'kind'>): boolean {
+  return t.kind === 'tracker' && !!t.tracker_state && t.tracker_state !== 'ok';
+}
+
+/** What is wrong with a task's tracker, in the tracker settings' own words
+ *  ("tracker: not tested yet", "tracker: token expired or wrong", …): a
+ *  tracker that was never tested is not "down". */
+export function trackerDownLabel(t: Pick<WorkTask, 'tracker_state'>): string {
+  return `tracker: ${trackerStateBadge(t.tracker_state ?? '').label}`;
+}
+
+/** A review kind as a badge. */
+export function reviewKindLabel(kind: string): string {
+  switch (kind) {
+    case 'suggestion':
+      return 'suggestion';
+    case 'cross_org':
+      return 'cross-org';
+    case 'unavailable':
+      return 'ticket unavailable';
+    case 'no_primary':
+      return 'no primary';
+    default:
+      return kind;
+  }
+}
+
+/** The undo of a review decision: a person's confirm / reject goes back to
+ *  a suggestion. Nothing else has an exact inverse. */
+export function undoOf(d: BatchDecision, version?: number | null): BatchDecision | null {
+  if (d.decision !== 'confirm' && d.decision !== 'reject') return null;
+  return {
+    session_id: d.session_id,
+    link_id: d.link_id,
+    decision: 'reconsider',
+    ...(version != null ? { expected_version: version } : {}),
+  };
+}
+
+/** Group a session's links: active (primary first), suggested, past,
+ *  rejected. */
+export function groupSessionLinks<T extends Pick<WorkTaskLink, 'state' | 'primary' | 'ended_at' | 'link_id'>>(
+  links: readonly T[],
+): { active: T[]; suggested: T[]; past: T[]; rejected: T[] } {
+  const active = links.filter((l) => l.state === 'active');
+  active.sort((a, b) => Number(!!b.primary) - Number(!!a.primary) || a.link_id - b.link_id);
+  const suggested = links.filter((l) => l.state === 'suggested');
+  const rejected = links.filter((l) => l.state === 'rejected');
+  const past = links
+    .filter((l) => !['active', 'suggested', 'rejected'].includes(l.state))
+    .sort((a, b) => (b.ended_at ?? 0) - (a.ended_at ?? 0) || b.link_id - a.link_id);
+  return { active, suggested, past, rejected };
+}
+
+// ---------------------------------------------------------------------------
+// Stores
+
+/** Which tree the sidebar shows. */
+export type SidebarView = 'sessions' | 'work';
+const isSidebarView = (v: unknown): v is SidebarView => v === 'sessions' || v === 'work';
+export const sidebarView = writable<SidebarView>(readPref('sidebar.view', 'sessions', isSidebarView));
+sidebarView.subscribe((v) => writePref('sidebar.view', v));
+
+export function toggleSidebarView(): void {
+  sidebarView.update((v) => (v === 'work' ? 'sessions' : 'work'));
+}
+
+const isFilters = (v: unknown): v is WorkTreeFilters => isObj(v);
+/** The Work view's filters (without `group`, which is per section). */
+export const workViewFilters = writable<WorkTreeFilters>(
+  (() => {
+    const { group: _g, ...f } = normalizeFilters(readPref('work.filters', {}, isFilters));
+    return f;
+  })(),
+);
+workViewFilters.subscribe((v) => writePref('work.filters', normalizeFilters(v)));
+
+const isViewId = (v: unknown): v is number | null => v === null || (typeof v === 'number' && Number.isInteger(v));
+/** The saved view the filters came from (null: none). */
+export const activeWorkViewId = writable<number | null>(readPref('work.view_id', null, isViewId));
+activeWorkViewId.subscribe((v) => writePref('work.view_id', v));
+
+/** The key per-view state is kept under. */
+export const workViewKey: Readable<string> = derived(activeWorkViewId, (id) => (id == null ? 'custom' : `view:${id}`));
+
+type Nested = Record<string, Record<string, boolean>>;
+const isNested = (v: unknown): v is Nested =>
+  isObj(v) && Object.values(v).every((x) => isObj(x) && Object.values(x).every((b) => typeof b === 'boolean'));
+/** view key → section key → expanded. */
+export const workExpanded = writable<Nested>(readPref('work.expanded', {}, isNested));
+workExpanded.subscribe((v) => writePref('work.expanded', v));
+
+export function setExpanded(viewKey: string, key: string, open: boolean): void {
+  workExpanded.update((m) => ({ ...m, [viewKey]: { ...(m[viewKey] ?? {}), [key]: open } }));
+}
+
+const isSelMap = (v: unknown): v is Record<string, string> =>
+  isObj(v) && Object.values(v).every((x) => typeof x === 'string');
+const selectedByView = writable<Record<string, string>>(readPref('work.selected', {}, isSelMap));
+selectedByView.subscribe((v) => writePref('work.selected', v));
+
+/** The task selected in the Work view (its id), kept per view. */
+export const selectedTaskId = writable<string | null>(get(selectedByView)[get(workViewKey)] ?? null);
+let restoring = false;
+selectedTaskId.subscribe((id) => {
+  if (restoring) return;
+  const k = get(workViewKey);
+  selectedByView.update((m) => {
+    const next = { ...m };
+    if (id) next[k] = id;
+    else delete next[k];
+    return next;
+  });
+});
+workViewKey.subscribe((k) => {
+  restoring = true;
+  selectedTaskId.set(get(selectedByView)[k] ?? null);
+  restoring = false;
+});
+
+/** Whether Details shows the selected task (until a session is opened). */
+export const taskDetailOpen = writable(false);
+onSessionOpened(() => taskDetailOpen.set(false));
+
+/** Select a task and show it in Details. */
+export function openTask(taskId: string): void {
+  selectedTaskId.set(taskId);
+  taskDetailOpen.set(true);
+  todayOpen.set(false);
+}
+
+/** A request to scroll the Work tree to a task (and load its section). */
+export const revealTaskRequest = writable<{ taskId: string; seq: number } | null>(null);
+let revealSeqN = 0;
+
+/** "Show in Work view": switch the sidebar, select the task, reveal it. */
+export function showTaskInWorkView(taskId: string): void {
+  sidebarView.set('work');
+  openTask(taskId);
+  revealTaskRequest.set({ taskId, seq: ++revealSeqN });
+}
+
+/** The last tree page's orgs, trackers and group labels, for names in the
+ *  detail and the placement picker. */
+export const workTreeMeta = writable<{ orgs: WorkTreeOrg[]; trackers: WorkTreeTracker[]; groups: WorkTreeGroup[] }>({
+  orgs: [],
+  trackers: [],
+  groups: [],
+});
+
+/** Bumped by every work write (`work.ts`), by `work:changed` and by session
+ *  events that touch work; the Work view re-reads what it shows (debounced)
+ *  when it moves. Lives in `work.ts` so its link wrappers bump it too. */
+export { workChanged, bumpWorkChanged };
+
+/** The session ids the loaded tree shows, so their status changes refresh
+ *  it even when they have no primary work. */
+export const workTreeSessionIds = writable<ReadonlySet<number>>(new Set());
+
+/** A `work:changed` frame (ids only). */
 /** `work:changed`: ids only. `resync` is the desktop's own: its hub stream
  *  was re-established after a gap (`lagged`, or a connection that did not
  *  resume), so nothing short of a whole reload is current. */
@@ -507,4 +1112,66 @@ export function parseWorkChanged(payload: unknown): WorkChanged | null {
  *  than re-reading the visible page: a gap in the stream. */
 export function needsFullReload(changes: readonly WorkChanged[]): boolean {
   return changes.some((c) => c.what === 'resync');
+}
+
+/** What of a row the Work view shows: its primary and suggested work, its
+ *  org, `work_rev` (moves when ANY of its live links changes, a secondary
+ *  one too), whether it is alive, and whether it needs you. Not the raw
+ *  `claude_status`: working ↔ idle flips on every turn and the tree draws
+ *  nothing from it but "needs you". */
+function workSig(r: SessionRow | undefined): string {
+  if (!r) return '';
+  const w = r.work;
+  const s = r.work_suggested;
+  const needsYou = r.claude_status === 'blocked' || r.claude_status === 'failed' || r.stuck_kind != null;
+  return JSON.stringify([
+    w?.link_id ?? null,
+    w?.state ?? null,
+    w?.item_id ?? null,
+    w?.key ?? null,
+    w?.archived_at ?? null,
+    s?.link_id ?? null,
+    s?.suggestions ?? null,
+    r.org_id ?? null,
+    r.work_rev ?? 0,
+    r.status,
+    needsYou ? 1 : 0,
+  ]);
+}
+
+/** Whether a batch of session events changes anything the Work view shows:
+ *  a row with work (before or after) or a row the tree shows whose work,
+ *  org or attention moved, or that was created / killed. Call BEFORE the
+ *  events are applied to the store (it compares against it). */
+export function sessionEventsTouchWork(
+  events: readonly SessionEvent[],
+  current: readonly SessionRow[] = get(sessions),
+  shown: ReadonlySet<number> = get(workTreeSessionIds),
+): boolean {
+  const byId = new Map(current.map((r) => [r.id, r]));
+  for (const e of events) {
+    if (e.type === 'killed') {
+      const prev = byId.get(e.id);
+      if (shown.has(e.id) || prev?.work || prev?.work_suggested) return true;
+      continue;
+    }
+    if (e.type !== 'created' && e.type !== 'updated') continue;
+    const prev = byId.get(e.row.id);
+    const involved = shown.has(e.row.id) || !!(prev?.work || prev?.work_suggested || e.row.work || e.row.work_suggested);
+    if (involved && workSig(prev) !== workSig(e.row)) return true;
+  }
+  return false;
+}
+
+/** Route the batched `work:*` frames: a `changed` frame bumps the tick. */
+export function noteWorkEvents(events: readonly { type: string }[]): void {
+  if (events.some((e) => e.type === 'item')) bumpWorkChanged();
+}
+
+/** `work:changed` frames (placements, rules, views, a task's org, or the
+ *  desktop's own `resync` after a stream gap): the Work view re-reads what
+ *  it shows. Every kind is a re-read today; `needsFullReload` tells the
+ *  cases a caller might one day treat differently apart. */
+export function noteWorkChanged(changes: readonly WorkChanged[]): void {
+  if (changes.length > 0) bumpWorkChanged();
 }
