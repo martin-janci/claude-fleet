@@ -72,10 +72,17 @@ pub const LAGGED_FRAME: &str = "lagged";
 /// going through the same drain thread into the same `Emitter::emit`.
 ///
 /// `&'static str` rather than `String` is deliberate; the only way to obtain
-/// one is [`known_event_name`].
+/// one is [`known_event_name`], or the bridge's own [`RESYNCED_EVENT`].
 pub trait RemoteEventSink: Send + Sync {
     fn emit_remote(&self, name: &'static str, payload: Value);
 }
+
+/// What the bridge emits after every re-list that reached the hub. Not a
+/// row event: the window re-fetches the stores whose list tools answer a
+/// different shape than their events (projects with their worktrees,
+/// trackers with their work items) with its own loaders — see [`HubResync`]
+/// for why they are not re-listed here.
+pub const RESYNCED_EVENT: &str = "hub:resynced";
 
 /// Re-list the fleet and emit what it finds, because a fresh subscription
 /// replays nothing.
@@ -107,7 +114,9 @@ pub trait EventStreamBody: Send {
 /// driven by a script of connections instead of a hub.
 #[async_trait::async_trait]
 pub trait HubEventStream: Send + Sync {
-    async fn open(&self) -> Result<Box<dyn EventStreamBody>, String>;
+    /// `last_id` is the last frame id this client applied, sent as
+    /// `Last-Event-ID` so the hub can replay the gap.
+    async fn open(&self, last_id: Option<&str>) -> Result<Box<dyn EventStreamBody>, String>;
 }
 
 /// Waiting. Injected so that no test of the reconnect loop sleeps on the real
@@ -245,6 +254,9 @@ pub struct EventBridge {
     /// Told every transition, so the interface can show a banner while the
     /// stream is down. See [`super::connection`].
     status: Arc<dyn ConnectionReporter>,
+    /// The `id:` of the last row frame this bridge applied — what the next
+    /// open sends as `Last-Event-ID`. `None` until a row frame carried one.
+    last_id: Mutex<Option<String>>,
 }
 
 impl EventBridge {
@@ -262,6 +274,7 @@ impl EventBridge {
             delay,
             cancel,
             status: Arc::new(NoReporter),
+            last_id: Mutex::new(None),
         }
     }
 
@@ -287,7 +300,8 @@ impl EventBridge {
             // Drawn before anything is reported, so the banner names the
             // delay this loop will really wait rather than a nominal one.
             let wait;
-            match self.stream.open().await {
+            let last = self.last_id.lock().expect("last id").clone();
+            match self.stream.open(last.as_deref()).await {
                 Ok(body) => {
                     // Reporting `Connected` and re-listing both move into
                     // `pump`, gated on the hub's `ready` frame: whether this
@@ -427,13 +441,19 @@ impl EventBridge {
                             // were still standing. Pinned by
                             // `the_backfill_runs_with_the_contract_verdict_already_cleared`.
                             self.status.report(HubConnection::Connected);
-                            // A fresh subscription replays nothing, so
-                            // everything that happened while this client was
-                            // detached is missing. Re-list before reading
-                            // any further frame, so whatever the hub sends
-                            // from here on applies on top of the re-listed
-                            // rows rather than underneath them.
-                            self.resync.resync().await;
+                            // A subscription the hub could not resume
+                            // replays nothing, so everything that happened
+                            // while this client was detached is missing.
+                            // Re-list before reading any further frame, so
+                            // whatever the hub sends from here on applies on
+                            // top of the re-listed rows rather than
+                            // underneath them. A resumed one replays the gap
+                            // itself (`Last-Event-ID`): no re-list.
+                            if resumed(&frame.data) {
+                                tracing::info!("[hub events] the hub replayed the gap; no re-list");
+                            } else {
+                                self.resync.resync().await;
+                            }
                         }
                         contract::ContractFit::TooOld => {
                             tracing::warn!(
@@ -485,7 +505,14 @@ impl EventBridge {
                 }
                 match self.deliver(&frame.name, &frame.data) {
                     Delivery::KeepReading => {}
-                    Delivery::Row => row_events = true,
+                    Delivery::Row => {
+                        row_events = true;
+                        // Applied first, then remembered: a crash between
+                        // the two re-applies rather than skips.
+                        if let Some(id) = &frame.id {
+                            *self.last_id.lock().expect("last id") = Some(id.clone());
+                        }
+                    }
                     // Lagged: only the lifetime can vouch for this one.
                     Delivery::EndOfStream => {
                         return StreamEnd::Gap {
@@ -637,14 +664,15 @@ struct Seen {
 /// | `list_tasks` | `TaskRow` | `task:updated` (a task is never removed) |
 /// | `list_accounts` | `AccountRow` | `account:upserted` (an account is never removed here) |
 ///
-/// **Projects and worktrees are deliberately left out.** `list_projects`
-/// answers `ProjectTreeRow` and `list_worktrees` answers `WorktreeOccupancy`,
-/// while `project:updated` and `worktree:updated` carry `ProjectRow` and
-/// `WorktreeRow`. Emitting the list shapes under those names would not resync
-/// those stores, it would corrupt them — a wrong payload is worse than a stale
-/// one. A project or worktree changed during a gap therefore stays stale until
-/// something else refreshes it; that is a real, named limitation rather than
-/// an oversight.
+/// **Projects and worktrees are deliberately not re-listed here.**
+/// `list_projects` answers `ProjectTreeRow` and `list_worktrees` answers
+/// `WorktreeOccupancy`, while `project:updated` and `worktree:updated` carry
+/// `ProjectRow` and `WorktreeRow`. Emitting the list shapes under those names
+/// would not resync those stores, it would corrupt them — a wrong payload is
+/// worse than a stale one. The same holds for trackers and work items. So a
+/// re-list that reached the hub ends with [`RESYNCED_EVENT`], and the window
+/// re-fetches those stores with its own loaders (`loadProjects`,
+/// `loadTrackers`), which already know the list shapes.
 pub struct HubResync {
     hub: Arc<HubBackend>,
     sink: Arc<dyn RemoteEventSink>,
@@ -709,10 +737,16 @@ impl FleetResync for HubResync {
     }
 
     async fn resync(&self) {
+        // Whether any list reached the hub: a re-list that failed outright
+        // emits nothing at all (the stores stay as they were), and that
+        // includes the refetch signal at the end — the window's loaders
+        // would only fail the same way.
+        let mut reached = false;
         // `force: false` — a reconcile pass belongs to whoever owns the fleet,
         // and that is the hub. This asks for what it already knows.
         match self.hub.list_sessions(false).await {
             Ok(rows) => {
+                reached = true;
                 let now: HashSet<i64> = rows.iter().map(|r| r.id).collect();
                 for row in &rows {
                     self.emit_row("session:updated", row);
@@ -734,6 +768,7 @@ impl FleetResync for HubResync {
         }
         match self.hub.list_hosts().await {
             Ok(rows) => {
+                reached = true;
                 let now: HashSet<String> = rows.iter().map(|r| r.alias.clone()).collect();
                 for row in &rows {
                     self.emit_row("host:probed", row);
@@ -755,6 +790,7 @@ impl FleetResync for HubResync {
         }
         match self.hub.list_tasks(None, None, None).await {
             Ok(rows) => {
+                reached = true;
                 for row in &rows {
                     self.emit_row("task:updated", row);
                 }
@@ -766,6 +802,7 @@ impl FleetResync for HubResync {
         }
         match self.hub.list_accounts().await {
             Ok(rows) => {
+                reached = true;
                 for row in &rows {
                     self.emit_row("account:upserted", row);
                 }
@@ -774,6 +811,12 @@ impl FleetResync for HubResync {
                 code = %e.code,
                 "[hub events] could not re-list accounts after reconnecting"
             ),
+        }
+        if reached {
+            self.sink.emit_remote(
+                RESYNCED_EVENT,
+                serde_json::json!({ "projects": true, "work": true }),
+            );
         }
     }
 }
@@ -811,10 +854,10 @@ impl std::fmt::Debug for HubSse {
 
 #[async_trait::async_trait]
 impl HubEventStream for HubSse {
-    async fn open(&self) -> Result<Box<dyn EventStreamBody>, String> {
+    async fn open(&self, last_id: Option<&str>) -> Result<Box<dyn EventStreamBody>, String> {
         let url = format!("{}/events", self.cfg.base_url);
         let at = Endpoint::parse(&url)?;
-        let opened = tokio::time::timeout(OPEN_TIMEOUT, open_stream(&at, &self.cfg.token))
+        let opened = tokio::time::timeout(OPEN_TIMEOUT, open_stream(&at, &self.cfg.token, last_id))
             .await
             .map_err(|_| format!("no response head within {OPEN_TIMEOUT:.0?}"))?;
         // The token can appear in a transport error only if something echoed
@@ -833,20 +876,45 @@ fn redact(text: &str, token: &str) -> String {
     text.replace(token, "<redacted>")
 }
 
-/// Connect, send the request, read the head, hand back the body.
-async fn open_stream(at: &Endpoint, bearer: &str) -> Result<Box<dyn EventStreamBody>, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut conn = connect(at).await?;
-    // No `Connection: close` — unlike `POST /mcp` this request is supposed to
-    // stay open. `Cache-Control: no-cache` is what the SSE spec asks a client
-    // to send, and it stops an intermediary buffering the stream into
-    // uselessness.
-    let request = format!(
+/// The `GET /events` request head. No `Connection: close` — unlike
+/// `POST /mcp` this request is supposed to stay open. `Cache-Control:
+/// no-cache` is what the SSE spec asks a client to send, and it stops an
+/// intermediary buffering the stream into uselessness. `Last-Event-ID` is
+/// the last row frame this client applied (`/events` replays from it, or
+/// says `resumed: false`).
+pub fn events_request(at: &Endpoint, bearer: &str, last_id: Option<&str>) -> String {
+    let mut request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
-         Accept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n",
+         Accept: text/event-stream\r\nCache-Control: no-cache\r\n",
         at.target(),
         at.authority()
     );
+    if let Some(id) = last_id {
+        request.push_str(&format!("Last-Event-ID: {id}\r\n"));
+    }
+    request.push_str("\r\n");
+    request
+}
+
+/// The `ready` frame's `resumed` field: whether `Last-Event-ID` was honoured.
+/// A hub without the field (or a malformed one) is read as `false`, which is
+/// today's behaviour: re-list.
+fn resumed(ready: &str) -> bool {
+    serde_json::from_str::<Value>(ready)
+        .ok()
+        .and_then(|v| v.get("resumed")?.as_bool())
+        .unwrap_or(false)
+}
+
+/// Connect, send the request, read the head, hand back the body.
+async fn open_stream(
+    at: &Endpoint,
+    bearer: &str,
+    last_id: Option<&str>,
+) -> Result<Box<dyn EventStreamBody>, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut conn = connect(at).await?;
+    let request = events_request(at, bearer, last_id);
     conn.write_all(request.as_bytes())
         .await
         .map_err(|e| format!("send to {}:{}: {e}", at.host(), at.port()))?;

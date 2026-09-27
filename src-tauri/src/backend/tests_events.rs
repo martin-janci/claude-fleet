@@ -151,6 +151,8 @@ struct ScriptedStream {
     script: StdMutex<std::collections::VecDeque<Connection>>,
     cancel: CancellationToken,
     opens: std::sync::atomic::AtomicUsize,
+    /// The `Last-Event-ID` each open was asked to resume from.
+    asked: StdMutex<Vec<Option<String>>>,
 }
 
 impl ScriptedStream {
@@ -159,17 +161,26 @@ impl ScriptedStream {
             script: StdMutex::new(script.into()),
             cancel,
             opens: std::sync::atomic::AtomicUsize::new(0),
+            asked: StdMutex::new(Vec::new()),
         })
     }
     fn opens(&self) -> usize {
         self.opens.load(std::sync::atomic::Ordering::SeqCst)
     }
+    fn asked(&self) -> Vec<Option<String>> {
+        self.asked.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
 impl HubEventStream for ScriptedStream {
-    async fn open(&self) -> Result<Box<dyn EventStreamBody>, String> {
+    async fn open(&self, last_id: Option<&str>) -> Result<Box<dyn EventStreamBody>, String> {
         let next = self.script.lock().unwrap().pop_front();
+        // Recorded like `opens`: for a scripted connection, not for the
+        // spent-script open that only ends the run.
+        if next.is_some() {
+            self.asked.lock().unwrap().push(last_id.map(str::to_string));
+        }
         match next {
             Some(Connection::Fails(why)) => {
                 self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -279,6 +290,23 @@ async fn drive_bounded(
 /// `data: <json>` then a blank line).
 fn frame(name: &str, payload: &Value) -> String {
     format!("event: {name}\ndata: {payload}\n\n")
+}
+
+/// `frame` with the `id:` line `/events` puts on every row frame.
+fn frame_with_id(name: &str, payload: &Value, id: &str) -> String {
+    format!("event: {name}\nid: {id}\ndata: {payload}\n\n")
+}
+
+/// A `ready` frame saying whether the hub honoured `Last-Event-ID`.
+fn ready_resumed(resumed: bool) -> String {
+    frame(
+        READY_FRAME,
+        &json!({
+            "version": "0.3.1", "now": 1, "kinds": ["session"],
+            "contract": fleet_core::wire_contract::CONTRACT_REVISION,
+            "resumed": resumed
+        }),
+    )
 }
 
 /// Exactly what the hub sends for `change`: the same name and the same JSON a
@@ -1462,7 +1490,7 @@ async fn the_real_stream_reads_a_chunked_sse_response_from_a_real_socket() {
         token: "cl_s3cret".into(),
         client_name: "laptop".into(),
     };
-    let mut stream = HubSse::new(cfg).open().await.expect("the stream opens");
+    let mut stream = HubSse::new(cfg).open(None).await.expect("the stream opens");
     let mut decoder = SseDecoder::new();
     let mut frames = Vec::new();
     while let Some(text) = stream.next().await.expect("a readable stream") {
@@ -1527,7 +1555,7 @@ async fn a_refused_stream_reports_the_hubs_own_words_and_never_the_token() {
         token: "cl_s3cret".into(),
         client_name: "laptop".into(),
     };
-    let err = match HubSse::new(cfg).open().await {
+    let err = match HubSse::new(cfg).open(None).await {
         Err(e) => e,
         Ok(_) => panic!("503 must be a failure, not a stream"),
     };
@@ -1686,10 +1714,13 @@ async fn a_resync_emits_the_rows_it_re_listed_as_the_events_the_stores_apply() {
             "session:updated",
             "session:updated",
             "host:probed",
-            "host:probed"
+            "host:probed",
+            "hub:resynced",
         ],
         "a re-list has to reach the stores as the events they already apply — \
-         there is no `refetch` event and giving them one would be a store change"
+         there is no `refetch` event for THESE stores and giving them one would \
+         be a store change; `hub:resynced` at the end is for the window's own \
+         loaders (projects, work), never a row"
     );
     assert_eq!(
         table.asked(),
@@ -1846,5 +1877,70 @@ async fn a_resync_against_an_unreachable_hub_emits_nothing_rather_than_clearing_
         "a failed re-list must leave the stores as they were; emitting an \
          empty fleet would blank the UI on a blip: {:?}",
         seen.events()
+    );
+}
+
+/// perf-logs §4: the desktop never sent `Last-Event-ID`, so every reconnect
+/// re-listed sessions, hosts, tasks and accounts (63 `session:updated`).
+#[tokio::test]
+async fn a_reconnect_sends_the_last_frame_id_and_a_resumed_ready_skips_the_re_list() {
+    let killed = RowChange::SessionKilled(1);
+    let cancel = CancellationToken::new();
+    let stream = ScriptedStream::new(
+        vec![
+            Connection::Delivers(vec![
+                ready_resumed(false),
+                frame_with_id(killed.name(), &killed.payload(), "3-41"),
+            ]),
+            Connection::Delivers(vec![
+                ready_resumed(true),
+                frame_with_id(killed.name(), &killed.payload(), "3-42"),
+            ]),
+            Connection::Delivers(vec![ready_resumed(false)]),
+        ],
+        cancel.clone(),
+    );
+    let sink = Arc::new(Recorder::default());
+    let resync = Arc::new(CountingResync::default());
+    let delay = Arc::new(FakeDelay::default());
+    EventBridge::new(stream.clone(), sink, resync.clone(), delay, cancel)
+        .run()
+        .await;
+    assert_eq!(
+        stream.asked(),
+        vec![None, Some("3-41".to_string()), Some("3-42".to_string())],
+        "the first open has nothing to resume from; every reconnect names the last id it applied"
+    );
+    assert_eq!(
+        resync.count(),
+        2,
+        "the connection the hub resumed needs no re-list; the other two do"
+    );
+}
+
+#[test]
+fn the_events_request_carries_last_event_id_only_when_there_is_one() {
+    let at = crate::backend::remote::Endpoint::parse("https://fleet.example.com/events").unwrap();
+    let with = crate::backend::events::events_request(&at, "cl_tok", Some("3-41"));
+    assert!(with.contains("\r\nLast-Event-ID: 3-41\r\n"), "{with}");
+    assert!(with.contains("Authorization: Bearer cl_tok"), "{with}");
+    let without = crate::backend::events::events_request(&at, "cl_tok", None);
+    assert!(!without.contains("Last-Event-ID"), "{without}");
+}
+
+#[tokio::test]
+async fn a_resync_ends_by_telling_the_window_to_refetch_projects_and_work() {
+    let (resync, seen, _table) = resync_over(&[
+        ("list_sessions", "[]"),
+        ("list_hosts", "[]"),
+        ("list_tasks", "[]"),
+        ("list_accounts", "[]"),
+    ]);
+    resync.resync().await;
+    assert_eq!(
+        seen.names().last().map(|n| n.to_string()),
+        Some(crate::backend::events::RESYNCED_EVENT.to_string()),
+        "projects, worktrees and work have list shapes the events cannot carry; \
+         the window re-fetches them with its own loaders on this signal"
     );
 }

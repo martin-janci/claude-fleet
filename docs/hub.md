@@ -1479,6 +1479,10 @@ minutes of a busy fleet's churn) or because the hub has restarted since the id
 was minted, which the `generation` half is there to catch. `false` means
 re-list; it is never a reason to assume continuity.
 
+The desktop does this: it sends the last row frame id it applied, re-lists
+only when `ready` says `resumed: false`, and then also re-fetches projects,
+worktrees and work in the window.
+
 `?fields=id,claude_status,…` keeps only those keys in each frame's payload.
 There is no fixed vocabulary — a field is whatever the row type serialises,
 and that differs per event — so every name is accepted and the `ready` frame
@@ -1950,7 +1954,9 @@ standalone exactly as before.
   produced, so the window updates itself. When that stream drops it reconnects
   with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
   banner — "what you see may be out of date", the attempt number and the
-  reason — until it is back. A stream that goes silent (not even the hub's
+  reason — until it is back. After a dropped stream the app resumes from the
+  last event it applied when the hub still has it (15 minutes / 512 events);
+  otherwise it re-lists. A stream that goes silent (not even the hub's
   15-second keep-alive) for about 40 seconds is treated as dead, which is what
   a laptop that slept and woke on another network looks like.
 - **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
