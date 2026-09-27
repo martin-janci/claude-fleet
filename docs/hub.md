@@ -1272,6 +1272,8 @@ fleet-hub decide status                         # read-only: flag, modes, consen
 fleet-hub decide runs --feature work_link --limit 20
 fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]   # status_map: section → category (confidence)
 fleet-hub tracker section-map 3 --set 'ideas=todo' --set 'parked=done'   # a person applies them
+fleet-hub decide proposals apply 812 [--as in_progress]   # or one at a time, by its run
+fleet-hub decide proposals reject 814                    # "not this": stays unmapped
 ```
 
 The `decide.*` settings are set like the `work.*` ones, with `set_setting`
@@ -1280,7 +1282,14 @@ The `decide.*` settings are set like the `work.*` ones, with `set_setting`
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
 the record. `tracker section-map` is a `work_admin update` over loopback
-(master token) that confirms the section map with your entries on top.
+(master token) that confirms the section map with your entries on top;
+`proposals apply <run>` is the same call for one proposal (`not_planned`
+applies as done; `--as` corrects it) and marks its run confirmed or
+corrected. `proposals reject <run>` writes only the run's follow-up
+(`rejected`) in `state.db`, like `set-key`: the section stays unmapped and
+the answer is not proposed again until a new one exists (another input,
+question version or model). A paired desktop refuses both (tracker
+administration); a standalone desktop decides them in Settings → Work.
 
 The offline `work_link` benchmark (test map card J1, phase 0) measures a
 provider against the links people confirmed, before anything is turned on:
