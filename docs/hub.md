@@ -1272,6 +1272,8 @@ fleet-hub decide status                         # read-only: flag, modes, consen
 fleet-hub decide runs --feature work_link --limit 20
 fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]   # status_map: section → category (confidence)
 fleet-hub tracker section-map 3 --set 'ideas=todo' --set 'parked=done'   # a person applies them
+fleet-hub decide proposals apply 812 [--as in_progress]   # or one at a time, by its run
+fleet-hub decide proposals reject 814                    # "not this": stays unmapped
 ```
 
 The `decide.*` settings are set like the `work.*` ones, with `set_setting`
@@ -1280,7 +1282,14 @@ The `decide.*` settings are set like the `work.*` ones, with `set_setting`
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
 the record. `tracker section-map` is a `work_admin update` over loopback
-(master token) that confirms the section map with your entries on top.
+(master token) that confirms the section map with your entries on top;
+`proposals apply <run>` is the same call for one proposal (`not_planned`
+applies as done; `--as` corrects it) and marks its run confirmed or
+corrected. `proposals reject <run>` writes only the run's follow-up
+(`rejected`) in `state.db`, like `set-key`: the section stays unmapped and
+the answer is not proposed again until a new one exists (another input,
+question version or model). A paired desktop refuses both (tracker
+administration); a standalone desktop decides them in Settings → Work.
 
 The offline `work_link` benchmark (test map card J1, phase 0) measures a
 provider against the links people confirmed, before anything is turned on:
@@ -2031,7 +2040,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 183 commands, 78 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 185 commands, 78 route to a hub tool, 1 routes except for one argument shape, 85 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2074,6 +2083,7 @@ Of the 183 commands, 78 route to a hub tool, 1 routes except for one argument sh
 | `catalog_update_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_write_layer` | writing a layer edits a file in the catalog's git checkout, which only the machine that owns the fleet has, and the hub exposes no layer-authoring tool; author on that machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
+| `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
@@ -2111,6 +2121,7 @@ Of the 183 commands, 78 route to a hub tool, 1 routes except for one argument sh
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub with set_setting (master token) |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |

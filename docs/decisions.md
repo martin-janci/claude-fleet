@@ -179,6 +179,7 @@ tracker 3 "Company B"  org 1  status_map mode assist
     "parked" → not_planned (0.85)  (applies as done)  run 813
     "someday" → unsure (0.70)  (proposes nothing)  run 814
   apply (a person decides): fleet-hub tracker section-map 3 --set 'ideas=todo' --set 'parked=done'
+  or one at a time: fleet-hub decide proposals apply <run> [--as CATEGORY] | reject <run>
 ```
 
 The section names come from the tracker's stored config (matched through
@@ -192,9 +193,55 @@ carries the same change as `work_admin` arguments. In `shadow` the view
 shows, per section, the rule's and the model's category and how often they
 agree where the rule decided.
 
+**One proposal at a time: apply, correct or reject.** A proposal is named
+by its run id (`run 812` above). A person decides it three ways:
+
+| | Hub (operator) | Standalone desktop | What it writes | Follow-up |
+|---|---|---|---|---|
+| **Apply** | `fleet-hub decide proposals apply 812` | Settings → Work → **Apply** | the answer's category into your section map (`not_planned` applies as `done`; `unsure` proposes nothing and cannot be applied as is) | `confirmed` |
+| **Apply as** | `… apply 812 --as in_progress` | **Apply as…** | the category you chose (`todo`, `in_progress` or `done` only) | `corrected` to yours (`confirmed` if it is what the answer applies as) |
+| **Reject** | `fleet-hub decide proposals reject 814` | **Not this** | nothing but the run's follow-up: the section stays unmapped (it counts as to do) | `rejected` |
+
+An apply is a `work_admin update` of the tracker's settings — over loopback
+on the hub, like `fleet-hub tracker section-map`; in process on a desktop,
+like the section map's **Confirm** — so it confirms the section map with
+the inferred one kept under your entries, and the follow-up is recorded as
+below. `reject` writes only `decision_runs.followup` (on the hub, directly
+in `state.db`, like `set-key`; the running hub needs no restart).
+
+Only the proposal the view shows can be decided: a `status_map` run
+answered in `assist` with no fallback, the latest such answer for its
+section, not decided yet, about a section the tracker's stored config
+still lists and that is not in your map already. The section's name is
+looked up from the tracker's config through the section id — never taken
+from the caller.
+
+**Rejected stays rejected** until a new answer exists: the proposals view
+hides a section whose latest answer was rejected on the same input
+fingerprint, question version and model (`fleet-hub decide proposals`
+counts them: `N rejected proposal(s) hidden until a new answer`), and in
+`assist` the adapter does not ask that input again under the same pinned
+`decide.jev.model`. A changed board (a new fingerprint), a new question
+version or another model asks again and proposes again. (Under
+`jev-latest` the section is re-asked on the usual 14-day schedule and an
+answer of the model that was rejected stays hidden.)
+
+**In the desktop.** With `decide.jev.status_map` at `assist`, Settings →
+Work shows an Asana tracker's pending proposals as *Proposed by Jev
+(assist)*: the section, the proposed category, the confidence (e.g. 0.82),
+a short *why* — the answer's two most probable options — and, when shadow
+runs exist, how often Jev agreed with the keyword rule on the sections the
+rule classified; then **Apply**, **Apply as…** and **Not this**. Section
+names are the tracker's text and are shown as plain text. A desktop paired
+with a hub does not show them: deciding a proposal is tracker
+administration (`work_admin`, master-only), so its commands
+(`status_map_proposals`, `decide_status_map_proposal`) refuse with
+`E_LOCAL_ONLY` and the operator uses the CLI above.
+
 **Follow-up.** When your `settings.section_map` later holds a section, its
 latest answered run is marked `confirmed` (the answer applies as your
-category) or `corrected` (to yours) — `fleet-hub decide status` counts them.
+category) or `corrected` (to yours) — `fleet-hub decide status` counts them,
+with the `rejected` ones.
 
 **Off.** `decide.jev.status_map` to `off`; your confirmed maps stay (they
 are yours).
@@ -228,6 +275,8 @@ fleet-hub decide clear-key
 fleet-hub decide status [--days 30] [--json]
 fleet-hub decide runs [--feature work_link] [--limit 50] [--json]
 fleet-hub decide proposals [--tracker ID] [--json]   # status_map, above
+fleet-hub decide proposals apply RUN [--as todo|in_progress|done] [--json]   # over the running hub
+fleet-hub decide proposals reject RUN [--json]       # the run's follow-up only
 fleet-hub decide bench status-map --fixture | --labels FILE [--provider none|todo|rule|jev|haiku ...]
 fleet-hub decide bench work-link [--split all] [--provider bm25 --provider jev] [--shape choice+noul]
 fleet-hub decide bench … --provider haiku --haiku-host ALIAS [--haiku-model haiku|sonnet|opus] [--haiku-timeout SECS]
@@ -236,7 +285,7 @@ fleet-hub decide bench … --provider haiku --haiku-host ALIAS [--haiku-model ha
 The key is never an argument (shell history, `ps`). `set-key` and
 `clear-key` write the hub's database directly, like `fleet-hub tracker
 webhook`; the running hub reads the key at its next call. `status`,
-`runs` and `proposals` open the database read-only (no running hub needed; `--db FILE`
+`runs` and `proposals` (the listing) open the database read-only (no running hub needed; `--db FILE`
 reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the breaker, today's tokens and cost, and runs per

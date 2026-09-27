@@ -14,12 +14,17 @@
 //!   but ids, words and numbers — never the key.
 //! * `proposals` (J3, `status_map`) reads the same way; the section names it
 //!   prints come from the trackers' stored config, never from the runs.
+//!   `proposals apply <run> [--as CATEGORY]` writes the tracker's section
+//!   map over the running hub's `work_admin update`, like `fleet-hub tracker
+//!   section-map`; `proposals reject <run>` writes only the run's follow-up,
+//!   directly, like `set-key`.
 
 use crate::config::{self, HubOptions};
 use crate::out;
 use crate::serve;
 use clap::Subcommand;
 use fleet_core::service::decide;
+use fleet_core::service::decide::status_map::{self, ProposalAction, ProposalOutcome};
 use fleet_core::store::{DecisionRunFilter, DecisionRunRow, Secret, Store};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -84,7 +89,11 @@ pub enum DecideCmd {
     /// answer per section as `section → category (confidence)`, with the
     /// command a person runs to apply them, and in shadow the agreement
     /// with the keyword rule. Reads the database only; applies nothing.
+    /// `apply <run>` / `reject <run>` decide one proposal.
+    #[command(args_conflicts_with_subcommands = true)]
     Proposals {
+        #[command(subcommand)]
+        action: Option<ProposalCmd>,
         /// Only this tracker.
         #[arg(long)]
         tracker: Option<i64>,
@@ -95,6 +104,113 @@ pub enum DecideCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// `fleet-hub decide proposals apply|reject <run>`: a person decides one
+/// proposal, named by its decision run (the `run N` of the listing).
+#[derive(Subcommand, Debug)]
+pub enum ProposalCmd {
+    /// Put the proposal's category (not_planned → done), or --as another
+    /// one (a correction), into the tracker's section map and confirm it
+    /// — over the running hub's work_admin update, as `fleet-hub tracker
+    /// section-map` does. The run is marked confirmed or corrected.
+    Apply {
+        /// The proposal's run id.
+        run: i64,
+        /// todo, in_progress or done instead of the proposal's category.
+        #[arg(long = "as", value_name = "CATEGORY")]
+        category: Option<String>,
+    },
+    /// "Not this": mark the run rejected. The section stays unmapped, and
+    /// the answer is not proposed again until a new one exists (another
+    /// input, question version or model). Writes the hub's database only.
+    Reject {
+        /// The proposal's run id.
+        run: i64,
+    },
+}
+
+/// The action a `ProposalCmd` names, and its run.
+fn proposal_action(cmd: &ProposalCmd) -> Result<(i64, ProposalAction), String> {
+    match cmd {
+        ProposalCmd::Apply { run, category } => {
+            let action = match category {
+                None => ProposalAction::parse("apply", None),
+                Some(c) => ProposalAction::parse("apply_as", Some(c)),
+            }
+            .map_err(|e| e.message)?;
+            Ok((*run, action))
+        }
+        ProposalCmd::Reject { run } => Ok((*run, ProposalAction::Reject)),
+    }
+}
+
+/// One decided proposal as a line.
+fn outcome_line(o: &ProposalOutcome) -> String {
+    match (&o.category, o.followup.as_deref()) {
+        (None, _) => format!(
+            "rejected run {}: {:?} of tracker {} stays unmapped; not proposed again until a new \
+             answer",
+            o.run_id, o.section, o.tracker_id
+        ),
+        (Some(c), f) => format!(
+            "tracker {}: {:?}={c} in your section map (run {} {})",
+            o.tracker_id,
+            o.section,
+            o.run_id,
+            match (f, &o.corrected_to) {
+                (Some(f), Some(to)) => format!("{f} to {to}"),
+                (Some(f), None) => f.to_string(),
+                (None, _) => "not marked".into(),
+            }
+        ),
+    }
+}
+
+/// `apply` / `reject`. A rejection writes only the run's follow-up, in the
+/// hub's database, like `set-key`. An apply reads the proposal from the
+/// database, writes the tracker's settings over the running hub's
+/// `work_admin update` (as `fleet-hub tracker section-map`: the hub's
+/// validation, event and follow-up), then makes sure the run carries its
+/// follow-up.
+async fn decide_one(
+    cmd: ProposalCmd,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<ProposalOutcome, String> {
+    let (run, action) = proposal_action(&cmd)?;
+    serve::existing_db(&config::resolve_data_dir(opts, env))?;
+    if action == ProposalAction::Reject {
+        let store = serve::open_store(opts, env)?;
+        return status_map::reject_proposal(&store, run, now()).map_err(|e| e.message);
+    }
+    let (p, category) = {
+        let ro = open_read_only(&db_path(None, opts, env)?)?;
+        let p = status_map::pending_proposal(&ro, run).map_err(|e| e.message)?;
+        let category = p
+            .category(&action)
+            .map_err(|e| e.message)?
+            .ok_or("an apply needs a category")?;
+        (p, category)
+    };
+    let conn = crate::pair::hub_conn(opts, env)?;
+    let listed =
+        crate::pair::call_tool(&conn, "work_admin", serde_json::json!({ "action": "list" }))
+            .await?;
+    let row: fleet_core::store::TrackerRow = listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|t| t["id"].as_i64() == Some(p.tracker.id))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("read the tracker: {e}"))?
+        .ok_or_else(|| format!("no tracker {}", p.tracker.id))?;
+    let args = status_map::apply_one_args(&row, &p.section, &category);
+    crate::pair::call_tool(&conn, "work_admin", args).await?;
+    let store = serve::open_store(opts, env)?;
+    status_map::record_applied(&store, &p, &action, &category, now()).map_err(|e| e.message)
 }
 
 /// Where `set-key` gets the key from.
@@ -294,7 +410,24 @@ pub async fn run(
                 }
             }
         }
-        DecideCmd::Proposals { tracker, db, json } => {
+        DecideCmd::Proposals {
+            action: Some(cmd),
+            json,
+            ..
+        } => {
+            let o = decide_one(cmd, opts, env).await?;
+            if json {
+                out::line(&serde_json::to_string_pretty(&o).map_err(|e| e.to_string())?);
+            } else {
+                out::line(&outcome_line(&o));
+            }
+        }
+        DecideCmd::Proposals {
+            action: None,
+            tracker,
+            db,
+            json,
+        } => {
             let store = open_read_only(&db_path(db, opts, env)?)?;
             let all = decide::status_map::proposals(&store, tracker).map_err(|e| e.message)?;
             if json {
@@ -499,5 +632,172 @@ mod tests {
             "{text}"
         );
         assert!(parse(&["proposals", "--tracker", "3", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn proposals_apply_and_reject_name_a_run_and_a_category_of_the_map() {
+        assert!(matches!(
+            parse(&["proposals", "reject", "42"]).unwrap(),
+            DecideCmd::Proposals {
+                action: Some(ProposalCmd::Reject { run: 42 }),
+                ..
+            }
+        ));
+        let DecideCmd::Proposals {
+            action: Some(cmd), ..
+        } = parse(&["proposals", "apply", "7", "--as", "in_progress"]).unwrap()
+        else {
+            panic!("apply parses");
+        };
+        assert_eq!(
+            proposal_action(&cmd).unwrap(),
+            (7, ProposalAction::ApplyAs("in_progress".into()))
+        );
+        let DecideCmd::Proposals {
+            action: Some(cmd), ..
+        } = parse(&["proposals", "apply", "7"]).unwrap()
+        else {
+            panic!("apply parses");
+        };
+        assert_eq!(proposal_action(&cmd).unwrap(), (7, ProposalAction::Apply));
+        // not_planned is an answer, not a category a map takes.
+        let DecideCmd::Proposals {
+            action: Some(cmd), ..
+        } = parse(&["proposals", "apply", "7", "--as", "not_planned"]).unwrap()
+        else {
+            panic!("apply parses");
+        };
+        assert!(proposal_action(&cmd).unwrap_err().contains("todo"));
+        // A listing's filters do not go with a decision; a run is needed.
+        assert!(parse(&["proposals", "--tracker", "3", "reject", "42"]).is_err());
+        assert!(parse(&["proposals", "reject"]).is_err());
+    }
+
+    /// A hub database with one Asana tracker and assist proposals for
+    /// `backlog` (todo) and `ideas` (unsure). Returns (tracker, backlog run,
+    /// ideas run).
+    fn hub_with_proposals(dir: &Path) -> (i64, i64, i64) {
+        use fleet_core::service::decide::status_map;
+        let s = Store::open_with_bus(
+            &dir.join("state.db"),
+            std::sync::Arc::new(fleet_core::events::NoopEventBus),
+        )
+        .unwrap();
+        let tracker = s
+            .add_tracker("asana", "B", "https://app.asana.com")
+            .unwrap()
+            .id;
+        let cfg = fleet_core::store::TrackerConfig {
+            unmapped_sections: vec!["backlog".into(), "ideas".into()],
+            ..Default::default()
+        };
+        s.set_tracker_probe(tracker, None, &cfg).unwrap();
+        let key = s.decision_fp_key().unwrap();
+        let mut ids = Vec::new();
+        for (name, answer) in [("backlog", "todo"), ("ideas", "unsure")] {
+            ids.push(
+                s.insert_decision_run(&fleet_core::store::NewDecisionRun {
+                    at: now(),
+                    feature: "status_map".into(),
+                    subject_kind: status_map::SUBJECT_KIND.into(),
+                    subject_id: status_map::subject_id(
+                        tracker,
+                        &status_map::section_id(&key, tracker, name),
+                    ),
+                    mode: "assist".into(),
+                    provider: "jev".into(),
+                    model_version: Some("jev-1.13.0".into()),
+                    question_version: status_map::QUESTION_VERSION.into(),
+                    input_fp: Some(format!("{:0>64}", name.len())),
+                    answer: Some(answer.into()),
+                    confidence: Some(0.9),
+                    baseline_answer: Some("none".into()),
+                    called: true,
+                    ..Default::default()
+                })
+                .unwrap(),
+            );
+        }
+        (tracker, ids[0], ids[1])
+    }
+
+    #[tokio::test]
+    async fn reject_marks_the_run_in_the_hubs_database_and_hides_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tracker, backlog, _) = hub_with_proposals(dir.path());
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let env = HashMap::new();
+        run(
+            parse(&["proposals", "reject", &backlog.to_string()]).unwrap(),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap();
+        let ro = open_read_only(&dir.path().join("state.db")).unwrap();
+        let r = ro.get_decision_run(backlog).unwrap().unwrap();
+        assert_eq!(r.followup.as_deref(), Some("rejected"));
+        let all = status_map::proposals(&ro, Some(tracker)).unwrap();
+        assert_eq!(all[0].rejected, 1);
+        assert!(all[0].proposals.iter().all(|p| p.section != "backlog"));
+        // The tracker is untouched: the section stays unmapped.
+        assert!(ro
+            .require_tracker(tracker)
+            .unwrap()
+            .settings
+            .section_map
+            .is_empty());
+        // Twice is refused, as is a run that is not a proposal.
+        let e = run(
+            parse(&["proposals", "reject", &backlog.to_string()]).unwrap(),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("already rejected"), "{e}");
+        let e = run(
+            parse(&["proposals", "reject", "9999"]).unwrap(),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("no decision run"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn apply_checks_the_proposal_before_it_reaches_the_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, ideas) = hub_with_proposals(dir.path());
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        // unsure proposes nothing: refused from the database, no hub needed.
+        let e = run(
+            parse(&["proposals", "apply", &ideas.to_string()]).unwrap(),
+            &opts,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("proposes nothing"), "{e}");
+        let line = outcome_line(&ProposalOutcome {
+            run_id: 5,
+            tracker_id: 3,
+            section: "ideas".into(),
+            action: "apply_as".into(),
+            category: Some("done".into()),
+            followup: Some("corrected".into()),
+            corrected_to: Some("done".into()),
+        });
+        assert_eq!(
+            line,
+            "tracker 3: \"ideas\"=done in your section map (run 5 corrected to done)"
+        );
     }
 }

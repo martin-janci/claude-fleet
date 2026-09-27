@@ -8,7 +8,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import WorkSettings from './WorkSettings.svelte';
 import { get } from 'svelte/store';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
-import { trackers, type TrackerRow } from './trackers';
+import { trackers, type TrackerRow, type TrackerProposals } from './trackers';
 import { toasts } from './toasts';
 
 const TOKEN = 'ATATT3xFfGF0-ui-test-token';
@@ -573,5 +573,196 @@ describe('Settings → Work, GitHub Enterprise Server and sync metrics (work gra
     render(WorkSettings);
     await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'list_trackers')).toBe(true));
     expect(inv.mock.calls.some((c) => c[0] === 'tracker_sync_metrics')).toBe(false);
+  });
+});
+
+describe('Settings → Work, Jev section proposals (status_map assist)', () => {
+  const asana = (over: Partial<TrackerRow> = {}): TrackerRow =>
+    row({
+      id: 8,
+      provider: 'asana',
+      name: 'Company B',
+      site_url: 'https://app.asana.com',
+      username: null,
+      config: { section_map: { 'in progress': 'in_progress', done: 'done' } },
+      settings: { section_map: { 'in progress': 'in_progress', done: 'done' }, section_map_confirmed: true },
+      ...over,
+    });
+
+  const proposals = (over: Partial<TrackerProposals> = {}): TrackerProposals[] => [
+    {
+      tracker_id: 8,
+      name: 'Company B',
+      org_id: 1,
+      mode: 'assist',
+      proposals: [
+        {
+          section: 'ideas',
+          answer: 'todo',
+          applies_as: 'todo',
+          confidence: 0.82,
+          run_id: 812,
+          at: 1,
+          top: [
+            ['todo', 0.82],
+            ['unsure', 0.11],
+          ],
+        },
+        {
+          section: 'parked <b>now</b>',
+          answer: 'not_planned',
+          applies_as: 'done',
+          confidence: 0.7,
+          run_id: 813,
+          at: 1,
+          top: [['not_planned', 0.7]],
+        },
+        { section: 'someday', answer: 'unsure', applies_as: null, confidence: 0.6, run_id: 814, at: 1 },
+        // Already the person's: not shown.
+        {
+          section: 'backlog',
+          answer: 'todo',
+          applies_as: 'todo',
+          run_id: 815,
+          at: 1,
+          person: 'todo',
+          followup: 'confirmed',
+        },
+      ],
+      shadow: [
+        { section: 'in progress', rule: 'in_progress', model: 'in_progress', run_id: 700 },
+        { section: 'done', rule: 'done', model: 'in_progress', run_id: 701 },
+        { section: 'ideas', rule: 'none', model: 'todo', run_id: 702 },
+      ],
+      unknown_sections: 0,
+      rejected: 0,
+      ...over,
+    },
+  ];
+
+  it('shows the pending proposals with their category, confidence and why, as plain text', async () => {
+    route([asana()], { status_map_proposals: proposals() });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('jev-proposal')).toHaveLength(3));
+    expect(screen.getByTestId('jev-proposals').textContent).toContain('Proposed by Jev (assist)');
+    const rows = screen.getAllByTestId('jev-proposal');
+    expect(rows.map((r) => r.querySelector('[data-testid="jev-proposal-section"]')!.textContent)).toEqual([
+      'ideas',
+      'parked <b>now</b>',
+      'someday',
+    ]);
+    // Third-party text is never markup.
+    expect(rows[1].querySelector('b')).toBeNull();
+    expect(rows[0].querySelector('[data-testid="jev-proposal-confidence"]')!.textContent).toBe('0.82');
+    expect(rows[0].querySelector('[data-testid="jev-proposal-why"]')!.textContent).toBe(
+      'why: to do 0.82 · unsure 0.11',
+    );
+    expect(rows[1].querySelector('[data-testid="jev-proposal-category"]')!.textContent).toMatch(
+      /not planned\s+\(applies as done\)/,
+    );
+    // Unsure proposes nothing: no Apply, but Apply as… and Not this.
+    expect(rows[2].querySelector('[data-testid="jev-apply"]')).toBeNull();
+    expect(rows[2].querySelector('[data-testid="jev-apply-as"]')).not.toBeNull();
+    expect(rows[2].querySelector('[data-testid="jev-reject"]')).not.toBeNull();
+    expect(screen.getByTestId('jev-shadow-agreement').textContent).toMatch(
+      /agreed with the keyword rule on 1 of 2/,
+    );
+  });
+
+  it('Apply, Apply as… and Not this name the run, then re-read the trackers and the proposals', async () => {
+    const inv = route([asana()], {
+      status_map_proposals: proposals(),
+      decide_status_map_proposal: {
+        run_id: 812,
+        tracker_id: 8,
+        section: 'ideas',
+        action: 'apply',
+        category: 'todo',
+        followup: 'confirmed',
+      },
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('jev-proposal')).toHaveLength(3));
+    const count = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd).length;
+    const before = [count('list_trackers'), count('status_map_proposals')];
+
+    await fireEvent.click(screen.getAllByTestId('jev-apply')[0]);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('decide_status_map_proposal', { args: { run_id: 812, action: 'apply' } }),
+    );
+    await waitFor(() => expect(count('status_map_proposals')).toBe(before[1] + 1));
+    expect(count('list_trackers')).toBe(before[0] + 1);
+    await waitFor(() =>
+      expect(get(toasts).some((t) => t.kind === 'success' && t.message.includes('ideas'))).toBe(true),
+    );
+
+    await fireEvent.change(screen.getAllByTestId('jev-apply-as')[1], { target: { value: 'in_progress' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('decide_status_map_proposal', {
+        args: { run_id: 813, action: 'apply_as', category: 'in_progress' },
+      }),
+    );
+    await waitFor(() => expect(count('status_map_proposals')).toBe(before[1] + 2));
+
+    await fireEvent.click(screen.getAllByTestId('jev-reject')[2]);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('decide_status_map_proposal', { args: { run_id: 814, action: 'reject' } }),
+    );
+    await waitFor(() => expect(count('status_map_proposals')).toBe(before[1] + 3));
+    // Nothing else wrote the tracker.
+    expect(count('update_tracker')).toBe(0);
+  });
+
+  it('a failed decision is a toast', async () => {
+    const inv = route([asana()]);
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_trackers') return [asana()];
+      if (cmd === 'status_map_proposals') return proposals();
+      if (cmd === 'decide_status_map_proposal')
+        throw { code: 'E_INVALID_STATE', message: 'run 812 is not the latest proposal for this section (run 900 is)' };
+      return null;
+    });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('jev-proposal')).toHaveLength(3));
+    await fireEvent.click(screen.getAllByTestId('jev-reject')[0]);
+    await waitFor(() =>
+      expect(get(toasts).some((t) => t.kind === 'error' && t.message.includes('not the latest proposal'))).toBe(
+        true,
+      ),
+    );
+  });
+
+  it('shows nothing outside assist, or when nothing is pending', async () => {
+    route([asana()], { status_map_proposals: proposals({ mode: 'shadow' }) });
+    const { unmount } = render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await tick();
+    expect(screen.queryByTestId('jev-proposals')).toBeNull();
+    unmount();
+    trackers.set([]);
+    route([asana()], { status_map_proposals: proposals({ proposals: [] }) });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await tick();
+    expect(screen.queryByTestId('jev-proposals')).toBeNull();
+  });
+
+  it('asks for no proposals without an Asana tracker, nor on a paired desktop', async () => {
+    const inv = route([row()], { status_map_proposals: proposals() });
+    const { unmount } = render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await tick();
+    expect(inv.mock.calls.some((c) => c[0] === 'status_map_proposals')).toBe(false);
+    unmount();
+
+    hubStatus.set(remote);
+    trackers.set([]);
+    const inv2 = route([asana()], { status_map_proposals: proposals() });
+    render(WorkSettings);
+    await waitFor(() => expect(screen.getAllByTestId('tracker-row')).toHaveLength(1));
+    await tick();
+    expect(inv2.mock.calls.some((c) => c[0] === 'status_map_proposals')).toBe(false);
+    expect(screen.queryByTestId('jev-proposals')).toBeNull();
+    expect(screen.getByTestId('work-remote').textContent).toContain('fleet-hub decide proposals');
   });
 });

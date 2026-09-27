@@ -298,6 +298,11 @@ only, off): the Asana probe keeps `config.unmapped_sections` /
 unclassified section after a clean sync (`StatusMapTrigger`, daily), and
 `fleet-hub decide proposals` lists what a person applies with `fleet-hub
 tracker section-map`; follow-ups are recorded in `work_admin update`.
+Assist is usable one proposal at a time (`status_map::decide_proposal`,
+by run id: apply / apply_as through `work_admin update`, reject → the
+follow-up only, hidden until a new answer): Settings → Work on a
+standalone desktop (`status_map_proposals` / `decide_status_map_proposal`,
+`LocalOnly` when paired) and `fleet-hub decide proposals apply|reject`.
 Phase 0 (offline) is built for J1 `work_link` and J3: `fleet-hub decide bench
 work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
 split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
