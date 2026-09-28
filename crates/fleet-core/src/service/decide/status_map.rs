@@ -1120,11 +1120,13 @@ pub struct StatusMapTrigger {
     running: Arc<AtomicBool>,
 }
 
-/// PURE: a digest of what a run reads from a tracker's row.
-fn sections_digest(row: &TrackerRow) -> u64 {
+/// PURE: a digest of what a run reads from a tracker's row, and its org's
+/// consent (D36): a run the gate refused is due again once the org says yes.
+fn sections_digest(row: &TrackerRow, org_consents: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     row.org_id.hash(&mut h);
+    org_consents.hash(&mut h);
     row.config.unmapped_sections.hash(&mut h);
     row.config.project_sections.hash(&mut h);
     row.config.section_map.hash(&mut h);
@@ -1157,7 +1159,13 @@ impl StatusMapTrigger {
         passes: &[TrackerPass],
     ) -> Option<tokio::task::JoinHandle<()>> {
         let now = self.ctx.now();
-        let due_ids: Vec<i64> = {
+        // Single-flight FIRST: a pass that finds a run going marks nothing,
+        // so the trackers it found due are still due on the next pass
+        // instead of recorded as asked for a day.
+        if self.running.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let due_ids: Vec<i64> = (|| {
             let s = lock(&self.ctx.store).ok()?;
             if !settings::get_bool(&s, settings::DECIDE_JEV_ENABLED)
                 || FeatureMode::of(&s, Feature::StatusMap) == FeatureMode::Off
@@ -1173,15 +1181,21 @@ impl StatusMapTrigger {
                 if row.provider != PROVIDER {
                     continue;
                 }
-                let digest = sections_digest(&row);
+                let consents = row
+                    .org_id
+                    .and_then(|o| s.get_org(o).ok().flatten())
+                    .is_some_and(|o| o.jev_allowed);
+                let digest = sections_digest(&row, consents);
                 if due(last.get(&row.id).copied(), now, digest) {
                     ids.push(row.id);
                     last.insert(row.id, (now, digest));
                 }
             }
-            ids
-        };
-        if due_ids.is_empty() || self.running.swap(true, Ordering::AcqRel) {
+            Some(ids)
+        })()
+        .unwrap_or_default();
+        if due_ids.is_empty() {
+            self.running.store(false, Ordering::Release);
             return None;
         }
         let ctx = self.ctx.clone();

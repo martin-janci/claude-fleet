@@ -1128,7 +1128,10 @@ impl Store {
 
     /// Say that `session_id` does NOT work on `target` (a person's "Not
     /// this"). Sticky: detection must never re-propose it; only a later
-    /// explicit link by a person overrides it.
+    /// explicit link by a person overrides it. Test shorthand for a
+    /// person's reject: every production path names its decider
+    /// ([`Self::reject_session_work_as`]).
+    #[cfg(test)]
     pub fn reject_session_work(
         &self,
         session_id: i64,

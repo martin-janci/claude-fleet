@@ -462,6 +462,14 @@ fn a_batch_and_an_undo_keep_the_deciders_apart() {
         Decider::Agent,
     )
     .unwrap();
+    // Nor remove it: unlink, then link, is the same overturn.
+    let unlink = WorkLinkArgs {
+        link_id: Some(b.link_id),
+        ..wl(&w, "unlink", w.s1)
+    };
+    let err = crate::service::work::work_link_as(&unlink, &w.st, &OrgScope::All, Decider::Agent)
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_FORBIDDEN);
     work_link(&undo, &w.st, &OrgScope::All).unwrap();
 }
 
