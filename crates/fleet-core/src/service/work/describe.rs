@@ -147,16 +147,30 @@ pub async fn describe(
     let (item_id, out_key, item_key, external_id, tracker, ttl_secs) = {
         let s = lock(store)?;
         orgs::require_key(&s, scope, &key)?;
-        let Some(item) = s.work_item_by_key(&key)? else {
-            return Err(orgs::not_visible_to(scope, &key));
-        };
-        let org_id = s.item_org(item.id)?;
-        if let Some(allowed) = tickets::allowed(scope, &s)? {
-            if !allowed.contains(&item.id) && (item.tracker_id.is_some() || !scope.sees_org(org_id))
-            {
-                return Err(orgs::not_visible_to(scope, &key));
+        // The first item carrying `key` that this caller may see. Two
+        // trackers can hold the same key (two Jira sites, one per org): the
+        // store's single "the item for this key" would pick the oldest and
+        // refuse a host of the other org over a ticket that is not theirs,
+        // when their own is right there.
+        let allowed = tickets::allowed(scope, &s)?;
+        let mut item = None;
+        for candidate in s.work_items_by_key(&key)? {
+            let visible = match &allowed {
+                None => true,
+                Some(allowed) => {
+                    allowed.contains(&candidate.id)
+                        || (candidate.tracker_id.is_none()
+                            && scope.sees_org(s.item_org(candidate.id)?))
+                }
+            };
+            if visible {
+                item = Some(candidate);
+                break;
             }
         }
+        let Some(item) = item else {
+            return Err(orgs::not_visible_to(scope, &key));
+        };
         let tracker = s
             .list_trackers()?
             .into_iter()
