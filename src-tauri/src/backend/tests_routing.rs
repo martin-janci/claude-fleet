@@ -2121,6 +2121,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "start_command": "pnpm dev",
                 "friendly_name": "the demo",
                 "resume_claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
+                "model": "opus",
+                "effort": "high",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -2140,6 +2142,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         resume_claude_session_id: Some(
                             "550e8400-e29b-41d4-a716-446655440000".into(),
                         ),
+                        model: Some("opus".into()),
+                        effort: Some("high".into()),
                     },
                     s,
                     h,

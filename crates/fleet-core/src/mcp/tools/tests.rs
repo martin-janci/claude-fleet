@@ -1368,6 +1368,8 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 start_command: None,
                 friendly_name: None,
                 resume_claude_session_id: None,
+                model: None,
+                effort: None,
                 confirm_nonce: None,
             }),
         )
@@ -1597,6 +1599,8 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 kind: Some("shell".into()),
                 start_command: Some("echo hi".into()),
                 friendly_name: Some("a".repeat(81)), // over the 80-char cap
+                model: None,
+                effort: None,
                 confirm_nonce: None,
             }),
         )
@@ -3255,9 +3259,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 63,311 on 2026-09-28
-    /// (`catalog_admin` over main's #359).
-    const BUDGET_BYTES: usize = 63_411;
+    /// comment conflicted on every merge. Measured at 63,473 on 2026-09-28
+    /// (`catalog_admin` over `new_session`'s `model` / `effort`).
+    const BUDGET_BYTES: usize = 63_573;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

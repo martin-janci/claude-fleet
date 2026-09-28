@@ -97,6 +97,12 @@ pub struct NewSessionParams {
     /// for one a session on the host holds (use restore_host_sessions).
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
+    /// `claude --model` (alias or id).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// low|medium|high|xhigh|max.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
