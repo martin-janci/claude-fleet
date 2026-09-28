@@ -60,7 +60,6 @@ vi.mock('@tauri-apps/api/core', () => ({
       tmux_version: '3.6a',
       account: null,
     };
-    if (cmd === 'related_sessions') return [];
     // ── multi-user M1 ──────────────────────────────────────────────────
     // `my_grants` is what a client derives its per-session access from
     // (`src/lib/access.ts`). The default answer is a person with NO grants,
