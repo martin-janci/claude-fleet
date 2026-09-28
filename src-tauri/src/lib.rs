@@ -35,7 +35,7 @@ pub fn run() {
     declare_app_version();
     // File logging first, so the instance reaper and env recovery below are
     // captured too. A failure is non-fatal: the app runs without a log file.
-    let data_dir = appdata_dir();
+    let (data_dir, data_dir_note) = appdata_dir();
     let log_dir = match fleet_core::logging::init(&data_dir) {
         Ok(dir) => Some(dir),
         Err(e) => {
@@ -46,6 +46,9 @@ pub fn run() {
             None
         }
     };
+    if let Some(note) = data_dir_note {
+        tracing::warn!("[startup] {note}");
+    }
 
     // Win the singleton race before opening the DB or binding the MCP port:
     // kill any other running instance of this app (any build).
