@@ -1097,6 +1097,42 @@ describe('ConversationPanel quick actions', () => {
     expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'go on');
   });
 
+  it('an auto-send chip is named as one for a screen reader', async () => {
+    composerPresets.set([
+      { label: 'Go on', text: 'go on', auto_send: true },
+      { label: 'Tests', text: 'run the tests' },
+    ]);
+    await mount();
+    const [go, tests] = screen.getAllByTestId('conv-chip');
+    expect(go.getAttribute('aria-label')).toBe('Go on, sends immediately');
+    expect(tests.getAttribute('aria-label')).toBeNull();
+  });
+
+  // An auto-send chip clicked while a permission / choice prompt is up would
+  // type its text (and an Enter) into that prompt's menu.
+  it.each([
+    ['a permission prompt', { claude_status: 'blocked' as const, stuck_kind: null }],
+    ['a stuck screen', { claude_status: 'idle' as const, stuck_kind: 'trust_prompt' as const }],
+  ])('on %s an auto-send chip fills the box instead and says why', async (_what, over) => {
+    composerPresets.set([
+      { label: 'Go on', text: 'go on', auto_send: true },
+      { label: 'Status', text: '/status' },
+    ]);
+    await mount(over);
+    const [go, status] = screen.getAllByTestId('conv-chip');
+    await fireEvent.click(go);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.value).toBe('go on');
+    expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/waiting on an answer/);
+    // Shift+click on a fill chip is a one-gesture send too: held the same way.
+    await fireEvent.click(status, { shiftKey: true });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('/status');
+  });
+
   it('a session stuck on press_enter gets a chip that sends a bare Enter', async () => {
     await mount({ claude_status: 'blocked', stuck_kind: 'press_enter' });
     await fireEvent.click(screen.getByTestId('conv-chip-enter'));
