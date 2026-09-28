@@ -1098,6 +1098,14 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   rule…* stay desktop-only is recorded. M14's D31–D36 and the Jev
   evaluation's D31–D47 share numbers: "M14-D3x" / "Jev-D3x" from now on
   where ambiguous, no rows renumbered.
+- 2026-09-28: **D15 narrowed** by the owner, after a phone link across orgs
+  ended in the hub's bare refusal: a session's *Tasks* on the phone may now
+  link another org's task when the person picks **Link anyway** in a
+  cross-org choice (`work_link link` with `force_cross_org`, a full token
+  only); the same choice shows the `fleet-hub org rule add` that moves the
+  session into the task's org, to copy (org rules stay master-only). A
+  start, multi-start or resume still never forces from the phone
+  (fleet-mobile branch `ccr-a2e40ea2-eciucy`). No hub change.
 - 2026-09-27: **M14.2–M14.4.** The desktop Work view (tree, task detail,
   Review, placement and rules, saved views, the org dialog) and the phone's
   *My work* merged over M14.1's backend from
