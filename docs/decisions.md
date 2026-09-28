@@ -342,7 +342,10 @@ reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the live breaker, today's tokens and cost (the live
 features', which the budget counts, and the benchmark's apart), and runs
-per feature, `live` or `bench`, provider, fallback and org.
+per feature, `live` or `bench`, provider, fallback and org. Its `agreed
+X/Y` counts only the runs whose baseline decided: a section the keyword
+rule abstained on (baseline `none`) has nothing to agree with, so it is
+not among the `Y` — the same count `decide proposals` prints.
 
 ### The key on a standalone desktop
 

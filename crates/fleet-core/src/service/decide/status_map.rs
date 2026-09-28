@@ -74,7 +74,9 @@ pub const REASK_DAYS: i64 = 14;
 /// the tracker's sections changed).
 pub const RUN_EVERY_SECS: i64 = 86_400;
 /// The baseline of a section the keyword rule did not classify.
-pub const NO_RULE: &str = "none";
+/// It is the store's abstained baseline, so `decide status` counts agreement
+/// over the same sections as this view.
+pub const NO_RULE: &str = crate::store::DECISION_NO_BASELINE;
 /// The option that proposes nothing.
 pub const UNSURE: &str = "unsure";
 /// The provider this adapter reads.
