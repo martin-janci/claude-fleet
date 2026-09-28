@@ -411,8 +411,10 @@ fn source_is_idle(store: &Mutex<Store>, session_id: i64) -> Result<bool, IpcErro
     let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
         IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
     })?;
+    let demoted = s.stale_demoted_by_id(session_id)?;
     Ok(crate::service::tasks::session_satisfies(
         &row,
+        demoted,
         crate::service::tasks::WaitCond::Idle,
     ))
 }
@@ -2370,17 +2372,20 @@ async fn gather(
     //    nothing moved — one long tool call looks the same — so its pane is
     //    asked, and the move goes ahead only when the pane shows it quiet.
     hooks.refresh_host(store, &src).await?;
-    let fresh = {
+    let (fresh, demoted) = {
         let s = lock(store)?;
-        s.get_session_by_id(snap.row.id)?
-            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?
+        let fresh = s
+            .get_session_by_id(snap.row.id)?
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
+        let demoted = s.stale_demoted_by_id(fresh.id)?;
+        (fresh, demoted)
     };
-    let live = if crate::store::needs_pane_confirmation(&fresh) {
+    let live = if crate::store::needs_pane_confirmation(&fresh, demoted) {
         hooks.pane_status(store, fresh.id).await
     } else {
         None
     };
-    let status = crate::store::trusted_status(&fresh, live.as_deref()).map(str::to_string);
+    let status = crate::store::trusted_status(&fresh, demoted, live.as_deref()).map(str::to_string);
     let idle_deferred = args.dry_run && args.when == When::Idle;
     let busy = if idle_deferred {
         require_source_idle(status.as_deref()).is_err()
@@ -6593,7 +6598,8 @@ mod tests {
     /// staleness reads `idle` only because nothing moved for
     /// `reconcile.stale_working_secs` — one long tool call looks the same.
     /// Its stored `idle` must not let a move copy a turn in flight: the pane
-    /// is asked, and only a quiet pane lets the move proceed.
+    /// is asked, and only a quiet pane lets the move proceed — keyed on the
+    /// demotion (`stale_demoted_at`), which outlives the attention stamp.
     #[tokio::test]
     async fn a_stale_demoted_source_is_moved_only_when_its_pane_is_quiet() {
         for (pane, moves) in [
@@ -6606,9 +6612,13 @@ mod tests {
                 let s = f.store.lock().unwrap();
                 s.set_claude_status_by_session_id(SID, "idle").unwrap();
                 let id = s.get_session_by_claude_id(SID).unwrap().unwrap().id;
+                // Demoted, and the attention stamp since acknowledged (an
+                // attach or the TTL): the demotion's memory alone must still
+                // make the move ask the pane.
                 s.conn_ref()
                     .execute(
-                        "UPDATE sessions SET stale_working_at = 5 WHERE id = ?1",
+                        "UPDATE sessions SET stale_demoted_at = 5, stale_working_at = NULL \
+                         WHERE id = ?1",
                         [id],
                     )
                     .unwrap();

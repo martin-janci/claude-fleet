@@ -257,12 +257,13 @@ Settings.
 
 ### Session state thresholds
 
-Four settings tune how the tick reads a session's state (Settings, or
+Five settings tune how the tick reads a session's state (Settings, or
 `set_setting` over MCP):
 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `reconcile.stale_working_secs` | `1800` | A `working` row with no hook, turn, transcript growth, spinner on its pane or tmux session activity for this long turns `idle` and is flagged `stale_working`. `0` turns the rule off. |
+| `reconcile.stale_working_ttl_secs` | `86400` | How long the `stale_working` flag asks for a look before the tick lifts it on its own. An attach, any hook, or the row working again lifts it sooner. The demotion itself stays until a hook or the pane shows a live turn. `0` never lifts it by age. |
 | `health.context_red_pct` | `85` | The context-window percentage at or past which a session reads `context_full`, counts as `context_red` in `fleet_health` and draws red on the desktop (1–100). |
 | `playbooks.oom_max_attempts` | `2` | How many recreates the `oom` playbook may run on one session per 24 h (0–20). `0` refuses every recreate but keeps the refusals on the timeline. |
 | `gc.external_lost_ttl_secs` | `3600` | How long a lost `external` row (a Claude fleet only observes) is kept before the GC sweep deletes it. `0` reaps it on the next pass. |
@@ -281,8 +282,10 @@ Tick passes whose pane capture shows Claude's spinner ("esc to interrupt")
 count as activity, so one long tool call is not demoted. A row that was
 demoted is `idle` only as a guess: `run_prompt`, a move's source check and
 `wait_for_session { until: "idle" }` look at its pane first and treat it as
-mid-turn unless the pane shows the REPL's idle prompt. A hook (the next
-prompt, Stop, …) clears the flag.
+mid-turn unless the pane shows the REPL's idle prompt. That holds until a
+hook (the next prompt, Stop, …) or a pane showing a live turn lifts the
+demotion itself — an attach or `reconcile.stale_working_ttl_secs` ends only
+the `stale_working` flag, not the guess.
 
 ### After laptop sleep / wake
 

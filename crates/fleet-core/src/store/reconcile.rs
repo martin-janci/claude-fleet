@@ -523,9 +523,12 @@ impl Store {
                idle_since={idle},
                pending_input={new_pending},
                -- A pane that shows a live turn lifts the stale-working
-               -- demotion (F2); anything else keeps the stamp.
+               -- demotion (F2): the stamp and the veto's memory (080) both
+               -- go. Anything else keeps them.
                stale_working_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
                                      ELSE stale_working_at END,
+               stale_demoted_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
+                                     ELSE stale_demoted_at END,
                -- The freshness stamp (Task H / the BE-3 guard's evidence),
                -- folded in here so a pass is ONE physical UPDATE per row
                -- instead of this upsert plus a second stamping UPDATE.
@@ -534,7 +537,7 @@ impl Store {
                -- does not watch it, so it never bumps `row_version` either.
                last_reconciled_at=COALESCE(?23, last_reconciled_at),
                -- The pane showed a live turn this pass (?25): the stale-working
-               -- sweep's evidence of life (migration 080). Bookkeeping like
+               -- sweep's evidence of life (migration 081). Bookkeeping like
                -- `last_reconciled_at`: not a `SessionRow` field, not watched
                -- by the row_version trigger, so stamping it never emits.
                pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END

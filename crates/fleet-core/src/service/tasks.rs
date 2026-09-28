@@ -124,8 +124,9 @@ pub enum WaitCond {
     /// started a turn — use `TurnGt` after a `send_prompt` for "the reply
     /// to MY prompt is in". A row the tick demoted for staleness is not
     /// idle on its stored status: only a live pane reading that shows it
-    /// quiet (a [`PaneProbe`]), or the hook that clears the stamp, ends the
-    /// wait (`store::trusted_status`).
+    /// quiet (a [`PaneProbe`]), or the hook that lifts the demotion, ends
+    /// the wait (`store::trusted_status`) — an attach or the TTL, which end
+    /// only the attention stamp, do not.
     Idle,
     /// `turn_seq` strictly greater than the given value.
     TurnGt(i64),
@@ -148,11 +149,12 @@ impl WaitCond {
     }
 }
 
-/// PURE: does `row` satisfy `cond`? A stale-demoted row never satisfies
+/// PURE: does `row` satisfy `cond`? A stale-demoted row (`demoted`, its
+/// `stale_demoted_at` — `Store::stale_demoted_by_id`) never satisfies
 /// `Idle` here — see [`WaitCond::Idle`].
-pub fn session_satisfies(row: &SessionRow, cond: WaitCond) -> bool {
+pub fn session_satisfies(row: &SessionRow, demoted: bool, cond: WaitCond) -> bool {
     match cond {
-        WaitCond::Idle => crate::store::turn_over_row(row),
+        WaitCond::Idle => crate::store::turn_over_row(row, demoted),
         WaitCond::TurnGt(t) => row.turn_seq > t,
     }
 }
@@ -248,25 +250,28 @@ pub async fn wait_for_session_probed(
     let mut last_probe: Option<tokio::time::Instant> = None;
     loop {
         // Lock, read one row, unlock — never across the sleep or the probe.
-        let row = {
+        let (row, demoted) = {
             let s = lock(store)?;
-            s.get_session_by_id(session_id)?.ok_or_else(|| {
+            let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
                 IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
-            })?
+            })?;
+            let demoted = s.stale_demoted_by_id(session_id)?;
+            (row, demoted)
         };
-        if session_satisfies(&row, cond) {
+        if session_satisfies(&row, demoted, cond) {
             return Ok(WaitOutcome {
                 satisfied: true,
                 row,
             });
         }
         if cond == WaitCond::Idle
-            && crate::store::needs_pane_confirmation(&row)
+            && crate::store::needs_pane_confirmation(&row, demoted)
             && last_probe.is_none_or(|t| t.elapsed() >= probe_every)
         {
             last_probe = Some(tokio::time::Instant::now());
             let live = probe.pane_status(row.id).await;
-            if crate::store::turn_over(crate::store::trusted_status(&row, live.as_deref())) {
+            if crate::store::turn_over(crate::store::trusted_status(&row, demoted, live.as_deref()))
+            {
                 return Ok(WaitOutcome {
                     satisfied: true,
                     row,
@@ -910,18 +915,18 @@ mod tests {
         s.set_claude_session_id(id, "uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert!(
-            !session_satisfies(&row, WaitCond::Idle),
+            !session_satisfies(&row, false, WaitCond::Idle),
             "unknown status is not idle"
         );
-        assert!(!session_satisfies(&row, WaitCond::TurnGt(0)));
+        assert!(!session_satisfies(&row, false, WaitCond::TurnGt(0)));
         s.record_prompt_submit_hook("uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
-        assert!(!session_satisfies(&row, WaitCond::Idle));
+        assert!(!session_satisfies(&row, false, WaitCond::Idle));
         s.record_stop_hook("uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
-        assert!(session_satisfies(&row, WaitCond::Idle));
-        assert!(session_satisfies(&row, WaitCond::TurnGt(0)));
-        assert!(!session_satisfies(&row, WaitCond::TurnGt(1)));
+        assert!(session_satisfies(&row, false, WaitCond::Idle));
+        assert!(session_satisfies(&row, false, WaitCond::TurnGt(0)));
+        assert!(!session_satisfies(&row, false, WaitCond::TurnGt(1)));
     }
 
     #[tokio::test]
@@ -988,7 +993,8 @@ mod tests {
     /// staleness reads `idle` only because nothing moved — one long tool
     /// call looks the same. The wait must not return on that stored `idle`:
     /// only a pane that shows the turn over, or the hook that clears the
-    /// stamp, ends it. The pane is asked at most once per `probe_every`.
+    /// demotion, ends it — an attach that acknowledges the attention stamp
+    /// does not. The pane is asked at most once per `probe_every`.
     #[tokio::test]
     async fn an_idle_wait_on_a_stale_demoted_row_needs_the_pane_or_a_hook() {
         let s = Store::open_in_memory().unwrap();
@@ -997,7 +1003,8 @@ mod tests {
         s.record_prompt_submit_hook("uuid-w").unwrap();
         s.conn_ref()
             .execute(
-                "UPDATE sessions SET claude_status = 'idle', stale_working_at = 5 WHERE id = ?1",
+                "UPDATE sessions SET claude_status = 'idle', stale_working_at = 5, \
+                 stale_demoted_at = 5 WHERE id = ?1",
                 [id],
             )
             .unwrap();
@@ -1010,6 +1017,17 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.satisfied, "no probe: the stored idle is not believed");
+        // An attach acknowledges the attention stamp; the demotion (and so
+        // the guess) stands.
+        assert!(store.lock().unwrap().touch_session(id).unwrap());
+        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast)
+            .await
+            .unwrap();
+        assert_eq!(out.row.stale_working_at, None, "the attach acknowledged it");
+        assert!(
+            !out.satisfied,
+            "an acknowledged demotion's stored idle is still not believed"
+        );
 
         for (answer, satisfied) in [
             (None, false),
@@ -1055,6 +1073,7 @@ mod tests {
         stopper.await.unwrap();
         assert!(out.satisfied);
         assert_eq!(out.row.stale_working_at, None);
+        assert!(!store.lock().unwrap().stale_demoted_by_id(id).unwrap());
     }
 
     /// Final review, Important 2. `complete_task` posts the result to the

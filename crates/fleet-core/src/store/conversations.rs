@@ -420,7 +420,8 @@ impl Store {
     }
 
     /// A genuine SessionStart: the turn state the previous process left ends
-    /// with it — `failed` reads `idle`, the stale-working stamp goes — and
+    /// with it — `failed` reads `idle`, the stale-working stamp and its
+    /// veto (`stale_demoted_at`) go — and
     /// `last_hook_at` is stamped, so a reconcile pass already in flight keeps
     /// this (the MCP-1 guard) and the StopFailure guard (`last_hook_at =
     /// last_stop_at`) no longer holds. Any other status is left as it is; a
@@ -430,7 +431,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT claude_status = 'failed' FROM sessions \
-                 WHERE id = ?1 AND (claude_status = 'failed' OR stale_working_at IS NOT NULL)",
+                 WHERE id = ?1 AND (claude_status = 'failed' OR stale_working_at IS NOT NULL \
+                                    OR stale_demoted_at IS NOT NULL)",
                 [session_id],
                 |r| r.get::<_, Option<bool>>(0).map(|b| b.unwrap_or(false)),
             )
@@ -440,6 +442,7 @@ impl Store {
         };
         self.conn.execute(
             "UPDATE sessions SET last_hook_at = ?2, stale_working_at = NULL, \
+                 stale_demoted_at = NULL, \
                  claude_status = CASE WHEN claude_status = 'failed' THEN 'idle' \
                                       ELSE claude_status END \
              WHERE id = ?1",

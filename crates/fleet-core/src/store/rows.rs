@@ -314,10 +314,10 @@ impl SessionRow {
 }
 
 /// What losing a session clears, in every path that loses one (a host's
-/// sessions lost, a kill, a reconcile ghosting): the pane-derived state and
-/// the stale-working stamp, none of which a dead row can act on.
+/// sessions lost, a kill, a reconcile ghosting): the pane-derived state,
+/// the stale-working stamp and its veto, none of which a dead row can act on.
 pub(super) const LOSS_CLEARS: &str = "claude_status=NULL, stuck_kind=NULL, stuck_since=NULL, \
-     current_activity=NULL, pending_input=NULL, stale_working_at=NULL";
+     current_activity=NULL, pending_input=NULL, stale_working_at=NULL, stale_demoted_at=NULL";
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
 /// `map_session_row` consumes it. One definition so a new column is added in
@@ -707,16 +707,27 @@ pub fn turn_over(status: Option<&str>) -> bool {
 }
 
 /// The status a turn-over check may believe for `row`. A row the tick
-/// demoted for staleness (`stale_working_at` set) reads `idle` only because
-/// nothing moved for `reconcile.stale_working_secs` — and one tool call
-/// running longer than that fires no hook and grows no transcript. Its
-/// `idle` is a guess, so for such a row this is `live`, the pane's own
-/// reading taken just now (`session_activity`), and `None` — unknown, never
-/// over — when nobody asked the pane or it could not tell. Any other row's
-/// stored status stands.
-pub fn trusted_status<'a>(row: &'a SessionRow, live: Option<&'a str>) -> Option<&'a str> {
+/// demoted for staleness reads `idle` only because nothing moved for
+/// `reconcile.stale_working_secs` — and one tool call running longer than
+/// that fires no hook and grows no transcript. Its `idle` is a guess, so for
+/// such a row this is `live`, the pane's own reading taken just now
+/// (`session_activity`), and `None` — unknown, never over — when nobody
+/// asked the pane or it could not tell. Any other row's stored status
+/// stands.
+///
+/// `demoted` is the demotion's own memory, `sessions.stale_demoted_at`
+/// (migration 080, read with `Store::stale_demoted_by_id`; not a
+/// `SessionRow` field): an attach or `reconcile.stale_working_ttl_secs`
+/// clears the `stale_working_at` attention stamp, but the stored `idle` is
+/// still a guess until a hook or the pane lifts the demotion. The stamp
+/// counts too, so a caller whose flag read failed errs towards asking.
+pub fn trusted_status<'a>(
+    row: &'a SessionRow,
+    demoted: bool,
+    live: Option<&'a str>,
+) -> Option<&'a str> {
     let stored = row.claude_status.as_deref();
-    if row.stale_working_at.is_some() && turn_over(stored) {
+    if needs_pane_confirmation(row, demoted) {
         live
     } else {
         stored
@@ -725,15 +736,16 @@ pub fn trusted_status<'a>(row: &'a SessionRow, live: Option<&'a str>) -> Option<
 
 /// [`turn_over`] of the row's [`trusted_status`] with no pane reading: a
 /// stale-demoted row is never over on its stored `idle` alone.
-pub fn turn_over_row(row: &SessionRow) -> bool {
-    turn_over(trusted_status(row, None))
+pub fn turn_over_row(row: &SessionRow, demoted: bool) -> bool {
+    turn_over(trusted_status(row, demoted, None))
 }
 
-/// Whether `row` is stale-demoted with a stored status that only a live
-/// pane reading can confirm (see [`trusted_status`]): the one case a
-/// turn-over check should spend a `session_activity` probe on.
-pub fn needs_pane_confirmation(row: &SessionRow) -> bool {
-    row.stale_working_at.is_some() && turn_over(row.claude_status.as_deref())
+/// Whether `row` is stale-demoted (`demoted`, or its attention stamp still
+/// set) with a stored status that only a live pane reading can confirm (see
+/// [`trusted_status`]): the one case a turn-over check should spend a
+/// `session_activity` probe on.
+pub fn needs_pane_confirmation(row: &SessionRow, demoted: bool) -> bool {
+    (demoted || row.stale_working_at.is_some()) && turn_over(row.claude_status.as_deref())
 }
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
@@ -1211,7 +1223,7 @@ pub struct ReconcileSession<'a> {
     pub pending_input: Option<PendingInput>,
     /// The pane captured this pass shows a live turn (`derived_status ==
     /// Working`, the spinner's "esc to interrupt"). Stamps
-    /// `sessions.pane_working_at` (migration 080), which the stale-working
+    /// `sessions.pane_working_at` (migration 081), which the stale-working
     /// sweep respects: a row whose pane is visibly working is never demoted,
     /// whatever the agents cadence let the status say this pass.
     pub pane_working: bool,

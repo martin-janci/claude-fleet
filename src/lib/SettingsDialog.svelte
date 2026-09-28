@@ -1107,6 +1107,15 @@
           onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingSecs, e)} />
         <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth, spinner on its pane or tmux session activity before it reads idle (0 = never)</span>
       </div>
+      <div class="mcp-field">
+        <span class="lbl">stale ttl</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileStaleWorkingTtlSecs)}
+          disabled={automationBusy}
+          data-testid="reconcile-stale-working-ttl-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingTtlSecs, e)} />
+        <span class="hook-desc">seconds a demoted session asks for a look before the tick drops the reason; opening its terminal drops it at once (0 = never)</span>
+      </div>
       {#if automationError}<p class="err">{automationError}</p>{/if}
     </section>
 

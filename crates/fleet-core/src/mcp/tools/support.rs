@@ -492,14 +492,16 @@ pub(super) fn broadcast_summary(
 /// attention reason asks for — the same set `wait_for_session { until:
 /// "idle" }` accepts, so following this error's advice cannot loop.
 /// `live` is the pane's reading, taken only for a stale-demoted row
-/// (`store::trusted_status`): its stored `idle` alone is not enough.
+/// (`demoted`, its `stale_demoted_at`; `store::trusted_status`): its stored
+/// `idle` alone is not enough.
 pub(super) fn run_prompt_ready(
     row: &crate::store::SessionRow,
+    demoted: bool,
     live: Option<&str>,
 ) -> Result<(), McpError> {
-    match crate::store::trusted_status(row, live) {
+    match crate::store::trusted_status(row, demoted, live) {
         s if crate::store::turn_over(s) => Ok(()),
-        None if crate::store::needs_pane_confirmation(row) => Err(mcp_err(
+        None if crate::store::needs_pane_confirmation(row, demoted) => Err(mcp_err(
             "E_INVALID_STATE",
             format!(
                 "session {} was demoted from working after a quiet spell and its pane could \

@@ -1900,36 +1900,44 @@ async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = t.store.lock().unwrap();
     s.record_stop_hook("uuid-w").unwrap();
     let row = s.get_session_by_id(id).unwrap().unwrap();
-    assert!(run_prompt_ready(&row, None).is_ok());
+    assert!(run_prompt_ready(&row, false, None).is_ok());
     // A turn that ended in an API error has ended: re-prompt it.
     let failed = crate::store::SessionRow {
         claude_status: Some("failed".into()),
         ..row.clone()
     };
-    assert!(run_prompt_ready(&failed, None).is_ok());
+    assert!(run_prompt_ready(&failed, false, None).is_ok());
     assert!(crate::service::tasks::session_satisfies(
         &failed,
+        false,
         crate::service::tasks::WaitCond::Idle
     ));
     // F2 x S5: a row the tick demoted for staleness reads `idle` because
     // nothing moved — exactly what one long tool call looks like. Its stored
     // status alone must not let run_prompt through (the reply it would hand
     // back is the PREVIOUS turn's); only a pane that shows it quiet does.
-    let demoted = crate::store::SessionRow {
+    // Keyed on the demotion (`stale_demoted_at`, the `demoted` flag): an
+    // attach or the TTL clears the attention stamp but not the guess.
+    let stamped = crate::store::SessionRow {
         stale_working_at: Some(5),
-        ..row
+        ..row.clone()
     };
-    let e = run_prompt_ready(&demoted, None).unwrap_err();
-    assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
-    assert!(e.message.contains("could not confirm"), "{}", e.message);
-    let e = run_prompt_ready(&demoted, Some("working")).unwrap_err();
-    assert!(e.message.contains("working"), "{}", e.message);
-    assert!(run_prompt_ready(&demoted, Some("blocked")).is_err());
-    assert!(run_prompt_ready(&demoted, Some("idle")).is_ok());
-    assert!(!crate::service::tasks::session_satisfies(
-        &demoted,
-        crate::service::tasks::WaitCond::Idle
-    ));
+    // Stamp and memory, memory alone (acknowledged), stamp alone (a failed
+    // flag read errs towards asking).
+    for (r, demoted) in [(&stamped, true), (&row, true), (&stamped, false)] {
+        let e = run_prompt_ready(r, demoted, None).unwrap_err();
+        assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+        assert!(e.message.contains("could not confirm"), "{}", e.message);
+        let e = run_prompt_ready(r, demoted, Some("working")).unwrap_err();
+        assert!(e.message.contains("working"), "{}", e.message);
+        assert!(run_prompt_ready(r, demoted, Some("blocked")).is_err());
+        assert!(run_prompt_ready(r, demoted, Some("idle")).is_ok());
+        assert!(!crate::service::tasks::session_satisfies(
+            r,
+            demoted,
+            crate::service::tasks::WaitCond::Idle
+        ));
+    }
 }
 
 #[tokio::test]
