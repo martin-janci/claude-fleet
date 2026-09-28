@@ -1,0 +1,391 @@
+{"section": "Backlog", "project_sections": ["Backlog", "To do", "Doing", "Review", "Done"], "expect": "todo", "lang": "en"}
+{"section": "To do", "project_sections": ["Backlog", "To do", "Doing", "Review", "Done"], "expect": "todo", "lang": "en"}
+{"section": "Doing", "project_sections": ["Backlog", "To do", "Doing", "Review", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "Review", "project_sections": ["Backlog", "To do", "Doing", "Review", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "Done", "project_sections": ["Backlog", "To do", "Doing", "Review", "Done"], "expect": "done", "lang": "en"}
+{"section": "Inbox", "project_sections": ["Inbox", "Next up", "In progress", "Code review", "QA", "Done"], "expect": "todo", "lang": "en"}
+{"section": "Next up", "project_sections": ["Inbox", "Next up", "In progress", "Code review", "QA", "Done"], "expect": "todo", "lang": "en"}
+{"section": "In progress", "project_sections": ["Inbox", "Next up", "In progress", "Code review", "QA", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "Code review", "project_sections": ["Inbox", "Next up", "In progress", "Code review", "QA", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "QA", "project_sections": ["Inbox", "Next up", "In progress", "Code review", "QA", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "Done", "project_sections": ["Inbox", "Next up", "In progress", "Code review", "QA", "Done"], "expect": "done", "lang": "en"}
+{"section": "Ideas", "project_sections": ["Ideas", "Planned", "In Progress", "Blocked", "Shipped"], "expect": "todo", "lang": "en"}
+{"section": "Planned", "project_sections": ["Ideas", "Planned", "In Progress", "Blocked", "Shipped"], "expect": "todo", "lang": "en"}
+{"section": "In Progress", "project_sections": ["Ideas", "Planned", "In Progress", "Blocked", "Shipped"], "expect": "in_progress", "lang": "en"}
+{"section": "Blocked", "project_sections": ["Ideas", "Planned", "In Progress", "Blocked", "Shipped"], "expect": "in_progress", "lang": "en", "note": "ambiguous: started but stuck"}
+{"section": "Shipped", "project_sections": ["Ideas", "Planned", "In Progress", "Blocked", "Shipped"], "expect": "done", "lang": "en"}
+{"section": "Icebox", "project_sections": ["Icebox", "Backlog", "Sprint", "WIP", "Testing", "Released"], "expect": "todo", "lang": "en", "note": "ambiguous: maybe-later vs never"}
+{"section": "Backlog", "project_sections": ["Icebox", "Backlog", "Sprint", "WIP", "Testing", "Released"], "expect": "todo", "lang": "en"}
+{"section": "Sprint", "project_sections": ["Icebox", "Backlog", "Sprint", "WIP", "Testing", "Released"], "expect": "todo", "lang": "en", "note": "position: before WIP, committed not started"}
+{"section": "WIP", "project_sections": ["Icebox", "Backlog", "Sprint", "WIP", "Testing", "Released"], "expect": "in_progress", "lang": "en"}
+{"section": "Testing", "project_sections": ["Icebox", "Backlog", "Sprint", "WIP", "Testing", "Released"], "expect": "in_progress", "lang": "en"}
+{"section": "Released", "project_sections": ["Icebox", "Backlog", "Sprint", "WIP", "Testing", "Released"], "expect": "done", "lang": "en"}
+{"section": "Triage", "project_sections": ["Triage", "Ready", "In progress", "In review", "Ready for release", "Released to prod"], "expect": "todo", "lang": "en"}
+{"section": "Ready", "project_sections": ["Triage", "Ready", "In progress", "In review", "Ready for release", "Released to prod"], "expect": "todo", "lang": "en", "note": "position: before In progress"}
+{"section": "In progress", "project_sections": ["Triage", "Ready", "In progress", "In review", "Ready for release", "Released to prod"], "expect": "in_progress", "lang": "en"}
+{"section": "In review", "project_sections": ["Triage", "Ready", "In progress", "In review", "Ready for release", "Released to prod"], "expect": "in_progress", "lang": "en"}
+{"section": "Ready for release", "project_sections": ["Triage", "Ready", "In progress", "In review", "Ready for release", "Released to prod"], "expect": "in_progress", "lang": "en", "note": "position: after review, not released yet"}
+{"section": "Released to prod", "project_sections": ["Triage", "Ready", "In progress", "In review", "Ready for release", "Released to prod"], "expect": "done", "lang": "en"}
+{"section": "To do", "project_sections": ["To do", "Doing", "Waiting for client", "Done", "Won't fix"], "expect": "todo", "lang": "en"}
+{"section": "Doing", "project_sections": ["To do", "Doing", "Waiting for client", "Done", "Won't fix"], "expect": "in_progress", "lang": "en"}
+{"section": "Waiting for client", "project_sections": ["To do", "Doing", "Waiting for client", "Done", "Won't fix"], "expect": "in_progress", "lang": "en", "note": "ambiguous: started, waiting on someone"}
+{"section": "Done", "project_sections": ["To do", "Doing", "Waiting for client", "Done", "Won't fix"], "expect": "done", "lang": "en"}
+{"section": "Won't fix", "project_sections": ["To do", "Doing", "Waiting for client", "Done", "Won't fix"], "expect": "not_planned", "lang": "en"}
+{"section": "New", "project_sections": ["New", "Accepted", "Working on it", "Needs review", "Merged", "Deployed"], "expect": "todo", "lang": "en"}
+{"section": "Accepted", "project_sections": ["New", "Accepted", "Working on it", "Needs review", "Merged", "Deployed"], "expect": "todo", "lang": "en", "note": "position: before work starts"}
+{"section": "Working on it", "project_sections": ["New", "Accepted", "Working on it", "Needs review", "Merged", "Deployed"], "expect": "in_progress", "lang": "en"}
+{"section": "Needs review", "project_sections": ["New", "Accepted", "Working on it", "Needs review", "Merged", "Deployed"], "expect": "in_progress", "lang": "en"}
+{"section": "Merged", "project_sections": ["New", "Accepted", "Working on it", "Needs review", "Merged", "Deployed"], "expect": "done", "lang": "en", "note": "ambiguous: merged but a Deployed stage follows"}
+{"section": "Deployed", "project_sections": ["New", "Accepted", "Working on it", "Needs review", "Merged", "Deployed"], "expect": "done", "lang": "en"}
+{"section": "Parking lot", "project_sections": ["Parking lot", "This week", "Today", "Doing", "Done this week", "Archive"], "expect": "todo", "lang": "en", "note": "ambiguous: parked ideas vs dropped"}
+{"section": "This week", "project_sections": ["Parking lot", "This week", "Today", "Doing", "Done this week", "Archive"], "expect": "todo", "lang": "en"}
+{"section": "Today", "project_sections": ["Parking lot", "This week", "Today", "Doing", "Done this week", "Archive"], "expect": "todo", "lang": "en"}
+{"section": "Doing", "project_sections": ["Parking lot", "This week", "Today", "Doing", "Done this week", "Archive"], "expect": "in_progress", "lang": "en"}
+{"section": "Done this week", "project_sections": ["Parking lot", "This week", "Today", "Doing", "Done this week", "Archive"], "expect": "done", "lang": "en"}
+{"section": "Archive", "project_sections": ["Parking lot", "This week", "Today", "Doing", "Done this week", "Archive"], "expect": "done", "lang": "en", "note": "position: after done"}
+{"section": "Requests", "project_sections": ["Requests", "Approved", "Design", "Build", "QA", "Staging", "Production"], "expect": "todo", "lang": "en"}
+{"section": "Approved", "project_sections": ["Requests", "Approved", "Design", "Build", "QA", "Staging", "Production"], "expect": "todo", "lang": "en", "note": "position: before design and build"}
+{"section": "Design", "project_sections": ["Requests", "Approved", "Design", "Build", "QA", "Staging", "Production"], "expect": "in_progress", "lang": "en"}
+{"section": "Build", "project_sections": ["Requests", "Approved", "Design", "Build", "QA", "Staging", "Production"], "expect": "in_progress", "lang": "en"}
+{"section": "QA", "project_sections": ["Requests", "Approved", "Design", "Build", "QA", "Staging", "Production"], "expect": "in_progress", "lang": "en"}
+{"section": "Staging", "project_sections": ["Requests", "Approved", "Design", "Build", "QA", "Staging", "Production"], "expect": "in_progress", "lang": "en"}
+{"section": "Production", "project_sections": ["Requests", "Approved", "Design", "Build", "QA", "Staging", "Production"], "expect": "done", "lang": "en"}
+{"section": "Backlog", "project_sections": ["Backlog", "Selected for development", "In progress", "Pull request", "Done", "Cancelled"], "expect": "todo", "lang": "en"}
+{"section": "Selected for development", "project_sections": ["Backlog", "Selected for development", "In progress", "Pull request", "Done", "Cancelled"], "expect": "todo", "lang": "en"}
+{"section": "Pull request", "project_sections": ["Backlog", "Selected for development", "In progress", "Pull request", "Done", "Cancelled"], "expect": "in_progress", "lang": "en"}
+{"section": "Cancelled", "project_sections": ["Backlog", "Selected for development", "In progress", "Pull request", "Done", "Cancelled"], "expect": "not_planned", "lang": "en"}
+{"section": "Not started", "project_sections": ["Not started", "Started", "Almost done", "Complete"], "expect": "todo", "lang": "en", "note": "rule trap: contains 'started'"}
+{"section": "Started", "project_sections": ["Not started", "Started", "Almost done", "Complete"], "expect": "in_progress", "lang": "en"}
+{"section": "Almost done", "project_sections": ["Not started", "Started", "Almost done", "Complete"], "expect": "in_progress", "lang": "en", "note": "rule trap: contains 'done'"}
+{"section": "Complete", "project_sections": ["Not started", "Started", "Almost done", "Complete"], "expect": "done", "lang": "en"}
+{"section": "Proactive ideas", "project_sections": ["Proactive ideas", "Active", "Inactive", "Closed"], "expect": "todo", "lang": "en", "note": "rule trap: contains 'active'"}
+{"section": "Active", "project_sections": ["Proactive ideas", "Active", "Inactive", "Closed"], "expect": "in_progress", "lang": "en"}
+{"section": "Inactive", "project_sections": ["Proactive ideas", "Active", "Inactive", "Closed"], "expect": "not_planned", "lang": "en", "note": "ambiguous; rule trap: contains 'active'"}
+{"section": "Closed", "project_sections": ["Proactive ideas", "Active", "Inactive", "Closed"], "expect": "done", "lang": "en"}
+{"section": "Wishlist", "project_sections": ["Wishlist", "Up next", "On it", "Awaiting feedback", "Wrapped up"], "expect": "todo", "lang": "en"}
+{"section": "Up next", "project_sections": ["Wishlist", "Up next", "On it", "Awaiting feedback", "Wrapped up"], "expect": "todo", "lang": "en"}
+{"section": "On it", "project_sections": ["Wishlist", "Up next", "On it", "Awaiting feedback", "Wrapped up"], "expect": "in_progress", "lang": "en"}
+{"section": "Awaiting feedback", "project_sections": ["Wishlist", "Up next", "On it", "Awaiting feedback", "Wrapped up"], "expect": "in_progress", "lang": "en", "note": "ambiguous: started, waiting on someone"}
+{"section": "Wrapped up", "project_sections": ["Wishlist", "Up next", "On it", "Awaiting feedback", "Wrapped up"], "expect": "done", "lang": "en"}
+{"section": "Bugs", "project_sections": ["Bugs", "Investigating", "Fixing", "Verifying", "Fixed", "Can't reproduce"], "expect": "todo", "lang": "en", "note": "ambiguous: a bug inbox"}
+{"section": "Investigating", "project_sections": ["Bugs", "Investigating", "Fixing", "Verifying", "Fixed", "Can't reproduce"], "expect": "in_progress", "lang": "en"}
+{"section": "Fixing", "project_sections": ["Bugs", "Investigating", "Fixing", "Verifying", "Fixed", "Can't reproduce"], "expect": "in_progress", "lang": "en"}
+{"section": "Verifying", "project_sections": ["Bugs", "Investigating", "Fixing", "Verifying", "Fixed", "Can't reproduce"], "expect": "in_progress", "lang": "en"}
+{"section": "Fixed", "project_sections": ["Bugs", "Investigating", "Fixing", "Verifying", "Fixed", "Can't reproduce"], "expect": "done", "lang": "en"}
+{"section": "Can't reproduce", "project_sections": ["Bugs", "Investigating", "Fixing", "Verifying", "Fixed", "Can't reproduce"], "expect": "not_planned", "lang": "en"}
+{"section": "Someday", "project_sections": ["Someday", "Soon", "Now", "Done", "Abandoned"], "expect": "todo", "lang": "en", "note": "ambiguous: maybe-later vs never"}
+{"section": "Soon", "project_sections": ["Someday", "Soon", "Now", "Done", "Abandoned"], "expect": "todo", "lang": "en"}
+{"section": "Now", "project_sections": ["Someday", "Soon", "Now", "Done", "Abandoned"], "expect": "in_progress", "lang": "en", "note": "position: between soon and done"}
+{"section": "Abandoned", "project_sections": ["Someday", "Soon", "Now", "Done", "Abandoned"], "expect": "not_planned", "lang": "en", "note": "rule trap: contains 'done'"}
+{"section": "Drafts", "project_sections": ["Drafts", "Writing", "Editing", "Scheduled", "Published"], "expect": "todo", "lang": "en", "note": "ambiguous: drafts may be in writing"}
+{"section": "Writing", "project_sections": ["Drafts", "Writing", "Editing", "Scheduled", "Published"], "expect": "in_progress", "lang": "en"}
+{"section": "Editing", "project_sections": ["Drafts", "Writing", "Editing", "Scheduled", "Published"], "expect": "in_progress", "lang": "en"}
+{"section": "Scheduled", "project_sections": ["Drafts", "Writing", "Editing", "Scheduled", "Published"], "expect": "in_progress", "lang": "en", "note": "ambiguous: written, waiting to publish"}
+{"section": "Published", "project_sections": ["Drafts", "Writing", "Editing", "Scheduled", "Published"], "expect": "done", "lang": "en"}
+{"section": "Leads", "project_sections": ["Leads", "Contacted", "Negotiation", "Won", "Lost"], "expect": "todo", "lang": "en"}
+{"section": "Contacted", "project_sections": ["Leads", "Contacted", "Negotiation", "Won", "Lost"], "expect": "in_progress", "lang": "en"}
+{"section": "Negotiation", "project_sections": ["Leads", "Contacted", "Negotiation", "Won", "Lost"], "expect": "in_progress", "lang": "en"}
+{"section": "Won", "project_sections": ["Leads", "Contacted", "Negotiation", "Won", "Lost"], "expect": "done", "lang": "en"}
+{"section": "Lost", "project_sections": ["Leads", "Contacted", "Negotiation", "Won", "Lost"], "expect": "not_planned", "lang": "en"}
+{"section": "Next", "project_sections": ["Backlog", "Next", "Doing", "Waiting", "Done", "Later"], "expect": "todo", "lang": "en"}
+{"section": "Waiting", "project_sections": ["Backlog", "Next", "Doing", "Waiting", "Done", "Later"], "expect": "in_progress", "lang": "en", "note": "position: between doing and done"}
+{"section": "Later", "project_sections": ["Backlog", "Next", "Doing", "Waiting", "Done", "Later"], "expect": "todo", "lang": "en", "note": "ambiguous; position: vague name after done"}
+{"section": "Waiting", "project_sections": ["Doing", "Done", "Waiting"], "expect": "in_progress", "lang": "en", "note": "ambiguous; position: vague name after done"}
+{"section": "Queue", "project_sections": ["Queue", "Active sprint", "Review", "Done"], "expect": "todo", "lang": "en"}
+{"section": "Active sprint", "project_sections": ["Queue", "Active sprint", "Review", "Done"], "expect": "in_progress", "lang": "en", "note": "ambiguous: sprint scope vs being worked on"}
+{"section": "Review", "project_sections": ["Queue", "Active sprint", "Review", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "Open", "project_sections": ["Open", "In Progress", "Resolved", "Closed"], "expect": "todo", "lang": "en"}
+{"section": "Resolved", "project_sections": ["Open", "In Progress", "Resolved", "Closed"], "expect": "done", "lang": "en"}
+{"section": "Closed", "project_sections": ["Open", "In Progress", "Resolved", "Closed"], "expect": "done", "lang": "en"}
+{"section": "Proposed", "project_sections": ["Proposed", "Accepted", "Rejected", "Implemented"], "expect": "todo", "lang": "en"}
+{"section": "Accepted", "project_sections": ["Proposed", "Accepted", "Rejected", "Implemented"], "expect": "todo", "lang": "en"}
+{"section": "Rejected", "project_sections": ["Proposed", "Accepted", "Rejected", "Implemented"], "expect": "not_planned", "lang": "en"}
+{"section": "Implemented", "project_sections": ["Proposed", "Accepted", "Rejected", "Implemented"], "expect": "done", "lang": "en"}
+{"section": "Planning", "project_sections": ["Planning", "In development", "Code review", "Testing", "Complete", "Rejected"], "expect": "todo", "lang": "en"}
+{"section": "In development", "project_sections": ["Planning", "In development", "Code review", "Testing", "Complete", "Rejected"], "expect": "in_progress", "lang": "en"}
+{"section": "Code review", "project_sections": ["Planning", "In development", "Code review", "Testing", "Complete", "Rejected"], "expect": "in_progress", "lang": "en"}
+{"section": "Testing", "project_sections": ["Planning", "In development", "Code review", "Testing", "Complete", "Rejected"], "expect": "in_progress", "lang": "en"}
+{"section": "Complete", "project_sections": ["Planning", "In development", "Code review", "Testing", "Complete", "Rejected"], "expect": "done", "lang": "en"}
+{"section": "Rejected", "project_sections": ["Planning", "In development", "Code review", "Testing", "Complete", "Rejected"], "expect": "not_planned", "lang": "en"}
+{"section": "Ready for grooming", "project_sections": ["Ready for grooming", "Groomed", "Doing", "PR open", "Released", "Obsolete"], "expect": "todo", "lang": "en"}
+{"section": "Groomed", "project_sections": ["Ready for grooming", "Groomed", "Doing", "PR open", "Released", "Obsolete"], "expect": "todo", "lang": "en"}
+{"section": "PR open", "project_sections": ["Ready for grooming", "Groomed", "Doing", "PR open", "Released", "Obsolete"], "expect": "in_progress", "lang": "en"}
+{"section": "Released", "project_sections": ["Ready for grooming", "Groomed", "Doing", "PR open", "Released", "Obsolete"], "expect": "done", "lang": "en"}
+{"section": "Obsolete", "project_sections": ["Ready for grooming", "Groomed", "Doing", "PR open", "Released", "Obsolete"], "expect": "not_planned", "lang": "en"}
+{"section": "Todo", "project_sections": ["Todo", "WIP", "Done"], "expect": "todo", "lang": "en"}
+{"section": "WIP", "project_sections": ["Todo", "WIP", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "Candidates", "project_sections": ["Candidates", "Shortlist", "Interviewing", "Offer", "Hired", "Rejected"], "expect": "todo", "lang": "en"}
+{"section": "Shortlist", "project_sections": ["Candidates", "Shortlist", "Interviewing", "Offer", "Hired", "Rejected"], "expect": "todo", "lang": "en", "note": "ambiguous: recruiting pipeline"}
+{"section": "Interviewing", "project_sections": ["Candidates", "Shortlist", "Interviewing", "Offer", "Hired", "Rejected"], "expect": "in_progress", "lang": "en"}
+{"section": "Offer", "project_sections": ["Candidates", "Shortlist", "Interviewing", "Offer", "Hired", "Rejected"], "expect": "in_progress", "lang": "en"}
+{"section": "Hired", "project_sections": ["Candidates", "Shortlist", "Interviewing", "Offer", "Hired", "Rejected"], "expect": "done", "lang": "en"}
+{"section": "Rejected", "project_sections": ["Candidates", "Shortlist", "Interviewing", "Offer", "Hired", "Rejected"], "expect": "not_planned", "lang": "en"}
+{"section": "Unscheduled", "project_sections": ["Unscheduled", "Scheduled", "Recording", "Editing", "Live", "Scrapped"], "expect": "todo", "lang": "en"}
+{"section": "Scheduled", "project_sections": ["Unscheduled", "Scheduled", "Recording", "Editing", "Live", "Scrapped"], "expect": "todo", "lang": "en", "note": "position: before recording"}
+{"section": "Recording", "project_sections": ["Unscheduled", "Scheduled", "Recording", "Editing", "Live", "Scrapped"], "expect": "in_progress", "lang": "en"}
+{"section": "Editing", "project_sections": ["Unscheduled", "Scheduled", "Recording", "Editing", "Live", "Scrapped"], "expect": "in_progress", "lang": "en"}
+{"section": "Live", "project_sections": ["Unscheduled", "Scheduled", "Recording", "Editing", "Live", "Scrapped"], "expect": "done", "lang": "en"}
+{"section": "Scrapped", "project_sections": ["Unscheduled", "Scheduled", "Recording", "Editing", "Live", "Scrapped"], "expect": "not_planned", "lang": "en"}
+{"section": "Reported", "project_sections": ["Reported", "Confirmed", "In progress", "Fixed in main", "Released", "Won't fix", "Duplicate"], "expect": "todo", "lang": "en"}
+{"section": "Confirmed", "project_sections": ["Reported", "Confirmed", "In progress", "Fixed in main", "Released", "Won't fix", "Duplicate"], "expect": "todo", "lang": "en"}
+{"section": "Fixed in main", "project_sections": ["Reported", "Confirmed", "In progress", "Fixed in main", "Released", "Won't fix", "Duplicate"], "expect": "done", "lang": "en"}
+{"section": "Released", "project_sections": ["Reported", "Confirmed", "In progress", "Fixed in main", "Released", "Won't fix", "Duplicate"], "expect": "done", "lang": "en"}
+{"section": "Won't fix", "project_sections": ["Reported", "Confirmed", "In progress", "Fixed in main", "Released", "Won't fix", "Duplicate"], "expect": "not_planned", "lang": "en"}
+{"section": "Duplicate", "project_sections": ["Reported", "Confirmed", "In progress", "Fixed in main", "Released", "Won't fix", "Duplicate"], "expect": "not_planned", "lang": "en"}
+{"section": "Staging", "project_sections": ["Backlog", "Staging", "Released"], "expect": "in_progress", "lang": "en"}
+{"section": "Next sprint", "project_sections": ["Next sprint", "Current sprint", "Done"], "expect": "todo", "lang": "en"}
+{"section": "Current sprint", "project_sections": ["Next sprint", "Current sprint", "Done"], "expect": "in_progress", "lang": "en", "note": "ambiguous: sprint scope vs being worked on"}
+{"section": "Holding", "project_sections": ["Holding", "Doing", "Done", "Old"], "expect": "todo", "lang": "en", "note": "ambiguous: on hold before or during work"}
+{"section": "Old", "project_sections": ["Holding", "Doing", "Done", "Old"], "expect": "done", "lang": "en", "note": "ambiguous; position: vague name after done"}
+{"section": "To do", "project_sections": ["To do", "In progress", "Done", "Verified"], "expect": "todo", "lang": "en"}
+{"section": "Verified", "project_sections": ["To do", "In progress", "Done", "Verified"], "expect": "done", "lang": "en", "note": "position: after done"}
+{"section": "Unplanned", "project_sections": ["Unplanned", "Planned", "Doing", "Done"], "expect": "todo", "lang": "en", "note": "ambiguous: not planned yet vs not planned at all"}
+{"section": "Planned", "project_sections": ["Unplanned", "Planned", "Doing", "Done"], "expect": "todo", "lang": "en"}
+{"section": "Needs design", "project_sections": ["Needs design", "Needs dev", "Needs review", "Needs deploy", "Deployed"], "expect": "todo", "lang": "en"}
+{"section": "Needs dev", "project_sections": ["Needs design", "Needs dev", "Needs review", "Needs deploy", "Deployed"], "expect": "todo", "lang": "en"}
+{"section": "Needs review", "project_sections": ["Needs design", "Needs dev", "Needs review", "Needs deploy", "Deployed"], "expect": "in_progress", "lang": "en"}
+{"section": "Needs deploy", "project_sections": ["Needs design", "Needs dev", "Needs review", "Needs deploy", "Deployed"], "expect": "in_progress", "lang": "en"}
+{"section": "Deployed", "project_sections": ["Needs design", "Needs dev", "Needs review", "Needs deploy", "Deployed"], "expect": "done", "lang": "en"}
+{"section": "Follow-up", "project_sections": ["Backlog", "In progress", "Done", "Follow-up"], "expect": "todo", "lang": "en", "note": "ambiguous; position: vague name after done"}
+{"section": "Paused", "project_sections": ["Paused", "Doing", "Done"], "expect": "in_progress", "lang": "en", "note": "ambiguous: started then stopped"}
+{"section": "Next", "project_sections": ["Next", "In progress", "Review", "Done"], "expect": "todo", "lang": "en", "note": "position: before in progress"}
+{"section": "Review", "project_sections": ["Next", "In progress", "Review", "Done"], "expect": "in_progress", "lang": "en"}
+{"section": "Next", "project_sections": ["In progress", "Done", "Next"], "expect": "todo", "lang": "en", "note": "ambiguous; position: vague name after done"}
+{"section": "Discussion", "project_sections": ["Discussion", "Agreed", "Doing", "Done", "Declined"], "expect": "todo", "lang": "en", "note": "ambiguous: triage or already being shaped"}
+{"section": "Agreed", "project_sections": ["Discussion", "Agreed", "Doing", "Done", "Declined"], "expect": "todo", "lang": "en", "note": "position: before doing"}
+{"section": "Declined", "project_sections": ["Discussion", "Agreed", "Doing", "Done", "Declined"], "expect": "not_planned", "lang": "en"}
+{"section": "Ready for dev", "project_sections": ["Ready for dev", "Dev", "Ready for QA", "QA", "Ready to deploy", "Deployed", "Duplicate"], "expect": "todo", "lang": "en"}
+{"section": "Dev", "project_sections": ["Ready for dev", "Dev", "Ready for QA", "QA", "Ready to deploy", "Deployed", "Duplicate"], "expect": "in_progress", "lang": "en"}
+{"section": "Ready for QA", "project_sections": ["Ready for dev", "Dev", "Ready for QA", "QA", "Ready to deploy", "Deployed", "Duplicate"], "expect": "in_progress", "lang": "en"}
+{"section": "QA", "project_sections": ["Ready for dev", "Dev", "Ready for QA", "QA", "Ready to deploy", "Deployed", "Duplicate"], "expect": "in_progress", "lang": "en"}
+{"section": "Ready to deploy", "project_sections": ["Ready for dev", "Dev", "Ready for QA", "QA", "Ready to deploy", "Deployed", "Duplicate"], "expect": "in_progress", "lang": "en"}
+{"section": "Deployed", "project_sections": ["Ready for dev", "Dev", "Ready for QA", "QA", "Ready to deploy", "Deployed", "Duplicate"], "expect": "done", "lang": "en"}
+{"section": "Duplicate", "project_sections": ["Ready for dev", "Dev", "Ready for QA", "QA", "Ready to deploy", "Deployed", "Duplicate"], "expect": "not_planned", "lang": "en"}
+{"section": "Unassigned", "project_sections": ["Unassigned", "Assigned", "Pending approval", "Approved", "Denied"], "expect": "todo", "lang": "en"}
+{"section": "Assigned", "project_sections": ["Unassigned", "Assigned", "Pending approval", "Approved", "Denied"], "expect": "todo", "lang": "en", "note": "ambiguous: assigned may be started"}
+{"section": "Pending approval", "project_sections": ["Unassigned", "Assigned", "Pending approval", "Approved", "Denied"], "expect": "in_progress", "lang": "en"}
+{"section": "Approved", "project_sections": ["Unassigned", "Assigned", "Pending approval", "Approved", "Denied"], "expect": "done", "lang": "en", "note": "ambiguous; position: last live stage"}
+{"section": "Denied", "project_sections": ["Unassigned", "Assigned", "Pending approval", "Approved", "Denied"], "expect": "not_planned", "lang": "en"}
+{"section": "Discovery", "project_sections": ["Backlog", "Discovery", "Design review", "Engineering", "Beta", "GA"], "expect": "in_progress", "lang": "en"}
+{"section": "Design review", "project_sections": ["Backlog", "Discovery", "Design review", "Engineering", "Beta", "GA"], "expect": "in_progress", "lang": "en"}
+{"section": "Engineering", "project_sections": ["Backlog", "Discovery", "Design review", "Engineering", "Beta", "GA"], "expect": "in_progress", "lang": "en"}
+{"section": "Beta", "project_sections": ["Backlog", "Discovery", "Design review", "Engineering", "Beta", "GA"], "expect": "in_progress", "lang": "en"}
+{"section": "GA", "project_sections": ["Backlog", "Discovery", "Design review", "Engineering", "Beta", "GA"], "expect": "done", "lang": "en"}
+{"section": "Hotfix queue", "project_sections": ["Hotfix queue", "Hotfixing", "Hotfix released"], "expect": "todo", "lang": "en"}
+{"section": "Hotfixing", "project_sections": ["Hotfix queue", "Hotfixing", "Hotfix released"], "expect": "in_progress", "lang": "en"}
+{"section": "Hotfix released", "project_sections": ["Hotfix queue", "Hotfixing", "Hotfix released"], "expect": "done", "lang": "en"}
+{"section": "To triage", "project_sections": ["To triage", "Won't do", "To do", "Doing", "Done"], "expect": "todo", "lang": "en"}
+{"section": "Won't do", "project_sections": ["To triage", "Won't do", "To do", "Doing", "Done"], "expect": "not_planned", "lang": "en"}
+{"section": "Needs info", "project_sections": ["Needs info", "Ready", "Doing", "Done"], "expect": "todo", "lang": "en", "note": "ambiguous: waiting on the reporter before work starts"}
+{"section": "Ready", "project_sections": ["Needs info", "Ready", "Doing", "Done"], "expect": "todo", "lang": "en", "note": "position: before doing"}
+{"section": "Upcoming", "project_sections": ["Upcoming", "Current", "Past"], "expect": "todo", "lang": "en"}
+{"section": "Current", "project_sections": ["Upcoming", "Current", "Past"], "expect": "in_progress", "lang": "en"}
+{"section": "Past", "project_sections": ["Upcoming", "Current", "Past"], "expect": "done", "lang": "en"}
+{"section": "Q1", "project_sections": ["Q1", "Q2", "Q3", "Shipped"], "expect": "todo", "lang": "en", "note": "ambiguous: quarter buckets"}
+{"section": "Q2", "project_sections": ["Q1", "Q2", "Q3", "Shipped"], "expect": "todo", "lang": "en", "note": "ambiguous: quarter buckets"}
+{"section": "Q3", "project_sections": ["Q1", "Q2", "Q3", "Shipped"], "expect": "todo", "lang": "en", "note": "ambiguous: quarter buckets"}
+{"section": "Shipped", "project_sections": ["Q1", "Q2", "Q3", "Shipped"], "expect": "done", "lang": "en"}
+{"section": "Completed", "project_sections": ["Backlog", "In progress", "Completed", "Closed - won't fix"], "expect": "done", "lang": "en"}
+{"section": "Closed - won't fix", "project_sections": ["Backlog", "In progress", "Completed", "Closed - won't fix"], "expect": "not_planned", "lang": "en", "note": "rule trap: contains 'closed'"}
+{"section": "To be released", "project_sections": ["Backlog", "Doing", "To be released", "Released"], "expect": "in_progress", "lang": "en", "note": "rule trap: contains 'released'"}
+{"section": "Shipping", "project_sections": ["Backlog", "Shipping", "Shipped"], "expect": "in_progress", "lang": "en"}
+{"section": "Shipped", "project_sections": ["Backlog", "Shipping", "Shipped"], "expect": "done", "lang": "en"}
+{"section": "📥 Inbox", "project_sections": ["📥 Inbox", "🔜 Next up", "🏗️ Building", "👀 In review", "🚀 Shipped", "🗑️ Won't do"], "expect": "todo", "lang": "en"}
+{"section": "🔜 Next up", "project_sections": ["📥 Inbox", "🔜 Next up", "🏗️ Building", "👀 In review", "🚀 Shipped", "🗑️ Won't do"], "expect": "todo", "lang": "en"}
+{"section": "🏗️ Building", "project_sections": ["📥 Inbox", "🔜 Next up", "🏗️ Building", "👀 In review", "🚀 Shipped", "🗑️ Won't do"], "expect": "in_progress", "lang": "en"}
+{"section": "👀 In review", "project_sections": ["📥 Inbox", "🔜 Next up", "🏗️ Building", "👀 In review", "🚀 Shipped", "🗑️ Won't do"], "expect": "in_progress", "lang": "en"}
+{"section": "🚀 Shipped", "project_sections": ["📥 Inbox", "🔜 Next up", "🏗️ Building", "👀 In review", "🚀 Shipped", "🗑️ Won't do"], "expect": "done", "lang": "en"}
+{"section": "🗑️ Won't do", "project_sections": ["📥 Inbox", "🔜 Next up", "🏗️ Building", "👀 In review", "🚀 Shipped", "🗑️ Won't do"], "expect": "not_planned", "lang": "en"}
+{"section": "💡 Ideas", "project_sections": ["💡 Ideas", "🧊 Icebox", "🔥 Urgent", "⚙️ In progress", "🧪 Testing", "✅ Done"], "expect": "todo", "lang": "en"}
+{"section": "🧊 Icebox", "project_sections": ["💡 Ideas", "🧊 Icebox", "🔥 Urgent", "⚙️ In progress", "🧪 Testing", "✅ Done"], "expect": "todo", "lang": "en", "note": "ambiguous: maybe-later vs never"}
+{"section": "🔥 Urgent", "project_sections": ["💡 Ideas", "🧊 Icebox", "🔥 Urgent", "⚙️ In progress", "🧪 Testing", "✅ Done"], "expect": "todo", "lang": "en", "note": "ambiguous: urgent but maybe not started"}
+{"section": "⚙️ In progress", "project_sections": ["💡 Ideas", "🧊 Icebox", "🔥 Urgent", "⚙️ In progress", "🧪 Testing", "✅ Done"], "expect": "in_progress", "lang": "en"}
+{"section": "🧪 Testing", "project_sections": ["💡 Ideas", "🧊 Icebox", "🔥 Urgent", "⚙️ In progress", "🧪 Testing", "✅ Done"], "expect": "in_progress", "lang": "en"}
+{"section": "✅ Done", "project_sections": ["💡 Ideas", "🧊 Icebox", "🔥 Urgent", "⚙️ In progress", "🧪 Testing", "✅ Done"], "expect": "done", "lang": "en"}
+{"section": "🐛 Bugs", "project_sections": ["🐛 Bugs", "🛠️ Fixing", "⏳ Waiting", "🎉 Live", "❌ Cancelled"], "expect": "todo", "lang": "en", "note": "ambiguous: a bug inbox"}
+{"section": "🛠️ Fixing", "project_sections": ["🐛 Bugs", "🛠️ Fixing", "⏳ Waiting", "🎉 Live", "❌ Cancelled"], "expect": "in_progress", "lang": "en"}
+{"section": "⏳ Waiting", "project_sections": ["🐛 Bugs", "🛠️ Fixing", "⏳ Waiting", "🎉 Live", "❌ Cancelled"], "expect": "in_progress", "lang": "en", "note": "ambiguous; position: after fixing"}
+{"section": "🎉 Live", "project_sections": ["🐛 Bugs", "🛠️ Fixing", "⏳ Waiting", "🎉 Live", "❌ Cancelled"], "expect": "done", "lang": "en"}
+{"section": "❌ Cancelled", "project_sections": ["🐛 Bugs", "🛠️ Fixing", "⏳ Waiting", "🎉 Live", "❌ Cancelled"], "expect": "not_planned", "lang": "en"}
+{"section": "📝 To write", "project_sections": ["📝 To write", "✍️ Drafting", "🔍 Proofreading", "📦 Released", "🗄️ Archive"], "expect": "todo", "lang": "en"}
+{"section": "✍️ Drafting", "project_sections": ["📝 To write", "✍️ Drafting", "🔍 Proofreading", "📦 Released", "🗄️ Archive"], "expect": "in_progress", "lang": "en"}
+{"section": "🔍 Proofreading", "project_sections": ["📝 To write", "✍️ Drafting", "🔍 Proofreading", "📦 Released", "🗄️ Archive"], "expect": "in_progress", "lang": "en"}
+{"section": "📦 Released", "project_sections": ["📝 To write", "✍️ Drafting", "🔍 Proofreading", "📦 Released", "🗄️ Archive"], "expect": "done", "lang": "en"}
+{"section": "🗄️ Archive", "project_sections": ["📝 To write", "✍️ Drafting", "🔍 Proofreading", "📦 Released", "🗄️ Archive"], "expect": "done", "lang": "en", "note": "position: after released"}
+{"section": "🛑 Blocked", "project_sections": ["🛑 Blocked", "🟡 Doing", "🟢 Done", "⚪ Not started"], "expect": "in_progress", "lang": "en", "note": "ambiguous: started but stuck"}
+{"section": "🟡 Doing", "project_sections": ["🛑 Blocked", "🟡 Doing", "🟢 Done", "⚪ Not started"], "expect": "in_progress", "lang": "en"}
+{"section": "🟢 Done", "project_sections": ["🛑 Blocked", "🟡 Doing", "🟢 Done", "⚪ Not started"], "expect": "done", "lang": "en"}
+{"section": "⚪ Not started", "project_sections": ["🛑 Blocked", "🟡 Doing", "🟢 Done", "⚪ Not started"], "expect": "todo", "lang": "en", "note": "rule trap: contains 'started'"}
+{"section": "Brain dump", "project_sections": ["Brain dump", "Maybe one day", "Cooking", "In the oven", "Out the door", "Graveyard"], "expect": "todo", "lang": "en"}
+{"section": "Maybe one day", "project_sections": ["Brain dump", "Maybe one day", "Cooking", "In the oven", "Out the door", "Graveyard"], "expect": "todo", "lang": "en", "note": "ambiguous: maybe-later vs never"}
+{"section": "Cooking", "project_sections": ["Brain dump", "Maybe one day", "Cooking", "In the oven", "Out the door", "Graveyard"], "expect": "in_progress", "lang": "en"}
+{"section": "In the oven", "project_sections": ["Brain dump", "Maybe one day", "Cooking", "In the oven", "Out the door", "Graveyard"], "expect": "in_progress", "lang": "en"}
+{"section": "Out the door", "project_sections": ["Brain dump", "Maybe one day", "Cooking", "In the oven", "Out the door", "Graveyard"], "expect": "done", "lang": "en"}
+{"section": "Graveyard", "project_sections": ["Brain dump", "Maybe one day", "Cooking", "In the oven", "Out the door", "Graveyard"], "expect": "not_planned", "lang": "en"}
+{"section": "Pls fix", "project_sections": ["Pls fix", "On fire", "Hmm", "Victory lap", "Nope"], "expect": "todo", "lang": "en"}
+{"section": "On fire", "project_sections": ["Pls fix", "On fire", "Hmm", "Victory lap", "Nope"], "expect": "in_progress", "lang": "en", "note": "ambiguous: urgent, maybe not started"}
+{"section": "Hmm", "project_sections": ["Pls fix", "On fire", "Hmm", "Victory lap", "Nope"], "expect": "todo", "lang": "en", "note": "ambiguous: no signal"}
+{"section": "Victory lap", "project_sections": ["Pls fix", "On fire", "Hmm", "Victory lap", "Nope"], "expect": "done", "lang": "en"}
+{"section": "Nope", "project_sections": ["Pls fix", "On fire", "Hmm", "Victory lap", "Nope"], "expect": "not_planned", "lang": "en"}
+{"section": "Stuff", "project_sections": ["Stuff", "Things in flight", "Landed", "The void"], "expect": "todo", "lang": "en", "note": "ambiguous: no signal"}
+{"section": "Things in flight", "project_sections": ["Stuff", "Things in flight", "Landed", "The void"], "expect": "in_progress", "lang": "en"}
+{"section": "Landed", "project_sections": ["Stuff", "Things in flight", "Landed", "The void"], "expect": "done", "lang": "en"}
+{"section": "The void", "project_sections": ["Stuff", "Things in flight", "Landed", "The void"], "expect": "not_planned", "lang": "en", "note": "ambiguous: dropped or just ignored"}
+{"section": "Limbo", "project_sections": ["Limbo", "Rabbit holes", "Misc", "Done-done"], "expect": "todo", "lang": "en", "note": "ambiguous: no signal"}
+{"section": "Rabbit holes", "project_sections": ["Limbo", "Rabbit holes", "Misc", "Done-done"], "expect": "in_progress", "lang": "en", "note": "ambiguous: being explored or parked"}
+{"section": "Misc", "project_sections": ["Limbo", "Rabbit holes", "Misc", "Done-done"], "expect": "todo", "lang": "en", "note": "ambiguous: no signal"}
+{"section": "Done-done", "project_sections": ["Limbo", "Rabbit holes", "Misc", "Done-done"], "expect": "done", "lang": "en"}
+{"section": "Zásobník", "project_sections": ["Zásobník", "Na riešenie", "Rozpracované", "Na review", "Hotovo"], "expect": "todo", "lang": "sk"}
+{"section": "Na riešenie", "project_sections": ["Zásobník", "Na riešenie", "Rozpracované", "Na review", "Hotovo"], "expect": "todo", "lang": "sk"}
+{"section": "Rozpracované", "project_sections": ["Zásobník", "Na riešenie", "Rozpracované", "Na review", "Hotovo"], "expect": "in_progress", "lang": "sk"}
+{"section": "Na review", "project_sections": ["Zásobník", "Na riešenie", "Rozpracované", "Na review", "Hotovo"], "expect": "in_progress", "lang": "sk"}
+{"section": "Hotovo", "project_sections": ["Zásobník", "Na riešenie", "Rozpracované", "Na review", "Hotovo"], "expect": "done", "lang": "sk"}
+{"section": "Nápady", "project_sections": ["Nápady", "Nové", "V riešení", "Kontrola", "Dokončené", "Zrušené"], "expect": "todo", "lang": "sk"}
+{"section": "Nové", "project_sections": ["Nápady", "Nové", "V riešení", "Kontrola", "Dokončené", "Zrušené"], "expect": "todo", "lang": "sk"}
+{"section": "V riešení", "project_sections": ["Nápady", "Nové", "V riešení", "Kontrola", "Dokončené", "Zrušené"], "expect": "in_progress", "lang": "sk"}
+{"section": "Kontrola", "project_sections": ["Nápady", "Nové", "V riešení", "Kontrola", "Dokončené", "Zrušené"], "expect": "in_progress", "lang": "sk"}
+{"section": "Dokončené", "project_sections": ["Nápady", "Nové", "V riešení", "Kontrola", "Dokončené", "Zrušené"], "expect": "done", "lang": "sk"}
+{"section": "Zrušené", "project_sections": ["Nápady", "Nové", "V riešení", "Kontrola", "Dokončené", "Zrušené"], "expect": "not_planned", "lang": "sk"}
+{"section": "Zasobnik", "project_sections": ["Zasobnik", "Nove", "Rozpracovane", "Na kontrolu", "Hotovo", "Nebude sa robit"], "expect": "todo", "lang": "sk", "note": "no diacritics"}
+{"section": "Nove", "project_sections": ["Zasobnik", "Nove", "Rozpracovane", "Na kontrolu", "Hotovo", "Nebude sa robit"], "expect": "todo", "lang": "sk", "note": "no diacritics"}
+{"section": "Rozpracovane", "project_sections": ["Zasobnik", "Nove", "Rozpracovane", "Na kontrolu", "Hotovo", "Nebude sa robit"], "expect": "in_progress", "lang": "sk", "note": "no diacritics"}
+{"section": "Na kontrolu", "project_sections": ["Zasobnik", "Nove", "Rozpracovane", "Na kontrolu", "Hotovo", "Nebude sa robit"], "expect": "in_progress", "lang": "sk"}
+{"section": "Hotovo", "project_sections": ["Zasobnik", "Nove", "Rozpracovane", "Na kontrolu", "Hotovo", "Nebude sa robit"], "expect": "done", "lang": "sk"}
+{"section": "Nebude sa robit", "project_sections": ["Zasobnik", "Nove", "Rozpracovane", "Na kontrolu", "Hotovo", "Nebude sa robit"], "expect": "not_planned", "lang": "sk", "note": "no diacritics"}
+{"section": "Nové", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "todo", "lang": "sk"}
+{"section": "Odložené", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "todo", "lang": "sk", "note": "ambiguous: postponed vs dropped"}
+{"section": "V riešení", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "in_progress", "lang": "sk"}
+{"section": "Čaká na klienta", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "in_progress", "lang": "sk", "note": "ambiguous: started, waiting on the client"}
+{"section": "Testovanie", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "in_progress", "lang": "sk"}
+{"section": "Na nasadenie", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "in_progress", "lang": "sk"}
+{"section": "Nasadené", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "done", "lang": "sk"}
+{"section": "Archív", "project_sections": ["Nové", "Odložené", "V riešení", "Čaká na klienta", "Testovanie", "Na nasadenie", "Nasadené", "Archív"], "expect": "done", "lang": "sk", "note": "position: after deployed"}
+{"section": "Napady", "project_sections": ["Napady", "Odlozene", "V rieseni", "Caka na klienta", "Blokovane", "Uzavrete"], "expect": "todo", "lang": "sk", "note": "no diacritics"}
+{"section": "Odlozene", "project_sections": ["Napady", "Odlozene", "V rieseni", "Caka na klienta", "Blokovane", "Uzavrete"], "expect": "todo", "lang": "sk", "note": "ambiguous; no diacritics"}
+{"section": "V rieseni", "project_sections": ["Napady", "Odlozene", "V rieseni", "Caka na klienta", "Blokovane", "Uzavrete"], "expect": "in_progress", "lang": "sk", "note": "no diacritics"}
+{"section": "Caka na klienta", "project_sections": ["Napady", "Odlozene", "V rieseni", "Caka na klienta", "Blokovane", "Uzavrete"], "expect": "in_progress", "lang": "sk", "note": "ambiguous; no diacritics"}
+{"section": "Blokovane", "project_sections": ["Napady", "Odlozene", "V rieseni", "Caka na klienta", "Blokovane", "Uzavrete"], "expect": "in_progress", "lang": "sk", "note": "ambiguous; no diacritics"}
+{"section": "Uzavrete", "project_sections": ["Napady", "Odlozene", "V rieseni", "Caka na klienta", "Blokovane", "Uzavrete"], "expect": "done", "lang": "sk", "note": "no diacritics"}
+{"section": "Pripravené", "project_sections": ["Pripravené", "Robí sa", "Hotové", "V produkcii"], "expect": "todo", "lang": "sk", "note": "position: before work starts"}
+{"section": "Robí sa", "project_sections": ["Pripravené", "Robí sa", "Hotové", "V produkcii"], "expect": "in_progress", "lang": "sk"}
+{"section": "Hotové", "project_sections": ["Pripravené", "Robí sa", "Hotové", "V produkcii"], "expect": "done", "lang": "sk"}
+{"section": "V produkcii", "project_sections": ["Pripravené", "Robí sa", "Hotové", "V produkcii"], "expect": "done", "lang": "sk"}
+{"section": "Treba spraviť", "project_sections": ["Treba spraviť", "Robím na tom", "Hotovo", "Zahodené"], "expect": "todo", "lang": "sk"}
+{"section": "Robím na tom", "project_sections": ["Treba spraviť", "Robím na tom", "Hotovo", "Zahodené"], "expect": "in_progress", "lang": "sk"}
+{"section": "Hotovo", "project_sections": ["Treba spraviť", "Robím na tom", "Hotovo", "Zahodené"], "expect": "done", "lang": "sk"}
+{"section": "Zahodené", "project_sections": ["Treba spraviť", "Robím na tom", "Hotovo", "Zahodené"], "expect": "not_planned", "lang": "sk"}
+{"section": "Tento týždeň", "project_sections": ["Backlog", "Tento týždeň", "Robím", "Čaká sa", "Hotovo"], "expect": "todo", "lang": "sk"}
+{"section": "Robím", "project_sections": ["Backlog", "Tento týždeň", "Robím", "Čaká sa", "Hotovo"], "expect": "in_progress", "lang": "sk"}
+{"section": "Čaká sa", "project_sections": ["Backlog", "Tento týždeň", "Robím", "Čaká sa", "Hotovo"], "expect": "in_progress", "lang": "sk", "note": "ambiguous; position: between doing and done"}
+{"section": "Na spracovanie", "project_sections": ["Na spracovanie", "Spracováva sa", "Na schválenie", "Schválené", "Zamietnuté"], "expect": "todo", "lang": "sk"}
+{"section": "Spracováva sa", "project_sections": ["Na spracovanie", "Spracováva sa", "Na schválenie", "Schválené", "Zamietnuté"], "expect": "in_progress", "lang": "sk"}
+{"section": "Na schválenie", "project_sections": ["Na spracovanie", "Spracováva sa", "Na schválenie", "Schválené", "Zamietnuté"], "expect": "in_progress", "lang": "sk"}
+{"section": "Schválené", "project_sections": ["Na spracovanie", "Spracováva sa", "Na schválenie", "Schválené", "Zamietnuté"], "expect": "done", "lang": "sk", "note": "ambiguous; position: last stage"}
+{"section": "Zamietnuté", "project_sections": ["Na spracovanie", "Spracováva sa", "Na schválenie", "Schválené", "Zamietnuté"], "expect": "not_planned", "lang": "sk"}
+{"section": "Zásobník", "project_sections": ["Zásobník", "K řešení", "V řešení", "Ke kontrole", "Hotovo"], "expect": "todo", "lang": "cs"}
+{"section": "K řešení", "project_sections": ["Zásobník", "K řešení", "V řešení", "Ke kontrole", "Hotovo"], "expect": "todo", "lang": "cs"}
+{"section": "V řešení", "project_sections": ["Zásobník", "K řešení", "V řešení", "Ke kontrole", "Hotovo"], "expect": "in_progress", "lang": "cs"}
+{"section": "Ke kontrole", "project_sections": ["Zásobník", "K řešení", "V řešení", "Ke kontrole", "Hotovo"], "expect": "in_progress", "lang": "cs"}
+{"section": "Nápady", "project_sections": ["Nápady", "Nové", "Rozpracováno", "Testování", "Dokončeno", "Zrušeno"], "expect": "todo", "lang": "cs"}
+{"section": "Nové", "project_sections": ["Nápady", "Nové", "Rozpracováno", "Testování", "Dokončeno", "Zrušeno"], "expect": "todo", "lang": "cs"}
+{"section": "Rozpracováno", "project_sections": ["Nápady", "Nové", "Rozpracováno", "Testování", "Dokončeno", "Zrušeno"], "expect": "in_progress", "lang": "cs"}
+{"section": "Testování", "project_sections": ["Nápady", "Nové", "Rozpracováno", "Testování", "Dokončeno", "Zrušeno"], "expect": "in_progress", "lang": "cs"}
+{"section": "Dokončeno", "project_sections": ["Nápady", "Nové", "Rozpracováno", "Testování", "Dokončeno", "Zrušeno"], "expect": "done", "lang": "cs"}
+{"section": "Zrušeno", "project_sections": ["Nápady", "Nové", "Rozpracováno", "Testování", "Dokončeno", "Zrušeno"], "expect": "not_planned", "lang": "cs"}
+{"section": "Zasobnik", "project_sections": ["Zasobnik", "K reseni", "V reseni", "Ceka na zakaznika", "Uzavreno", "Nebude se delat"], "expect": "todo", "lang": "cs", "note": "no diacritics"}
+{"section": "K reseni", "project_sections": ["Zasobnik", "K reseni", "V reseni", "Ceka na zakaznika", "Uzavreno", "Nebude se delat"], "expect": "todo", "lang": "cs", "note": "no diacritics"}
+{"section": "V reseni", "project_sections": ["Zasobnik", "K reseni", "V reseni", "Ceka na zakaznika", "Uzavreno", "Nebude se delat"], "expect": "in_progress", "lang": "cs", "note": "no diacritics"}
+{"section": "Ceka na zakaznika", "project_sections": ["Zasobnik", "K reseni", "V reseni", "Ceka na zakaznika", "Uzavreno", "Nebude se delat"], "expect": "in_progress", "lang": "cs", "note": "ambiguous; no diacritics"}
+{"section": "Uzavreno", "project_sections": ["Zasobnik", "K reseni", "V reseni", "Ceka na zakaznika", "Uzavreno", "Nebude se delat"], "expect": "done", "lang": "cs", "note": "no diacritics"}
+{"section": "Nebude se delat", "project_sections": ["Zasobnik", "K reseni", "V reseni", "Ceka na zakaznika", "Uzavreno", "Nebude se delat"], "expect": "not_planned", "lang": "cs", "note": "no diacritics"}
+{"section": "Odloženo", "project_sections": ["Odloženo", "Připraveno", "Probíhá", "K nasazení", "Nasazeno", "Archiv"], "expect": "todo", "lang": "cs", "note": "ambiguous: postponed vs dropped"}
+{"section": "Připraveno", "project_sections": ["Odloženo", "Připraveno", "Probíhá", "K nasazení", "Nasazeno", "Archiv"], "expect": "todo", "lang": "cs", "note": "position: before work starts"}
+{"section": "Probíhá", "project_sections": ["Odloženo", "Připraveno", "Probíhá", "K nasazení", "Nasazeno", "Archiv"], "expect": "in_progress", "lang": "cs"}
+{"section": "K nasazení", "project_sections": ["Odloženo", "Připraveno", "Probíhá", "K nasazení", "Nasazeno", "Archiv"], "expect": "in_progress", "lang": "cs"}
+{"section": "Nasazeno", "project_sections": ["Odloženo", "Připraveno", "Probíhá", "K nasazení", "Nasazeno", "Archiv"], "expect": "done", "lang": "cs"}
+{"section": "Archiv", "project_sections": ["Odloženo", "Připraveno", "Probíhá", "K nasazení", "Nasazeno", "Archiv"], "expect": "done", "lang": "cs", "note": "position: after deployed"}
+{"section": "V řešení", "project_sections": ["Nové", "V řešení", "Čeká na zákazníka", "Blokováno", "Vyřešeno"], "expect": "in_progress", "lang": "cs"}
+{"section": "Čeká na zákazníka", "project_sections": ["Nové", "V řešení", "Čeká na zákazníka", "Blokováno", "Vyřešeno"], "expect": "in_progress", "lang": "cs", "note": "ambiguous: started, waiting on the customer"}
+{"section": "Blokováno", "project_sections": ["Nové", "V řešení", "Čeká na zákazníka", "Blokováno", "Vyřešeno"], "expect": "in_progress", "lang": "cs", "note": "ambiguous: started but stuck"}
+{"section": "Vyřešeno", "project_sections": ["Nové", "V řešení", "Čeká na zákazníka", "Blokováno", "Vyřešeno"], "expect": "done", "lang": "cs"}
+{"section": "Udělat", "project_sections": ["Udělat", "Dělá se", "Hotové", "Zamítnuto"], "expect": "todo", "lang": "cs"}
+{"section": "Dělá se", "project_sections": ["Udělat", "Dělá se", "Hotové", "Zamítnuto"], "expect": "in_progress", "lang": "cs"}
+{"section": "Hotové", "project_sections": ["Udělat", "Dělá se", "Hotové", "Zamítnuto"], "expect": "done", "lang": "cs"}
+{"section": "Zamítnuto", "project_sections": ["Udělat", "Dělá se", "Hotové", "Zamítnuto"], "expect": "not_planned", "lang": "cs"}
+{"section": "Tento týden", "project_sections": ["Tento týden", "Pracuje se", "Revize", "Vydáno"], "expect": "todo", "lang": "cs"}
+{"section": "Pracuje se", "project_sections": ["Tento týden", "Pracuje se", "Revize", "Vydáno"], "expect": "in_progress", "lang": "cs"}
+{"section": "Revize", "project_sections": ["Tento týden", "Pracuje se", "Revize", "Vydáno"], "expect": "in_progress", "lang": "cs"}
+{"section": "Vydáno", "project_sections": ["Tento týden", "Pracuje se", "Revize", "Vydáno"], "expect": "done", "lang": "cs"}
+{"section": "Zu erledigen", "project_sections": ["Backlog", "Zu erledigen", "In Arbeit", "Review", "Erledigt"], "expect": "todo", "lang": "de", "note": "contrast: erledigen (to do) vs erledigt (done)"}
+{"section": "In Arbeit", "project_sections": ["Backlog", "Zu erledigen", "In Arbeit", "Review", "Erledigt"], "expect": "in_progress", "lang": "de"}
+{"section": "Erledigt", "project_sections": ["Backlog", "Zu erledigen", "In Arbeit", "Review", "Erledigt"], "expect": "done", "lang": "de"}
+{"section": "Ideen", "project_sections": ["Ideen", "Offen", "In Bearbeitung", "In Prüfung", "Fertig", "Verworfen"], "expect": "todo", "lang": "de"}
+{"section": "Offen", "project_sections": ["Ideen", "Offen", "In Bearbeitung", "In Prüfung", "Fertig", "Verworfen"], "expect": "todo", "lang": "de"}
+{"section": "In Bearbeitung", "project_sections": ["Ideen", "Offen", "In Bearbeitung", "In Prüfung", "Fertig", "Verworfen"], "expect": "in_progress", "lang": "de"}
+{"section": "In Prüfung", "project_sections": ["Ideen", "Offen", "In Bearbeitung", "In Prüfung", "Fertig", "Verworfen"], "expect": "in_progress", "lang": "de"}
+{"section": "Fertig", "project_sections": ["Ideen", "Offen", "In Bearbeitung", "In Prüfung", "Fertig", "Verworfen"], "expect": "done", "lang": "de"}
+{"section": "Verworfen", "project_sections": ["Ideen", "Offen", "In Bearbeitung", "In Prüfung", "Fertig", "Verworfen"], "expect": "not_planned", "lang": "de"}
+{"section": "Offen", "project_sections": ["Offen", "Geplant", "In Bearbeitung", "Pruefung", "Abgeschlossen", "Abgelehnt"], "expect": "todo", "lang": "de"}
+{"section": "Geplant", "project_sections": ["Offen", "Geplant", "In Bearbeitung", "Pruefung", "Abgeschlossen", "Abgelehnt"], "expect": "todo", "lang": "de"}
+{"section": "In Bearbeitung", "project_sections": ["Offen", "Geplant", "In Bearbeitung", "Pruefung", "Abgeschlossen", "Abgelehnt"], "expect": "in_progress", "lang": "de"}
+{"section": "Pruefung", "project_sections": ["Offen", "Geplant", "In Bearbeitung", "Pruefung", "Abgeschlossen", "Abgelehnt"], "expect": "in_progress", "lang": "de", "note": "no diacritics"}
+{"section": "Abgeschlossen", "project_sections": ["Offen", "Geplant", "In Bearbeitung", "Pruefung", "Abgeschlossen", "Abgelehnt"], "expect": "done", "lang": "de"}
+{"section": "Abgelehnt", "project_sections": ["Offen", "Geplant", "In Bearbeitung", "Pruefung", "Abgeschlossen", "Abgelehnt"], "expect": "not_planned", "lang": "de"}
+{"section": "Eingang", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "todo", "lang": "de"}
+{"section": "Zurückgestellt", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "todo", "lang": "de", "note": "ambiguous: postponed vs dropped"}
+{"section": "In Arbeit", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "in_progress", "lang": "de"}
+{"section": "Wartet auf Kunde", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "in_progress", "lang": "de", "note": "ambiguous: started, waiting on the customer"}
+{"section": "Blockiert", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "in_progress", "lang": "de", "note": "ambiguous: started but stuck"}
+{"section": "Freigabe", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "in_progress", "lang": "de"}
+{"section": "Live", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "done", "lang": "de"}
+{"section": "Archiv", "project_sections": ["Eingang", "Zurückgestellt", "In Arbeit", "Wartet auf Kunde", "Blockiert", "Freigabe", "Live", "Archiv"], "expect": "done", "lang": "de", "note": "position: after live"}
+{"section": "Nächste Schritte", "project_sections": ["Nächste Schritte", "Läuft", "Test", "Ausgeliefert", "Wird nicht gemacht"], "expect": "todo", "lang": "de"}
+{"section": "Läuft", "project_sections": ["Nächste Schritte", "Läuft", "Test", "Ausgeliefert", "Wird nicht gemacht"], "expect": "in_progress", "lang": "de"}
+{"section": "Test", "project_sections": ["Nächste Schritte", "Läuft", "Test", "Ausgeliefert", "Wird nicht gemacht"], "expect": "in_progress", "lang": "de"}
+{"section": "Ausgeliefert", "project_sections": ["Nächste Schritte", "Läuft", "Test", "Ausgeliefert", "Wird nicht gemacht"], "expect": "done", "lang": "de"}
+{"section": "Wird nicht gemacht", "project_sections": ["Nächste Schritte", "Läuft", "Test", "Ausgeliefert", "Wird nicht gemacht"], "expect": "not_planned", "lang": "de"}
+{"section": "Anfragen", "project_sections": ["Anfragen", "Genehmigt", "Umsetzung", "Abnahme", "Erledigt"], "expect": "todo", "lang": "de"}
+{"section": "Genehmigt", "project_sections": ["Anfragen", "Genehmigt", "Umsetzung", "Abnahme", "Erledigt"], "expect": "todo", "lang": "de", "note": "position: before implementation"}
+{"section": "Umsetzung", "project_sections": ["Anfragen", "Genehmigt", "Umsetzung", "Abnahme", "Erledigt"], "expect": "in_progress", "lang": "de"}
+{"section": "Abnahme", "project_sections": ["Anfragen", "Genehmigt", "Umsetzung", "Abnahme", "Erledigt"], "expect": "in_progress", "lang": "de"}
+{"section": "Erledigt", "project_sections": ["Anfragen", "Genehmigt", "Umsetzung", "Abnahme", "Erledigt"], "expect": "done", "lang": "de"}
+{"section": "Zurueckgestellt", "project_sections": ["Zurueckgestellt", "Naechste Schritte", "Laeuft", "Fertig"], "expect": "todo", "lang": "de", "note": "ambiguous; no diacritics"}
+{"section": "Naechste Schritte", "project_sections": ["Zurueckgestellt", "Naechste Schritte", "Laeuft", "Fertig"], "expect": "todo", "lang": "de", "note": "no diacritics"}
+{"section": "Laeuft", "project_sections": ["Zurueckgestellt", "Naechste Schritte", "Laeuft", "Fertig"], "expect": "in_progress", "lang": "de", "note": "no diacritics"}
+{"section": "Fertig", "project_sections": ["Zurueckgestellt", "Naechste Schritte", "Laeuft", "Fertig"], "expect": "done", "lang": "de"}
+{"section": "Warteschlange", "project_sections": ["Warteschlange", "Entwicklung", "Qualitätssicherung", "Veröffentlicht", "Duplikat"], "expect": "todo", "lang": "de"}
+{"section": "Entwicklung", "project_sections": ["Warteschlange", "Entwicklung", "Qualitätssicherung", "Veröffentlicht", "Duplikat"], "expect": "in_progress", "lang": "de"}
+{"section": "Qualitätssicherung", "project_sections": ["Warteschlange", "Entwicklung", "Qualitätssicherung", "Veröffentlicht", "Duplikat"], "expect": "in_progress", "lang": "de"}
+{"section": "Veröffentlicht", "project_sections": ["Warteschlange", "Entwicklung", "Qualitätssicherung", "Veröffentlicht", "Duplikat"], "expect": "done", "lang": "de"}
+{"section": "Duplikat", "project_sections": ["Warteschlange", "Entwicklung", "Qualitätssicherung", "Veröffentlicht", "Duplikat"], "expect": "not_planned", "lang": "de"}
+{"section": "In progress (Rozpracované)", "project_sections": ["Backlog", "In progress (Rozpracované)", "Na review", "Hotovo / Done"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Na review", "project_sections": ["Backlog", "In progress (Rozpracované)", "Na review", "Hotovo / Done"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Hotovo / Done", "project_sections": ["Backlog", "In progress (Rozpracované)", "Na review", "Hotovo / Done"], "expect": "done", "lang": "mixed"}
+{"section": "Todo / Treba spraviť", "project_sections": ["Todo / Treba spraviť", "Waiting na klienta", "QA / Testovanie", "Deploy na prod", "Done ✔ Hotovo"], "expect": "todo", "lang": "mixed"}
+{"section": "Waiting na klienta", "project_sections": ["Todo / Treba spraviť", "Waiting na klienta", "QA / Testovanie", "Deploy na prod", "Done ✔ Hotovo"], "expect": "in_progress", "lang": "mixed", "note": "ambiguous: started, waiting on the client"}
+{"section": "QA / Testovanie", "project_sections": ["Todo / Treba spraviť", "Waiting na klienta", "QA / Testovanie", "Deploy na prod", "Done ✔ Hotovo"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Deploy na prod", "project_sections": ["Todo / Treba spraviť", "Waiting na klienta", "QA / Testovanie", "Deploy na prod", "Done ✔ Hotovo"], "expect": "in_progress", "lang": "mixed", "note": "ambiguous: about to deploy vs deployed"}
+{"section": "Done ✔ Hotovo", "project_sections": ["Todo / Treba spraviť", "Waiting na klienta", "QA / Testovanie", "Deploy na prod", "Done ✔ Hotovo"], "expect": "done", "lang": "mixed"}
+{"section": "Nápady / Ideas", "project_sections": ["Nápady / Ideas", "Ready na test", "Čaká na merge", "Blocked / Blokované", "Released 🚀"], "expect": "todo", "lang": "mixed"}
+{"section": "Ready na test", "project_sections": ["Nápady / Ideas", "Ready na test", "Čaká na merge", "Blocked / Blokované", "Released 🚀"], "expect": "in_progress", "lang": "mixed", "note": "position: before merge"}
+{"section": "Čaká na merge", "project_sections": ["Nápady / Ideas", "Ready na test", "Čaká na merge", "Blocked / Blokované", "Released 🚀"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Blocked / Blokované", "project_sections": ["Nápady / Ideas", "Ready na test", "Čaká na merge", "Blocked / Blokované", "Released 🚀"], "expect": "in_progress", "lang": "mixed", "note": "ambiguous: started but stuck"}
+{"section": "Released 🚀", "project_sections": ["Nápady / Ideas", "Ready na test", "Čaká na merge", "Blocked / Blokované", "Released 🚀"], "expect": "done", "lang": "mixed"}
+{"section": "Offen / Open", "project_sections": ["Offen / Open", "In Arbeit / WIP", "Erledigt ✅"], "expect": "todo", "lang": "mixed"}
+{"section": "In Arbeit / WIP", "project_sections": ["Offen / Open", "In Arbeit / WIP", "Erledigt ✅"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Erledigt ✅", "project_sections": ["Offen / Open", "In Arbeit / WIP", "Erledigt ✅"], "expect": "done", "lang": "mixed"}
+{"section": "K řešení / To do", "project_sections": ["K řešení / To do", "V řešení / Doing", "Hotovo / Done", "Zrušeno / Cancelled"], "expect": "todo", "lang": "mixed"}
+{"section": "V řešení / Doing", "project_sections": ["K řešení / To do", "V řešení / Doing", "Hotovo / Done", "Zrušeno / Cancelled"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Hotovo / Done", "project_sections": ["K řešení / To do", "V řešení / Doing", "Hotovo / Done", "Zrušeno / Cancelled"], "expect": "done", "lang": "mixed"}
+{"section": "Zrušeno / Cancelled", "project_sections": ["K řešení / To do", "V řešení / Doing", "Hotovo / Done", "Zrušeno / Cancelled"], "expect": "not_planned", "lang": "mixed"}
+{"section": "Inbox", "project_sections": ["Inbox", "Rozpracované 🔧", "Na kontrolu 👀", "Shipped 🚀", "Won't do / Nebude"], "expect": "todo", "lang": "mixed"}
+{"section": "Rozpracované 🔧", "project_sections": ["Inbox", "Rozpracované 🔧", "Na kontrolu 👀", "Shipped 🚀", "Won't do / Nebude"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Na kontrolu 👀", "project_sections": ["Inbox", "Rozpracované 🔧", "Na kontrolu 👀", "Shipped 🚀", "Won't do / Nebude"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Shipped 🚀", "project_sections": ["Inbox", "Rozpracované 🔧", "Na kontrolu 👀", "Shipped 🚀", "Won't do / Nebude"], "expect": "done", "lang": "mixed"}
+{"section": "Won't do / Nebude", "project_sections": ["Inbox", "Rozpracované 🔧", "Na kontrolu 👀", "Shipped 🚀", "Won't do / Nebude"], "expect": "not_planned", "lang": "mixed"}
+{"section": "Robím / Doing", "project_sections": ["Backlog", "Robím / Doing", "Čaká na review", "Nasadené na prod"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Čaká na review", "project_sections": ["Backlog", "Robím / Doing", "Čaká na review", "Nasadené na prod"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Nasadené na prod", "project_sections": ["Backlog", "Robím / Doing", "Čaká na review", "Nasadené na prod"], "expect": "done", "lang": "mixed"}
+{"section": "Todo", "project_sections": ["Todo", "In Arbeit", "Testing / Testovanie", "Hotovo"], "expect": "todo", "lang": "mixed"}
+{"section": "In Arbeit", "project_sections": ["Todo", "In Arbeit", "Testing / Testovanie", "Hotovo"], "expect": "in_progress", "lang": "mixed"}
+{"section": "Testing / Testovanie", "project_sections": ["Todo", "In Arbeit", "Testing / Testovanie", "Hotovo"], "expect": "in_progress", "lang": "mixed"}

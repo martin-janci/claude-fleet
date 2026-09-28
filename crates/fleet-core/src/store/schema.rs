@@ -233,6 +233,17 @@ fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 068: `orgs` already has its
+/// `jev_allowed` column.
+fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'jev_allowed'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 066 (work graph M14.1b): its last
 /// ADD COLUMN (`client_tokens.org_id`) present means the whole migration is.
 fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
@@ -665,6 +676,20 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/067_org_bound_sees_unassigned.sql"),
         already_applied: Some(orgs_has_bound_sees_unassigned),
     },
+    // Jev evaluation (D31 / D36): `orgs.jev_allowed`, an org's consent to
+    // decision-model calls. One ADD COLUMN, its own guard.
+    Migration {
+        version: 68,
+        sql: include_str!("../../migrations/068_org_jev_allowed.sql"),
+        already_applied: Some(orgs_has_jev_allowed),
+    },
+    // Jev evaluation (D35 / D37): `decision_runs` and `decision_secrets`.
+    // New tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(69, include_str!("../../migrations/069_decision_runs.sql")),
+    // D34 label hygiene: `work_unlinks`, a person's "Clear work" held
+    // against the unchanged state signal (R9u). A new table, index and
+    // trigger, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(70, include_str!("../../migrations/070_work_unlinks.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

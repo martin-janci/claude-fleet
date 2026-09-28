@@ -98,6 +98,13 @@ const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet admin
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
      configure them on the hub with `fleet-hub tracker add|set-credential|test`";
 
+/// Jev's section proposals (Asana `status_map`): applying one writes the
+/// tracker's settings, which is `work_admin`, master-only.
+const SECTION_PROPOSALS_ARE_ADMIN: &str = "the decision model's Asana section proposals are \
+     tracker administration: applying one writes the tracker's section map through the hub's \
+     work_admin, master-only, and a paired client is never the fleet's administrator; decide them \
+     on the hub with `fleet-hub decide proposals apply|reject`";
+
 /// Retention (work graph M12.3): the hub sweeps its own store.
 const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
      status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
@@ -385,6 +392,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: TRACKERS_ARE_ADMIN,
         },
     ),
+    // Jev `status_map` in assist: reading and deciding the section
+    // proposals is tracker administration (an apply is `work_admin
+    // update`); the hub's operator uses the CLI.
+    (
+        "status_map_proposals",
+        Verdict::LocalOnly {
+            instead: SECTION_PROPOSALS_ARE_ADMIN,
+        },
+    ),
+    (
+        "decide_status_map_proposal",
+        Verdict::LocalOnly {
+            instead: SECTION_PROPOSALS_ARE_ADMIN,
+        },
+    ),
     // Work graph M12.3: retention is the hub's own sweep; its status and
     // sweep_now are `work_admin`, master-only.
     (
@@ -483,6 +505,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "restart_session",
         Verdict::Routed {
             tool: "restart_session",
+        },
+    ),
+    (
+        "rewind_conversation",
+        Verdict::Routed {
+            tool: "rewind_conversation",
         },
     ),
     (

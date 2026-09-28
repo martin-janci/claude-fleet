@@ -442,3 +442,82 @@ describe('describeSyncMetrics', () => {
     ).not.toContain('skipped');
   });
 });
+
+// --- Jev status_map (assist): the section proposals --------------------------
+
+import {
+  statusMapProposals,
+  decideStatusMapProposal,
+  pendingProposals,
+  proposalWhy,
+  shadowAgreement,
+  categoryLabel,
+  type TrackerProposals,
+} from './trackers';
+
+describe('status_map proposals', () => {
+  const tp = (over: Partial<TrackerProposals> = {}): TrackerProposals => ({
+    tracker_id: 3,
+    name: 'B',
+    mode: 'assist',
+    proposals: [
+      {
+        section: 'ideas',
+        answer: 'todo',
+        applies_as: 'todo',
+        run_id: 1,
+        at: 0,
+        top: [
+          ['todo', 0.824],
+          ['unsure', 0.1],
+        ],
+      },
+      { section: 'mine', answer: 'done', applies_as: 'done', run_id: 2, at: 0, person: 'done', followup: 'confirmed' },
+    ],
+    shadow: [],
+    unknown_sections: 0,
+    ...over,
+  });
+
+  it('names the run, and carries a category with apply_as only', async () => {
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    inv.mockReset();
+    inv.mockResolvedValue(null);
+    await statusMapProposals();
+    await statusMapProposals(3);
+    await decideStatusMapProposal(7, 'apply');
+    await decideStatusMapProposal(7, 'apply_as', 'done');
+    await decideStatusMapProposal(7, 'reject', 'done');
+    expect(inv.mock.calls).toEqual([
+      ['status_map_proposals', { args: {} }],
+      ['status_map_proposals', { args: { tracker_id: 3 } }],
+      ['decide_status_map_proposal', { args: { run_id: 7, action: 'apply' } }],
+      ['decide_status_map_proposal', { args: { run_id: 7, action: 'apply_as', category: 'done' } }],
+      ['decide_status_map_proposal', { args: { run_id: 7, action: 'reject' } }],
+    ]);
+  });
+
+  it('pending means assist, not in the person’s map, not decided', () => {
+    expect(pendingProposals(tp()).map((p) => p.section)).toEqual(['ideas']);
+    expect(pendingProposals(tp({ mode: 'shadow' }))).toEqual([]);
+    expect(pendingProposals(null)).toEqual([]);
+  });
+
+  it('the why is the two most probable options; shadow agreement counts only what the rule classified', () => {
+    expect(proposalWhy(tp().proposals[0])).toBe('to do 0.82 · unsure 0.10');
+    expect(proposalWhy({ section: 'x', answer: 'todo', run_id: 1, at: 0 })).toBe('');
+    expect(shadowAgreement(tp())).toBeNull();
+    expect(
+      shadowAgreement(
+        tp({
+          shadow: [
+            { section: 'a', rule: 'done', model: 'done', run_id: 1 },
+            { section: 'b', rule: 'todo', model: 'done', run_id: 2 },
+            { section: 'c', rule: 'none', model: 'done', run_id: 3 },
+          ],
+        }),
+      ),
+    ).toEqual({ compared: 2, agreed: 1 });
+    expect(categoryLabel('not_planned')).toBe('not planned');
+  });
+});

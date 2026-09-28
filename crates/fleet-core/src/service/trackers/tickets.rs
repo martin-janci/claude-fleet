@@ -12,8 +12,9 @@
 //!   ticket": resolve, refuse a duplicate (`E_EXISTS` with the live
 //!   session, so the UI jumps to it), pick the project and host, name the
 //!   worktree after the key and title, create the session, link it
-//!   `started`, and — with a brief — queue the ticket's context (third-party
-//!   text inside `mark_untrusted`) for the first hook.
+//!   `started` (`agent_started` when an agent starts it, D34), and — with a
+//!   brief — queue the ticket's context (third-party text inside
+//!   `mark_untrusted`) for the first hook.
 //!
 //! **The fence** (M3's decision 6, bounded by the org since M5). A host-bound
 //! caller (an in-session Claude's per-host token) sees only the tracker
@@ -29,7 +30,7 @@ use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
 use crate::service::work::resume::InFlight;
-use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
+use crate::store::{Decider, SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -458,6 +459,10 @@ pub struct StartArgs {
     /// A multi-repo start (work graph M9.6): the duplicate guard counts only
     /// live sessions on the key in THIS start's project.
     pub per_project: bool,
+    /// Who starts (D34): a person's start links `started`, an agent's
+    /// (a per-host token, the operator) `agent_started`. The desktop's is
+    /// always a person's (the default).
+    pub decider: Decider,
 }
 
 /// Where a start lands and what it is called.
@@ -480,6 +485,10 @@ pub struct StartPlan {
     /// sessions on the key in this plan's project.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_project: bool,
+    /// Who starts ([`StartArgs::decider`]): decides the link's source.
+    /// Never on the wire: a plan read back is a person's.
+    #[serde(skip)]
+    pub decider: Decider,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -840,6 +849,7 @@ pub fn plan_resolved(
         branch,
         worktree_id,
         per_project: args.per_project,
+        decider: args.decider,
     })
 }
 
@@ -1087,7 +1097,8 @@ fn link_started(
         Some(id) => WorkTarget::Item(id),
         None => WorkTarget::Key(&plan.key),
     };
-    s.link_session_work(row.id, target, "started")?;
+    // `started` for a person, `agent_started` for an agent (D34).
+    s.link_session_work(row.id, target, plan.decider.start_source())?;
     let queued = match brief {
         Some(body) if !body.trim().is_empty() => {
             let body: String = body

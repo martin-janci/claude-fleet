@@ -441,3 +441,4 @@ describe('row event batching', () => {
     unlisten();
   });
 });
+

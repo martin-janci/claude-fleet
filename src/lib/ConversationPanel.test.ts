@@ -2964,6 +2964,24 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(mockedCopy).toHaveBeenCalledWith('see **this**');
   });
 
+  it('renders an action row per reply text group', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          truncated: false,
+          turns: [
+            { prompt: 'first', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply one' }], prompt_uuid: 'a1' },
+            { prompt: 'second', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply two' }], prompt_uuid: 'a2' },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getAllByTestId('reply-quote').length).toBe(2);
+    expect(screen.queryAllByTestId('reply-rewind').length).toBe(1); // the second turn only
+  });
+
   it('the turn index lists prompts and jumps', async () => {
     mockedConv.mockReturnValue(ok(threeTurns()));
     render(ConversationPanel, { session: session(), visible: true });
