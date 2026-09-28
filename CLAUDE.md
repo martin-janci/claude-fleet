@@ -303,7 +303,11 @@ and `work:changed`) and M14.2–M14.4 (the desktop Work view — `WorkTree`,
 `src/lib/work_view.ts` — and fleet-mobile's *My work*) are landed; the
 desktop re-reads on `onWorkChanged` and the `workChanged` tick in
 `work.ts`. `scripts/hub-e2e.sh` hub W section 10 runs the contract on a
-real hub. M14.5, the acceptance run (Part R), waits on the owner.
+real hub. M14.2 / M14.3 landed in #349 (fixes #357, #359, #361, #365) and
+M14.4 as one PR, fleet-mobile#54; M14.5's docs are on `main`, so only the
+owner's Part R run is open, and *Assign org…* / *Make a rule…* stay
+desktop-only (owner, 2026-09-28; M14's D31–D36 and Jev's D31–D47 share
+numbers, so write "M14-D3x" / "Jev-D3x").
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
