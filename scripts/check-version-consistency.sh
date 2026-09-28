@@ -43,6 +43,7 @@ cd "$ROOT"
 # `release.sh --list` is a contradiction and fails.
 EXEMPT=(
   "crates/fleet-core/Cargo.toml|fleet-core|0.1.0|internal library crate, consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
+  "crates/fleet-update/Cargo.toml|fleet-update|0.1.0|internal library crate (the update engine), consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
 )
 
 usage() {

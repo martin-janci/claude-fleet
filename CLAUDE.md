@@ -401,12 +401,17 @@ and a `peer_exchange` listener carry messages both ways by fleet address,
 and `fleet_health.peer_links_down` reports a link in trouble, per
 `docs/superpowers/specs/2026-09-24-hub-federation-design.md`.
 
-Application updates are **designed, not built**:
+Application updates: design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` (with
 fleet-mobile's `docs/superpowers/specs/2026-09-28-mobile-update-adapter.md`).
-It covers `UpdateChannel` (Git / Hub) in a new `fleet-update` crate, and a
-signed per-release manifest plus a per-track channel doc on the
-`update-channels` branch. The Hub is the policy authority and the release key
-is the content authority. The `/update` wire is frozen and exempt from
-`E_HUB_CONTRACT`. `fleet-updater` rolls the hub container back, including the
-DB restore. Slices S1–S9; its §13 questions wait on the owner.
+The Hub is the policy authority and the release key (minisign) the content
+authority. The manifest is two signed documents, a per-release manifest plus
+a per-track channel doc on the `update-channels` branch. The `/update` wire is
+frozen and exempt from `E_HUB_CONTRACT`. `fleet-updater` rolls the hub
+container back, including the DB restore. **S1 is landed:**
+`crates/fleet-update` (Tauri-free, no fleet-core dependency; version-exempt
+like fleet-core) holds the manifest / channel types, `verify` (`verify_target`
+is the one check before any install), the pure `decide()` over the shared
+fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
+`GitUpdateChannel` / `HubUpdateChannel`. S2–S9 are not built; the §13
+questions wait on the owner (S2 needs the release signing key).

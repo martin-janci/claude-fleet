@@ -1,6 +1,6 @@
 # Application updates: Update Channel, release manifest, desired state — design
 
-Status: **design, nothing built.** This spec takes over the brainstorm
+Status: **design; S1 (the `fleet-update` crate) is built**, the rest is not. This spec takes over the brainstorm
 handover "Cloud Fleet — Application Update Architecture" (2026-09-28). It
 does not reopen that handover's decisions; they are restated as F1–F8 below.
 What it adds is the concrete shape: the update protocol, the manifest
@@ -162,6 +162,7 @@ digest `record-digest` already has. It is never written by hand. A new
     "commit": "a83f19d0c2…",
     "build_id": "gh-run-18231-1",
     "published_at": "2026-09-30T10:12:00Z",
+    "assets_base": "https://github.com/martin-janci/claude-fleet/releases/download/v0.3.4/",
     "notes_url": "https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.4"
   },
   "compatibility": {
@@ -192,10 +193,10 @@ digest `record-digest` already has. It is never written by hand. A new
     "desktop": {
       "version": "0.3.4",
       "artifacts": [
-        { "kind": "tauri", "platform": "darwin-aarch64", "name": "claude-fleet_0.3.4_aarch64.app.tar.gz", "sha256": "…", "size": 0, "tauri_signature": "…minisign…" },
+        { "kind": "tauri", "platform": "macos-aarch64", "name": "claude-fleet_0.3.4_aarch64.app.tar.gz", "sha256": "…", "size": 0, "tauri_signature": "…minisign…" },
         { "kind": "tauri", "platform": "windows-x86_64", "name": "claude-fleet_0.3.4_x64-setup.exe", "sha256": "…", "size": 0, "tauri_signature": "…" },
-        { "kind": "tauri", "platform": "linux-x86_64-appimage", "name": "claude-fleet_0.3.4_amd64.AppImage", "sha256": "…", "size": 0, "tauri_signature": "…" },
-        { "kind": "download", "platform": "linux-x86_64-deb", "name": "claude-fleet_0.3.4_amd64.deb", "sha256": "…", "size": 0 }
+        { "kind": "tauri", "platform": "linux-x86_64", "variant": "appimage", "name": "claude-fleet_0.3.4_amd64.AppImage", "sha256": "…", "size": 0, "tauri_signature": "…" },
+        { "kind": "download", "platform": "linux-x86_64", "variant": "deb", "name": "claude-fleet_0.3.4_amd64.deb", "sha256": "…", "size": 0 }
       ]
     },
     "android": {
@@ -212,9 +213,14 @@ digest `record-digest` already has. It is never written by hand. A new
 
 Rules:
 
-- Asset URLs are derived. `name` resolves against
-  `https://github.com/<repo>/releases/download/v<version>/`; only the
-  cross-repo APK carries a full `url`. A hub-served mirror (§6.4) may serve
+- Asset URLs are derived. `name` resolves against the signed
+  `release.assets_base`; only the cross-repo APK carries a full `url`.
+  An artifact matches a caller's `platform` (`{os, arch, variant}`) by
+  `<os>-<arch>` plus an optional `variant` (`appimage` / `deb`). `oci`
+  matches the variant `oci` and the `linux/<arch>` key, and `tarball`
+  matches the variant `tarball` and the target triple. An unknown `kind`
+  parses as `unknown` and never matches, so a new kind never breaks an
+  older reader. A hub-served mirror (§6.4) may serve
   the same bytes from elsewhere; the sha256 is what is trusted.
 - The `compatibility` block is emitted by the binaries themselves, never
   typed. A new hidden subcommand, `fleet-hub compat --json`, prints its
@@ -319,6 +325,7 @@ Response, a `Decision`:
 ```json
 {
   "update_proto": 1,
+  "component": "desktop",
   "status": "update_available",
   "source": "hub",
   "track": "stable",
@@ -330,12 +337,28 @@ Response, a `Decision`:
     "deadline": null,
     "manifest": { "url": "…/v0.3.4/release-manifest.json", "sha256": "…" },
     "channel":  { "url": "…/update-channels/stable.json", "sequence": 118 },
-    "artifact": { "kind": "tauri", "name": "claude-fleet_0.3.4_aarch64.app.tar.gz", "url": "…", "sha256": "…", "size": 0 }
+    "artifact": { "kind": "tauri", "platform": "macos-aarch64", "name": "claude-fleet_0.3.4_aarch64.app.tar.gz", "sha256": "…", "size": 0, "tauri_signature": "…" },
+    "url": "https://github.com/…/v0.3.4/claude-fleet_0.3.4_aarch64.app.tar.gz",
+    "evidence": { "channel": "<stable.json, verbatim>", "channel_sig": "<.minisig>",
+                  "manifest": "<release-manifest.json, verbatim>", "manifest_sig": "<.minisig>" }
   },
   "reason": { "code": "newer_recommended", "text": "0.3.4 is recommended for this hub." },
   "next_check_secs": 21600
 }
 ```
+
+**Evidence.** The hub relays the signed channel document and the target's
+manifest *verbatim*, meaning the exact bytes that were signed. The caller
+verifies the target from them alone, with no second fetch and no trust in
+the relay (`verify_target`, §7):
+
+1. both signatures hold;
+2. the manifest's sha256 is what the channel lists for the target;
+3. the publisher permits the target (U6);
+4. the artifact is one the manifest carries for the caller's platform.
+
+A target without evidence is refused (`E_UPDATE_UNVERIFIED`). The documents
+are a few KB.
 
 `status` is one closed set, an enum in `fleet-update` mirrored in
 `HubContract.kt`:
@@ -426,10 +449,13 @@ pub struct CheckRequest { /* §6.2 */ }
 pub struct Decision { /* §6.2 */ }
 pub struct Report { /* §6.3 */ }
 
+/// The decision, and its target proven against the signed documents.
+pub struct CheckOutcome { pub decision: Decision, pub verified: Option<VerifiedTarget> }
+
 #[async_trait::async_trait]
 pub trait UpdateChannel: Send + Sync {
     fn source(&self) -> Source;
-    async fn check(&self, req: &CheckRequest) -> Result<Decision, UpdateError>;
+    async fn check(&self, req: &CheckRequest) -> Result<CheckOutcome, UpdateError>;
     async fn report(&self, report: &Report) -> Result<(), UpdateError>;
 }
 
@@ -444,8 +470,10 @@ pub struct GitUpdateChannel<F: Fetch> { fetch: F, track: Track, policy: LocalPol
 pub struct HubUpdateChannel<T: HubTransport> { transport: T }
 
 pub fn decide(input: &DecideInput) -> Decision;          // pure
-pub fn verify_channel(bytes: &[u8], sig: &[u8], keys: &PublicKeys, seen: u64, now: Timestamp) -> Result<ChannelDoc, VerifyError>;
-pub fn verify_manifest(bytes: &[u8], sig: &[u8], keys: &PublicKeys) -> Result<ReleaseManifest, VerifyError>;
+pub fn verify_channel(bytes: &[u8], sig: &str, keys: &TrustedKeys, track: Track, seen: u64, now: i64) -> Result<VerifiedChannel, VerifyError>;
+pub fn verify_manifest(bytes: &[u8], sig: &str, keys: &TrustedKeys) -> Result<ReleaseManifest, VerifyError>;
+/// Both channels end here: the one check between "a channel said so" and "install it".
+pub fn verify_target(d: &Decision, keys: &TrustedKeys, platform: &Platform, seen: u64, now: i64) -> Result<Option<VerifiedTarget>, VerifyError>;
 ```
 
 **Selection** (F3):
@@ -477,15 +505,20 @@ Inputs:
 
 Order (the first rule that matches wins):
 
-1. No fresh channel, or no artifact for the caller's platform → `unknown`
-   (stale channel: `hold`, with reason `channel_stale`).
+1. No channel → `unknown` (`no_channel`); a stale channel → `hold`
+   (`channel_stale`). A newer release with no verified artifact for the
+   caller's platform is `unknown` (`no_artifact`), never `up_to_date`.
 2. `installed` accepts nothing the hub serves (`contract_accepts` excludes
    `hub_speaks.contract.hub_serves`, or the agent proto is outside
    `hub_accepts`):
    - the caller is **ahead** of the hub → `client_too_new`, with target set
      to the newest release whose window fits (Docker and agent only);
    - otherwise → `update_required`, with the target chosen by rule 7's
-     selection.
+     selection. A *required* target may go past `recommended` up to
+     `current` when nothing at or below `recommended` fits the hub, so a
+     lagging recommendation never strands a caller the hub has already moved
+     past. When nothing fits at all: `update_required` with no target
+     (`no_compatible_release`).
 3. The operator pinned `desired` for this target or component →
    `rollback` if the pin is below installed, `update_*` if above, else
    `up_to_date`. Mandatory iff the pin says so.
@@ -869,7 +902,7 @@ Each slice lands on its own, green, with its tests.
 
 | slice | handover step | what | where | done when |
 |---|---|---|---|---|
-| **S1** | 1, 2 | `fleet-update` crate: manifest + channel types, serde, minisign verify, `decide()`, `UpdatePhase`, `UpdateChannel` trait, the fixture `decide_cases.json` | `crates/fleet-update/` | the fixture cases pass; the verify tests cover a bad signature, a lower sequence, expiry, rotation |
+| **S1** ✅ | 1, 2 | `fleet-update` crate: manifest + channel types, serde, minisign verify, `decide()`, `UpdatePhase`, `UpdateChannel` trait, the fixture `decide_cases.json` | `crates/fleet-update/` | the fixture cases pass; the verify tests cover a bad signature, a lower sequence, expiry, rotation |
 | **S2** | 3, 7 | CI emits and signs `release-manifest.json`; `fleet-hub compat --json`; `build_info` (U11); the `update-channels` branch + ruleset; `nightly.yml` for hub image + agent/hub tarballs on green `main` (desktop nightly in Open question 3); `verify-release` rule | `release.yml`, `hub-image.yml`, new `nightly.yml`, `channel-edit.yml`, `scripts/release-manifest.sh`, `scripts/release-assets.sh` | an rc tag publishes a verified manifest and moves `beta.json`; a `main` push moves `nightly.json` |
 | **S3** | 3 | `GitUpdateChannel` over fleet-core's HTTP client; `fleet-hub update check [--track]` prints the decision for the running hub | `fleet-update`, `crates/fleet-hub/src/` | standalone hub reports `update_available` against a fixture channel |
 | **S4** | 4, 5 | migration 074; `/update/check` + `/update/report`; the `updater` token mode; `X-Fleet-Client`; `update_status` / `update_admin` / `update_check_for`; `update:decision` / `update:changed` events; attention reasons; `HubUpdateChannel` | `fleet-core` `mcp/update_route.rs`, `service/update/`, `store/update.rs` | `hub-e2e.sh` section U: a fake client and fake agent see `update_available`, `update_required` and `client_too_new` from a fixture channel |
