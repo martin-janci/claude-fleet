@@ -29,7 +29,8 @@ ssh config; reconcile, the hook auto-install and onboarding now honour the
 missing local host; `ssh` gets a null stdin; the terminal reports a gone
 `ssh.exe` itself, since the ConPTY pipe outlives it; CRLF pastes; UNC
 credential paths refused. Still open from that review: shipping
-`conpty.dll`/`OpenConsole.exe` (bracketed paste and mouse on Windows 10).
+`conpty.dll`/`OpenConsole.exe` (bracketed paste and mouse on Windows 10) — done
+since: `scripts/fetch-conpty.sh` + `src-tauri/tauri.conpty.conf.json`.
 
 Compatibility round (2026-09-28): WSL distributions are hosts
 (`fleet_core::wsl`, `wsl-<name>`, run through `wsl.exe` — this replaces the

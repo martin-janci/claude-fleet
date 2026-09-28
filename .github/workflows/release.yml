@@ -289,6 +289,14 @@ jobs:
           workspaces: .
           key: ${{ matrix.os }}-${{ matrix.target || 'native' }}
       - run: pnpm install --frozen-lockfile
+      # The Windows leg bundles Microsoft's ConPTY (the leg's args carry
+      # --config src-tauri/tauri.conpty.conf.json; scripts/fetch-conpty.sh
+      # says why). Pinned by version and SHA-256, so a changed package stops
+      # the release instead of shipping.
+      - name: Fetch ConPTY for the Windows bundle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/fetch-conpty.sh
       # A macOS bundle must come out signed with the Team ID (see the header);
       # without these tauri silently falls back to ad-hoc, which is exactly
       # the per-update keychain prompt this signing exists to stop. Names
@@ -336,6 +344,14 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+      - name: Verify ConPTY is in the Windows build
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in conpty.dll OpenConsole.exe licenses/ConPTY-LICENSE.txt; do
+            test -s "target/release/$f" || { echo "::error::target/release/$f missing: the installer would ship without ConPTY"; exit 1; }
+          done
       # The signing config can fail to apply without failing the build (tauri
       # falls back to ad-hoc). This turns that into a red leg: the bundle must
       # name the expected identity and carry a Team ID.
