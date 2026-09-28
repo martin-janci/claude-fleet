@@ -394,12 +394,19 @@ impl FleetTools {
     #[tool(description = "Operator settings (ticks, GC, playbooks, projects \
         roots, move, usage, reports, work graph), each key's effective value. \
         Read-only but master token only (it names hosts and their paths).")]
-    pub(super) async fn get_settings(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn get_settings(
+        &self,
+        Parameters(p): Parameters<GetSettingsParams>,
+    ) -> Result<CallToolResult, McpError> {
         audit("get_settings", "");
-        let all = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::service::settings::read_all(&s)
-        };
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        if p.describe == Some(true) {
+            let described = crate::service::settings::describe(&s);
+            drop(s);
+            return ok_json_compact(&described);
+        }
+        let all = crate::service::settings::read_all(&s);
+        drop(s);
         ok_json_compact(&all)
     }
 

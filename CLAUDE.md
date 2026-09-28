@@ -88,6 +88,16 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 - **Session listing** is cache-first: `service::sessions::list_sessions` serves
   stored rows and only runs a reconcile pass when the last one is stale;
   `refresh_sessions` is the forced path for an explicit user refresh.
+- **Settings metadata** (`service/settings.rs`): every `SPECS` row carries
+  label, help, unit, what `0` means, tags, danger, restart and AI policy
+  next to its kind and default (`every_spec_has_consistent_metadata`).
+  `describe()` serves it to `get_settings { describe: true }` and
+  `describe_fleet_settings`; `docs/settings-reference.md` and the settings
+  tables in `docs/work-graph.md` / `docs/decisions.md` are generated from
+  it — after editing a spec run
+  `REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current`.
+  This is P1 of the declarative pages framework
+  (`docs/superpowers/specs/2026-09-28-declarative-pages-design.md`).
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
@@ -109,7 +119,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 204
+  verdict is written down once, in `backend/verdicts.rs`, for all 205
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -185,8 +195,8 @@ lookup / start — `service/trackers/`, `store/trackers.rs`,
 `store/tracker_items.rs`); read
 `docs/superpowers/2026-09-24-work-graph-roadmap.md` before touching them.
 The user guide is `docs/work-graph.md`: update it with any change a user
-sees, and add every new `work.*` setting to its table
-(`work_settings_are_in_the_user_guide` fails otherwise).
+sees. Its `work.*` settings table is generated (see *Settings metadata*
+below).
 Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
 Work graph M4 (detection) is landed: one recogniser in Rust and TS over a
 shared fixture (`service/work/recognize.rs`, `src/lib/work_keys.ts`), the
@@ -307,8 +317,7 @@ envelope is built and OFF (D35–D37): `service::decide` (`gate` / `decide`,
 per-org consent `orgs.jev_allowed` (migration 068), the record
 `decision_runs` + key `decision_secrets` (069; the key is read ONLY by
 `Store::resolve_decision_credential`, never raw text in a run), `fleet-hub
-decide`; guide `docs/decisions.md` (every `decide.*` setting must be in its
-table). The first use case, J3 `status_map`, is built (shadow / assist
+decide`; guide `docs/decisions.md` (its `decide.*` settings table is generated). The first use case, J3 `status_map`, is built (shadow / assist
 only, off): the Asana probe keeps `config.unmapped_sections` /
 `project_sections`, `service/decide/status_map.rs` asks one Choice per
 unclassified section after a clean sync (`StatusMapTrigger`, daily), and

@@ -905,27 +905,30 @@ asks you to confirm, like any kill.
 
 Every `work.*` setting, with its default. On a standalone desktop they are
 in Settings → Limits (with its *Retention* and *Lifecycle* groups); on a hub, set them with `set_setting` (master token), read
-them with `get_settings`. A test (`work_settings_are_in_the_user_guide`)
-fails when a `work.*` setting in `service/settings.rs` is missing from this
-table.
+them with `get_settings`. This table is generated from
+`service/settings.rs` (`settings_docs_are_current`); every setting is also
+in [the settings reference](settings-reference.md).
 
+<!-- BEGIN GENERATED: settings work. -->
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
 | Setting | Default | Range | What it does |
 |---|---|---|---|
-| `work.recent_days` | `14` | 1–365 days | how long ended work with no live session keeps a sidebar group |
-| `work.sync_interval_secs` | `300` | seconds, `0` = off | seconds between tracker sync passes; read at start; under a minute is raised to one |
-| `work.trusted_branch_projects` | `[]` | project ids | projects where a sole branch key links automatically; set from the popover, cleared with **Trust none** |
-| `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
-| `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |
-| `work.classify_nudge` | `false` | on / off | one note per conversation asking Claude to name its work after three unlinked turns |
-| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | the model a dead session's on-demand *Summarise* runs on, on the session's own host and account |
-| `work.tidy_done_days` | `2` | 1–365 days | how long a linked ticket must be done before tidy-up suggests its session |
-| `work.tidy_idle_hours` | `4` | 1–720 hours | how long a session must be idle before any tidy reason suggests it |
-| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | idle and unprompted days before a session with no work is suggested (`idle_unlinked`) |
-| `work.auto_tidy` | `false` | on / off | the GC sweep acts on the allowed tidy reasons by itself (safe kill or archive only) |
-| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | the reasons auto-tidy may act on |
-| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | work journal retention |
-| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | retention of done tickets no link names |
-| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | retention of handover, nudge, tidy and withdrawn-suggestion timeline events |
+| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |
+| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | Days a done ticket that no session links to is kept in the cache. |
+| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
+| `work.recent_days` | `14` | 1–365 days | How long ended work with no live session keeps a sidebar group. |
+| `work.sync_interval_secs` | `300` | seconds, `0` = off | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
+| `work.trusted_branch_projects` | `[]` | JSON array of ids | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
+| `work.evidence_snippets` | `true` | on / off | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
+| `work.session_start_context` | `false` | on / off | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
+| `work.classify_nudge` | `false` | on / off | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | The model Summarise runs on for a past session, on that session's own host and account. |
+| `work.tidy_done_days` | `2` | 1–365 days | Days a linked ticket must be done before Tidy up suggests its session. |
+| `work.tidy_idle_hours` | `4` | 1–720 hours | Hours a session must be idle before any tidy reason suggests it. |
+| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
+| `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
+<!-- END GENERATED: settings work. -->
 
 Per-org settings, set on the org (Settings → Work → Organisations, or
 `work_admin { action: "update_org", org_id, … }` on a hub), not here:

@@ -3601,7 +3601,10 @@ fn the_served_definition_budget_stays_bounded() {
     // whose every variant and field must be documented. Its own branch
     // measured +2,124 over M14.1c. Merged over reply actions and hub ops:
     // measured at 62,255 on 2026-09-28 (+2,197 over 60,058); plus 100.
-    const BUDGET_BYTES: usize = 62_355;
+    // Declarative pages P1: `get_settings` gains `describe` (the registry's
+    // metadata as a tool RESULT, so the description stays one line): +122 B,
+    // measured at 62,377 on 2026-09-28; plus 100.
+    const BUDGET_BYTES: usize = 62_477;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7992,6 +7995,41 @@ fn the_settings_tools_are_master_only() {
 }
 
 #[tokio::test]
+async fn get_settings_describe_returns_the_registry_with_values() {
+    let (tools, _guards, _store) = client_tools();
+    tools
+        .set_setting(Parameters(SetSettingParams {
+            key: "work.recent_days".into(),
+            value: serde_json::json!(30),
+        }))
+        .await
+        .expect("set");
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams {
+                describe: Some(true),
+            }))
+            .await
+            .expect("describe"),
+    );
+    let all = v.as_array().expect("an array, in display order");
+    assert_eq!(all.len(), crate::service::settings::SPECS.len());
+    let recent = all
+        .iter()
+        .find(|d| d["key"] == "work.recent_days")
+        .expect("work.recent_days");
+    assert_eq!(recent["value"], "30");
+    assert_eq!(recent["modified"], true);
+    assert_eq!(recent["label"], "Recent work");
+    assert_eq!(
+        recent["kind"],
+        serde_json::json!({"type": "int", "min": 1, "max": 365})
+    );
+    // The derived previews are not settings.
+    assert!(all.iter().all(|d| d["key"] != "projects.resolved_base"));
+}
+
+#[tokio::test]
 async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     let (tools, _guards, store) = client_tools();
     let set = |key: &str, value: serde_json::Value| {
@@ -8000,7 +8038,12 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
             value,
         }))
     };
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams { describe: None }))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(
         v["work.retention.journal_days"], "365",
         "the default when unset: {v}"
@@ -8042,7 +8085,12 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
             Some("[3,7]")
         );
     }
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams { describe: None }))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(v["work.retention.journal_days"], "30");
 
     // Refused: a bad value, an unknown key, a derived key, keys other

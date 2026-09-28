@@ -605,6 +605,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "describe_fleet_settings",
+        Verdict::LocalOnly {
+            instead: "these settings drive the reconcile tick, the GC sweeper and the \
+                      playbooks, which the hub runs and this app does not; describe them on \
+                      the hub with get_settings describe (master token)",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \

@@ -157,7 +157,14 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
   // !ownsFleet}` swaps the whole Projects section for the remote note, and
   // the Limits section (with WorkRetention.svelte, work graph M12.3) too.
-  gatedBySettingsDialog: ['set_fleet_setting', 'work_retention_status', 'work_retention_sweep'],
+  // `describe_fleet_settings` (declarative pages P1) feeds the generated
+  // settings pages, which sit behind that same gate.
+  gatedBySettingsDialog: [
+    'set_fleet_setting',
+    'describe_fleet_settings',
+    'work_retention_status',
+    'work_retention_sweep',
+  ],
   // (`pty_open` and `upload_to_session` used to be listed here, gated by
   // TerminalView's `ownsTheFleet` check. They are `same_in_both` now: both
   // are this machine's own `ssh`, addressed by the alias passed in, reading

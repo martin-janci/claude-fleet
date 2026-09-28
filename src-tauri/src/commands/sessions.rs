@@ -329,6 +329,20 @@ pub fn get_fleet_settings(
     Ok(fleet_core::service::settings::read_all(&s))
 }
 
+/// Every registered operator setting with its metadata (label, help, kind,
+/// bounds, unit, danger, restart, ai policy) and effective value, in display
+/// order: what a generated settings page renders
+/// (`docs/superpowers/specs/2026-09-28-declarative-pages-design.md`).
+#[tauri::command]
+pub fn describe_fleet_settings(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<fleet_core::service::settings::Descriptor>, IpcError> {
+    backend.refuse_local_only("describe_fleet_settings")?;
+    let s = lock(&store)?;
+    Ok(fleet_core::service::settings::describe(&s))
+}
+
 /// Validate and persist one operator setting. `E_INVALID` for an unknown key
 /// or a value of the wrong shape. Returns the full effective map so the
 /// dialog can re-render from one source of truth.

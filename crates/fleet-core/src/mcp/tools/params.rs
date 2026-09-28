@@ -889,6 +889,12 @@ pub struct SetClientTrustParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct GetSettingsParams {
+    /// true: every key's metadata (label, help, bounds, danger) and value.
+    pub describe: Option<bool>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SetSettingParams {
     /// e.g. "work.recent_days".
     pub key: String,

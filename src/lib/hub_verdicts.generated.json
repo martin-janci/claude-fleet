@@ -39,6 +39,7 @@
     "catalog_write_layer",
     "check_local_prereqs",
     "decide_status_map_proposal",
+    "describe_fleet_settings",
     "discard_kill_session",
     "discover_hosts",
     "dismiss_agent_session",

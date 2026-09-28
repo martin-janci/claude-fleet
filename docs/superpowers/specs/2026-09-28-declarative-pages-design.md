@@ -1,10 +1,11 @@
 # Declarative pages and forms: research and design
 
-**Status:** research and proposal only. Nothing is built. Every decision in §9
-waits on the owner.
+**Status:** accepted 2026-09-28. The owner took every recommendation in §9 and
+widened D-P1 to a general page engine. P1 is landed; P2 is next.
 
-**Goal.** A small framework in claude-fleet that renders settings pages and
-forms from a declarative spec. Pages can have sub-pages, tabs, collapsible
+**Goal.** A small framework in claude-fleet that renders pages and forms from a
+declarative spec: settings, and also pages with dynamic setup, prefilled data,
+charts, tables and editable lists. Pages can have sub-pages, tabs, collapsible
 sections and list editors, drawn from a few prepared layouts. An AI agent adds
 a page by writing a spec, not Svelte. The AI can also operate the forms: it
 proposes values, a person reviews them, and the change is applied with a record
@@ -223,6 +224,53 @@ bar and "Revert to inherited").
 
 ---
 
+### Beyond settings: sources, tables, charts and editable lists (D-P1)
+
+The owner widened the scope on 2026-09-28. The same engine also drives pages
+that are not settings: dynamic setup, prefilled data, charts, tables, editable
+lists and forms. The guardrails stay the same. What changes is that a spec can
+bind to three kinds of thing, all declared in Rust, instead of one:
+
+| Binding | Declared as | Read | Write |
+|---|---|---|---|
+| `key` | a settings `Spec` | `read_all` | `settings::set` |
+| `resource` | a `ResourceType` (fields, actions, `variant_by`) | its list/get provider | its `ActionSpec`s |
+| `source` | a named **`DataSource`**: an id, typed params, a result shape (`Scalar`, `Record{fields}`, `Rows{columns}`, `Series{x, y[]}`), the verdict and `OrgScope` rule, and a live-update event | a service call | none; a source is read-only, and writes are always actions |
+
+A `DataSource` is the "named backend provider" of `derived`, promoted so that
+any widget can use one. Examples: `usage.by_model` (`Series`), `sessions.list`
+(`Rows`), `work.today` (`Record`), and `tracker.sync_metrics` (`Record`).
+Params come only from the route, the page's scope picker, or another field on
+the same page (`{"param": "org_id", "from": "scope.org"}`). They are typed and
+validated like settings.
+
+**Prefilled forms.** A form in a `flow` or `object_editor` can take its initial
+values from a source (`"prefill": {"source": "project.defaults", "params": {…}}`).
+Prefilled values appear as defaults the user can see and override, never as
+already-saved values. An agent's prefill is a *suggested value*, per §5.
+
+**New widgets for data**, each declaring which result shapes it accepts:
+
+| Widget | Accepts | Notes |
+|---|---|---|
+| `stat` | `Scalar` | Value, unit, and an optional delta against a second source |
+| `table` | `Rows` | Columns come from the source's shape. Sort, filter and select come from the column types. Row actions are `ActionSpec`s. It is virtualised above about 200 rows |
+| `list_editor` | `Rows` + a resource | Add, edit inline, reorder, remove. Each operation is an action, and a row's editor is an `object_editor` |
+| `chart` | `Series` | `line`, `bar`, `stacked_bar`, `sparkline`. Charts are hand-rolled SVG so they need no dependency, since the app has no chart library. Colours come from the `app.css` tokens |
+| `record` | `Record` | A read-only key → value list with typed formatting |
+| `form` | a resource action's params | An inline form bound to one action (e.g. "add a quick reply") |
+
+A **seventh layout**, `L7 data_page`, covers dashboards and reports that mix
+these: a filter bar (fields bound to params) above a grid of `stat`, `chart`
+and `table` blocks. The layout places the blocks; there are still no spans or
+styles in specs.
+
+**Where the engine stops.** It serves screens whose logic is "read named data,
+show it, and run named actions on it". It does not serve screens with their
+own interaction model: the terminal, the Work tree's drag-and-drop, and the
+Transfer sheet's live steps. Those stay hand-built. A new need goes into a new
+catalog widget or a new source; it never becomes an expression in a spec.
+
 ## 4. Prepared layouts
 
 Every page chooses exactly one layout. The layout, not the individual field,
@@ -394,10 +442,11 @@ never coexist for long.
 
 | Slice | Content | Replaces |
 |---|---|---|
-| **P1** | `Spec` metadata for all 56 keys (label, help, unit, tags, danger, restart, ai); `describe_settings` command and `settings { describe }` tool; `RowChange::Setting`; doc tables generated between markers (`REGEN_SETTINGS_DOCS=1`) | Rustdoc-only help; the drift in hand-kept doc columns |
-| **P2** | The DSL, its Rust validator with the coverage test, and the preview route | `every_spec_has_a_settings_dialog_row` |
+| **P1** ✅ | `Spec` metadata for all 56 keys (label, help, unit, `zero`, tags, danger, restart, ai), held by `every_spec_has_consistent_metadata`; `settings::describe()`, served by `get_settings { describe: true }` and the `describe_fleet_settings` command (`LocalOnly`, like `get_fleet_settings`); `docs/settings-reference.md` and the `work.*` / `decide.*` guide tables generated (`REGEN_SETTINGS_DOCS=1`). **Moved out:** `RowChange::Setting` goes to P3, where a page first listens for it and the wire-contract bump is justified. Registering `hub.*` / `mcp.*` / `operator.*` goes to P2 | Rustdoc-only help; the hand-kept doc tables |
+| **P2** | The DSL, its Rust validator with the coverage test, and the preview route; the `DataSource` registry and `describe_sources`, with the first sources (`usage.by_model`, `work.today`) | `every_spec_has_a_settings_dialog_row` |
 | **P3** | The renderer: L1 and L5, twelve widgets, `Tabs` and `Disclosure`, search, modified and provenance chips. Migrate Automation, Limits and Decisions | About 900 lines of `SettingsDialog.svelte` and most of `fleet_settings.ts` |
 | **P4** | L2, L4 and L3, with resources for orgs and then trackers | `OrgSettings.svelte`, then `WorkSettings.svelte` |
+| **P4b** | L7 `data_page` and the data widgets (`stat`, `table`, `chart`, `record`, `list_editor`, `form`). First page: usage by model and host | Hand-built usage views, where a spec covers them |
 | **P5** | L6, `settings { propose | apply }`, suggested values, audit, the NL palette | — |
 | **P6** | Settings routed through the hub (master token or an org-scoped `full` client), and the phone renderer over the same catalog | The `LocalOnly` prose on paired desktops |
 
@@ -409,9 +458,9 @@ L4 covers it.
 
 ## 9. Decisions for the owner
 
-| # | Question | Recommendation |
+| # | Question | Decision (accepted 2026-09-28) |
 |---|---|---|
-| D-P1 | Is the framework scoped to **settings** (keys and resources), or is it a general page engine for any screen? | Settings and admin resources only. The Work view and session screens stay hand-built, because a general engine is how the inner-platform trap starts |
+| D-P1 | Is the framework scoped to **settings** (keys and resources), or is it a general page engine for any screen? | **Decided 2026-09-28: general.** It covers settings plus pages with dynamic setup, prefilled data, charts, tables, editable lists and forms, bound to named `DataSource`s (§3, "Beyond settings"). Screens with their own interaction model stay hand-built |
 | D-P2 | Where do page specs live? | `fleet-core`, compiled in, so the hub can serve them to clients and a phone |
 | D-P3 | Spec format: JSON or YAML? | JSON, because it adds no dependency on either side |
 | D-P4 | Do agents write settings at runtime (P5), or only author pages? | Both. Runtime writes go only through `propose` → review, with `AiPolicy` gates |

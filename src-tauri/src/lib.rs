@@ -419,6 +419,7 @@ pub fn run() {
             commands::quick_replies::quick_replies,
             commands::quick_replies::set_quick_replies,
             commands::sessions::get_fleet_settings,
+            commands::sessions::describe_fleet_settings,
             commands::sessions::set_fleet_setting,
             commands::tasks::list_tasks,
             commands::tasks::cancel_task,

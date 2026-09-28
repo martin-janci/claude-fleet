@@ -93,6 +93,8 @@ Parameters: `host_alias`
 
 Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
 
+Parameters: `describe`
+
 ### `hide_host`
 
 Hide or show a host (hidden: skipped by reconcile). Returns the host row.
