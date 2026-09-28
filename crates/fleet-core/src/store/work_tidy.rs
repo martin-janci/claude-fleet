@@ -64,7 +64,7 @@ impl Store {
                         i.status_name, i.resolution, i.status_changed_at, l.archived_at, \
                         l.tidy_snoozed_until, l.tidy_never, \
                         COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END), \
-                        l.item_id \
+                        l.item_id, i.status_set_by \
                  FROM work_links l \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  LEFT JOIN work_items i ON i.id = l.item_id \
@@ -85,6 +85,7 @@ impl Store {
                         snoozed_until: r.get(8)?,
                         never: r.get::<_, i64>(9)? != 0,
                         org_id: r.get(10)?,
+                        status_set_by: r.get(12)?,
                     },
                     r.get::<_, Option<i64>>(11)?,
                 ))

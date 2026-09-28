@@ -213,6 +213,12 @@ pub struct TidyLink {
     pub never: bool,
     /// The linked item's org (its tracker's, work graph M5).
     pub org_id: Option<i64>,
+    /// Who set the item's status (`work_items.status_set_by`): `None` |
+    /// `person` | `derived`. Decides `DoneIdle` vs `PrMergedIdle` below —
+    /// a stamped `done` keeps the reason faithful to its origin (design
+    /// 2026-09-28 §2), never a tracker item's, whose `status_set_by` stays
+    /// `None`.
+    pub status_set_by: Option<String>,
 }
 
 /// One session and everything the planner reads about it.
@@ -493,7 +499,14 @@ pub fn plan_tidy(
                     let done_long = l.status_category.as_deref() == Some("done")
                         && l.status_changed_at
                             .is_some_and(|t| now - t >= cfg.done_secs);
-                    if done_long && !resolved_away {
+                    // A merged-PR stamp (`status_set_by = 'derived'`) keeps
+                    // its reason faithful to its origin: `PrMergedIdle`
+                    // below, not `DoneIdle` here, so a reason allow-list
+                    // keeps the meaning its author chose (design 2026-09-28
+                    // §2). A person's `done` (`'person'`) and a tracker
+                    // item's (`None`) classify as `DoneIdle`, as before.
+                    let stamped = l.status_set_by.as_deref() == Some("derived");
+                    if done_long && !resolved_away && !stamped {
                         reasons.push((TidyReason::DoneIdle, since));
                     }
                     if resolved_away {

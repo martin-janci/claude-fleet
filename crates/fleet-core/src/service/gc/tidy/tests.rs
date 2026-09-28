@@ -129,6 +129,37 @@ fn one_row_per_reason() {
     assert!(got.iter().all(|c| !c.auto), "auto-tidy is off by default");
 }
 
+/// A merged PR's stamp (`status_set_by = 'derived'`) keeps its reason
+/// faithful to its origin — `PrMergedIdle`, not `DoneIdle` — so a reason
+/// allow-list keeps the meaning its author chose (design 2026-09-28 §2,
+/// task 3 fix round 1). A person's `done` (`'person'`) still classifies as
+/// `DoneIdle`, because that is what it is.
+#[test]
+fn a_stamped_done_classifies_as_pr_merged_not_done_idle() {
+    let stamped = TidySession {
+        link: Some(TidyLink {
+            status_set_by: Some("derived".into()),
+            ..link("done", 3 * DAY)
+        }),
+        pr_merged: true,
+        ..session(1, 5 * HOUR)
+    };
+    let persons_done = TidySession {
+        link: Some(TidyLink {
+            status_set_by: Some("person".into()),
+            ..link("done", 3 * DAY)
+        }),
+        ..session(2, 5 * HOUR)
+    };
+    assert_eq!(
+        reasons(&run(&[stamped, persons_done], &cfg())),
+        vec![
+            (2, TidyReason::DoneIdle, TidyAction::SafeKill),
+            (1, TidyReason::PrMergedIdle, TidyAction::SafeKill),
+        ]
+    );
+}
+
 #[test]
 fn thresholds_are_respected() {
     // Done for only one day; idle for only an hour; a ghost with a week left.
