@@ -240,7 +240,7 @@ pub struct Resource {
     pub bytes: Vec<u8>,
 }
 
-mod bytes_b64 {
+pub(crate) mod bytes_b64 {
     use base64::Engine;
     pub fn serialize<S: serde::Serializer>(b: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(b))

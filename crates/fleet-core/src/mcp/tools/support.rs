@@ -838,6 +838,16 @@ pub(super) fn apply_marker(
 /// while a name in neither list — nothing a client may ever call — gets a
 /// message that does not claim it as a real admin tool.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
+    if caller.host_alias.is_some() && guard::NOT_FOR_HOST_TOKENS.contains(&tool) {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{tool} is never a per-host token's ({} refused)",
+                caller.label()
+            ),
+            None,
+        ));
+    }
     if caller.is_master() || guard::is_client_tool(tool) {
         return Ok(());
     }
@@ -1052,6 +1062,10 @@ pub(super) struct ClientSummary {
     /// The org the client is bound to (work graph M14); absent: unbound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) org_id: Option<i64>,
+    /// When the operator let this client manage the asset catalog
+    /// (`catalog_admin`, migration 074); absent: not granted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) assets_admin_at: Option<i64>,
 }
 
 impl From<crate::store::ClientTokenRow> for ClientSummary {
@@ -1065,6 +1079,7 @@ impl From<crate::store::ClientTokenRow> for ClientSummary {
             revoked_at: r.revoked_at,
             trusted_at: r.trusted_at,
             org_id: r.org_id,
+            assets_admin_at: r.assets_admin_at,
         }
     }
 }

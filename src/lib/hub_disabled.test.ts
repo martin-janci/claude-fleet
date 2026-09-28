@@ -36,7 +36,7 @@ import {
   session as sessionFixture,
 } from './hosts_fixture';
 import { hosts } from './hosts';
-import { catalog } from './assets';
+import { catalog, catalogConfig } from './assets';
 import { projects, type ProjectTreeRow } from './projects';
 import { sessions as sessionsStore, type SessionRow } from './sessions';
 
@@ -139,33 +139,53 @@ describe('fleet administration on a hub client', () => {
 });
 
 describe('the asset catalog on a hub client', () => {
-  // Requirement (a): `catalog_config` is one of the six the UI calls
-  // unprompted. It now answers E_LOCAL_ONLY, so opening the Assets tab in
-  // remote mode used to raise an error where the panel should be.
-  it('does not ask for a catalog it cannot have', async () => {
+  // The hub's `catalog_admin` answers only a client the operator granted
+  // (`fleet-hub client grant <name> assets`); every other client is refused
+  // with E_FORBIDDEN on its first call, `catalog_config`.
+  const FORBIDDEN = { code: 'E_FORBIDDEN', message: 'catalog_admin needs the master token or a granted client' };
+  const refusing = (rest: (cmd: string) => unknown = () => null) =>
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw FORBIDDEN;
+      return rest(cmd);
+    });
+
+  it('asks the hub once, and asks for nothing an ungranted client cannot have', async () => {
     hubStatus.set(remote);
+    refusing();
     render(AssetsPanel, { props: { visible: true } });
-    await tick();
-    await tick();
-    expect(inv().mock.calls.some((c) => c[0] === 'catalog_config')).toBe(false);
+    await screen.findByTestId('assets-remote-note');
+    expect(inv().mock.calls.filter((c) => c[0] === 'catalog_config')).toHaveLength(1);
     expect(inv().mock.calls.some((c) => c[0] === 'catalog_last_sync')).toBe(false);
+    expect(inv().mock.calls.some((c) => c[0] === 'catalog_load')).toBe(false);
   });
 
-  it('shows the reason instead, and none of the controls that cannot work', async () => {
+  it('refused: the read-only overview, with how to get the grant, and none of the controls', async () => {
     hubStatus.set(remote);
+    refusing();
     render(AssetsPanel, { props: { visible: true } });
-    const note = await screen.findByTestId('assets-remote');
-    expect(note.textContent).toContain('fleet.example.com');
-    // Sync (apply_sync) and Secrets (set_secret) are two of the nine a client
-    // is refused; they must not be sitting there waiting to fail.
+    const note = await screen.findByTestId('assets-remote-note');
+    expect(note.textContent).toContain('Read-only');
+    expect(screen.getByTestId('assets-grant-cmd').textContent).toContain('fleet-hub client grant');
+    // E_FORBIDDEN is the ordinary answer, not an error to show.
+    expect(screen.queryByTestId('assets-grant-error')).toBeNull();
     expect(screen.queryByTestId('assets-sync')).toBeNull();
     expect(screen.queryByTestId('assets-secrets')).toBeNull();
     expect(screen.queryByTestId('assets-setup')).toBeNull();
   });
 
-  // The list and the scan route (the hub's list_assets / scan_assets), so
-  // the panel is a read-only overview of the hub's catalog rather than a
-  // dead end.
+  it('an unexpected refusal (an old hub, the link down) is shown as is', async () => {
+    hubStatus.set(remote);
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') throw { code: 'E_HUB_CONTRACT', message: 'update the hub' };
+      return null;
+    });
+    render(AssetsPanel, { props: { visible: true } });
+    expect((await screen.findByTestId('assets-grant-error')).textContent).toContain('update the hub');
+  });
+
+  // The list and the scan route for every paired client (the hub's
+  // list_assets / scan_assets), so the refused panel is a read-only overview
+  // of the hub's catalog rather than a dead end.
   const hubListing = {
     head: 'abcdef1234567890', loaded_at: 1, problems: [],
     unmanaged: [{ host_alias: 'nas', harness: 'claude', kind: 'skill', name: 'extra', state: 'unmanaged', catalog_hash: null, host_hash: null, scanned_at: 1, managed: false }],
@@ -180,7 +200,7 @@ describe('the asset catalog on a hub client', () => {
   it('shows the hub’s catalog read-only: where each asset is and in what state', async () => {
     catalog.set(null);
     hubStatus.set(remote);
-    inv().mockImplementation(async (cmd: string) => (cmd === 'catalog_list_assets' ? hubListing : null));
+    refusing((cmd) => (cmd === 'catalog_list_assets' ? hubListing : null));
     render(AssetsPanel, { props: { visible: true } });
     const row = await screen.findByTestId('asset-row-skill-worktree');
     expect(row.tagName).toBe('DIV');
@@ -190,13 +210,12 @@ describe('the asset catalog on a hub client', () => {
     expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1');
     // Unmanaged rows are listed, with nothing to import them into.
     expect(screen.getByTestId('unmanaged-row-nas-claude-skill-extra').textContent).not.toContain('Import');
-    expect(screen.getByTestId('assets-remote-note').textContent).toContain('Read-only');
   });
 
   it('scans the hosts through the hub and re-reads the overview', async () => {
     catalog.set(null);
     hubStatus.set(remote);
-    inv().mockImplementation(async (cmd: string) =>
+    refusing((cmd) =>
       cmd === 'catalog_list_assets'
         ? hubListing
         : cmd === 'assets_scan_hosts'
@@ -213,12 +232,52 @@ describe('the asset catalog on a hub client', () => {
   it('says so when the hub has no catalog yet', async () => {
     catalog.set(null);
     hubStatus.set(remote);
-    inv().mockImplementation(async (cmd: string) => {
+    refusing((cmd) => {
       if (cmd === 'catalog_list_assets') throw { code: 'E_CATALOG_NOT_CONFIGURED', message: 'catalog not loaded' };
       return null;
     });
     render(AssetsPanel, { props: { visible: true } });
     expect((await screen.findByTestId('assets-hub-failed')).textContent).toContain('no asset catalog yet');
+    // ...and says how to set one, rather than only that someone should.
+    expect(screen.getByTestId('assets-hub-setup-cmd').textContent).toContain('fleet-hub catalog set');
+  });
+
+  // Granted: the whole panel, onto the hub's catalog.
+  const hubConfig = { repo_path: '/var/lib/fleet-hub/agent-assets', remote_url: null, head_commit: 'abcdef1234567890', last_loaded_at: 1 };
+
+  it('granted: the full panel onto the hub’s catalog, but no import or author session', async () => {
+    catalog.set(null);
+    hubStatus.set(remote);
+    inv().mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'catalog_config': return hubConfig;
+        case 'catalog_load': return { head: 'abcdef1234567890', loaded_at: 1, asset_count: 1, problem_count: 0 };
+        case 'catalog_list_assets': return hubListing;
+        case 'assets_inventory': return [];
+        case 'catalog_repo_status': return { head: 'abcdef1', dirty: 0, ahead: null, behind: null, has_upstream: false };
+        default: return null;
+      }
+    });
+    render(AssetsPanel, { props: { visible: true } });
+    await screen.findByTestId('assets-sync');
+    expect(screen.getByTestId('assets-secrets')).toBeTruthy();
+    expect(screen.getByTestId('assets-new')).toBeTruthy();
+    expect(screen.queryByTestId('assets-remote-note')).toBeNull();
+    // The import reads host `local`, which on a hub is the hub's machine.
+    const imp = screen.getByTestId('assets-import') as HTMLButtonElement;
+    expect(imp.disabled).toBe(true);
+    expect(imp.title).toContain('import_assets');
+  });
+
+  it('granted with no catalog yet: the setup form, for a path on the hub’s machine', async () => {
+    catalog.set(null);
+    catalogConfig.set(null);
+    hubStatus.set(remote);
+    inv().mockImplementation(async () => null);
+    render(AssetsPanel, { props: { visible: true } });
+    const setup = await screen.findByTestId('assets-setup');
+    expect(setup.textContent).toContain("Path on the hub's machine");
+    expect(setup.textContent).toContain('fleet.example.com');
   });
 
   it('standalone is untouched: it still loads the catalog', async () => {

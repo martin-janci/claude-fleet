@@ -340,10 +340,18 @@ Index by area (names only; see the reference for details):
   ANY apply — not only one whose plan includes an overwrite or remove —
   while the setting is on), `set_secret` (store a `${NAME}`
   placeholder value; master token only; the value is never returned, logged, or
-  audited). Authoring (create, edit, delete assets) is desktop-only via the
-  Assets tab, which auto-commits every save; no MCP tools. Sessions may edit
-  the catalog repo directly and commit with `catalog:` prefixed messages,
-  which the app picks up on its next catalog load.
+  audited). `catalog_admin` is everything else the desktop's Assets tab does
+  — configure and load the checkout, create / edit / delete assets and
+  their resources, lint, commit and push, plan and apply Sync, secrets and
+  layers — as one tool whose `action` names the operation and whose `args`
+  is that operation's own object. It answers the master and a paired client
+  the operator granted (`fleet-hub client grant <name> assets`), refuses
+  every other caller with `E_FORBIDDEN`, and is not listed to a per-host
+  token; its `apply_sync` action passes the same confirm gate as
+  `apply_sync`. It is what a hub-client desktop's Assets tab routes to.
+  Sessions may also edit the catalog repo directly and commit with
+  `catalog:` prefixed messages, which the app picks up on its next catalog
+  load.
 - **Asset catalog layers** — `list_layers` (the catalog's layer definitions
   plus every host's stored role + contexts), `resolve_preview` (compute one
   host's effective asset set with provenance, without writing anything),
