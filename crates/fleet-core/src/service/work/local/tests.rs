@@ -95,6 +95,22 @@ fn naming_returns_the_row_with_its_new_primary_work() {
     assert_eq!(w.source, "manual");
 }
 
+/// D34: an agent naming its work (a per-host token, the operator) records
+/// `agent`, never a person's `manual`; a person's naming is unchanged.
+#[test]
+fn an_agent_naming_work_is_recorded_as_the_agents() {
+    let fx = fixture();
+    for (decider, sid, title, want) in [
+        (Decider::Agent, fx.s_a, "Agent's", "agent"),
+        (Decider::Person, fx.s_b, "Person's", "manual"),
+    ] {
+        let row = name_session_work_as(&name(sid, title, None), &fx.store, &OrgScope::All, decider)
+            .unwrap();
+        let w = row.work.expect("named work is the row's work");
+        assert_eq!((w.title.as_str(), w.source.as_str()), (title, want));
+    }
+}
+
 #[test]
 fn a_title_is_required_and_validated() {
     let fx = fixture();

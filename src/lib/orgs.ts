@@ -27,6 +27,14 @@ export interface OrgRow {
   /** Work graph M7: this org's auto-tidy override; absent = inherit
    *  `work.auto_tidy`. */
   auto_tidy?: boolean | null;
+  /** Jev evaluation (D31): this org consented to its redacted texts going
+   *  to the decision model (docs/decisions.md). Off by default; absent from
+   *  an older hub. */
+  jev_allowed?: boolean;
+  /** D31 (work graph M14): devices bound to this org (`fleet-hub pair
+   *  --org`) also see unassigned work and sessions, as a host does. On by
+   *  default; absent from an older hub, which has no bound devices. */
+  bound_sees_unassigned?: boolean;
 }
 
 /** An org's auto-tidy setting as the select shows it. */
@@ -232,7 +240,14 @@ export function addOrg(name: string, color: string | null, isolateSessions: bool
 
 export function updateOrg(
   orgId: number,
-  patch: { name?: string; color?: string; isolate_sessions?: boolean; auto_tidy?: OrgAutoTidy },
+  patch: {
+    name?: string;
+    color?: string;
+    isolate_sessions?: boolean;
+    auto_tidy?: OrgAutoTidy;
+    jev?: 'on' | 'off';
+    bound_sees_unassigned?: boolean;
+  },
 ) {
   return thenReload(invokeCmd<OrgRow>('update_org', { args: { org_id: orgId, ...patch } }));
 }

@@ -480,6 +480,17 @@ impl Store {
         Ok(n as u32)
     }
 
+    /// Links of either role that are configured and not revoked —
+    /// `fleet_health.peer_links_total`.
+    pub fn peer_links_total(&self) -> Result<u32, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM peer_links WHERE revoked_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
     pub fn set_peer_link_state(
         &self,
         id: i64,

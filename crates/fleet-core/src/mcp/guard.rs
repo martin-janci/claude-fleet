@@ -381,6 +381,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Lifecycle,
     },
     ToolPolicy {
+        name: "rewind_conversation",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
         name: "spawn_review",
         access: Access::Client,
         readonly: false,
@@ -876,6 +883,7 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "restore_host_sessions",
     "recreate_session",
     "restart_session",
+    "rewind_conversation",
     "safe_kill_session",
     "work_link",
 ];

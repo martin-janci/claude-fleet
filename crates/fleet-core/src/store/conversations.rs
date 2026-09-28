@@ -278,6 +278,47 @@ impl Store {
         Ok(self.emit_session(session_id)?)
     }
 
+    /// Relabel a just-recorded conversation's origin, for a start whose real
+    /// source only the caller knows and only AFTER the start has run.
+    ///
+    /// A fork's spawn goes `new_session` → [`Store::set_claude_session_id`] →
+    /// [`Self::rebind_conversation`] with [`StartSource::Fleet`], which is
+    /// both the wrong label (`fork` is what the clients render for a forked
+    /// conversation, and what a rewind already gets) and a
+    /// [`StartSource::resets_context`] source — so the new row would report 0
+    /// context for a transcript it inherited whole.
+    /// `rebind_conversation`'s own same-id upgrade deliberately lifts only
+    /// `unknown`, so this is a statement of its own rather than a widening of
+    /// that rule.
+    ///
+    /// The context is marked STALE rather than guessed: its size is the
+    /// inherited transcript's, and only a hook or a transcript read knows it.
+    pub fn relabel_conversation(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+        source: StartSource,
+        transcript_path: Option<&str>,
+    ) -> Result<Option<SessionRow>, IpcError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE conversations SET start_source = ?3,                  transcript_path = COALESCE(?4, transcript_path)              WHERE session_id = ?1 AND claude_session_id = ?2",
+            rusqlite::params![
+                session_id,
+                claude_session_id,
+                source.as_str(),
+                transcript_path
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET transcript_path = COALESCE(?2, transcript_path),                  context_tokens = 0, context_pct = 0, context_stale = 1              WHERE id = ?1 AND claude_session_id = ?3",
+            rusqlite::params![session_id, transcript_path, claude_session_id],
+        )?;
+        tx.commit()?;
+        self.bus.conversations_changed(session_id);
+        Ok(self.emit_session(session_id)?)
+    }
+
     /// Record that the conversation ended (SessionEnd / kill). The session's
     /// `claude_session_id` is untouched: the next rebind replaces it.
     pub fn close_conversation(
@@ -638,6 +679,56 @@ mod tests {
         assert_eq!(row.end_reason, None);
         assert_eq!(row.model, None);
         assert_eq!(row.first_prompt, None);
+    }
+
+    /// M1: a fork's spawn records its conversation through
+    /// `set_claude_session_id`, i.e. as `fleet` — the wrong label, and a
+    /// `resets_context()` source, so the row reports 0 context for a
+    /// transcript it inherited whole. `relabel_conversation` is what makes it
+    /// read `fork`; `rebind_conversation` cannot, because its same-id upgrade
+    /// deliberately lifts only `unknown`.
+    #[test]
+    fn relabelling_a_conversation_makes_a_fork_read_as_a_fork() {
+        let (s, _bus) = store_with_recorder();
+        let id = session(&s);
+        s.set_claude_session_id(id, A).unwrap();
+        let source = |s: &Store| -> String {
+            s.conn
+                .query_row(
+                    "SELECT start_source FROM conversations WHERE session_id = ?1                      AND claude_session_id = ?2",
+                    rusqlite::params![id, A],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(source(&s), "fleet", "what new_session records");
+        // A plain rebind cannot fix it: the same-id upgrade only lifts
+        // `unknown`. This is the gap the new method closes.
+        s.rebind_conversation(id, A, StartSource::Fork, None, None)
+            .unwrap();
+        assert_eq!(source(&s), "fleet");
+
+        let row = s
+            .relabel_conversation(id, A, StartSource::Fork, Some("/p/new.jsonl"))
+            .unwrap()
+            .expect("the session row comes back");
+        assert_eq!(source(&s), "fork");
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some("/p/new.jsonl"),
+            "the path the fork script actually wrote"
+        );
+        assert!(
+            row.context.context_stale,
+            "an inherited transcript's size is unknown until it is read, not 0"
+        );
+        // A conversation the session is no longer on is left alone.
+        s.relabel_conversation(id, B, StartSource::Fork, Some("/p/other.jsonl"))
+            .unwrap();
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some("/p/new.jsonl")
+        );
     }
 
     /// Work graph M4.6: the classification nudge is stamped per

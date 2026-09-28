@@ -270,6 +270,72 @@ mod fallback_tests {
     }
 }
 
+/// How long the launch waits on the token store before giving up on it.
+pub const KEYCHAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A [`TokenStore`] whose `get` runs on its own thread and answers `Err`
+/// past `wait`. The macOS keychain prompts on a locked keychain, and the
+/// prompt can sit for hours while `Backend::resolve` blocks Tauri's setup
+/// closure on the main thread (perf-logs §4). Past the bound the launch goes
+/// on as "configured hub unusable" — the existing banner, with the reason —
+/// and never as standalone (a paired app that guesses standalone is the
+/// two-brains failure `backend::startup` exists to prevent). The blocked
+/// thread finishes on its own whenever the keychain finally answers.
+pub struct BoundedTokenStore {
+    inner: std::sync::Arc<dyn TokenStore>,
+    wait: std::time::Duration,
+}
+
+impl BoundedTokenStore {
+    pub fn new(inner: std::sync::Arc<dyn TokenStore>, wait: std::time::Duration) -> Self {
+        Self { inner, wait }
+    }
+}
+
+impl TokenStore for BoundedTokenStore {
+    fn get(&self) -> Result<Option<String>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let inner = std::sync::Arc::clone(&self.inner);
+        let started = std::time::Instant::now();
+        tracing::info!("startup: reading the hub client token (a locked keychain prompts here)");
+        std::thread::Builder::new()
+            .name("hub-token-read".into())
+            .spawn(move || {
+                let _ = tx.send(inner.get());
+            })
+            .map_err(|e| format!("cannot start the token read: {e}"))?;
+        match rx.recv_timeout(self.wait) {
+            Ok(answer) => {
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    found = matches!(answer, Ok(Some(_))),
+                    "startup: hub client token read finished"
+                );
+                answer
+            }
+            Err(_) => {
+                tracing::warn!(
+                    waited_secs = self.wait.as_secs(),
+                    "startup: the token store did not answer; continuing with the hub marked \
+                     unusable (unlock the keychain and relaunch)"
+                );
+                Err(format!(
+                    "the token store did not answer within {} s (a locked keychain?) — unlock it and relaunch",
+                    self.wait.as_secs()
+                ))
+            }
+        }
+    }
+
+    fn set(&self, token: &str) -> Result<(), String> {
+        self.inner.set(token)
+    }
+
+    fn clear(&self) -> Result<(), String> {
+        self.inner.clear()
+    }
+}
+
 /// Test double: a token held in memory, or a store that always fails.
 #[cfg(test)]
 pub struct InMemoryTokenStore {

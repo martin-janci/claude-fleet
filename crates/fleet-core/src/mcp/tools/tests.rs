@@ -1158,6 +1158,63 @@ fn test_tools(store: Store) -> FleetTools {
     )
 }
 
+#[tokio::test]
+async fn rewind_conversation_rejects_an_unknown_mode() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let err = t
+        .rewind_conversation(
+            Extension(Caller::master()),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "sideways".into(),
+                new_worktree: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("mode is a closed set");
+    assert!(format!("{err:?}").contains("mode"));
+}
+
+#[tokio::test]
+async fn a_master_caller_is_not_confirm_gated_for_a_rewind() {
+    // `confirm: false` + OPERATOR_CONFIRMS means a person at the desktop is
+    // ungated — the desktop shows its own dialog. So this must NOT fail for
+    // the confirmation; it fails later, for an unreachable host.
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.set_claude_session_id(id, "11111111-1111-1111-1111-111111111111")
+        .unwrap();
+    let t = test_tools(s);
+    let err = t
+        .rewind_conversation(
+            Extension(Caller::master()),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "rewind".into(),
+                new_worktree: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("no reachable host in a unit test");
+    let text = format!("{err:?}").to_lowercase();
+    assert!(
+        !text.contains("confirm"),
+        "a master caller must not be confirm-gated: {text}"
+    );
+}
+
 fn two_host_store() -> (Store, i64, i64) {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("hosta").unwrap();
@@ -1608,6 +1665,48 @@ async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
         .is_none());
 }
 
+/// `rewind_conversation` truncates a transcript, rebinds a row and restarts
+/// a pane — a session-addressed WRITE, so it must be fenced to the caller's
+/// host exactly as `restart_session` and `recreate_session` above are. The
+/// service layer is caller-agnostic, so the fence lives in the handler.
+#[tokio::test]
+async fn per_host_callers_cannot_rewind_another_hosts_session() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
+        .unwrap();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    for mode in ["rewind", "fork"] {
+        forbidden(
+            t.rewind_conversation(
+                Extension(a.clone()),
+                Parameters(RewindConversationParams {
+                    session_id: on_b,
+                    anchor_uuid: None,
+                    mode: mode.into(),
+                    new_worktree: None,
+                    confirm_nonce: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+    }
+    // The row still names the original conversation: the refusal landed
+    // before the engine could rebind anything.
+    assert_eq!(
+        t.store
+            .lock()
+            .unwrap()
+            .get_session_by_id(on_b)
+            .unwrap()
+            .unwrap()
+            .claude_session_id
+            .as_deref(),
+        Some("0f8fad5b-d9cb-469f-a165-70867728950e")
+    );
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
     let (s, _pid, on_b) = two_host_store();
@@ -1915,8 +2014,8 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88;
-/// `add_project` / `list_github_repos`: 91.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
+/// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1937,7 +2036,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 91);
+    assert_eq!(served, 92);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3477,11 +3576,30 @@ fn the_served_definition_budget_stays_bounded() {
     // 14 optional parameters (the nested `rule` / `view` / `decisions`
     // served as a bare object / array) and one description clause; no new
     // tool. Measured at 58,977 on 2026-09-27; plus 100.
+    // `rewind_conversation` (reply actions): one tool with a `mode` rather
+    // than separate fork/rewind/retry tools, so this is a single addition.
+    // Trimming the tool description to one sentence was done first and freed
+    // 79 bytes; the five field docs are mandatory and are not slack. The
+    // tool's own cost is a stable 919 bytes; what keeps moving is the
+    // baseline under it, five times during this branch's life
+    // (56,660 -> 56,829 -> 56,950 -> 57,859 -> 58,977), which is why this is
+    // re-MEASURED on every merge rather than carried over or computed.
+    // Merged with `feat/reply-actions` (4-commit merge): measured at 59,896
+    // on 2026-09-27, 919 bytes over main's 58,977 baseline — exactly
+    // `rewind_conversation`'s stable cost. Raised to that measurement plus
+    // 100.
+    // Hub ops & accounting (plan D): `fleet_health` names `hub`,
+    // `tunnels_mode` and `peer_links_total`; `usage_report` names
+    // `by_day.backfill_cost_micros` — one slim clause each, the prose in
+    // docs/hub.md: +162 on its own branch (57,112 over 56,950). Merged over
+    // M14.1b/c and reply actions: measured at 60,058 on 2026-09-28 (59,896
+    // + 162); plus 100.
     // add_project / list_github_repos (a hub client adds a project): two
     // new tools; `add_project`'s `source` is a three-variant tagged enum
-    // whose every variant and field must be documented. Merged over M14.1c: measured at 61,101 on
-    // 2026-09-28 (+2,124); plus 100.
-    const BUDGET_BYTES: usize = 61_201;
+    // whose every variant and field must be documented. Its own branch
+    // measured +2,124 over M14.1c. Merged over reply actions and hub ops:
+    // measured at 62,255 on 2026-09-28 (+2,197 over 60,058); plus 100.
+    const BUDGET_BYTES: usize = 62_355;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7048,6 +7166,7 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "restore_host_sessions",
         "recreate_session",
         "restart_session",
+        "rewind_conversation",
         "safe_kill_session",
         "work_link",
         "kill_session",

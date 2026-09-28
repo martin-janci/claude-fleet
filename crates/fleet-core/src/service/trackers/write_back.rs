@@ -4,8 +4,9 @@
 //! When the PR probe sees a pull request on a session, [`on_pr`] queues one
 //! write per item the session is linked to — only where all of these hold:
 //!
-//! * the link is **confirmed** and a person made it (`manual` / `started`),
-//!   never a detection guess or an agent's inference;
+//! * the link is **confirmed** and a person made it (`manual` / `started`,
+//!   [`PERSON_SOURCES`]), never a detection guess, an agent's inference, or
+//!   an agent's link or start (`agent` / `agent_started`, D34);
 //! * the item belongs to a Jira tracker (Cloud or Data Center) whose admin
 //!   turned on `write_back.pr_remote_link` (off by default);
 //! * the session's org is the tracker's org (both known and different
@@ -24,7 +25,7 @@
 
 use super::{TrackerError, TrackerProvider, WriteOp};
 use crate::ipc_error::{lock, IpcError};
-use crate::store::{NewTrackerWrite, Store, TrackerRow, WRITE_OP_PR_REMOTE_LINK};
+use crate::store::{NewTrackerWrite, Store, TrackerRow, PERSON_SOURCES, WRITE_OP_PR_REMOTE_LINK};
 use std::sync::Mutex;
 
 /// Writes one pass sends per tracker, at most.
@@ -79,7 +80,7 @@ pub fn on_pr(s: &Store, session_id: i64, pr_url: &str) -> Result<usize, IpcError
         .and_then(|r| r.claude_session_id);
     let mut queued = 0;
     for (link, _) in s.detection_links(participant.id)? {
-        if link.state != "confirmed" || !matches!(link.source.as_str(), "manual" | "started") {
+        if link.state != "confirmed" || !PERSON_SOURCES.contains(&link.source.as_str()) {
             continue;
         }
         let Some(item_id) = link.item_id else {

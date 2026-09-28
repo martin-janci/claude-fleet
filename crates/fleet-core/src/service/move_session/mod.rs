@@ -4555,6 +4555,7 @@ mod tests {
                         last_msg_id: Some("msg_1".into()),
                         last_msg_usage: Some("40,0,0,0,0".into()),
                         now: 1,
+                        by_day: Vec::new(),
                     },
                 )
                 .unwrap();

@@ -196,7 +196,21 @@ pub fn run() {
             // be exactly one implementation of "where the token lives".
             let tokens: std::sync::Arc<dyn backend::TokenStore> =
                 std::sync::Arc::new(OsTokenStore::new(data_dir.clone()));
-            let backend = Backend::resolve(&store, tokens.as_ref());
+            tracing::info!("startup: resolving backend (hub.remote_url, then the client token)");
+            let resolving = std::time::Instant::now();
+            let backend = Backend::resolve(
+                &store,
+                &backend::token_store::BoundedTokenStore::new(
+                    std::sync::Arc::clone(&tokens),
+                    backend::token_store::KEYCHAIN_WAIT,
+                ),
+            );
+            tracing::info!(
+                elapsed_ms = resolving.elapsed().as_millis() as u64,
+                remote = backend.is_remote(),
+                unavailable = backend.unavailable().is_some(),
+                "startup: backend resolved"
+            );
             app.manage(std::sync::Arc::clone(&tokens));
             // Whether this window's live link to the hub is up — the
             // disconnected banner. Standalone it never moves off
@@ -338,6 +352,8 @@ pub fn run() {
             commands::trackers::test_tracker,
             commands::trackers::remove_tracker,
             commands::trackers::tracker_sync_metrics,
+            commands::trackers::status_map_proposals,
+            commands::trackers::decide_status_map_proposal,
             commands::trackers::work_retention_status,
             commands::trackers::work_retention_sweep,
             commands::trackers::work_usage,
@@ -362,6 +378,7 @@ pub fn run() {
             commands::sessions::session_tool_detail,
             commands::sessions::session_activity,
             commands::sessions::restart_session,
+            commands::sessions::rewind_conversation,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
             commands::sessions::recreate_session,

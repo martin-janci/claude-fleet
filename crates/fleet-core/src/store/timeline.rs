@@ -49,6 +49,11 @@ impl Store {
     /// - GC sweeper (`service::gc`): `gc_killed`, `gc_failed`.
     /// - tidy-up (`service::work::tidy`): `gc_tidied`, and `tidy_kept` (detail
     ///   is the unix second a person's keep holds until, work graph M11.3).
+    /// - work detection (`Store::apply_link_changes`) and fleet's carries
+    ///   (resume / fork / inherit): `work_suggestion_withdrawn` (detail is
+    ///   JSON of ids and vocabulary words only: `link_id`, `item_id`,
+    ///   `rule`, `reason` withdraw|decay|carried).
+    /// - hooks (`service::hooks`): `notification`.
     /// - hooks (`service::hooks` via the `record_*_hook_for_row` writers):
     ///   `notification`, `status_change`, `stop_failure`.
     /// - the tick (`Store::age_out_stale_working`): `stale_working`.

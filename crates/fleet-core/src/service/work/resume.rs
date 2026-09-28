@@ -1872,6 +1872,7 @@ mod tests {
             worktree_id: None,
             name: "ABC-1".into(),
             per_project: false,
+            decider: crate::store::Decider::Person,
         };
         let start = async {
             at_spawn.await.unwrap();

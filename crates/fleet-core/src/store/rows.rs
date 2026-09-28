@@ -630,6 +630,16 @@ pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<Usag
     })
 }
 
+/// One UTC day's slice of a [`UsageDelta`], priced. `backfill` marks history
+/// a fresh cursor read in one go (perf-logs §6a): kept apart in
+/// `usage_daily` so a takeover day never reads as a $850 day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayDelta {
+    pub day: i64,
+    pub totals: UsageTotals,
+    pub backfill: bool,
+}
+
 /// One usage pass's result for a session, applied by `Store::apply_usage`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageDelta {
@@ -642,6 +652,9 @@ pub struct UsageDelta {
     pub last_msg_id: Option<String>,
     pub last_msg_usage: Option<String>,
     pub now: i64,
+    /// Per-day slices of `totals`; empty means "book everything to the day
+    /// of `now`" (a reader without `D` lines).
+    pub by_day: Vec<DayDelta>,
 }
 
 /// `claude_status` values that mean "no turn in progress" — the states

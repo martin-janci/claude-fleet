@@ -18,7 +18,10 @@ default = []
 e2e = ["fleet-core/e2e"]
 
 [dependencies]
-fleet-core = { path = "../fleet-core" }
+# `nl-detect`: the language detector behind `fleet-hub census languages`
+# (Jev evaluation D40). Its models add about 45 MB, which is why only the
+# hub turns it on.
+fleet-core = { path = "../fleet-core", features = ["nl-detect"] }
 # Directly, not through `fleet-core`, for one function: the loopback rule the
 # bind check applies is the same one the agent and the desktop use
 # (`fleet_proto::net`). Already in the tree — `fleet-core` depends on it.
@@ -43,6 +46,9 @@ rustls-pki-types = { version = "1", features = ["std"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
+# A canned `SshExec` for `decide bench --provider haiku` (`bench.rs` tests):
+# already in the tree as `fleet-core`'s dependency, not a new crate.
+async-trait = "0.1"
 rcgen = "0.13"
 tempfile = "3"
 # `test-util` only: `#[tokio::test(start_paused = true)]` for the

@@ -738,6 +738,7 @@ mod tests {
                     last_msg_id: None,
                     last_msg_usage: None,
                     now: 86_400,
+                    by_day: Vec::new(),
                 },
             )
             .unwrap();

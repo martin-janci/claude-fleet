@@ -88,6 +88,11 @@ pub struct OrgRow {
     /// `work.auto_tidy`. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tidy: Option<bool>,
+    /// Jev evaluation (D31 / D36): this org consented to decision-model
+    /// calls (`service::decide`). Off by default; absent from an older hub.
+    #[serde(default)]
+    pub jev_allowed: bool,
+
     /// D31 (work graph M14.1b, migration 067): the org's bound paired
     /// clients also see unassigned work and sessions (the default), as a
     /// host does; off, only rows assigned to the org. Absent from an older
@@ -274,8 +279,8 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
     Ok(r)
 }
 
-const ORG_COLUMNS: &str =
-    "id, name, color, isolate_sessions, created_at, auto_tidy, bound_sees_unassigned";
+const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy, jev_allowed, \
+                           bound_sees_unassigned";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -286,7 +291,8 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         isolate_sessions: r.get::<_, i64>(3)? != 0,
         created_at: r.get(4)?,
         auto_tidy: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
-        bound_sees_unassigned: r.get::<_, i64>(6)? != 0,
+        jev_allowed: r.get::<_, i64>(6)? != 0,
+        bound_sees_unassigned: r.get::<_, i64>(7)? != 0,
     })
 }
 
@@ -406,6 +412,20 @@ impl Store {
         self.get_org(id)?.ok_or_else(|| org_not_found(id))
     }
 
+    /// Set an org's consent to decision-model calls (Jev evaluation, D31 /
+    /// D36). Only the master's org admin path (`work_admin`, `fleet-hub org
+    /// set --jev`, the standalone desktop's Organisations) reaches here.
+    pub fn set_org_jev_allowed(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE orgs SET jev_allowed = ?2 WHERE id = ?1",
+            rusqlite::params![id, on as i64],
+        )?;
+        if n == 0 {
+            return Err(org_not_found(id));
+        }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
     /// Set D31 for an org (work graph M14.1b): whether its bound paired
     /// clients also see unassigned work and sessions. A change bumps the
     /// auth epoch (migration 067's trigger).
@@ -418,6 +438,20 @@ impl Store {
             return Err(org_not_found(id));
         }
         self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// Whether org `id` consented to decision-model calls; `false` for an
+    /// org that does not exist (a removed org consents to nothing).
+    pub fn org_jev_allowed(&self, id: i64) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT jev_allowed FROM orgs WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some_and(|v| v != 0))
     }
 
     /// org id → its auto-tidy override, for the orgs that set one.
