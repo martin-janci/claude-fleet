@@ -61,6 +61,9 @@
 
   let detail = $state<TaskDetail | null>(null);
   let error = $state<IpcError | null>(null);
+  // A re-read that failed while the task is shown: the detail stays, with a
+  // line to retry (the full error is for a first load only).
+  let refreshError = $state<IpcError | null>(null);
   let loading = $state(false);
   let rules = $state<WorkRule[]>([]);
   let actionError = $state<string | null>(null);
@@ -78,11 +81,18 @@
     if (mine !== loadSeq) return;
     loading = false;
     if (!r.ok) {
+      // A task that is gone (or no longer visible) is gone whatever was shown.
+      if (detail && r.error.code !== 'E_NOTFOUND' && r.error.code !== 'E_FORBIDDEN') {
+        refreshError = r.error;
+        return;
+      }
       error = r.error;
+      refreshError = null;
       detail = null;
       return;
     }
     error = null;
+    refreshError = null;
     detail = r.value && r.value.task ? r.value : null;
     // A bare key a sync bound to a ticket answers as the ticket: follow it,
     // so the selection survives.
@@ -113,6 +123,7 @@
     loadedFor = id;
     detail = null;
     error = null;
+    refreshError = null;
     actionError = null;
     existingSession = null;
     void load(id);
@@ -182,10 +193,26 @@
     if (!t?.key || !l || acting) return;
     acting = true;
     actionError = null;
+    existingSession = null;
     const r = await resumeWork({ key: t.key, mode: 'last', linkId: l.link_id });
     acting = false;
-    if (r.ok) selectSessionExplicitly(r.value);
-    else actionError = r.error.message;
+    if (r.ok) {
+      selectSessionExplicitly(r.value);
+      return;
+    }
+    actionError = r.error.message;
+    if (r.error.code === 'E_EXISTS') existingSession = existingOf(r.error, t);
+  }
+
+  /** The live session an `E_EXISTS` points at: the one its details name,
+   *  else (a resume names none) the live session this task shows, else one
+   *  whose primary work is this key. */
+  function existingOf(e: IpcError, t: WorkTask): number | null {
+    const sid = (e.details as { session_id?: number } | undefined)?.session_id;
+    if (typeof sid === 'number') return sid;
+    if (liveLink?.session_id != null) return liveLink.session_id;
+    const key = t.key?.toUpperCase();
+    return key ? (get(sessions).find((r) => r.work?.key?.toUpperCase() === key)?.id ?? null) : null;
   }
 
   async function startNew() {
@@ -201,8 +228,7 @@
       return;
     }
     actionError = r.error.message;
-    const sid = (r.error.details as { session_id?: number } | undefined)?.session_id;
-    if (r.error.code === 'E_EXISTS' && typeof sid === 'number') existingSession = sid;
+    if (r.error.code === 'E_EXISTS') existingSession = existingOf(r.error, t);
   }
 
   function openExisting() {
@@ -253,6 +279,12 @@
   {:else if !task}
     <p class="muted" data-testid="work-task-loading">Loading…</p>
   {:else}
+    {#if refreshError}
+      <p class="warn" role="status" data-testid="work-task-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="work-task-refresh-retry" onclick={() => void load(taskId)}>Retry</button>
+      </p>
+    {/if}
     <div class="meta">
       <span class="badge" title={task.provider ?? task.kind}
         >{task.kind === 'local' ? 'local work' : task.kind === 'ref' ? 'bare key' : `${providerInfo(task.provider)?.label ?? task.provider ?? 'tracker'}`}</span
@@ -331,7 +363,7 @@
       <p class="err" role="alert" data-testid="work-task-action-error">
         {actionError}
         {#if existingSession !== null}
-          <button class="btn btn--quiet" type="button" onclick={openExisting}>Open it</button>
+          <button class="btn btn--quiet" type="button" data-testid="work-task-open-existing" onclick={openExisting}>Open it</button>
         {/if}
       </p>
     {/if}
