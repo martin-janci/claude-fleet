@@ -137,6 +137,18 @@ pub enum BenchCmd {
         /// Jev calls at most in this run; later cases are skipped. [default: 500]
         #[arg(long)]
         max_calls: Option<usize>,
+        /// Which boards' sections to report: dev, test or all. By board,
+        /// never by case: a board is dev when the SHA-256 of its normalised
+        /// section names is even (about half). Reword a question on dev,
+        /// judge it once on test. [default: all]
+        #[arg(long, value_parser = ["dev", "test", "all"])]
+        split: Option<String>,
+        /// Ask jev and haiku this question instead of the adapter's: JSON
+        /// {version, instructions, options: {todo, in_progress, done,
+        /// not_planned, unsure}}. The state sent stays the adapter's; jev's
+        /// runs are recorded as status_map.bench.q.<version>.
+        #[arg(long, value_name = "FILE")]
+        question: Option<PathBuf>,
         /// The database jev runs are gated by and recorded in, instead of
         /// the hub's (only read with --provider jev).
         #[arg(long, value_name = "FILE")]
@@ -352,9 +364,12 @@ pub async fn run(
             providers,
             haiku,
             max_calls,
+            split,
+            question,
             db,
             json,
         } => {
+            let split = sm_split(split.as_deref())?;
             let ssh = fleet_core::ssh::SshClient::new();
             let report = status_map(
                 labels.as_deref(),
@@ -364,6 +379,8 @@ pub async fn run(
                 &ssh,
                 max_calls,
                 db.as_deref(),
+                split,
+                question.as_deref(),
                 opts,
                 env,
             )
@@ -393,11 +410,38 @@ fn parse_sm_providers(v: &[String]) -> Result<Vec<sm::Provider>, String> {
     Ok(ps)
 }
 
+/// `--split` of `status-map`: every case unless told otherwise.
+fn sm_split(v: Option<&str>) -> Result<Split, String> {
+    Split::parse(v.unwrap_or("all")).ok_or_else(|| "--split is dev, test or all".to_string())
+}
+
+/// `--question FILE`, read and checked (an error names the file). Only a
+/// model is asked a question, so it needs `jev` or `haiku` among `providers`.
+fn read_question(
+    file: Option<&Path>,
+    providers: &[sm::Provider],
+) -> Result<Option<sm::QuestionOverride>, String> {
+    let Some(file) = file else {
+        return Ok(None);
+    };
+    if !providers.iter().any(|p| p.is_model()) {
+        return Err(
+            "--question goes with --provider jev or --provider haiku (only a model is asked it)"
+                .into(),
+        );
+    }
+    let raw = std::fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
+    sm::parse_question(&raw)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", file.display()))
+}
+
 /// `decide bench status-map`: the labeled sections (or the built-in set)
 /// through the providers. Only `--provider jev` opens a database — for
 /// writing, as the envelope records every call. `--provider haiku` runs on
 /// `ssh` against `--haiku-host`, whose org it reads from the database
-/// (read-only).
+/// (read-only). Only the `split` side's boards are asked; `question` (a
+/// file) rewords what jev and haiku are asked.
 #[allow(clippy::too_many_arguments)]
 async fn status_map(
     labels: Option<&Path>,
@@ -407,6 +451,8 @@ async fn status_map(
     ssh: &dyn fleet_core::ssh::SshExec,
     max_calls: Option<usize>,
     db: Option<&Path>,
+    split: Split,
+    question: Option<&Path>,
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<sm::Report, String> {
@@ -428,7 +474,9 @@ async fn status_map(
         None => format!("the built-in set: {e}"),
     })?;
     let (cases, dropped) = sm::cases(&rows);
+    let (cases, split_sizes) = sm::split_cases(cases, split);
     let providers = parse_sm_providers(providers)?;
+    let question = read_question(question, &providers)?;
     let max_calls = max_calls.unwrap_or(sm::DEFAULT_MAX_CALLS);
     let haiku = match haiku_args.config(providers.contains(&sm::Provider::Haiku))? {
         Some(cfg) => {
@@ -449,11 +497,29 @@ async fn status_map(
              the gate, at most {max_calls} calls; each call is recorded in decision_runs"
         ));
         let ctx = DecideCtx::jev(Arc::new(Mutex::new(store)));
-        sm::run_providers_with(&cases, &providers, Some(&ctx), haiku.as_ref(), max_calls).await
+        sm::run_providers_with(
+            &cases,
+            &providers,
+            Some(&ctx),
+            haiku.as_ref(),
+            max_calls,
+            question.as_ref(),
+        )
+        .await
     } else {
-        sm::run_providers_with(&cases, &providers, None, haiku.as_ref(), max_calls).await
+        sm::run_providers_with(
+            &cases,
+            &providers,
+            None,
+            haiku.as_ref(),
+            max_calls,
+            question.as_ref(),
+        )
+        .await
     };
-    let mut r = sm::report(&cases, &outs, rows.len(), dropped, labels.is_none());
+    let mut r = sm::report(&cases, &outs, rows.len(), dropped, labels.is_none())
+        .with_split(split, split_sizes)
+        .with_question(question.as_ref());
     r.notes.extend(note);
     Ok(r)
 }
@@ -644,6 +710,8 @@ mod tests {
             &never,
             max_calls,
             db,
+            Split::All,
+            None,
             opts,
             env,
         )
@@ -745,6 +813,8 @@ mod tests {
             &fake,
             None,
             Some(&db),
+            Split::All,
+            None,
             &HubOptions::default(),
             &HashMap::new(),
         )
@@ -780,6 +850,8 @@ mod tests {
             &fake,
             None,
             Some(&db),
+            Split::All,
+            None,
             &HubOptions::default(),
             &HashMap::new(),
         )
@@ -798,6 +870,8 @@ mod tests {
             &fake,
             None,
             Some(&db),
+            Split::All,
+            None,
             &HubOptions::default(),
             &HashMap::new(),
         )
@@ -814,6 +888,8 @@ mod tests {
             &HaikuArgs::default(),
             &fake,
             None,
+            None,
+            Split::All,
             None,
             &HubOptions::default(),
             &HashMap::new(),
@@ -911,6 +987,190 @@ mod tests {
         assert_eq!(jev.cases, 0);
         assert_eq!(jev.calls, 0);
         assert_eq!(jev.skipped.get("flag_off").copied(), Some(r.sizes.cases));
+    }
+
+    #[test]
+    fn status_map_parses_its_split_and_question_flags() {
+        let Ok(BenchCmd::StatusMap {
+            split, question, ..
+        }) = parse(&[
+            "status-map",
+            "--fixture",
+            "--split",
+            "dev",
+            "--question",
+            "q.json",
+        ])
+        else {
+            panic!("status-map");
+        };
+        assert_eq!(split.as_deref(), Some("dev"));
+        assert_eq!(question.as_deref(), Some(Path::new("q.json")));
+        let Ok(BenchCmd::StatusMap {
+            split, question, ..
+        }) = parse(&["status-map", "--fixture"])
+        else {
+            panic!("status-map");
+        };
+        assert_eq!((split, question), (None, None));
+        // The default is every case; a split is a board-level one.
+        assert_eq!(sm_split(None), Ok(Split::All));
+        assert_eq!(sm_split(Some("test")), Ok(Split::Test));
+        assert!(parse(&["status-map", "--fixture", "--split", "train"]).is_err());
+        assert!(sm_split(Some("train")).is_err());
+    }
+
+    const QUESTION: &str = r#"{"version": "v2-draft1",
+      "instructions": "Decide the category of state.section.",
+      "options": {"todo": "Not started.", "in_progress": "Started, or waiting after it started.",
+                  "done": "Finished.", "not_planned": "Will not be done.", "unsure": "Cannot tell."}}"#;
+
+    #[tokio::test]
+    async fn status_map_takes_a_split_and_a_question_file() {
+        let opts = HubOptions::default();
+        let env = HashMap::new();
+        let never = Canned::default();
+        let no_haiku = HaikuArgs::default();
+        let run = |split: Split| {
+            super::status_map(
+                None,
+                true,
+                &[],
+                &no_haiku,
+                &never,
+                None,
+                None,
+                split,
+                None,
+                &opts,
+                &env,
+            )
+        };
+        // The fixture's dev and test boards: disjoint halves of every case.
+        let all = run(Split::All).await.unwrap();
+        let dev = run(Split::Dev).await.unwrap();
+        let test = run(Split::Test).await.unwrap();
+        assert_eq!((all.split, dev.split, test.split), ("all", "dev", "test"));
+        assert_eq!(dev.split_sizes, all.split_sizes);
+        assert_eq!(dev.sizes.cases, all.split_sizes.dev_cases);
+        assert_eq!(test.sizes.cases, all.split_sizes.test_cases);
+        assert_eq!(dev.sizes.cases + test.sizes.cases, all.sizes.cases);
+        assert!(dev.sizes.cases > 0 && test.sizes.cases > 0);
+        assert!(never.hosts().is_empty());
+
+        // A question file reaches haiku's prompt, and the report names it.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sections.jsonl");
+        std::fs::write(
+            &file,
+            "{\"section\":\"Hotovo\",\"project_sections\":[\"Nové\",\"Hotovo\"],\"expect\":\"done\",\"lang\":\"sk\"}\n",
+        )
+        .unwrap();
+        let qfile = dir.path().join("q.json");
+        std::fs::write(&qfile, QUESTION).unwrap();
+        let db = dir.path().join("state.db");
+        {
+            let s = Store::open_with_bus(&db, Arc::new(fleet_core::events::NoopEventBus)).unwrap();
+            s.upsert_host("gpu1").unwrap();
+        }
+        let envelope = serde_json::json!({
+            "type": "result",
+            "result": "{\"choice\": \"done\", \"confidence\": 0.9}",
+            "usage": { "input_tokens": 50, "output_tokens": 5 },
+            "total_cost_usd": 0.001,
+        });
+        let canned = || Canned {
+            stdout: format!("fleet-haiku=run\n{envelope}\n"),
+            ..Default::default()
+        };
+        let gpu1 = HaikuArgs {
+            haiku_host: Some("gpu1".into()),
+            ..Default::default()
+        };
+        let haiku = ["haiku".to_string()];
+        let fake = canned();
+        let r = super::status_map(
+            Some(&file),
+            false,
+            &haiku,
+            &gpu1,
+            &fake,
+            None,
+            Some(&db),
+            Split::All,
+            Some(&qfile),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap();
+        let stdins = fake.stdins.lock().unwrap().clone();
+        assert_eq!(stdins.len(), 1);
+        assert!(
+            stdins[0].contains("Decide the category of state.section.")
+                && stdins[0].contains("waiting after it started")
+                && stdins[0].contains("hotovo"),
+            "{stdins:?}"
+        );
+        assert_eq!(r.question, "file v2-draft1");
+        assert_eq!(r.question_version, "status_map.bench.q.v2-draft1");
+
+        // A bad file is refused, naming itself, before anything is sent.
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, QUESTION.replace("\"not_planned\"", "\"wontfix\"")).unwrap();
+        let fake = canned();
+        let e = super::status_map(
+            Some(&file),
+            false,
+            &haiku,
+            &gpu1,
+            &fake,
+            None,
+            Some(&db),
+            Split::All,
+            Some(&bad),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("bad.json") && e.contains("wontfix"), "{e}");
+        assert!(fake.hosts().is_empty());
+        let e = super::status_map(
+            Some(&file),
+            false,
+            &haiku,
+            &gpu1,
+            &fake,
+            None,
+            Some(&db),
+            Split::All,
+            Some(&dir.path().join("absent.json")),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("absent.json"), "{e}");
+        assert!(fake.hosts().is_empty());
+        // Only a model reads a question: with offline providers it is an
+        // error, not a report that names a question nobody was asked.
+        let e = super::status_map(
+            Some(&file),
+            false,
+            &["rule".to_string()],
+            &HaikuArgs::default(),
+            &never,
+            None,
+            None,
+            Split::All,
+            Some(&qfile),
+            &opts,
+            &env,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("--question"), "{e}");
     }
 
     #[test]

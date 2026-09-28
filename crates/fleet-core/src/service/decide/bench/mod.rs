@@ -23,7 +23,46 @@ pub mod work_link;
 mod work_link_tests;
 
 use crate::service::nl::census::{Shown, SUPPRESS_BELOW};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// Which cases a benchmark reports: its `dev` cases, its `test` cases or
+/// `all`. Each bench says what makes a case dev (J1: the oldest share by
+/// decision time; J3: its board's hash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Split {
+    Dev,
+    Test,
+    All,
+}
+
+impl Split {
+    pub fn parse(s: &str) -> Option<Split> {
+        match s {
+            "dev" => Some(Split::Dev),
+            "test" => Some(Split::Test),
+            "all" => Some(Split::All),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Split::Dev => "dev",
+            Split::Test => "test",
+            Split::All => "all",
+        }
+    }
+
+    /// Whether a case in the dev split (`dev`) or not is reported.
+    pub fn keeps(self, dev: bool) -> bool {
+        match self {
+            Split::Dev => dev,
+            Split::Test => !dev,
+            Split::All => true,
+        }
+    }
+}
 
 /// A deterministic generator (splitmix64) for the bootstrap: the same seed
 /// gives the same intervals on every machine.

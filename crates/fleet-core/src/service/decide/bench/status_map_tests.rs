@@ -386,7 +386,7 @@ async fn jev_is_asked_only_through_the_gate_with_the_adapters_request() {
         .id;
     let mut one = cases[0].clone();
     one.org_id = Some(org);
-    let outs = run_jev(&ctx, &[one], 5).await;
+    let outs = run_jev(&ctx, &[one], 5, None).await;
     assert_eq!(outs[0].reason.as_deref(), Some("org_off"));
 }
 
@@ -457,7 +457,7 @@ async fn haiku_never_sends_a_case_across_the_org_boundary() {
         let ssh = &ssh;
         async move {
             let before = ssh.calls();
-            let outs = run_haiku(&haiku_in(ssh, host_org), &cases, DEFAULT_MAX_CALLS).await;
+            let outs = run_haiku(&haiku_in(ssh, host_org), &cases, DEFAULT_MAX_CALLS, None).await;
             (ssh.calls() - before, outs)
         }
     };
@@ -510,6 +510,7 @@ async fn haiku_is_asked_the_adapters_request_on_the_named_host() {
         None,
         Some(&h),
         DEFAULT_MAX_CALLS,
+        None,
     )
     .await;
     assert_eq!(ssh.calls(), cases.len());
@@ -571,7 +572,7 @@ async fn haiku_is_asked_the_adapters_request_on_the_named_host() {
 
     // The call cap.
     let before = ssh.calls();
-    let outs = run_providers_with(&cases, &[Provider::Haiku], None, Some(&h), 3).await;
+    let outs = run_providers_with(&cases, &[Provider::Haiku], None, Some(&h), 3, None).await;
     assert_eq!(ssh.calls() - before, 3);
     assert_eq!(
         outs[&Provider::Haiku]
@@ -621,6 +622,7 @@ async fn with_jev_and_haiku_on_the_same_cases_j3s_haiku_line_is_judged() {
         Some(&ctx),
         Some(&h),
         DEFAULT_MAX_CALLS,
+        None,
     )
     .await;
     assert_eq!(oracle.calls.load(Ordering::SeqCst), cases.len());
@@ -725,4 +727,383 @@ fn the_haiku_line_beats_ties_or_fails_on_paired_cases() {
     let c = haiku_criterion(Provider::Jev, &cases, &outs);
     assert_eq!(c.verdict, Verdict::NotJudged);
     assert!(c.measured.contains("--haiku-host"), "{}", c.measured);
+}
+
+// --- the dev/test split -----------------------------------------------------------
+
+use super::Split;
+
+fn label(section: &str, board: &[&str]) -> SectionLabel {
+    SectionLabel {
+        section: section.into(),
+        project_sections: board.iter().map(|s| s.to_string()).collect(),
+        expect: "todo".into(),
+        lang: "en".into(),
+        note: None,
+        org_id: None,
+    }
+}
+
+/// The assignment is SHA-256 of the board key: pinned here, so a change of
+/// hash (or of the key) is caught rather than silently reshuffling dev and
+/// test.
+#[test]
+fn the_split_is_by_board_and_pinned() {
+    assert!(is_dev_board("nové\nv riešení\nhotovo"));
+    assert!(is_dev_board(""));
+    assert!(!is_dev_board("to do\nin progress\ndone"));
+    assert!(!is_dev_board("backlog\ndoing\nreview\nshipped"));
+    assert!(!is_dev_board("ideas\nnext\ndone"));
+    // The key is the normalised, de-duplicated board: every section of a
+    // board has it, whatever its own name's case or spacing.
+    let board = ["Nové", "V riešení", "Hotovo", "nové"];
+    let (cs, _) = cases(&[
+        label("Hotovo", &board),
+        label("  V riešení ", &board),
+        label("NOVÉ", &board),
+        label("Done", &["To do", "In progress", "Done"]),
+    ]);
+    assert_eq!(board_key(&cs[0]), "nové\nv riešení\nhotovo");
+    assert!(cs[..3].iter().all(|c| board_key(c) == board_key(&cs[0])));
+    let (dev, sizes) = split_cases(cs.clone(), Split::Dev);
+    assert_eq!(
+        dev.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        vec!["s1", "s2", "s3"]
+    );
+    let (test, _) = split_cases(cs.clone(), Split::Test);
+    assert_eq!(
+        test.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        vec!["s4"]
+    );
+    assert_eq!(
+        sizes,
+        SplitSizes {
+            dev_boards: 1,
+            dev_cases: 3,
+            test_boards: 1,
+            test_cases: 1,
+        }
+    );
+    let (every, _) = split_cases(cs.clone(), Split::All);
+    assert_eq!(every, cs);
+}
+
+#[test]
+fn the_split_partitions_the_fixture_by_board() {
+    let (_, all) = fixture();
+    let (dev, ds) = split_cases(all.clone(), Split::Dev);
+    let (test, ts) = split_cases(all.clone(), Split::Test);
+    let (every, es) = split_cases(all.clone(), Split::All);
+    assert_eq!(every, all);
+    // The sizes are always the whole set's.
+    assert_eq!((&ds, &ds), (&ts, &es));
+    assert_eq!(ds.dev_cases as usize, dev.len());
+    assert_eq!(ds.test_cases as usize, test.len());
+    // Disjoint, and together every case.
+    assert_eq!(dev.len() + test.len(), all.len());
+    let mut ids: Vec<&str> = dev.iter().chain(&test).map(|c| c.id.as_str()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), all.len());
+    // No board on both sides.
+    let dev_boards: std::collections::BTreeSet<String> = dev.iter().map(board_key).collect();
+    let test_boards: std::collections::BTreeSet<String> = test.iter().map(board_key).collect();
+    assert!(dev_boards.is_disjoint(&test_boards));
+    assert_eq!(
+        (ds.dev_boards as usize, ds.test_boards as usize),
+        (dev_boards.len(), test_boards.len())
+    );
+    // Roughly half of the boards each.
+    let boards = dev_boards.len() + test_boards.len();
+    assert!(dev_boards.len() * 5 >= boards && test_boards.len() * 5 >= boards);
+    assert!(!dev.is_empty() && !test.is_empty());
+}
+
+#[tokio::test]
+async fn the_report_states_the_split() {
+    let (labels, all) = fixture();
+    // Without a split: every case, and one line saying so.
+    let outs = offline(&all).await;
+    let r = report(&all, &outs, labels.len(), 0, true);
+    assert_eq!(r.split, "all");
+    let lines = r.lines().join("\n");
+    assert!(lines.contains("split: all (by board: dev "), "{lines}");
+    assert!(!lines.contains("there is no dev/test split"), "{lines}");
+    // Dev: the dev cases, and both sides' sizes.
+    let (dev, sizes) = split_cases(all, Split::Dev);
+    let outs = offline(&dev).await;
+    let r = report(&dev, &outs, labels.len(), 0, true).with_split(Split::Dev, sizes.clone());
+    assert_eq!((r.split, r.sizes.cases as usize), ("dev", dev.len()));
+    assert_eq!(r.split_sizes, sizes);
+    let want = format!(
+        "split: dev (by board: dev {} boards, {} cases; test {} boards, {} cases)",
+        sizes.dev_boards, sizes.dev_cases, sizes.test_boards, sizes.test_cases
+    );
+    assert!(r.lines().contains(&want), "{:?}", r.lines());
+}
+
+// --- a question file (--question) -------------------------------------------------
+
+const Q: &str = r#"{"version": "v2-draft1",
+  "instructions": "Decide the category of state.section.",
+  "options": {"todo": "Not started: scheduled, assigned, this sprint or today.",
+              "in_progress": "Started: being worked on, or waiting or blocked after it started.",
+              "done": "Finished.",
+              "not_planned": "Will not be done.",
+              "unsure": "The name and the position do not settle it."}}"#;
+
+fn q_with(f: &dyn Fn(&mut serde_json::Value)) -> Result<QuestionOverride, String> {
+    let mut v: serde_json::Value = serde_json::from_str(Q).unwrap();
+    f(&mut v);
+    parse_question(&v.to_string())
+}
+
+#[test]
+fn a_question_file_is_checked() {
+    let q = parse_question(Q).unwrap();
+    assert_eq!(q.version, "v2-draft1");
+    assert_eq!(q.recorded_version(), "status_map.bench.q.v2-draft1");
+    assert!(crate::store::is_decision_word(&q.recorded_version()));
+    let Question::Choice {
+        instructions,
+        criteria,
+    } = q.question()
+    else {
+        panic!("a choice");
+    };
+    assert_eq!(
+        instructions,
+        serde_json::json!("Decide the category of state.section.")
+    );
+    // The adapter's options, reworded.
+    assert_eq!(
+        criteria.keys().collect::<Vec<_>>(),
+        sm::question().candidates().iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        criteria["in_progress"],
+        Some(serde_json::json!(
+            "Started: being worked on, or waiting or blocked after it started."
+        ))
+    );
+
+    // Missing and extra options.
+    let e = q_with(&|v| {
+        v["options"].as_object_mut().unwrap().remove("not_planned");
+    })
+    .unwrap_err();
+    assert!(e.contains("missing") && e.contains("not_planned"), "{e}");
+    let e = q_with(&|v| v["options"]["blocked"] = serde_json::json!("Blocked.")).unwrap_err();
+    assert!(e.contains("blocked"), "{e}");
+    // Empty text.
+    let e = q_with(&|v| v["options"]["done"] = serde_json::json!("  ")).unwrap_err();
+    assert!(e.contains("done") && e.contains("empty"), "{e}");
+    let e = q_with(&|v| v["instructions"] = serde_json::json!("\n")).unwrap_err();
+    assert!(e.contains("instructions") && e.contains("empty"), "{e}");
+    // The version.
+    let long = "v".repeat(41);
+    for bad in [
+        "",
+        "V2",
+        "-v2",
+        ".v2",
+        "v2 draft",
+        "v2/draft",
+        "v2:x",
+        long.as_str(),
+    ] {
+        let e = q_with(&|v| v["version"] = serde_json::json!(bad)).unwrap_err();
+        assert!(e.contains("version"), "{bad:?}: {e}");
+    }
+    let ok = "v".repeat(40);
+    for good in ["2", "v2", "v2-draft_3.1", ok.as_str()] {
+        assert!(
+            q_with(&|v| v["version"] = serde_json::json!(good)).is_ok(),
+            "{good:?}"
+        );
+    }
+    // Not a question file at all.
+    assert!(parse_question("{").is_err());
+    assert!(q_with(&|v| v["model"] = serde_json::json!("jev-2")).is_err());
+    assert!(q_with(&|v| {
+        v.as_object_mut().unwrap().remove("instructions");
+    })
+    .is_err());
+    assert!(q_with(&|v| v["options"]["todo"] = serde_json::json!(3)).is_err());
+}
+
+#[test]
+fn an_override_replaces_the_question_and_keeps_the_adapters_state() {
+    let (_, cs) = fixture();
+    let q = parse_question(Q).unwrap();
+    for c in &cs {
+        let adapter = sm::question_for(&c.key, &c.board);
+        assert_eq!(request_for(c, None), adapter);
+        let r = request_for(c, Some(&q));
+        assert_eq!(r.state, adapter.state);
+        assert_eq!(r.question, q.question());
+        assert_eq!(r.question.candidates(), adapter.question.candidates());
+    }
+}
+
+fn gated_store() -> Arc<Mutex<Store>> {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    {
+        let s = store.lock().unwrap();
+        settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
+        settings::set(&s, settings::DECIDE_JEV_STATUS_MAP, "shadow").unwrap();
+        settings::set(&s, settings::DECIDE_JEV_UNASSIGNED, "true").unwrap();
+        s.set_decision_credential(Some(&Secret::new(KEY)), None)
+            .unwrap();
+    }
+    store
+}
+
+fn oracle_for(cases: &[SectionCase]) -> Arc<Oracle> {
+    Arc::new(Oracle {
+        truth: cases
+            .iter()
+            .map(|c| {
+                (
+                    sm::question_for(&c.key, &c.board).state.to_string(),
+                    (c.expect, c.ambiguous),
+                )
+            })
+            .collect(),
+        calls: AtomicUsize::new(0),
+        seen: Mutex::new(Vec::new()),
+    })
+}
+
+#[tokio::test]
+async fn jev_with_a_question_file_sends_its_wording_under_its_own_version() {
+    let (_, cases) = fixture();
+    let few: Vec<SectionCase> = cases.into_iter().take(12).collect();
+    let store = gated_store();
+    let oracle = oracle_for(&few);
+    let ctx = DecideCtx::new(Arc::clone(&store), oracle.clone());
+    let q = parse_question(Q).unwrap();
+    let runs = || {
+        store
+            .lock()
+            .unwrap()
+            .list_decision_runs(&DecisionRunFilter {
+                limit: 10_000,
+                ..Default::default()
+            })
+            .unwrap()
+    };
+
+    let outs = run_providers_with(
+        &few,
+        &[Provider::Jev],
+        Some(&ctx),
+        None,
+        DEFAULT_MAX_CALLS,
+        Some(&q),
+    )
+    .await;
+    assert_eq!(oracle.calls.load(Ordering::SeqCst), few.len());
+    assert!(outs[&Provider::Jev].iter().all(|o| o.usable()));
+    let recorded = runs();
+    assert_eq!(recorded.len(), few.len());
+    assert!(recorded
+        .iter()
+        .all(|r| r.question_version == "status_map.bench.q.v2-draft1"));
+    {
+        let seen = oracle.seen.lock().unwrap();
+        for (c, req) in few.iter().zip(seen.iter()) {
+            assert_eq!(req, &request_for(c, Some(&q)));
+            let Question::Choice { instructions, .. } = &req.question else {
+                panic!("a choice");
+            };
+            assert_eq!(
+                instructions,
+                &serde_json::json!("Decide the category of state.section.")
+            );
+        }
+    }
+
+    // Without it: the benchmark's own version and the adapter's wording.
+    run_providers_with(
+        &few,
+        &[Provider::Jev],
+        Some(&ctx),
+        None,
+        DEFAULT_MAX_CALLS,
+        None,
+    )
+    .await;
+    let recorded = runs();
+    assert_eq!(recorded.len(), 2 * few.len());
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|r| r.question_version == QUESTION_VERSION)
+            .count(),
+        few.len()
+    );
+    let seen = oracle.seen.lock().unwrap();
+    for (c, req) in few.iter().zip(seen[few.len()..].iter()) {
+        assert_eq!(req, &sm::question_for(&c.key, &c.board));
+    }
+}
+
+#[tokio::test]
+async fn haiku_with_a_question_file_is_asked_its_wording() {
+    let (_, cases) = fixture();
+    let few: Vec<SectionCase> = cases.into_iter().take(10).collect();
+    let ssh = haiku_oracle(&few);
+    let h = haiku_on(&ssh);
+    let q = parse_question(Q).unwrap();
+    let outs = run_providers_with(
+        &few,
+        &[Provider::Haiku],
+        None,
+        Some(&h),
+        DEFAULT_MAX_CALLS,
+        Some(&q),
+    )
+    .await;
+    assert_eq!(ssh.calls(), few.len());
+    assert!(outs[&Provider::Haiku].iter().all(|o| o.ran));
+    let prompts = ssh.prompts.lock().unwrap();
+    for (c, p) in few.iter().zip(prompts.iter()) {
+        assert_eq!(p, &prompt_for(&request_for(c, Some(&q))).unwrap().0);
+        assert!(p.contains("Decide the category of state.section."), "{p}");
+        assert!(p.contains("waiting or blocked after it started"), "{p}");
+        assert!(
+            !p.contains("state.section is the name of one section"),
+            "{p}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_report_names_the_question_used() {
+    let (labels, cases) = fixture();
+    let outs = offline(&cases).await;
+    let r = report(&cases, &outs, labels.len(), 0, true);
+    assert_eq!(r.question_version, QUESTION_VERSION);
+    assert_eq!(r.question, "the adapter's status_map.v1");
+    // Today's header, byte for byte.
+    assert_eq!(
+        r.lines()[0],
+        format!(
+            "benchmark {} — question {QUESTION_VERSION} (the adapter's {}, floor {})",
+            r.benchmark,
+            sm::QUESTION_VERSION,
+            sm::MIN_CONFIDENCE
+        )
+    );
+    assert_eq!(r.clone().with_question(None), r);
+    let q = parse_question(Q).unwrap();
+    let r = r.with_question(Some(&q));
+    assert_eq!(r.question_version, "status_map.bench.q.v2-draft1");
+    assert_eq!(r.question, "file v2-draft1");
+    assert!(
+        r.lines()[0].contains("question status_map.bench.q.v2-draft1 (file v2-draft1, floor 0.5)"),
+        "{}",
+        r.lines()[0]
+    );
 }
