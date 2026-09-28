@@ -909,6 +909,7 @@ pub fn to_write(s: WorkItemSnapshot) -> TrackerItemWrite {
         iteration_active: s.iteration_active,
         updated_ext: s.updated,
         description: s.description,
+        description_chars: s.description_chars,
     }
 }
 

@@ -3,7 +3,10 @@
 //! ADF → text, and key recognition. Everything else — the API version,
 //! paging, bulk fetch, the epic — is each adapter's own.
 
-use super::{CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS, MAX_RETRY_AFTER_SECS};
+use super::{
+    description_and_len, CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS,
+    MAX_RETRY_AFTER_SECS,
+};
 use crate::net::https::Response;
 use serde_json::Value;
 
@@ -162,14 +165,14 @@ fn legacy_field(t: &str, key: &str) -> Option<String> {
 }
 
 /// Plain text out of an Atlassian Document Format value, at most
-/// [`DESCRIPTION_MAX_CHARS`] characters. A plain string (API v2, or a
-/// renderer) is taken as is.
-pub fn adf_excerpt(v: &Value) -> Option<String> {
+/// [`DESCRIPTION_MAX_CHARS`] characters, with its true length before that
+/// cap. A plain string (API v2, or a renderer) is taken as is.
+pub fn adf_excerpt(v: &Value) -> (Option<String>, Option<i64>) {
     let mut out = String::new();
     match v {
         Value::String(s) => out.push_str(s),
         Value::Object(_) => adf_walk(v, &mut out),
-        _ => return None,
+        _ => return (None, None),
     }
     let text = out
         .lines()
@@ -178,10 +181,7 @@ pub fn adf_excerpt(v: &Value) -> Option<String> {
         .join("\n")
         .trim()
         .to_string();
-    if text.is_empty() {
-        return None;
-    }
-    Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect())
+    description_and_len(&text)
 }
 
 fn adf_walk(node: &Value, out: &mut String) {

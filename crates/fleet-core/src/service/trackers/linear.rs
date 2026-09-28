@@ -22,9 +22,9 @@
 //!   back off, until `X-RateLimit-Requests-Reset` when Linear says.
 
 use super::{
-    check_http, map_transport, retry_after, CallKind, Caps, Fetched, Incremental, ItemRef, Page,
-    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
-    DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
+    check_http, description_and_len, map_transport, retry_after, CallKind, Caps, Fetched,
+    Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider,
+    ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
@@ -254,6 +254,8 @@ impl Linear {
             .collect();
         let parent = &n["parent"];
         let cycle = &n["cycle"];
+        let (description, description_chars) =
+            description_and_len(n["description"].as_str().map(str::trim).unwrap_or_default());
         Some(WorkItemSnapshot {
             external_id: id,
             key,
@@ -295,11 +297,8 @@ impl Linear {
             }),
             iteration_active: cycle["isActive"].as_bool().unwrap_or(false),
             updated: n["updatedAt"].as_str().and_then(super::parse_timestamp),
-            description: n["description"]
-                .as_str()
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-                .map(|d| d.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+            description,
+            description_chars,
         })
     }
 

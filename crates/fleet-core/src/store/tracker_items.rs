@@ -50,6 +50,7 @@ pub struct TrackerItemWrite {
     pub iteration_active: bool,
     pub updated_ext: Option<i64>,
     pub description: Option<String>,
+    pub description_chars: Option<i64>,
 }
 
 /// What an upsert did.
@@ -82,6 +83,9 @@ pub struct ItemMeta {
     /// The first 2k characters of the description (third-party text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The description's length at the tracker, before the 2k cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_chars: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -464,6 +468,7 @@ impl Store {
         let aliases: Vec<String> = aliases.into_iter().collect();
         let mut meta = before.as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
         meta.description = w.description.clone();
+        meta.description_chars = w.description_chars;
         meta.assignee_id = w.assignee_id.clone();
         meta.iteration_active = w.iteration_active;
         let meta_json = serde_json::to_string(&meta).ok();
@@ -1166,6 +1171,30 @@ mod tests {
         assert_eq!(row.status_category, "in_progress");
         assert!(row.status_changed_at.is_some());
         assert_eq!(row.source, "jira");
+    }
+
+    #[test]
+    fn an_items_meta_keeps_the_descriptions_true_length() {
+        let (s, t, _bus) = with_tracker(&["ABC"]);
+        let id = s
+            .upsert_tracker_item(
+                t,
+                &TrackerItemWrite {
+                    external_id: "10001".into(),
+                    key: Some("ABC-1".into()),
+                    title: "one".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    description: Some("x".repeat(2000)),
+                    description_chars: Some(6812),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+        let meta = s.work_item_meta(id).unwrap();
+        assert_eq!(meta.description_chars, Some(6812));
+        assert_eq!(meta.description.map(|d| d.chars().count()), Some(2000));
     }
 
     // ── Task 5: tracker sync batches unchanged items' `fetched_at` ──

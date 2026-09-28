@@ -258,6 +258,7 @@ impl JiraCloud {
             .as_deref()
             .map(|sf| current_sprint(&f[sf]))
             .unwrap_or((None, false));
+        let (description, description_chars) = adf_excerpt(&f["description"]);
         Some(WorkItemSnapshot {
             url: key.as_ref().map(|k| format!("{}/browse/{k}", self.site)),
             external_id,
@@ -292,7 +293,8 @@ impl JiraCloud {
             iteration,
             iteration_active,
             updated: f["updated"].as_str().and_then(super::parse_timestamp),
-            description: adf_excerpt(&f["description"]),
+            description,
+            description_chars,
         })
     }
 }

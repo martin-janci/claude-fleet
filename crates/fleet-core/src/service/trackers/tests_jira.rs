@@ -624,12 +624,53 @@ fn resolutions_are_told_apart_conservatively() {
 fn adf_excerpts_are_capped() {
     let long = json!({"type":"doc","content":[{"type":"paragraph","content":[
         {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS * 2)}]}]});
+    let (excerpt, chars) = adf_excerpt(&long);
+    assert_eq!(excerpt.unwrap().chars().count(), DESCRIPTION_MAX_CHARS);
+    assert_eq!(chars, Some((DESCRIPTION_MAX_CHARS * 2) as i64));
+    assert_eq!(adf_excerpt(&Value::Null), (None, None));
     assert_eq!(
-        adf_excerpt(&long).unwrap().chars().count(),
-        DESCRIPTION_MAX_CHARS
+        adf_excerpt(&json!({"type":"doc","content":[]})),
+        (None, None)
     );
-    assert_eq!(adf_excerpt(&Value::Null), None);
-    assert_eq!(adf_excerpt(&json!({"type":"doc","content":[]})), None);
+}
+
+/// Fetch one Jira issue over [`FakeTransport`], with `text` as its
+/// description body (a single ADF text node — the shape
+/// [`adf_excerpts_are_capped`] uses for a description longer than the cap).
+async fn fetch_one_with_description(text: &str) -> WorkItemSnapshot {
+    let f = FakeTransport::new();
+    let mut body = fixture("bulkfetch.json");
+    body["issues"][0]["fields"]["description"] = json!({"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text": text}]}
+    ]});
+    f.once(
+        Method::Post,
+        "/issue/bulkfetch",
+        Ok(Response::json(200, &body)),
+    );
+    let got = jira(&f)
+        .fetch(&[ItemRef::Id("10101".into())])
+        .await
+        .unwrap();
+    match got.into_iter().next().unwrap() {
+        Fetched::Found(s) => *s,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_long_jira_description_reports_its_true_length() {
+    // The existing cap test in this file builds an ADF body of
+    // DESCRIPTION_MAX_CHARS * 2 characters; reuse that fixture shape.
+    let snap = fetch_one_with_description(&"x".repeat(DESCRIPTION_MAX_CHARS * 2)).await;
+    assert_eq!(
+        snap.description.as_ref().map(|d| d.chars().count()),
+        Some(DESCRIPTION_MAX_CHARS)
+    );
+    assert_eq!(
+        snap.description_chars,
+        Some((DESCRIPTION_MAX_CHARS * 2) as i64)
+    );
 }
 
 // --- the provider conformance suite (M6.0) -----------------------------------

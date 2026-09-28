@@ -24,9 +24,9 @@
 //! * **Hierarchy**: sub-issues' `parent`.
 
 use super::{
-    check_http, map_transport, retry_after, CallKind, Caps, Fetched, Incremental, ItemRef, Page,
-    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
-    DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
+    check_http, description_and_len, map_transport, retry_after, CallKind, Caps, Fetched,
+    Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider,
+    ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerSettings};
@@ -246,6 +246,8 @@ impl GitHub {
             .or(assignees.first())
             .cloned();
         let parent = &n["parent"];
+        let (description, description_chars) =
+            description_and_len(n["body"].as_str().map(str::trim).unwrap_or_default());
         Some(WorkItemSnapshot {
             external_id: id,
             key: Some(self.key(&repo, number)),
@@ -281,11 +283,8 @@ impl GitHub {
             iteration: None,
             iteration_active: false,
             updated: n["updatedAt"].as_str().and_then(super::parse_timestamp),
-            description: n["body"]
-                .as_str()
-                .map(str::trim)
-                .filter(|b| !b.is_empty())
-                .map(|b| b.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+            description,
+            description_chars,
         })
     }
 

@@ -134,10 +134,28 @@ pub struct WorkItemSnapshot {
     /// Third-party text: anything that reaches an agent goes through
     /// `mark_untrusted`.
     pub description: Option<String>,
+    /// How many characters the description has AT THE TRACKER, before
+    /// [`DESCRIPTION_MAX_CHARS`]. `None` when the adapter does not report it.
+    /// Read only to say that text was cut — never to widen a cap.
+    pub description_chars: Option<i64>,
 }
 
 /// Longest description excerpt kept (plan: the first 2k chars).
 pub const DESCRIPTION_MAX_CHARS: usize = 2000;
+
+/// The description as plain text, capped at [`DESCRIPTION_MAX_CHARS`], with
+/// its length AT THE TRACKER — what a later reader needs to say that text
+/// was cut.
+pub(super) fn description_and_len(text: &str) -> (Option<String>, Option<i64>) {
+    let full = text.chars().count() as i64;
+    if full == 0 {
+        return (None, None);
+    }
+    (
+        Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+        Some(full),
+    )
+}
 
 /// A by-id fetch's answer for one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
