@@ -170,6 +170,8 @@ impl OrgScope {
             return;
         }
         row.work_rejected.clear();
+        // Another org's hidden link would move it (M14).
+        row.work_rev = 0;
         if !self.sees_org(row.org_id) {
             row.work = None;
             row.work_suggested = None;
@@ -212,6 +214,7 @@ impl OrgScope {
                     && WORK_FIELDS.iter().any(|k| map.contains_key(*k));
                 if is_row {
                     map.remove("work_rejected");
+                    map.remove("work_rev");
                     let org = session_org(map);
                     if !self.sees_org(org) {
                         for k in WORK_FIELDS {
