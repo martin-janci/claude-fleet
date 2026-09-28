@@ -47,6 +47,12 @@ Capture a session's terminal: the visible tmux pane, plus scrollback_lines of hi
 
 Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
+### `catalog_admin`
+
+The Assets tab's catalog operations as one tool. Master or a client granted `assets`.
+
+Parameters: `action`, `args`, `confirm_nonce`
+
 ### `delete_worktree`
 
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).

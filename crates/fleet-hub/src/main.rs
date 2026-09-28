@@ -231,6 +231,13 @@ enum TokenCmd {
     Regenerate,
 }
 
+/// What `fleet-hub client grant` can give a paired client.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum Grant {
+    /// The asset catalog: the hub's `catalog_admin` tool.
+    Assets,
+}
+
 #[derive(Subcommand)]
 enum ClientCmd {
     /// Print the paired clients, one per line.
@@ -247,6 +254,13 @@ enum ClientCmd {
     Untrust { name: String },
     /// Bind a client to one org (its id): it reads only that org's work and sessions.
     Bind { name: String, org: i64 },
+    /// Let a paired client do what is otherwise the master's. `assets`: manage
+    /// the asset catalog (edit, commit, push, Sync, Secrets, layers) from its
+    /// Assets tab. Only a `full` client bound to no org. No running hub
+    /// needed.
+    Grant { name: String, grant: Grant },
+    /// Take a `grant` back.
+    Ungrant { name: String, grant: Grant },
     /// Lift a client's org binding: it reads every org again.
     Unbind { name: String },
 }
@@ -314,6 +328,10 @@ async fn main() -> ExitCode {
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
             ClientCmd::Bind { name, org } => pair::client_bind(&opts, &env, &name, Some(org)).await,
             ClientCmd::Unbind { name } => pair::client_bind(&opts, &env, &name, None).await,
+            ClientCmd::Grant { name, grant } => pair::client_grant(&opts, &env, &name, grant, true),
+            ClientCmd::Ungrant { name, grant } => {
+                pair::client_grant(&opts, &env, &name, grant, false)
+            }
         },
         Cmd::Peer { cmd, opts } => match cmd {
             PeerCmd::Add {

@@ -129,6 +129,59 @@ impl FleetTools {
         ok_json_compact(&summary)
     }
 
+    #[tool(description = "The Assets tab's catalog operations as one tool. \
+        Master or a client granted `assets`.")]
+    pub(super) async fn catalog_admin(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<CatalogAdminParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use catalog::admin::AdminCall;
+        audit(
+            "catalog_admin",
+            &format!("action={} caller={}", p.action, caller.label()),
+        );
+        if !may_admin_catalog(&caller, &self.store)? {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "catalog_admin needs the master token or a paired client granted the \
+                     asset catalog ({} refused); on the hub: fleet-hub client grant <name> assets",
+                    caller.label()
+                ),
+                None,
+            ));
+        }
+        let mut wire = serde_json::json!({ "action": p.action });
+        if let Some(args) = p.args.filter(|a| !a.is_null()) {
+            wire["args"] = args;
+        }
+        let mut call: AdminCall = serde_json::from_value(wire).map_err(|e| {
+            mcp_err(
+                "E_INVALID",
+                format!("catalog_admin {}: {e}", p.action),
+                None,
+            )
+        })?;
+        match &mut call {
+            AdminCall::ApplySync(a) => {
+                let summary = format!("plan_id={} force_partial={}", a.plan_id, a.force_partial);
+                self.confirm_gate("apply_sync", p.confirm_nonce.as_deref(), &summary, &caller)?;
+                // A cancellation id means something only in the process that
+                // minted it: the caller's, not this one.
+                a.call_id = None;
+            }
+            // Loading and configuring are what `ensure_fresh` would do; every
+            // other call reads the catalog this process last loaded.
+            AdminCall::Config | AdminCall::Configure(_) | AdminCall::Load(_) => {}
+            _ => catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?,
+        }
+        let value = catalog::admin::run(call, &self.store, &self.ssh, &self.reg)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&value)
+    }
+
     #[tool(description = "Store a value for a catalog ${NAME} placeholder \
         (global, or per host with host_alias). Master token only. The value \
         is never returned or logged.")]
@@ -263,6 +316,28 @@ impl FleetTools {
 /// Parse an MCP `kind` filter string into a `Kind`, using the same
 /// snake_case names the JSON representation already uses elsewhere
 /// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`).
+/// True when `caller` may use `catalog_admin`: the master, or a live `full`
+/// paired client, bound to no org, that the operator granted the asset
+/// catalog to. Read from the store on every call, so an un-grant or a revoke
+/// holds from the next call on. A per-host token never may: a host's Claude
+/// editing what Sync then writes to every host is exactly what the master
+/// gate exists to prevent.
+fn may_admin_catalog(caller: &Caller, store: &std::sync::Mutex<Store>) -> Result<bool, McpError> {
+    if caller.is_master() {
+        return Ok(true);
+    }
+    match (&caller.host_alias, &caller.client) {
+        (None, Some(c)) => {
+            let s = store
+                .lock()
+                .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
+            s.client_is_assets_admin(c.id)
+                .map_err(|e| to_mcp_err(e.into()))
+        }
+        _ => Ok(false),
+    }
+}
+
 fn parse_kind(s: &str) -> Result<catalog::model::Kind, McpError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|_| mcp_err(codes::E_INVALID, format!("unknown asset kind '{s}'"), None))

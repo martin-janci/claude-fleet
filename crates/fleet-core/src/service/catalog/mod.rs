@@ -3,6 +3,7 @@
 //! what each host actually has installed.
 //! Spec: docs/superpowers/specs/2026-09-14-asset-catalog-design.md
 
+pub mod admin;
 pub mod author;
 pub mod author_session;
 pub mod harness;
@@ -49,7 +50,7 @@ use model::{Asset, Kind, Problem};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigureArgs {
     pub repo_path: String,
     pub remote_url: Option<String>,
@@ -252,14 +253,14 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
     })
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preview {
     pub harness: String,
     pub plan: Option<RenderPlan>,
     pub unsupported: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetDetail {
     pub asset: Asset,
     pub previews: Vec<Preview>,
@@ -334,7 +335,7 @@ pub fn get_asset(kind: Kind, name: &str, store: &Mutex<Store>) -> Result<AssetDe
 }
 
 /// The catalog's layer definitions plus every host's stored assignment.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerListing {
     pub layers: Vec<layer::Layer>,
     pub hosts: Vec<crate::store::HostLayerRow>,

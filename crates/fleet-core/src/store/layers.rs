@@ -1,10 +1,10 @@
 //! Per-host layer assignment: one active role plus ordered contexts.
 
 use crate::store::Store;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One row of `host_layers`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostLayerRow {
     pub host_alias: String,
     pub layer_name: String,

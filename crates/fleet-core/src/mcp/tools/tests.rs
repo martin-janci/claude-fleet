@@ -2017,7 +2017,8 @@ fn capture_default_cap_matches_docs() {
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
-/// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92.)
+/// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
+/// `catalog_admin`: 93.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2038,7 +2039,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 92);
+    assert_eq!(served, 93);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3601,7 +3602,11 @@ fn the_served_definition_budget_stays_bounded() {
     // whose every variant and field must be documented. Its own branch
     // measured +2,124 over M14.1c. Merged over reply actions and hub ops:
     // measured at 62,255 on 2026-09-28 (+2,197 over 60,058); plus 100.
-    const BUDGET_BYTES: usize = 62_355;
+    // catalog_admin (a granted client manages the asset catalog): one tool
+    // for the Assets tab's 29 operations, its action list the bulk of it —
+    // one tool instead of 29 is what keeps this to +797. Not listed to a
+    // per-host token. Measured at 63,052 on 2026-09-28; plus 100.
+    const BUDGET_BYTES: usize = 63_152;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8153,4 +8158,216 @@ fn add_project_serves_the_source_variants_and_no_call_id() {
             "source kind {kind} missing: {text}"
         );
     }
+}
+
+/// A small committed catalog checkout for the `catalog_admin` tests.
+#[cfg(unix)]
+fn catalog_admin_repo(tag: &str) -> std::path::PathBuf {
+    let root =
+        std::env::temp_dir().join(format!("fleet-catalog-admin-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("skills/s")).unwrap();
+    std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+    std::fs::write(
+        root.join("skills/s/asset.yaml"),
+        "kind: skill\nname: s\ndescription: d\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+        &["add", "."],
+        &["commit", "-q", "-m", "init"],
+    ] {
+        let o = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    root
+}
+
+#[cfg(unix)]
+fn admin(action: &str, args: Option<serde_json::Value>) -> Parameters<CatalogAdminParams> {
+    Parameters(CatalogAdminParams {
+        action: action.into(),
+        args,
+        confirm_nonce: None,
+    })
+}
+
+/// `catalog_admin` answers the master and a GRANTED paired client, and
+/// nobody else: not an ungranted client, not a per-host token even in full
+/// mode, and not a client whose grant was taken back — read live, so that
+/// holds from the very next call.
+///
+/// `CATALOG_TEST_LOCK` only serialises tests against the process-global
+/// `CATALOG`; it guards nothing the runtime needs, so holding it across the
+/// tool's awaits is safe despite the lint (as in `inventory`'s tests).
+#[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn catalog_admin_is_for_the_master_and_granted_clients_only() {
+    let _g = crate::service::catalog::CATALOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (tools, _guards, store) = client_tools();
+    let desk_id = {
+        let s = store.lock().unwrap();
+        s.insert_client_token("desk", "aa11", "full").unwrap().id
+    };
+    let desk = Caller {
+        host_alias: None,
+        client: Some(crate::mcp::auth::ClientRef {
+            id: desk_id,
+            name: "desk".into(),
+            trusted: false,
+            org_id: None,
+        }),
+        mode: TokenMode::Full,
+    };
+    let refused = |r: Result<CallToolResult, McpError>| {
+        let e = r.expect_err("refused");
+        assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+        assert!(
+            e.message.contains("fleet-hub client grant"),
+            "{}",
+            e.message
+        );
+    };
+    refused(
+        tools
+            .catalog_admin(Extension(desk.clone()), admin("config", None))
+            .await,
+    );
+    refused(
+        tools
+            .catalog_admin(
+                Extension(host_caller("mefistos", TokenMode::Full)),
+                admin("config", None),
+            )
+            .await,
+    );
+
+    store
+        .lock()
+        .unwrap()
+        .set_client_assets_admin("desk", true)
+        .unwrap();
+    let r = tools
+        .catalog_admin(Extension(desk.clone()), admin("config", None))
+        .await
+        .unwrap();
+    assert!(result_json(&r).is_null(), "not configured yet");
+
+    // Configure, then author through the same tool the desktop routes to.
+    let root = catalog_admin_repo("gate");
+    let r = tools
+        .catalog_admin(
+            Extension(desk.clone()),
+            admin(
+                "configure",
+                Some(serde_json::json!({ "repo_path": root.to_string_lossy() })),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&r)["repo_path"],
+        root.to_string_lossy().as_ref()
+    );
+    tools
+        .catalog_admin(
+            Extension(desk.clone()),
+            admin("load", Some(serde_json::json!({ "pull": false }))),
+        )
+        .await
+        .unwrap();
+    let r = tools
+        .catalog_admin(
+            Extension(desk.clone()),
+            admin(
+                "create_asset",
+                Some(serde_json::json!({ "kind": "skill", "name": "fresh" })),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(result_json(&r)["commit"].is_string());
+    let r = tools
+        .catalog_admin(
+            Extension(desk.clone()),
+            admin(
+                "get_asset",
+                Some(serde_json::json!({ "kind": "skill", "name": "fresh" })),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result_json(&r)["asset"]["name"],
+        "fresh",
+        "{}",
+        result_json(&r)
+    );
+
+    // A secret goes in and never comes back out.
+    tools
+        .catalog_admin(
+            Extension(desk.clone()),
+            admin(
+                "set_secret",
+                Some(serde_json::json!({ "name": "API_TOKEN", "value": "hunter2" })),
+            ),
+        )
+        .await
+        .unwrap();
+    let r = tools
+        .catalog_admin(Extension(desk.clone()), admin("list_secrets", None))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&r)[0]["name"], "API_TOKEN");
+    assert!(!text_of(&r.content[0]).contains("hunter2"));
+    let e = tools
+        .catalog_admin(
+            Extension(desk.clone()),
+            admin(
+                "set_secret",
+                Some(serde_json::json!({ "name": "bad name", "value": "x" })),
+            ),
+        )
+        .await
+        .expect_err("invalid name");
+    assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+
+    // An unknown action, or an action's missing args, is the caller's error.
+    for (action, args) in [("frobnicate", None), ("get_asset", None)] {
+        let e = tools
+            .catalog_admin(Extension(desk.clone()), admin(action, args))
+            .await
+            .expect_err(action);
+        assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+    }
+
+    // The master always may; an un-grant holds from the next call.
+    tools
+        .catalog_admin(Extension(Caller::master()), admin("repo_status", None))
+        .await
+        .unwrap();
+    store
+        .lock()
+        .unwrap()
+        .set_client_assets_admin("desk", false)
+        .unwrap();
+    refused(
+        tools
+            .catalog_admin(Extension(desk), admin("repo_status", None))
+            .await,
+    );
+    *crate::service::catalog::CATALOG.write().unwrap() = None;
+    let _ = std::fs::remove_dir_all(root);
 }

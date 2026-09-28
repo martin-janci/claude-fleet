@@ -68,6 +68,11 @@ pub(super) fn visible_to(caller: &Caller, tool: &str) -> bool {
     if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
         return false;
     }
+    // Refused to every per-host token at the central gate (`enforce_admin`);
+    // listing it would cost every host's Claude a definition it can never use.
+    if caller.host_alias.is_some() && guard::NOT_FOR_HOST_TOKENS.contains(&tool) {
+        return false;
+    }
     caller.is_master() || guard::is_client_tool(tool)
 }
 

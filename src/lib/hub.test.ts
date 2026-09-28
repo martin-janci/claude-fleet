@@ -95,7 +95,7 @@ describe('hubBlock', () => {
   });
 
   it('the fleet-administration actions say a client is not the administrator', () => {
-    for (const action of ['add_host', 'remove_host', 'hide_host', 'provision_hosts', 'apply_sync', 'set_secret'] as const) {
+    for (const action of ['add_host', 'remove_host', 'hide_host', 'provision_hosts'] as const) {
       expect(hubBlock(action, remote)!.toLowerCase(), action).toContain('client');
     }
   });
@@ -110,14 +110,14 @@ describe('hubBlock', () => {
     expect(HUB_ACTIONS as readonly string[]).not.toContain('terminal');
   });
 
-  // The audit's finding H, the frontend half: the hub DOES serve the asset
-  // list (`list_assets`, read-only, open to any paired client). What it does
-  // not serve is the catalog's configuration and checkout, which the panel is
-  // built on — so that is the reason, and it must not deny a tool that exists.
-  it('the asset catalog reason does not deny the tool the hub has', () => {
-    const said = hubBlock('catalog_config', remote)!;
+  // The audit's finding H, the frontend half: a refusal must not deny a
+  // tool the hub has. The asset catalog routes to `catalog_admin` now; the
+  // one catalog reason left that has a hub tool is the import, which must
+  // name it.
+  it('the asset import reason does not deny the tool the hub has', () => {
+    const said = hubBlock('catalog_import_host', remote)!;
     expect(said).not.toMatch(/no authoring tool|exposes no tool/);
-    expect(said).toContain('list_assets');
+    expect(said).toContain('import_assets');
   });
 });
 

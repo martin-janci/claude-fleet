@@ -1190,6 +1190,13 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
 /// The table [`every_routed_mutation_names_its_tool_and_arguments`] runs; also run against a configured hub this
 /// launch cannot use, which must refuse every row.
 fn routed_mutation_cases() -> Vec<Case> {
+    let mut cases = routed_mutation_cases_but_the_catalog();
+    cases.extend(catalog_admin_cases());
+    cases
+}
+
+/// The mutations outside the asset catalog; [`catalog_admin_cases`] is the rest.
+fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use commands::sessions::RepairSessionArgs;
     use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     use fleet_core::service::bg_sessions::NewBgSessionArgs;
@@ -3217,7 +3224,7 @@ fn a_hub_answering_a_wait_deserialises_into_move_outcome_waiting() {
 #[test]
 fn a_local_only_command_is_a_no_op_when_standalone() {
     assert!(FleetBackend::local()
-        .refuse_local_only("catalog_push")
+        .refuse_local_only("catalog_spawn_author_session")
         .is_ok());
 }
 
@@ -3340,7 +3347,7 @@ fn repair_session_explicit_false_stays_local_only_in_remote_mode() {
 fn a_refusal_never_carries_the_token() {
     let fake = Fake::answering("[]");
     let err = remote_backend(&fake)
-        .refuse_local_only("catalog_push")
+        .refuse_local_only("catalog_spawn_author_session")
         .unwrap_err();
     assert!(!format!("{err:?}").contains("cl_s3cret-token"), "{err:?}");
     assert!(!format!("{:?}", remote_backend(&fake)).contains("cl_s3cret-token"));
@@ -3357,10 +3364,10 @@ fn a_refusal_never_carries_the_token() {
 /// - `dismiss_agent_session` said "the hub exposes no tool for it" while the
 ///   routed `kill_session` dismisses an inactive agent exactly as it does.
 ///
-/// The four layer commands merged from main are held to the same standard:
-/// the hub grew a tool for each, three of them read-only, and
-/// `set_host_layers` is master-only — which is the real reason THAT one
-/// refuses, the same shape as `apply_sync` and `set_secret`.
+/// The asset catalog used to be the bulk of this list: its commands refused
+/// while the hub had a tool for most of them. They route to `catalog_admin`
+/// now; `catalog_import_host` is the one left refusing, and it still has to
+/// name the hub's `import_assets` rather than deny it.
 ///
 /// The sentences used to be read back out of the source, because a
 /// `#[tauri::command]` cannot be called without a live `tauri::App`. They are
@@ -3375,16 +3382,7 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
     }
     const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
 
-    for (command, tool) in [
-        ("catalog_import_host", "import_assets"),
-        ("catalog_plan_sync", "plan_sync"),
-        ("catalog_apply_sync", "apply_sync"),
-        ("catalog_set_secret", "set_secret"),
-        ("catalog_list_layers", "list_layers"),
-        ("catalog_resolve_preview", "resolve_preview"),
-        ("catalog_propose_layers", "propose_layers"),
-        ("catalog_set_host_layers", "set_host_layers"),
-    ] {
+    for (command, tool) in [("catalog_import_host", "import_assets")] {
         let said = reason(command);
         for d in DENIALS {
             assert!(
@@ -3396,15 +3394,6 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
             said.contains(tool),
             "{command} must name the hub's {tool}: {said}"
         );
-    }
-    // The three the hub keeps for its master: THAT is why they refuse.
-    for command in [
-        "catalog_apply_sync",
-        "catalog_set_secret",
-        "catalog_set_host_layers",
-    ] {
-        let said = reason(command);
-        assert!(said.contains("master"), "{command}: {said}");
     }
 
     let said = reason("dismiss_agent_session");
@@ -3500,8 +3489,10 @@ fn local_only_messages() -> String {
 #[test]
 fn every_local_only_message_is_the_one_the_fixture_records() {
     let actual = local_only_messages();
+    // 50, not the 70 it once was: the asset catalog's ~27 refusals became
+    // routes to `catalog_admin` (a granted client manages the hub's catalog).
     assert!(
-        actual.lines().count() > 70,
+        actual.lines().count() > 50,
         "only {} lines of refusal — the table lost rows, or this stopped \
          rendering them",
         actual.lines().count()
@@ -4046,3 +4037,428 @@ const SOURCES: &[(&str, &str)] = &[
     ("pty.rs", include_str!("../pty.rs")),
     ("lib.rs", include_str!("../lib.rs")),
 ];
+
+/// A payload built from a real value, for the catalog answers too big to
+/// write out by hand; leaked, since a [`Case`] holds a `&'static str`.
+fn payload_of<T: serde::Serialize>(value: &T) -> &'static str {
+    Box::leak(
+        serde_json::to_string(value)
+            .expect("serialisable")
+            .into_boxed_str(),
+    )
+}
+
+/// Every asset-catalog command that routes to `catalog_admin`: the action
+/// and arguments it sends (its own argument struct, as `args`), and an answer
+/// of the command's own return type. Reads and writes together, because the
+/// point of the one tool is that each is the desktop command, one to one.
+fn catalog_admin_cases() -> Vec<Case> {
+    use commands::assets::routed as r;
+    use fleet_core::service::catalog::admin::{
+        DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
+        SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+    };
+    use fleet_core::service::catalog::author::{
+        self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
+        UpdateArgs,
+    };
+    use fleet_core::service::catalog::layer::Axis;
+    use fleet_core::service::catalog::model::Kind;
+    use fleet_core::service::catalog::sync::{ApplyArgs, PlanArgs};
+    use fleet_core::service::catalog::ConfigureArgs;
+
+    const CONFIG: &str =
+        r#"{"repo_path":"/srv/assets","remote_url":null,"head_commit":"abc","last_loaded_at":1}"#;
+    const WRITE: &str = r#"{"commit":"abc","lint":{"errors":[],"warnings":[]}}"#;
+    const STATUS: &str =
+        r#"{"head":"abc","dirty":0,"ahead":null,"behind":null,"has_upstream":false}"#;
+    const SYNC_RUN: &str = r#"{"plan_id":"p1","started_at":1,"finished_at":2,"hosts":[]}"#;
+    let asset = payload_of(&author::template(Kind::Skill, "s"));
+    let detail =
+        Box::leak(format!(r#"{{"asset":{asset},"previews":[],"hosts":[]}}"#).into_boxed_str());
+    let layer = payload_of(&author::layer_template("core", Axis::Role));
+    let skill = |name: &str| AssetRef {
+        kind: Kind::Skill,
+        name: name.into(),
+    };
+    let resource =
+        std::env::temp_dir().join(format!("fleet-routed-resource-{}", std::process::id()));
+    std::fs::write(&resource, "echo hi\n").unwrap();
+    let resource = resource.to_string_lossy().into_owned();
+
+    vec![
+        (
+            "catalog_config",
+            "catalog_admin",
+            json!({ "action": "config" }),
+            CONFIG,
+            Box::new(|b, s, _| block_on(r::catalog_config(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_configure",
+            "catalog_admin",
+            json!({ "action": "configure",
+                    "args": { "repo_path": "/srv/assets", "remote_url": "git@x:a.git" } }),
+            CONFIG,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_configure(
+                    b,
+                    ConfigureArgs {
+                        repo_path: "/srv/assets".into(),
+                        remote_url: Some("git@x:a.git".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_load",
+            "catalog_admin",
+            json!({ "action": "load", "args": { "pull": true } }),
+            r#"{"head":"abc","loaded_at":1,"asset_count":3,"problem_count":0}"#,
+            Box::new(|b, s, _| block_on(r::catalog_load(b, LoadArgs { pull: true }, s)).map(|_| ())),
+        ),
+        (
+            "catalog_get_asset",
+            "catalog_admin",
+            json!({ "action": "get_asset", "args": { "kind": "skill", "name": "s" } }),
+            detail,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_get_asset(
+                    b,
+                    GetAssetArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_list_layers",
+            "catalog_admin",
+            json!({ "action": "list_layers" }),
+            Box::leak(format!(r#"{{"layers":[{layer}],"hosts":[{{"host_alias":"nas","layer_name":"core","axis":"role","position":0,"active":true}}]}}"#).into_boxed_str()),
+            Box::new(|b, s, _| block_on(r::catalog_list_layers(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_resolve_preview",
+            "catalog_admin",
+            json!({ "action": "resolve_preview", "args": { "host_alias": "nas" } }),
+            r#"{"catalog":{"assets":[],"problems":[],"head":"abc","loaded_at":1,"layers":{"layers":{}}},"provenance":{},"excluded":{},"layered":false}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_resolve_preview(
+                    b,
+                    ResolvePreviewArgs {
+                        host_alias: "nas".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_propose_layers",
+            "catalog_admin",
+            json!({ "action": "propose_layers" }),
+            r#"{"layers":[],"singletons":[{"key":"skill/s","host":"nas"}]}"#,
+            Box::new(|b, s, _| block_on(r::catalog_propose_layers(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_set_host_layers",
+            "catalog_admin",
+            json!({ "action": "set_host_layers",
+                    "args": { "host_alias": "nas", "role": "core", "contexts": ["gpu"] } }),
+            r#"[{"host_alias":"nas","layer_name":"core","axis":"role","position":0,"active":true}]"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_set_host_layers(
+                    b,
+                    SetHostLayersArgs {
+                        host_alias: "nas".into(),
+                        role: Some("core".into()),
+                        contexts: vec!["gpu".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_layer_template",
+            "catalog_admin",
+            json!({ "action": "layer_template", "args": { "name": "core", "axis": "role" } }),
+            layer,
+            Box::new(|b, _, _| {
+                block_on(r::catalog_layer_template(
+                    b,
+                    LayerTemplateArgs {
+                        name: "core".into(),
+                        axis: Axis::Role,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_write_layer",
+            "catalog_admin",
+            json!({ "action": "write_layer",
+                    "args": { "layer": serde_json::from_str::<Value>(layer).unwrap() } }),
+            r#""abc""#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_write_layer(
+                    b,
+                    WriteLayerArgs {
+                        layer: author::layer_template("core", Axis::Role),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_delete_layer",
+            "catalog_admin",
+            json!({ "action": "delete_layer", "args": { "name": "core" } }),
+            r#""abc""#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_delete_layer(b, LayerRef { name: "core".into() }, s))
+                    .map(|_| ())
+            }),
+        ),
+        (
+            "assets_inventory",
+            "catalog_admin",
+            json!({ "action": "inventory" }),
+            r#"[{"host_alias":"nas","harness":"claude","kind":"skill","name":"s","state":"in_sync","scanned_at":1,"managed":true}]"#,
+            Box::new(|b, s, _| block_on(r::assets_inventory(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_plan_sync",
+            "catalog_admin",
+            json!({ "action": "plan_sync",
+                    "args": { "host_alias": "nas", "kind": "skill", "name": "s" } }),
+            r#"{"id":"p1","computed_at":1,"hosts":[],"counts":{}}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_plan_sync(
+                    b,
+                    PlanArgs {
+                        host_alias: Some("nas".into()),
+                        kind: Some(Kind::Skill),
+                        name: Some("s".into()),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_apply_sync",
+            "catalog_admin",
+            json!({ "action": "apply_sync",
+                    "args": { "plan_id": "p1", "force_partial": true, "call_id": 9 } }),
+            SYNC_RUN,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_apply_sync(
+                    b,
+                    ApplyArgs {
+                        plan_id: "p1".into(),
+                        force_partial: true,
+                        call_id: Some(9),
+                    },
+                    s,
+                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_last_sync",
+            "catalog_admin",
+            json!({ "action": "last_sync" }),
+            SYNC_RUN,
+            Box::new(|b, s, _| block_on(r::catalog_last_sync(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_list_secrets",
+            "catalog_admin",
+            json!({ "action": "list_secrets" }),
+            r#"[{"name":"API_TOKEN","host_alias":null,"updated_at":1}]"#,
+            Box::new(|b, s, _| block_on(r::catalog_list_secrets(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_set_secret",
+            "catalog_admin",
+            json!({ "action": "set_secret",
+                    "args": { "name": "API_TOKEN", "host_alias": "nas", "value": "v" } }),
+            "null",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_set_secret(
+                    b,
+                    SetSecretArgs {
+                        name: "API_TOKEN".into(),
+                        host_alias: Some("nas".into()),
+                        value: "v".into(),
+                    },
+                    s,
+                ))
+            }),
+        ),
+        (
+            "catalog_delete_secret",
+            "catalog_admin",
+            json!({ "action": "delete_secret", "args": { "name": "API_TOKEN", "host_alias": null } }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_delete_secret(
+                    b,
+                    DeleteSecretArgs {
+                        name: "API_TOKEN".into(),
+                        host_alias: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_create_asset",
+            "catalog_admin",
+            json!({ "action": "create_asset",
+                    "args": { "kind": "skill", "name": "fresh", "duplicate_from": "s" } }),
+            WRITE,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_create_asset(
+                    b,
+                    CreateArgs {
+                        kind: Kind::Skill,
+                        name: "fresh".into(),
+                        duplicate_from: Some("s".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_update_asset",
+            "catalog_admin",
+            json!({ "action": "update_asset",
+                    "args": { "asset": serde_json::from_str::<Value>(asset).unwrap() } }),
+            WRITE,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_update_asset(
+                    b,
+                    UpdateArgs {
+                        asset: author::template(Kind::Skill, "s"),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_delete_asset",
+            "catalog_admin",
+            json!({ "action": "delete_asset", "args": { "kind": "skill", "name": "s" } }),
+            r#""abc""#,
+            Box::new(move |b, s, _| block_on(r::catalog_delete_asset(b, skill("s"), s)).map(|_| ())),
+        ),
+        // The file is read on this side; its bytes are what the hub gets.
+        (
+            "catalog_add_resource",
+            "catalog_admin",
+            json!({ "action": "add_resource_bytes",
+                    "args": { "kind": "skill", "name": "s", "rel_path": "resources/run.sh",
+                              "bytes": "ZWNobyBoaQo=" } }),
+            WRITE,
+            Box::new(move |b, s, _| {
+                block_on(r::catalog_add_resource(
+                    b,
+                    AddResourceArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        local_path: resource.clone(),
+                        rel_path: Some("resources/run.sh".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_remove_resource",
+            "catalog_admin",
+            json!({ "action": "remove_resource",
+                    "args": { "kind": "skill", "name": "s", "rel_path": "resources/run.sh" } }),
+            WRITE,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_remove_resource(
+                    b,
+                    RemoveResourceArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        rel_path: "resources/run.sh".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_lint_asset",
+            "catalog_admin",
+            json!({ "action": "lint_asset", "args": { "kind": "skill", "name": "s" } }),
+            r#"{"errors":[],"warnings":[{"field":"description","message":"short"}]}"#,
+            Box::new(move |b, s, _| block_on(r::catalog_lint_asset(b, skill("s"), s)).map(|_| ())),
+        ),
+        (
+            "catalog_lint_all",
+            "catalog_admin",
+            json!({ "action": "lint_all" }),
+            r#"{"assets":[],"problems":[],"errors":0,"warnings":0}"#,
+            Box::new(|b, s, _| block_on(r::catalog_lint_all(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_commit_pending",
+            "catalog_admin",
+            json!({ "action": "commit_pending", "args": { "message": "catalog: tidy" } }),
+            r#""abc""#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_commit_pending(
+                    b,
+                    CommitPendingArgs {
+                        message: Some("catalog: tidy".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_push",
+            "catalog_admin",
+            json!({ "action": "push" }),
+            STATUS,
+            Box::new(|b, s, _| block_on(r::catalog_push(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_repo_status",
+            "catalog_admin",
+            json!({ "action": "repo_status" }),
+            STATUS,
+            Box::new(|b, s, _| block_on(r::catalog_repo_status(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_template",
+            "catalog_admin",
+            json!({ "action": "template", "args": { "kind": "skill", "name": "s" } }),
+            asset,
+            Box::new(move |b, _, _| block_on(r::catalog_template(b, skill("s"))).map(|_| ())),
+        ),
+    ]
+}

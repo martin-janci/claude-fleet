@@ -93,4 +93,10 @@
 //!   neither: the sidebar's "Add project" would be enabled and every attempt
 //!   would fail with an unknown-tool error. `GithubRepo` also joins the
 //!   report types the desktop deserialises.
-pub const CONTRACT_REVISION: u32 = 5;
+//! - **6** — *a brand-new tool the desktop routes to.* `catalog_admin`: the
+//!   desktop's asset-catalog commands (config, authoring, commit / push,
+//!   lint, Sync, secrets, layers) route to it instead of refusing as
+//!   local-only, for the master or a paired client granted the catalog. A
+//!   revision-5 hub does not serve it, so even a granted desktop would open
+//!   the full Assets panel and fail every action with an unknown tool.
+pub const CONTRACT_REVISION: u32 = 6;

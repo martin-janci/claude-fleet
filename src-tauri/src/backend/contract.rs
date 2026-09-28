@@ -110,7 +110,11 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// a desktop paired with one would offer "Add project" and fail every
 /// attempt with an unknown tool. Refusing that hub with the skew banner says
 /// what to do (update the hub); leaving it `InRange` would not.
-pub const MIN_HUB_CONTRACT: u32 = 5;
+///
+/// Raised to 6 for revision 6: the asset-catalog commands route to the new
+/// `catalog_admin` tool. A revision-5 hub does not serve it, so the Assets
+/// panel's every action would fail with an unknown tool.
+pub const MIN_HUB_CONTRACT: u32 = 6;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -119,11 +123,11 @@ pub const MIN_HUB_CONTRACT: u32 = 5;
 /// Moves in lockstep with [`fleet_core::wire_contract::CONTRACT_REVISION`]:
 /// this build's own hub must be `InRange`, so bumping the revision without
 /// bumping this is a shipped outage against itself.
-pub const MAX_HUB_CONTRACT: u32 = 5;
+pub const MAX_HUB_CONTRACT: u32 = 6;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `5..=5` today, and unlike the original `0..=1` range this one CAN
+/// are `6..=6` today, and unlike the original `0..=1` range this one CAN
 /// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
 /// `4`) — see `tests_contract.rs`, independent of whichever bounds
 /// a future release ships.

@@ -756,6 +756,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Lifecycle,
     },
+    // Managing the catalog from a paired desktop: every catalog operation
+    // the desktop app has, as one tool. `Client` here only lets the call past
+    // the central gate; the tool itself answers the master and a paired
+    // client the operator granted (`fleet-hub client grant <name> assets`)
+    // and refuses everyone else, per-host tokens included. Not confirm-gated
+    // as a whole — most actions are reads or checkout edits — but its
+    // `apply_sync` action passes the same confirm gate as `apply_sync`.
+    ToolPolicy {
+        name: "catalog_admin",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // Secret values feed every host's rendered config; scoping this to the
     // master token keeps a per-host token from setting values another host's
     // assets would pick up.
@@ -911,6 +925,13 @@ pub fn is_admin_tool(name: &str) -> bool {
 pub fn is_client_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| matches!(p.access, Access::Client))
 }
+
+/// `Client` tools a per-host token is nonetheless refused, at the central
+/// gate and in the tool list alike. `catalog_admin` answers the master and a
+/// GRANTED paired client only (the tool checks the grant itself); a host's
+/// Claude editing what Sync then writes to every host is what the master
+/// gate exists to prevent.
+pub const NOT_FOR_HOST_TOKENS: &[&str] = &["catalog_admin"];
 
 // --- legacy name lists -------------------------------------------------------
 //

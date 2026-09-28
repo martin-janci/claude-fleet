@@ -338,7 +338,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             .and_then(|v| v.as_i64())
             .map_or_else(|| "-".to_string(), |o| format!("org {o}"))
     };
-    let cells: Vec<[String; 7]> = rows
+    let cells: Vec<[String; 8]> = rows
         .iter()
         .map(|r| {
             [
@@ -346,6 +346,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
                 field(r, "mode"),
                 org(r),
                 time(r, "trusted_at"),
+                time(r, "assets_admin_at"),
                 time(r, "created_at"),
                 time(r, "last_seen_at"),
                 time(r, "revoked_at"),
@@ -357,6 +358,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
         "MODE",
         "ORG",
         "TRUSTED",
+        "ASSETS",
         "CREATED",
         "LAST SEEN",
         "REVOKED",
@@ -371,7 +373,7 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
     // Padding is counted in terminal columns, not `char`s: `{:<w$}` pads to a
     // char count, which would under-pad a CJK or emoji name (two columns per
     // char) and misalign every column after it.
-    let line = |row: &[String; 7]| {
+    let line = |row: &[String; 8]| {
         let mut s = String::new();
         for (i, (cell, w)) in row.iter().zip(width).enumerate() {
             s.push_str(cell);
@@ -485,6 +487,40 @@ pub async fn client_trust(
         )
     } else {
         format!("untrusted {shown}; its prompts are marked again from its next call on")
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `fleet-hub client grant <name> assets` / `client ungrant <name> assets`:
+/// let a paired client manage the asset catalog through `catalog_admin`, or
+/// take that back. Written straight to `state.db`, like `host-token-mode`: the
+/// hub reads the grant live on every `catalog_admin` call, so a running hub
+/// honours it from the client's next call and no running hub is needed.
+pub fn client_grant(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    name: &str,
+    grant: crate::Grant,
+    on: bool,
+) -> Result<ExitCode, String> {
+    crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
+    let store = crate::serve::open_store(opts, env)?;
+    let crate::Grant::Assets = grant;
+    let row = store
+        .set_client_assets_admin(name, on)
+        .map_err(|e| e.message)?;
+    out::line(&if on {
+        format!(
+            "{} may manage the asset catalog (since {}): editing assets, Sync and Secrets \
+             from its Assets tab, on this hub's checkout and hosts",
+            row.name,
+            fmt_time(row.assets_admin_at)
+        )
+    } else {
+        format!(
+            "{} no longer manages the asset catalog; its Assets tab is read-only from its next call",
+            row.name
+        )
     });
     Ok(ExitCode::SUCCESS)
 }
@@ -839,6 +875,7 @@ mod tests {
             lines[0].contains("REVOKED") && lines[0].contains("TRUSTED"),
             "{t}"
         );
+        assert!(lines[0].contains("ASSETS"), "{t}");
         assert!(
             lines[1].contains("phone") && lines[1].contains("full"),
             "{t}"
@@ -849,8 +886,8 @@ mod tests {
         assert!(lines[1].contains("2023-11-14 22:18Z"), "{t}");
         assert_eq!(
             lines[2].split_whitespace().filter(|c| *c == "-").count(),
-            3,
-            "a dash for ORG, TRUSTED and LAST SEEN:\n{t}"
+            4,
+            "a dash for ORG, TRUSTED, ASSETS and LAST SEEN:\n{t}"
         );
         // A live client's revoked column is a dash, not an empty gap.
         assert!(lines[1].trim_end().ends_with('-'), "{t}");

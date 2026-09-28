@@ -78,20 +78,52 @@
     await Promise.all([refresh(), repoStatus()]);
   }
 
-  // The whole catalog is a git checkout on the machine that owns the fleet.
-  // The hub serves the asset list (`list_assets`) but not the configuration
-  // and checkout this panel is built on, so every `catalog_*` command is
-  // guarded. `catalog_config` is one of the six this UI calls UNPROMPTED, so
-  // without this opening the Assets tab raised an error where the panel
-  // should be.
-  const catalogBlocked = $derived(hubBlock('catalog_config', $hubStatus));
-
-  // ...but the list itself, and the scan that refreshes it, DO route: on a
-  // hub-backed desktop the panel is a read-only overview of the hub's
-  // catalog — which asset is installed where, what drifted, what is on a
-  // host but not in the catalog. Loaded once the window is known to be a
-  // hub client (the status can resolve after mount).
+  // On a hub-backed desktop the catalog is the HUB's: a git checkout on the
+  // hub's machine. Every command this panel uses routes to the hub's
+  // `catalog_admin`, which answers a client the operator granted
+  // (`fleet-hub client grant <name> assets`) and refuses any other with
+  // E_FORBIDDEN. So the panel asks once (`catalog_config`): granted, it is
+  // the full panel onto the hub's catalog; refused, it is the read-only
+  // overview below, built on the two commands open to every paired client.
   const hubOverview = $derived($hubStatus.remote && !$hubStatus.unavailable);
+  let hubAdmin = $state<'idle' | 'probing' | 'granted' | 'denied'>('idle');
+  // Why the probe did not grant: E_FORBIDDEN is the ordinary answer (not
+  // granted); anything else (an old hub, the link down) is shown as is.
+  let hubAdminError = $state<string | null>(null);
+  async function probeHubAdmin() {
+    hubAdmin = 'probing';
+    hubAdminError = null;
+    const c = await loadCatalogConfig();
+    if (!c.ok) {
+      hubAdmin = 'denied';
+      if (c.error.code !== 'E_FORBIDDEN') hubAdminError = c.error.message;
+      return;
+    }
+    hubAdmin = 'granted';
+    if (c.value) {
+      await reload(false);
+      void repoStatus();
+    }
+    void lastSync();
+  }
+  $effect(() => {
+    if (!hubOverview || !visible) return;
+    if (untrack(() => hubAdmin) !== 'idle') return;
+    void probeHubAdmin();
+  });
+  // A configured hub this launch cannot use: nothing here can work.
+  const hubUnavailable = $derived($hubStatus.unavailable ? hubBlock('catalog_import_host', $hubStatus) : null);
+  // Not the full panel: the hub's read-only overview until (and unless) the
+  // probe says this client may manage the catalog.
+  const catalogBlocked = $derived(hubUnavailable !== null || (hubOverview && hubAdmin !== 'granted'));
+  // Import and "Open in session" stay this machine's (see their REASONS).
+  const importBlocked = $derived(hubBlock('catalog_import_host', $hubStatus));
+
+  // ...but the list itself, and the scan that refreshes it, route for every
+  // paired client: the read-only overview of the hub's catalog — which asset
+  // is installed where, what drifted, what is on a host but not in the
+  // catalog. Loaded once the window is known to be a hub client (the status
+  // can resolve after mount).
   let overviewLoad = $state<'idle' | 'loading' | 'loaded' | 'failed'>('idle');
   let overviewError = $state<string | null>(null);
   let overviewNotConfigured = $state(false);
@@ -109,7 +141,7 @@
     overviewError = r.error.message;
   }
   $effect(() => {
-    if (!hubOverview || !visible) return;
+    if (!hubOverview || !visible || hubAdmin !== 'denied') return;
     if (untrack(() => overviewLoad) !== 'idle') return;
     void loadOverview();
   });
@@ -167,6 +199,7 @@
   }
 
   function onImportUnmanaged(_row: AssetInventoryRow) {
+    if (importBlocked) { error = importBlocked; return; }
     showImport = true;
   }
 
@@ -255,7 +288,12 @@
 
 <div class="assets-panel">
   {#if catalogBlocked}
-    {#if hubOverview}
+    {#if hubOverview && hubAdmin !== 'denied'}
+      <div class="setup" data-testid="assets-remote-probing">
+        <h3>Asset catalog</h3>
+        <p class="muted">Asking the hub…</p>
+      </div>
+    {:else if hubOverview}
       <div class="hub-overview" data-testid="assets-remote">
         <div class="toolbar">
           <span class="path">Asset catalog on the hub{$hubStatus.url ? ` (${$hubStatus.url})` : ''}</span>
@@ -268,12 +306,14 @@
           <input class="filter" placeholder="filter" bind:value={filter} />
         </div>
         <p class="muted note" data-testid="assets-remote-note">
-          Read-only here. Editing assets, Sync and Secrets are fleet
-          administration: they run where the catalog's git checkout and the
-          sync secrets live — on the hub's machine (<code>fleet-hub catalog
-          set|reload</code> there, then Refresh). A paired client never
-          writes to the hosts.
+          Read-only here: the hub has not granted this desktop the asset
+          catalog. To edit assets, Sync and manage Secrets from this window,
+          run on the hub's machine
+          <code data-testid="assets-grant-cmd">fleet-hub client grant &lt;this client's name&gt; assets</code>
+          (<code>fleet-hub client list</code> shows the name), then reopen
+          this tab.
         </p>
+        {#if hubAdminError}<p class="error" data-testid="assets-grant-error">{hubAdminError}</p>{/if}
         {#if error}<p class="error">{error}</p>{/if}
         {#if scanResults}
           <p class="scan-result" data-testid="assets-scan-result">{scanResults.map((r) => `${r.host}: ${r.status}${r.detail ? ` (${r.detail})` : ''}`).join(' · ')}</p>
@@ -303,14 +343,14 @@
     {:else}
       <div class="setup" data-testid="assets-remote">
         <h3>Asset catalog</h3>
-        <p class="muted">{catalogBlocked}</p>
+        <p class="muted">{hubUnavailable}</p>
       </div>
     {/if}
   {:else if !$catalogConfig}
     <div class="setup" data-testid="assets-setup">
       <h3>Asset catalog</h3>
-      <p class="muted">Point fleet at a git repo of skills, agents, hooks, MCP servers and plugin refs. A remote URL is cloned into the path when the path is empty.</p>
-      <label>Local path <input bind:value={setupPath} data-testid="assets-setup-path" /></label>
+      <p class="muted">Point fleet at a git repo of skills, agents, hooks, MCP servers and plugin refs. A remote URL is cloned into the path when the path is empty.{#if hubOverview} The path is on the hub's machine{$hubStatus.url ? ` (${$hubStatus.url})` : ''}, and the clone uses its git credentials.{/if}</p>
+      <label>{hubOverview ? "Path on the hub's machine" : 'Local path'} <input bind:value={setupPath} data-testid="assets-setup-path" /></label>
       <label>Remote URL (optional) <input bind:value={setupRemote} placeholder="git@github.com:you/agent-assets.git" /></label>
       {#if error}<p class="error">{error}</p>{/if}
       <button class="primary" onclick={setup} disabled={busy !== ''} data-testid="assets-setup-submit">{busy === 'setup' ? 'Setting up…' : 'Use this catalog'}</button>
@@ -321,7 +361,7 @@
       <span class="head" data-testid="assets-head">@ {shortHead || '—'}</span>
       <button onclick={pull} disabled={busy !== ''}>{busy === 'pull' ? 'Pulling…' : 'Pull'}</button>
       <button onclick={scan} disabled={busy !== ''} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
-      <button onclick={() => (showImport = true)} disabled={busy !== ''}>Import from host</button>
+      <button onclick={() => (showImport = true)} disabled={busy !== '' || importBlocked !== null} title={importBlocked ?? ''} data-testid="assets-import">Import from host</button>
       <button onclick={() => requestSync({})} disabled={busy !== ''} data-testid="assets-sync">{busy === 'plan' ? 'Planning…' : 'Sync'}</button>
       <button onclick={() => (showSecrets = true)} disabled={busy !== ''} data-testid="assets-secrets">Secrets</button>
       <button onclick={() => (showNewAsset = true)} disabled={busy !== ''} data-testid="assets-new">New asset</button>

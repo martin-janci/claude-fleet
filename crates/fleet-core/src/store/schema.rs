@@ -268,6 +268,17 @@ fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 072: `client_tokens` already has
+/// `assets_admin_at`, and `ALTER TABLE ... ADD COLUMN` would fail again.
+fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'assets_admin_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -709,6 +720,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 71,
         sql: include_str!("../../migrations/071_usage_daily_backfill.sql"),
         already_applied: Some(usage_daily_has_backfill),
+    },
+    // `client_tokens.assets_admin_at` (a client allowed `catalog_admin`)
+    // and its auth-epoch trigger. One ADD COLUMN, its own guard.
+    Migration {
+        version: 72,
+        sql: include_str!("../../migrations/072_client_assets_admin.sql"),
+        already_applied: Some(client_tokens_has_assets_admin),
     },
 ];
 
@@ -3046,7 +3064,10 @@ mod tests {
                 "trusted_at",
                 // Work graph M14 (migration 066): its own trigger,
                 // `auth_epoch_client_tokens_org`.
-                "org_id"
+                "org_id",
+                // Migration 072: its own trigger,
+                // `auth_epoch_client_tokens_assets_admin`.
+                "assets_admin_at"
             ],
             "client_tokens changed: add the column to auth_epoch_client_tokens_update \
              (migration 060) unless it is liveness-only like last_seen_at"
