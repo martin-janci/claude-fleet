@@ -6,7 +6,10 @@
 //! is ever offered: an update engine that cannot verify is one that does
 //! nothing, never one that installs unverified bytes. A rotation adds the
 //! next key here *and* in a signed channel document's `next_keys`.
-pub const RELEASE_KEYS: &[&str] = &[];
+pub const RELEASE_KEYS: &[&str] = &[
+    // Created by scripts/release-key.sh.
+    "RWR7mtPD4eO3+OpcUzdJ0YLgvLn8dqjnQ1QBlXh33aYecfvKTmS19E9p",
+];
 
 /// [`RELEASE_KEYS`] as a [`TrustedKeys`](crate::TrustedKeys).
 pub fn release_keys() -> crate::TrustedKeys {
