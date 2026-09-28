@@ -2536,6 +2536,7 @@ mod tests {
 
     /// Run [`read_script`] with a private `$HOME` (the script only touches
     /// `$HOME/.claude/projects`), exactly as the host would.
+    #[cfg(unix)]
     fn run_script(home: &std::path::Path, script: &str) -> std::process::Output {
         std::process::Command::new("bash")
             .arg("-c")
@@ -2547,11 +2548,13 @@ mod tests {
 
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
+    #[cfg(unix)]
     fn write_transcript(dir: &std::path::Path, text: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(format!("{SID}.jsonl")), text).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_fallback_dir_resolves_to_the_physical_transcript_dir() {
         // Claude records a session started under `link/proj` (link → real)
@@ -2585,6 +2588,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "PHYSICAL");
     }
 
+    #[cfg(unix)]
     #[test]
     fn stored_transcript_path_is_preferred_over_any_derived_path() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2627,6 +2631,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn unknown_cwd_or_truncated_dir_name_is_found_by_session_id() {
         // Claude truncates encoded names over 200 chars with a hash suffix;
@@ -4225,6 +4230,7 @@ mod tests {
         assert_eq!(a.transcript_path.as_deref(), Some(pb.as_str()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fetch_for_row_writes_the_context_back_only_for_the_current_conversation() {
         let dir = tempfile::tempdir().unwrap();
@@ -4260,6 +4266,7 @@ mod tests {
         assert_eq!(ctx(&store), Some(1_000));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fetch_for_row_attaches_only_the_requested_conversations_events() {
         let dir = tempfile::tempdir().unwrap();
@@ -4313,6 +4320,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fetch_for_row_caps_events_at_the_limit_keeping_the_newest() {
         let dir = tempfile::tempdir().unwrap();
@@ -4390,6 +4398,7 @@ mod tests {
         assert_eq!(transcript_read_script(&bad).unwrap_err().code, "E_INVALID");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fetch_conversation_maps_a_missing_local_transcript_to_e_no_transcript() {
         let ssh = Arc::new(SshClient::new());
@@ -4432,6 +4441,7 @@ mod tests {
         assert_ne!(err.code, "E_NO_TRANSCRIPT");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fetch_maps_a_missing_local_transcript_to_e_no_transcript() {
         let ssh = Arc::new(SshClient::new());
@@ -4621,6 +4631,7 @@ mod tests {
         assert!(s.contains("head -c 262144"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_tool_lines_script_prints_matching_lines_and_succeeds_on_no_match() {
         let home = tempfile::tempdir().unwrap();

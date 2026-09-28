@@ -2079,6 +2079,10 @@ at whichever one provisioned it last.
 
 ## Point a desktop at the hub
 
+On Windows this is the recommended setup: Windows' `ssh` cannot multiplex,
+so a standalone Windows desktop pays a fresh SSH connection per command. See
+[windows.md](windows.md).
+
 Settings → **Hub**. On the hub, mint a code and paste it:
 
 ```bash
@@ -2086,8 +2090,9 @@ fleet-hub pair --name laptop     # prints a code; it dies on first use
 ```
 
 The desktop pairs as an ordinary client — the hub cannot tell it from a phone
-and should not. It stores the client token in the OS keychain (macOS) or an
-owner-only 0600 file (elsewhere), never in `state.db` and never in a log
+and should not. It stores the client token in the OS keychain (macOS),
+Windows Credential Manager, or an owner-only 0600 file (Linux), never in
+`state.db` and never in a log
 line. Off macOS that file is *not* an OS secret store: anything running as
 your user can read it, so treat that machine's account as holding a fleet
 credential. Which fleet the app is a window onto is decided **once, at startup**, so

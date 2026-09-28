@@ -48,6 +48,7 @@ mod tests {
         assert_eq!(quote("`evil`"), "'`evil`'");
     }
 
+    #[cfg(unix)]
     #[test]
     fn quote_round_trips_through_bash() {
         for raw in [

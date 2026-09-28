@@ -348,7 +348,7 @@ impl AgentRegistry {
     /// Which connection is live for `alias`. Test-only: it is how an
     /// end-to-end test knows a reconnect has REPLACED the old connection,
     /// which `connected(alias)` cannot tell it.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn live_conn(&self, alias: &str) -> Option<ConnId> {
         self.live(alias).map(|c| c.id)
     }

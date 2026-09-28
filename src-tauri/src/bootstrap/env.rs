@@ -17,6 +17,8 @@ pub(crate) fn appdata_dir() -> std::path::PathBuf {
 /// Pure: compute a new PATH that appends any of `common_bin_dirs` that are not
 /// already in `current` and that `dir_exists` reports as present. Returns
 /// `None` if nothing would change.
+// Unix-only in the app (see `import_login_shell_env`); the tests are portable.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn compute_backfilled_path(
     current: &str,
     common_bin_dirs: &[&str],
@@ -48,6 +50,7 @@ fn compute_backfilled_path(
 /// One shell invocation prints a sentinel, then each value `\x1e`-terminated.
 /// We parse and call set_var on each non-empty value. Best-effort: any failure
 /// leaves the var unchanged.
+#[cfg(unix)]
 pub(crate) fn import_login_shell_env() -> bool {
     let Ok(shell) = std::env::var("SHELL") else {
         return false;
@@ -88,6 +91,8 @@ pub(crate) fn import_login_shell_env() -> bool {
 /// Marker printed by [`import_login_shell_env`] immediately before the env
 /// values, so interactive-shell startup chatter (greetings, version-manager
 /// banners) printed to stdout is dropped during parsing.
+// Unix-only in the app (see `import_login_shell_env`); the tests are portable.
+#[cfg_attr(not(unix), allow(dead_code))]
 const ENV_DUMP_SENTINEL: &str = "__FLEET_ENV_BEGIN__";
 
 /// Parse the `printf` dump from [`import_login_shell_env`]: discard everything
@@ -95,6 +100,8 @@ const ENV_DUMP_SENTINEL: &str = "__FLEET_ENV_BEGIN__";
 /// positionally against `vars`. Empty/whitespace values are skipped. If the
 /// sentinel is absent (degenerate shell), the whole output is parsed as a
 /// fallback.
+// Unix-only in the app (see `import_login_shell_env`); the tests are portable.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn parse_login_env<'a>(stdout: &str, vars: &[&'a str]) -> Vec<(&'a str, String)> {
     let body = stdout
         .rsplit_once(ENV_DUMP_SENTINEL)
@@ -142,6 +149,7 @@ pub(crate) fn backfill_locale_for_gui_launch() {
 /// login-shell import is redundant. Errs toward `false` (run the import) when
 /// unsure: claude-fleet only shells out to `ssh`/`git`/`tmux`, which live in
 /// the standard bin dirs `backfill_path_for_gui_launch` guarantees anyway.
+#[cfg(unix)]
 pub(crate) fn env_looks_complete() -> bool {
     let path = std::env::var("PATH").unwrap_or_default();
     let has_brew = path
@@ -157,6 +165,7 @@ pub(crate) fn env_looks_complete() -> bool {
     has_brew && has_utf8
 }
 
+#[cfg(unix)]
 pub(crate) fn backfill_path_for_gui_launch() {
     const COMMON_BIN_DIRS: &[&str] = &[
         "/opt/homebrew/bin", // Apple Silicon Homebrew

@@ -1274,6 +1274,10 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 /// `claude_cli.rs`, `service/account_usage.rs`, `service/add_project.rs` and
 /// `service/move_session/carry.rs` all write their exec'd stubs through it.
 /// Any new fake the test process itself spawns belongs here too.
+///
+/// Unix only: the fakes are `sh` scripts exec'd by path, so a test that needs
+/// one is a Unix test.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod fake_exec {
     use std::path::{Path, PathBuf};
@@ -1855,6 +1859,7 @@ mod tests {
         assert!(crate::tmux::transcript_mtimes_script(&["bad".into()]).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn mtimes_script_runs_against_a_real_projects_tree() {
         // The script itself, through `bash -c` with a throwaway $HOME: finds a
@@ -1892,6 +1897,7 @@ mod tests {
         assert!(discover_transcripts_script(50).contains("head -n 50"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn discover_script_runs_under_local_bash() {
         use crate::service::sessions::parse_discover_output;
@@ -2074,6 +2080,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_identity_script_runs_under_local_bash() {
         // Real bash, real `tmux` if installed — CI's `ubuntu-24.04` runner
@@ -2122,6 +2129,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_script_is_unknown_when_tmux_is_missing_from_path() {
         // The 127 case this whole fix exists for: a login profile edit or a

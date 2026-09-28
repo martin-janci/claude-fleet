@@ -589,6 +589,7 @@ mod tests {
     /// "s" as a member — "t" exists in the catalog but is not in any layer
     /// the role chain reaches. Used to prove a resolved plan actually
     /// restricts to the role while the scan/inventory still covers both.
+    #[cfg(unix)]
     fn two_skills_and_a_role_layer() -> Vec<(&'static str, String)> {
         vec![
             (
@@ -644,6 +645,7 @@ mod tests {
     /// `plan_sync` against `local` with a temp HOME: one `HostPlan` per
     /// scanning harness, fresh inventory rows persisted, and the plan parked
     /// in the registry under the id it returned.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_plans_every_scanning_harness_and_registers_the_plan() {
@@ -781,6 +783,7 @@ mod tests {
     /// hard if the two arguments are ever "tidied" into the same resolved
     /// catalog (inventory would stop reporting drift for the asset the
     /// layer excludes).
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_plans_the_resolved_catalog_but_scans_the_full_one() {
@@ -841,6 +844,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_removes_a_dropped_plugin_only_on_an_unlayered_host() {
@@ -893,6 +897,7 @@ mod tests {
         assert_eq!(gone_op(&layered), Some(ActionOp::Noop));
     }
 
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn assigning_a_layer_that_drops_an_installed_asset_plans_its_removal() {
@@ -970,6 +975,7 @@ mod tests {
     /// A plan whose actions are blocked on an unresolved `${NAME}` is
     /// refused by name (never by value) unless `force_partial` says to apply
     /// the rest anyway.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn apply_sync_refuses_a_plan_blocked_on_missing_secrets() {
@@ -1031,6 +1037,7 @@ mod tests {
     }
 
     /// End to end on `local` with a temp HOME: plan, apply, and re-plan.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_apply_and_replan_locally() {

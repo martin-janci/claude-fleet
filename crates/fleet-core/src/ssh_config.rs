@@ -123,7 +123,7 @@ fn is_real_alias(alias: &str) -> bool {
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(std::path::PathBuf::from)
+    crate::home::home_dir()
 }
 
 #[cfg(test)]

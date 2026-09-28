@@ -1146,7 +1146,9 @@ pub async fn fetch_account_usage_with(
 mod tests {
     use super::*;
     use crate::ssh_fake::{FakeSsh, Match, Reply};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     /// A fake access token. `CANARY` is its distinctive middle; it must never
     /// be found anywhere but the fake credentials file.
@@ -1670,10 +1672,12 @@ mod tests {
     // must remove. After every run the whole sandbox except the fake
     // credentials file is scanned for the token.
 
+    #[cfg(unix)]
     struct Sandbox {
         dir: tempfile::TempDir,
     }
 
+    #[cfg(unix)]
     const FAKE_CURL: &str = r#"#!/bin/sh
 log="$FAKE_LOG"
 if [ "$1" = -q ]; then echo yes > "$log/q_first"; fi
@@ -1717,14 +1721,17 @@ printf '%s' "$FAKE_STATUS"
 
     /// BASH_ENV for the sandboxed bash: trace every variable, and plant
     /// hostile functions the script must unset before use.
+    #[cfg(unix)]
     const BASH_ENV: &str = r#"set -o functrace
 trap 'declare -p >>"$FAKE_LOG/vars" 2>/dev/null' DEBUG
 rm() { :; }
 curl() { echo HIJACKED; }
 "#;
 
+    #[cfg(unix)]
     const SHIM: &str = "#!/bin/sh\n{ echo \"== $0\"; printf '%s\\n' \"$@\"; env; } >> \"$FAKE_LOG/tool_calls\"\nexec @@REAL@@ \"$@\"\n";
 
+    #[cfg(unix)]
     fn find_tool(name: &str) -> Option<PathBuf> {
         ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
             .iter()
@@ -1734,6 +1741,7 @@ curl() { echo HIJACKED; }
 
     /// Recursively list regular files under `dir` whose bytes contain
     /// `needle`, skipping symlinks and `skip`.
+    #[cfg(unix)]
     fn files_containing(dir: &Path, needle: &[u8], skip: &Path) -> Vec<PathBuf> {
         let mut hits = Vec::new();
         let Ok(rd) = std::fs::read_dir(dir) else {
@@ -1758,9 +1766,11 @@ curl() { echo HIJACKED; }
         hits
     }
 
+    #[cfg(unix)]
     impl Sandbox {
         /// `None` when a needed tool is missing on this machine: the test
         /// skips, except under CI where it must fail loudly.
+        #[cfg(unix)]
         fn new(json_tool: &str) -> Option<Self> {
             use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
             let dir = tempfile::tempdir().unwrap();
@@ -1885,6 +1895,7 @@ curl() { echo HIJACKED; }
         }
     }
 
+    #[cfg(unix)]
     fn missing(tool: &str) -> Option<Sandbox> {
         if std::env::var_os("CI").is_some() {
             panic!("{tool} is required for the usage-script tests under CI");
@@ -1893,12 +1904,14 @@ curl() { echo HIJACKED; }
         None
     }
 
+    #[cfg(unix)]
     fn creds(expires_at: i64, refresh_expires_at: i64) -> String {
         format!(
             r#"{{"claudeAiOauth":{{"accessToken":"{FAKE_TOKEN}","refreshToken":"sk-ant-ort01-refresh-FAKE","expiresAt":{expires_at},"refreshTokenExpiresAt":{refresh_expires_at},"scopes":["user:inference"],"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}}}"#
         )
     }
 
+    #[cfg(unix)]
     fn unix_now() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1907,6 +1920,7 @@ curl() { echo HIJACKED; }
     }
 
     /// POSIX `cksum` of `data`, computed by the system tool.
+    #[cfg(unix)]
     fn cksum_of(data: &str) -> String {
         use std::io::Write;
         let mut child = std::process::Command::new(find_tool("cksum").unwrap())
@@ -1923,6 +1937,7 @@ curl() { echo HIJACKED; }
         String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
     }
 
+    #[cfg(unix)]
     fn run_script_paths(json_tool: &str) {
         let Some(sb) = Sandbox::new(json_tool) else {
             return;
@@ -2048,11 +2063,13 @@ curl() { echo HIJACKED; }
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn script_runs_end_to_end_with_python3_against_a_fake_curl() {
         run_script_paths("python3");
     }
 
+    #[cfg(unix)]
     #[test]
     fn script_runs_end_to_end_with_jq_against_a_fake_curl() {
         run_script_paths("jq");
@@ -2060,6 +2077,7 @@ curl() { echo HIJACKED; }
 
     /// The leak detectors themselves work: a script that keeps the token in
     /// a shell variable, or writes it to a temp file, is caught.
+    #[cfg(unix)]
     #[test]
     fn leak_detectors_catch_a_token_in_a_variable_or_on_disk() {
         let Some(sb) = Sandbox::new("jq") else {
@@ -2092,6 +2110,7 @@ curl() { echo HIJACKED; }
 
     /// SIGKILL while curl is in flight (OOM killer): no token may be left on
     /// disk. This failed when the header went through a temp file.
+    #[cfg(unix)]
     #[test]
     fn sigkill_during_the_request_leaves_no_token_on_disk() {
         for tool in ["python3", "jq"] {
@@ -2144,6 +2163,7 @@ curl() { echo HIJACKED; }
     /// L-2: a hostile login profile (`set -euo pipefail`, a function named
     /// `unset`, shadowing `rm`/`curl`, the variable trace) cannot change the
     /// script's control flow or make it leak the token.
+    #[cfg(unix)]
     #[test]
     fn a_hostile_profile_does_not_change_the_outcome_or_leak() {
         for tool in ["python3", "jq"] {

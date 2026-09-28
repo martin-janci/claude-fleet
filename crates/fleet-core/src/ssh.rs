@@ -70,6 +70,19 @@ struct SshClientInner {
     /// result. A positive result is kept for the process lifetime; a `None`
     /// (both shells failed) is retried after [`TOOLCHAIN_RETRY_AFTER`].
     toolchains: DashMap<String, (std::time::Instant, Option<HostToolchain>)>,
+    /// Whether ssh calls share a per-host ControlMaster. [`mux_supported`]
+    /// by default: on, except on Windows, whose OpenSSH has no ControlMaster.
+    /// Off, every call is its own connection and nothing below touches a
+    /// control socket (no `-O check`, no `-O exit`, no mux retry).
+    mux: bool,
+}
+
+/// Whether this platform's `ssh` can multiplex (ControlMaster over a Unix
+/// socket). Win32-OpenSSH cannot, so a Windows desktop runs every call as a
+/// fresh connection — see docs/windows.md for what that costs and why
+/// hub-client mode is the recommended setup there.
+pub const fn mux_supported() -> bool {
+    cfg!(unix)
 }
 
 /// RAII decrement for `SshClientInner::in_flight`.
@@ -110,6 +123,17 @@ impl SshClient {
         Self::build(None)
     }
 
+    /// [`SshClient::new`] with multiplexing forced on or off rather than
+    /// left to [`mux_supported`]: how a test pins either platform's flags.
+    pub fn new_with_mux(mux: bool) -> Self {
+        Self::build_with(None, PathBuf::from("ssh"), mux)
+    }
+
+    /// Whether this client shares a ControlMaster per host.
+    pub fn multiplexes(&self) -> bool {
+        self.inner.mux
+    }
+
     /// A client that routes each host to its own transport: a host row whose
     /// `transport` is `'agent'` is reached through the agent connected in
     /// `agents` under that host's fleet alias, and every other host is
@@ -127,10 +151,14 @@ impl SshClient {
     }
 
     fn build(route: Option<Arc<crate::agent::HostRouter>>) -> Self {
-        Self::build_with(route, PathBuf::from("ssh"))
+        Self::build_with(route, PathBuf::from("ssh"), mux_supported())
     }
 
-    fn build_with(route: Option<Arc<crate::agent::HostRouter>>, ssh_bin: PathBuf) -> Self {
+    fn build_with(
+        route: Option<Arc<crate::agent::HostRouter>>,
+        ssh_bin: PathBuf,
+        mux: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(SshClientInner {
                 seen: DashMap::new(),
@@ -140,6 +168,7 @@ impl SshClient {
                 route,
                 ssh_bin,
                 toolchains: DashMap::new(),
+                mux,
             }),
         }
     }
@@ -149,7 +178,13 @@ impl SshClient {
     /// mux-failure detection and the one-retry-after-reset path without a
     /// real host.
     pub fn with_ssh_binary(path: impl Into<PathBuf>) -> Self {
-        Self::build_with(None, path.into())
+        Self::build_with(None, path.into(), mux_supported())
+    }
+
+    /// [`SshClient::with_ssh_binary`] with multiplexing forced on or off.
+    #[cfg(all(test, unix))]
+    fn with_ssh_binary_and_mux(path: impl Into<PathBuf>, mux: bool) -> Self {
+        Self::build_with(None, path.into(), mux)
     }
 
     /// A fresh `Command` for the configured ssh binary (`"ssh"` in
@@ -226,15 +261,24 @@ impl SshClient {
     /// The `-o` flags shared by every multiplexed ssh invocation. With
     /// `ControlMaster=auto` + `ControlPersist`, ssh creates the master on the
     /// first call and reuses/recreates it as needed — no app-side bookkeeping.
+    ///
+    /// Without multiplexing (Windows) the three `Control*` pairs are left out
+    /// and the rest is the same: every call then connects on its own, so
+    /// `ConnectTimeout` bounds each one.
     pub fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
-        let path = self.control_path(host);
-        vec![
-            "-o".into(),
-            "ControlMaster=auto".into(),
-            "-o".into(),
-            format!("ControlPath={}", path.display()),
-            "-o".into(),
-            "ControlPersist=10m".into(),
+        let mut opts: Vec<String> = Vec::new();
+        if self.inner.mux {
+            let path = self.control_path(host);
+            opts.extend([
+                "-o".into(),
+                "ControlMaster=auto".into(),
+                "-o".into(),
+                format!("ControlPath={}", path.display()),
+                "-o".into(),
+                "ControlPersist=10m".into(),
+            ]);
+        }
+        opts.extend([
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
@@ -251,7 +295,8 @@ impl SshClient {
             "ServerAliveInterval=5".into(),
             "-o".into(),
             "ServerAliveCountMax=2".into(),
-        ]
+        ]);
+        opts
     }
 
     /// The attached terminal's own ControlPath: a probe's master reset must
@@ -636,7 +681,7 @@ impl SshClient {
             // still want the OS to clean up the child eventually.
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| IpcError::new(spawn_code, format!("ssh spawn {host}: {e}")))?;
+            .map_err(|e| IpcError::new(spawn_code, spawn_error_message(host, &e)))?;
 
         // Take stdout/stderr handles BEFORE moving `child` into the wait —
         // reader tasks keep the pipes drained so the child can't block on a
@@ -727,7 +772,9 @@ impl SshClient {
                 max_output,
             )
             .await?;
-        if !is_mux_failure(&first) {
+        // Without a master an exit 255 is a failed connection, not a dead
+        // mux: nothing to check, reset or retry.
+        if !self.inner.mux || !is_mux_failure(&first) {
             return Ok(first);
         }
         if self.master_alive(host).await {
@@ -785,6 +832,9 @@ impl SshClient {
     /// deliberately outside this `-O check` and this reset — a probe's
     /// master dying must never take the attached terminal down with it.
     async fn maybe_reset_master(&self, host: &str) -> bool {
+        if !self.inner.mux {
+            return false;
+        }
         if self.others_in_flight(host) > 0 {
             // warn: a timeout is a failure path, and this is its only log line
             // (the caller just gets E_SSH_TIMEOUT).
@@ -849,6 +899,9 @@ impl SshClient {
     /// Also removes the socket file so `ControlMaster=auto` cannot attach to
     /// a dead master that never answered the exit request.
     pub(crate) async fn reset_master(&self, host: &str) {
+        if !self.inner.mux {
+            return;
+        }
         let path = self.control_path(host);
         let mut cmd = self.ssh_command();
         cmd.args([
@@ -882,6 +935,9 @@ impl SshClient {
     /// `spawn()` not `status()` so quit isn't serialised on N round-trips,
     /// and ControlPersist would reap an un-exited master anyway.
     pub fn shutdown_all(&self) {
+        if !self.inner.mux {
+            return;
+        }
         let hosts: Vec<String> = self.inner.seen.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
             for path in [self.control_path(&host), self.control_path_for_pty(&host)] {
@@ -940,7 +996,7 @@ impl SshClient {
         resolved
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn forget_toolchain_for_tests(&self, host: &str) {
         self.inner.toolchains.remove(host);
     }
@@ -1719,11 +1775,23 @@ pub(crate) fn is_mux_failure(out: &Output) -> bool {
         && crate::ssh_diag::classify::mentions_mux_failure(&String::from_utf8_lossy(&out.stderr))
 }
 
-fn cache_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".cache").join("claude-fleet");
+/// The text of a failed `ssh` spawn. A missing binary gets the fix in the
+/// message itself, because on Windows that is the likely cause and the
+/// remedy is a Settings switch rather than a package manager.
+fn spawn_error_message(host: &str, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        let fix = if cfg!(windows) {
+            "install the OpenSSH Client (Settings → System → Optional features)"
+        } else {
+            "install OpenSSH and make sure `ssh` is on PATH"
+        };
+        return format!("ssh spawn {host}: `ssh` was not found — {fix}");
     }
-    std::env::temp_dir().join("claude-fleet")
+    format!("ssh spawn {host}: {e}")
+}
+
+fn cache_dir() -> PathBuf {
+    crate::home::cache_dir()
 }
 
 #[cfg(test)]
@@ -1750,7 +1818,7 @@ mod tests {
 
     #[test]
     fn pty_mux_opts_use_their_own_socket_and_a_gentler_keepalive() {
-        let c = SshClient::new();
+        let c = SshClient::new_with_mux(true);
         let opts = c.mux_opts_for_pty("h", Duration::from_secs(5)).join(" ");
         assert!(
             opts.contains("ControlPath=") && opts.contains("cm-h-tty.sock"),
@@ -1775,7 +1843,7 @@ mod tests {
 
     #[test]
     fn mux_opts_carry_controlmaster_auto_and_persist() {
-        let c = SshClient::new();
+        let c = SshClient::new_with_mux(true);
         let opts = c.mux_opts("h", Duration::from_secs(5));
         assert!(opts.iter().any(|o| o == "ControlMaster=auto"));
         assert!(opts.iter().any(|o| o == "ControlPersist=10m"));
@@ -1785,6 +1853,61 @@ mod tests {
         // attach onto an existing one.
         assert!(opts.iter().any(|o| o == "ServerAliveInterval=5"));
         assert!(opts.iter().any(|o| o == "ServerAliveCountMax=2"));
+    }
+
+    #[test]
+    fn a_missing_ssh_binary_says_how_to_install_it() {
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+        let m = spawn_error_message("h", &missing);
+        assert!(m.starts_with("ssh spawn h: `ssh` was not found"), "{m}");
+        assert!(
+            m.contains(if cfg!(windows) {
+                "OpenSSH Client"
+            } else {
+                "on PATH"
+            }),
+            "{m}"
+        );
+        let other = std::io::Error::other("boom");
+        assert_eq!(spawn_error_message("h", &other), "ssh spawn h: boom");
+    }
+
+    #[test]
+    fn the_default_client_multiplexes_only_where_ssh_can() {
+        assert_eq!(SshClient::new().multiplexes(), cfg!(unix));
+        assert!(SshClient::new_with_mux(true).multiplexes());
+        assert!(!SshClient::new_with_mux(false).multiplexes());
+    }
+
+    /// Windows: no `Control*` option at all (Win32-OpenSSH has no
+    /// ControlMaster), and every other option exactly as with a master.
+    #[test]
+    fn without_mux_the_opts_drop_only_the_control_pairs() {
+        let with = SshClient::new_with_mux(true).mux_opts("h", Duration::from_secs(5));
+        let without = SshClient::new_with_mux(false).mux_opts("h", Duration::from_secs(5));
+        assert!(
+            without.iter().all(|o| !o.starts_with("Control")),
+            "{without:?}"
+        );
+        let rest: Vec<&String> = with
+            .chunks(2)
+            .filter(|p| !p[1].starts_with("Control"))
+            .flatten()
+            .collect();
+        assert_eq!(without.iter().collect::<Vec<_>>(), rest);
+        assert!(without.chunks(2).all(|p| p[0] == "-o"), "{without:?}");
+
+        let pty = SshClient::new_with_mux(false)
+            .mux_opts_for_pty("h", Duration::from_secs(5))
+            .join(" ");
+        assert!(!pty.contains("Control"), "{pty}");
+        assert!(
+            pty.contains("ServerAliveInterval=15")
+                && pty.contains("ServerAliveCountMax=3")
+                && pty.contains("BatchMode=yes")
+                && pty.contains("ConnectTimeout=5"),
+            "{pty}"
+        );
     }
 
     #[test]
@@ -1937,7 +2060,7 @@ mod tests {
             eprintln!("skipping: no sh on this box");
             return;
         }
-        let c = SshClient::new();
+        let c = SshClient::new_with_mux(true);
         let host = "fleet-test-nonexistent-host-2";
         let mut cmd = tokio::process::Command::new("sh");
         cmd.args(["-c", "sleep 30"]);
@@ -2130,6 +2253,7 @@ mod tests {
     /// the fix and explains why a rename alone is not one; the probe guard it
     /// prepends runs before `body`, so a fake that counts its invocations
     /// still counts only the real ones.
+    #[cfg(unix)]
     fn fake_ssh(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
         write_exec(dir, "ssh", &format!("#!/bin/sh\n{PROBE_GUARD}{body}\n"))
@@ -2138,11 +2262,10 @@ mod tests {
     #[test]
     fn mux_failures_are_exit_255_with_a_master_message() {
         let out = |code: i32, stderr: &str| Output {
-            status: std::process::ExitStatus::from_raw(code << 8),
+            status: crate::agent::transport::exit_status(code),
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         };
-        use std::os::unix::process::ExitStatusExt;
         assert!(is_mux_failure(&out(
             255,
             "mux_client_request_session: read from master failed"
@@ -2175,6 +2298,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_resets_the_master_and_retries_once() {
         // `-O check` answers 1 (dead) so the master is actually reset.
@@ -2203,6 +2327,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_on_a_live_master_retries_without_resetting() {
         // `-O check` answers 0 (alive): a mux failure on this command does
@@ -2232,6 +2357,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_is_retried_only_once() {
         // Always fails, and the master never answers `-O check` (dead), so
@@ -2252,6 +2378,7 @@ mod tests {
         assert_eq!(c.master_reset_counts().get("h-twice"), Some(&1));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_dead_host_is_not_retried() {
         let dir = tempfile::tempdir().unwrap();
@@ -2275,6 +2402,35 @@ mod tests {
             "exactly one attempt"
         );
         assert!(!c.master_reset_counts().contains_key("h-dead"));
+    }
+
+    /// Without a master, an exit 255 that reads like a dead mux is just a
+    /// failed connection: one attempt, and no `-O check` / `-O exit` is ever
+    /// spawned against a control socket that does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn without_mux_a_mux_looking_failure_is_neither_checked_nor_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls");
+        let bin = fake_ssh(
+            dir.path(),
+            &format!(
+                "echo \"$*\" >> '{l}'; echo 'mux_client_request_session: read from master failed' >&2; exit 255",
+                l = log.display()
+            ),
+        );
+        let c = SshClient::with_ssh_binary_and_mux(bin, false);
+        let out = c
+            .run("h-nomux", &["true"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(out.status.code(), Some(255));
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 1, "exactly one attempt: {calls}");
+        assert!(!calls.contains("-O"), "no control request: {calls}");
+        assert!(!calls.contains("Control"), "no Control option: {calls}");
+        assert!(!c.master_reset_counts().contains_key("h-nomux"));
+        c.shutdown_all(); // a no-op without mux
     }
 
     #[test]
@@ -2303,6 +2459,7 @@ mod tests {
         assert!(parse_toolchain("").is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn toolchain_is_resolved_once_and_a_failure_is_retried_after_the_backoff() {
         let dir = tempfile::tempdir().unwrap();
@@ -2345,6 +2502,7 @@ mod tests {
     /// `via_cli:local` / `via_host:local` on a desktop: the stdin-fed
     /// script runs here, the way `run_shell` treats `local`, and `ssh` is
     /// never spawned for a host that resolves to nothing.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_with_stdin_on_local_spawns_locally_and_never_ssh() {
         let dir = tempfile::tempdir().unwrap();

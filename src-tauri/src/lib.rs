@@ -7,10 +7,9 @@ mod pty;
 pub use app_events::AppHandleEventBus;
 
 use backend::{Backend, OsTokenStore};
-use bootstrap::env::{
-    appdata_dir, backfill_locale_for_gui_launch, backfill_path_for_gui_launch, env_looks_complete,
-    import_login_shell_env,
-};
+use bootstrap::env::{appdata_dir, backfill_locale_for_gui_launch};
+#[cfg(unix)]
+use bootstrap::env::{backfill_path_for_gui_launch, env_looks_complete, import_login_shell_env};
 use bootstrap::singleton::kill_other_instances;
 use commands::cancel::cancel_command;
 use fleet_core::store::Store;
@@ -66,10 +65,17 @@ pub fn run() {
     // Step 1 spawns a login shell (~100-500ms). Skip it when the env already
     // looks like a terminal launch — the common dev case — so startup stays
     // snappy; the backfills below still run as a safety net.
-    if !env_looks_complete() {
-        import_login_shell_env();
+    //
+    // Steps 1 and 2 are Unix-only: Windows has no login shell to ask, and a
+    // Git Bash `$SHELL` would hand back a POSIX-style PATH that breaks every
+    // spawn.
+    #[cfg(unix)]
+    {
+        if !env_looks_complete() {
+            import_login_shell_env();
+        }
+        backfill_path_for_gui_launch();
     }
-    backfill_path_for_gui_launch();
     backfill_locale_for_gui_launch();
 
     let ssh_client = std::sync::Arc::new(fleet_core::ssh::SshClient::new());
@@ -172,6 +178,26 @@ pub fn run() {
                     Ok(0) => {}
                     Ok(n) => tracing::info!("backfilled {n} friendly_name row(s)"),
                     Err(e) => tracing::warn!("friendly_name backfill failed: {e}"),
+                }
+            }
+            // Windows is a client, never a fleet host: no tmux, no bash, no
+            // Claude Code sessions of its own (docs/windows.md). `local` goes
+            // off the way it does on a hub with `hub.local_host=false`, before
+            // the ticks and the control API start: every command naming it is
+            // refused with E_NOTFOUND, and the seeded row is hidden.
+            #[cfg(windows)]
+            {
+                fleet_core::service::hub::disable_local_host();
+                if let Ok(s) = store.lock() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    match fleet_core::service::hub::retire_local_host(&s, now) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!("retired {n} session(s) on the local host"),
+                        Err(e) => tracing::warn!("could not retire the local host: {e}"),
+                    }
                 }
             }
             app.manage(std::sync::Arc::clone(&store));

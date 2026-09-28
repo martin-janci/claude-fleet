@@ -742,6 +742,7 @@ fn place_private_file(
         return Ok(());
     }
     std::fs::copy(tmp, target)?;
+    #[cfg(unix)]
     std::fs::set_permissions(
         target,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
@@ -949,6 +950,7 @@ mod tests {
     /// The local twin of the remote fallback: when the rename fails the way
     /// a bind-mounted target makes it fail, the content must still land, at
     /// 0600 even though the target was world-readable, with no tmp left.
+    #[cfg(unix)]
     #[test]
     fn place_private_file_falls_back_to_a_copy_when_the_rename_fails() {
         use std::os::unix::fs::PermissionsExt;

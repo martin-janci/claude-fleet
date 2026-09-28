@@ -3621,6 +3621,7 @@ fn worktree_add_script_blank_base_normalizes_to_default() {
 
 // ── create_worktree_local integration test ────────────────────────────────
 
+#[cfg(unix)]
 #[tokio::test]
 async fn create_worktree_local_creates_and_is_idempotent() {
     use std::process::Command;
@@ -4767,6 +4768,7 @@ async fn ensure_remote_project_keeps_other_git_failures_verbatim() {
 /// Runs the real mirror script against local git repos: a bare `origin`, a
 /// `source` clone that pushes one branch and keeps another local-only, and a
 /// `remote` clone standing in for the other host.
+#[cfg(unix)]
 #[tokio::test]
 async fn ensure_remote_project_script_mirrors_pushed_branches_and_refuses_unpushed_ones() {
     use std::process::Command;
