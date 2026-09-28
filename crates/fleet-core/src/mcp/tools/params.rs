@@ -236,14 +236,14 @@ pub struct RewindConversationParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,
     /// Keep the transcript strictly before this turn's prompt_uuid (from
-    /// session_conversation). Omit to keep all of it.
+    /// session_conversation). Required to rewind; omit to fork keeping all
+    /// of it.
     #[serde(default)]
     pub anchor_uuid: Option<String>,
     /// "rewind" restarts this session on the truncated copy; "fork" leaves
     /// it alone and starts a new session on the copy.
     pub mode: String,
-    /// fork only: name a new worktree for the new session; omit to reuse
-    /// this session's.
+    /// Not implemented (refused); omit it.
     #[serde(default)]
     pub new_worktree: Option<String>,
     /// Approved confirmation; required for "rewind".

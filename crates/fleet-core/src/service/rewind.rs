@@ -32,17 +32,33 @@ pub const NO_TURNS: &str = "__CF_NO_TURNS__";
 /// What this adds is one `awk` pass:
 ///
 /// - lines are copied from the start and stop **before** the line whose
-///   `uuid` is `anchor_uuid`; `None` copies the whole file, which is what
-///   forking the newest turn means;
+///   TOP-LEVEL `uuid` is `anchor_uuid`; `None` copies the whole file, which
+///   is what forking the newest turn means (Fork only — `rewind_conversation`
+///   refuses a Rewind without an anchor);
 /// - `sessionId` is rewritten to `new_id` on every copied line;
 /// - `cwd` is rewritten when `cwd_rewrite` is set (a fork into a different
 ///   worktree, whose pane must start where the transcript says it did);
 /// - the result lands in `dest_dir` (else beside the source), named
 ///   `<new_id>.jsonl`, and its path is the only thing on stdout.
 ///
+/// Finding the anchor is `top_uuid_is()`: only a line that contains the
+/// anchor text at all (a cheap `index` prefilter, so the scan runs on a
+/// handful of lines, not the whole file) is walked character by character,
+/// tracking string / escape state and brace depth, and it matches only a
+/// `"uuid"` KEY at depth 1 whose value is the anchor, whitespace allowed
+/// around the `:`. A `"uuid"` nested inside `message` or a tool result, or
+/// the anchor appearing as some other key's value (the next entry's
+/// `parentUuid`), does not stop the copy. `LC_ALL=C` keeps `substr` a byte
+/// operation, so that walk is linear. Limitation: it is a lexer, not a JSON
+/// parser — it trusts the line to be one well-formed JSON object, which is
+/// what Claude Code writes.
+///
 /// Both replacements go through the script's own `rep()`, which is
 /// `index`-based and therefore LITERAL. `gsub` would treat the search text as
-/// a regex, and a cwd is full of `.` and `+`.
+/// a regex, and a cwd is full of `.` and `+`. They match the COMPACT form
+/// (`"sessionId":"…"`, no whitespace), which is how Claude Code serialises
+/// every entry (`JSON.stringify`); a hand-edited, pretty-printed line would
+/// keep its old id.
 ///
 /// Copying a prefix rather than filtering by turn is deliberate: it keeps the
 /// header entries that carry no uuid (`custom-title`, `mode`, `agent-name`,
@@ -87,7 +103,7 @@ if [ -z "$destdir" ]; then destdir=$(dirname -- "$f"); fi
 mkdir -p -- "$destdir" || exit 1
 dest="$destdir/$newid.jsonl"
 tmp="$dest.part.$$"
-awk -v anchor="$anchor" -v oldid={id_q} -v newid="$newid" \
+LC_ALL=C awk -v anchor="$anchor" -v oldid={id_q} -v newid="$newid" \
     -v oldcwd="$oldcwd" -v newcwd="$newcwd" '
 function rep(s, from, to,    out, p) {{
   if (from == "") return s
@@ -98,7 +114,33 @@ function rep(s, from, to,    out, p) {{
   }}
   return out s
 }}
-anchor != "" && index($0, "\"uuid\":\"" anchor "\"") > 0 {{ found = 1; exit }}
+function top_uuid_is(s, want,    n, i, c, depth, instr, esc, j) {{
+  n = length(s); depth = 0; instr = 0; esc = 0
+  for (i = 1; i <= n; i++) {{
+    c = substr(s, i, 1)
+    if (instr) {{
+      if (esc) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == "\"") instr = 0
+      continue
+    }}
+    if (c == "{{" || c == "[") {{ depth++; continue }}
+    if (c == "}}" || c == "]") {{ depth--; continue }}
+    if (c != "\"") continue
+    if (depth == 1 && substr(s, i, 6) == "\"uuid\"") {{
+      j = i + 6
+      while (substr(s, j, 1) == " " || substr(s, j, 1) == "\t") j++
+      if (substr(s, j, 1) == ":") {{
+        j++
+        while (substr(s, j, 1) == " " || substr(s, j, 1) == "\t") j++
+        if (substr(s, j, length(want) + 2) == "\"" want "\"") return 1
+      }}
+    }}
+    instr = 1
+  }}
+  return 0
+}}
+anchor != "" && index($0, anchor) > 0 && top_uuid_is($0, anchor) {{ found = 1; exit }}
 {{
   line = rep($0, "\"sessionId\":\"" oldid "\"", "\"sessionId\":\"" newid "\"")
   if (newcwd != "") line = rep(line, "\"cwd\":\"" oldcwd "\"", "\"cwd\":\"" newcwd "\"")
@@ -112,7 +154,7 @@ if [ "$rc" -ne 0 ]; then
   if [ "$rc" -eq 3 ]; then printf '{NO_ANCHOR} %s\n' "$anchor" >&2; fi
   exit "$rc"
 fi
-if ! grep -q -F -e '"uuid":"' -- "$tmp"; then
+if ! grep -q -E -e '"uuid"[[:space:]]*:[[:space:]]*"' -- "$tmp"; then
   rm -f -- "$tmp"
   printf '{NO_TURNS}\n' >&2
   exit 5
@@ -211,6 +253,66 @@ fn project_id_for_fork(project_id: Option<i64>) -> Result<i64, IpcError> {
     })
 }
 
+/// What `rewind_conversation` does to the world after the transcript copy:
+/// read the pane, restart it, spawn a session. A seam so the service's own
+/// sequencing — each mode's follow-up called exactly once, and what is undone
+/// when the restart fails — is testable without a live tmux or a host
+/// (spec §7). Production is [`LiveOps`]; the script and the cleanup `rm`
+/// still go through `run_shell` either way.
+#[async_trait::async_trait]
+trait ReplyOps: Send + Sync {
+    /// The pane's live `claude_status` (a `session_activity` probe), or
+    /// `None` when it cannot tell — an unreachable host, a blank pane.
+    async fn pane_status(&self, session_id: i64) -> Option<String>;
+    async fn restart(
+        &self,
+        args: crate::service::sessions::RestartSessionArgs,
+    ) -> Result<SessionRow, IpcError>;
+    async fn spawn(
+        &self,
+        args: crate::service::sessions::NewSessionArgs,
+    ) -> Result<SessionRow, IpcError>;
+}
+
+/// The real follow-ups: `session_activity`, `restart_session`, `new_session`.
+struct LiveOps<'a> {
+    store: &'a Mutex<Store>,
+    ssh: &'a Arc<SshClient>,
+    reg: &'a Arc<CancellationRegistry>,
+}
+
+#[async_trait::async_trait]
+impl ReplyOps for LiveOps<'_> {
+    async fn pane_status(&self, session_id: i64) -> Option<String> {
+        crate::service::sessions::session_activity(self.store, self.ssh, session_id)
+            .await
+            .ok()
+            .and_then(|p| p.claude_status)
+    }
+    async fn restart(
+        &self,
+        args: crate::service::sessions::RestartSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        crate::service::sessions::restart_session(args, self.store, self.ssh).await
+    }
+    async fn spawn(
+        &self,
+        args: crate::service::sessions::NewSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        crate::service::sessions::new_session(args, self.store, self.ssh, self.reg).await
+    }
+}
+
+/// Whether a `claude_status` value means the session is between turns — the
+/// same set as the frontend's `isQuietStatus`. `None` and anything this
+/// build cannot parse are NOT quiet: an unknown state is not evidence that a
+/// restart throws nothing away.
+fn status_is_quiet(status: Option<&str>) -> bool {
+    status
+        .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok())
+        .is_some_and(crate::service::pane_intel::ClaudeStatus::is_quiet)
+}
+
 /// Truncate a session's transcript into a new conversation and act on it.
 ///
 /// One engine for three buttons: Fork here spawns on the copy, Rewind here
@@ -233,9 +335,29 @@ pub async fn rewind_conversation(
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<SessionRow, IpcError> {
+    rewind_conversation_with(args, store, ssh, &LiveOps { store, ssh, reg }).await
+}
+
+async fn rewind_conversation_with(
+    args: RewindArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    ops: &dyn ReplyOps,
+) -> Result<SessionRow, IpcError> {
     if let Some(a) = args.anchor_uuid.as_deref() {
         crate::validate::claude_session_id(a)
             .map_err(|_| IpcError::new(codes::E_INVALID, "anchor_uuid must be a lowercase UUID"))?;
+    }
+    // A rewind with no anchor would copy the WHOLE transcript and restart
+    // the pane on it: the same conversation under a new id, reported as a
+    // success — a silent no-op. Spec §3 gives "no anchor ⇒ keep the whole
+    // file" to Fork alone (forking the newest turn); Rewind and Retry always
+    // name their own turn's prompt.
+    if args.mode == RewindMode::Rewind && args.anchor_uuid.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "rewind needs anchor_uuid: the prompt to rewind to before",
+        ));
     }
     // Forking into a NEW worktree is not implemented — see `RewindArgs::
     // new_worktree`'s doc for the full reasoning. Refuse up front, before
@@ -307,13 +429,28 @@ pub async fn rewind_conversation(
         (sess, claude_id, stored_transcript_path, fallback_cwd)
     };
 
-    // Rewind respawns the pane, so doing it mid-turn throws the turn away.
-    // Fork is exempt: it touches nothing live.
-    if args.mode == RewindMode::Rewind && sess.claude_status.as_deref() == Some("working") {
-        return Err(IpcError::new(
-            codes::E_INVALID,
-            "this session is mid-turn; interrupt it first, then rewind",
-        ));
+    // Rewind respawns the pane, so doing it mid-turn throws the turn away —
+    // and "mid-turn" is not only `working`: a `blocked` session is waiting
+    // on a permission prompt or a question INSIDE its turn. So the rule is
+    // the positive one, quiet or refused (`ClaudeStatus::is_quiet`, the
+    // frontend's `isQuietStatus`). The stored status can lag the pane by a
+    // whole reconcile tick, so the pane is asked first, live; only when it
+    // cannot say (unreachable, blank) does the stored value decide. Fork is
+    // exempt: it touches nothing live.
+    if args.mode == RewindMode::Rewind {
+        let live = ops.pane_status(sess.id).await;
+        let status = live.as_deref().or(sess.claude_status.as_deref());
+        if !status_is_quiet(status) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                match status {
+                    Some(s) => format!(
+                        "this session is mid-turn ({s}); interrupt it or answer its prompt first, then rewind"
+                    ),
+                    None => "can't tell whether this session is mid-turn (no status yet); interrupt it first, then rewind".to_string(),
+                },
+            ));
+        }
     }
 
     let new_id = mint_conversation_id();
@@ -342,7 +479,7 @@ pub async fn rewind_conversation(
         if stderr.contains(NO_ANCHOR) {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
-                "that reply is no longer in the transcript",
+                "that turn is no longer in this conversation's transcript — the conversation was rewound (or compacted) past it since it was loaded; reload the conversation and try again",
             ));
         }
         if stderr.contains(NO_TURNS) {
@@ -376,38 +513,60 @@ pub async fn rewind_conversation(
                     sess.context.model.as_deref(),
                 )?;
             }
-            let restarted = crate::service::sessions::restart_session(
-                crate::service::sessions::RestartSessionArgs {
+            let restarted = ops
+                .restart(crate::service::sessions::RestartSessionArgs {
                     host_alias: sess.host_alias.clone(),
                     name: sess.tmux_name.clone(),
                     force: false,
-                },
-                store,
-                ssh,
-            )
-            .await;
+                })
+                .await;
             // The rebind is committed before the restart can be attempted at
             // all, and the restart can still fail for something only it can
             // know (`E_REPAIR_REQUIRED` from `ensure_session_workspace`, an
-            // unreachable host). Put the row back on the conversation it was
-            // on, so it never reads a frozen copy while the live Claude keeps
-            // writing the original — the same restore-on-failure shape
-            // `send_prompt_inner` uses for `last_prompt`. Best-effort: the
-            // restart's error is what the caller must see.
+            // unreachable host). Undo both halves of what this call did, so
+            // the failure leaves nothing behind: the row goes back on the
+            // conversation it was on (it must never read a frozen copy while
+            // the live Claude keeps writing the original), the new
+            // conversation's row is dropped rather than left listed as a
+            // conversation that never ran, and the new `.jsonl` is removed
+            // from the host rather than left as an orphan. `revert_rebind`
+            // is not a second rebind: a `Resume` rebind would write a
+            // conversation row of its own and mark the context stale.
+            // Best-effort: the restart's error is what the caller must see.
             if let Err(e) = &restarted {
-                if let Ok(s) = lock(store) {
-                    if let Err(re) = s.rebind_conversation(
+                match lock(store).and_then(|s| {
+                    s.revert_rebind(
                         sess.id,
+                        &new_id,
                         &claude_id,
-                        StartSource::Resume,
                         stored_transcript_path.as_deref(),
-                        sess.context.model.as_deref(),
-                    ) {
-                        tracing::warn!(
+                    )
+                }) {
+                    Ok(_) => {}
+                    Err(re) => tracing::warn!(
+                        session_id = sess.id,
+                        error = %re.message,
+                        "[rewind] restoring the previous conversation failed"
+                    ),
+                }
+                // Only ever the file this call wrote: the script prints
+                // `<dest dir>/<new id>.jsonl`, and anything else on stdout is
+                // not a path this code is willing to delete.
+                let ours = new_path.ends_with(&format!("/{new_id}.jsonl"));
+                if ours {
+                    let rm = format!("rm -f -- {}", quote(&new_path));
+                    match run_shell(ssh, &sess.host_alias, &rm).await {
+                        Ok(o) if o.status.success() => {}
+                        Ok(o) => tracing::warn!(
+                            session_id = sess.id,
+                            stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                            "[rewind] removing the unused transcript copy failed"
+                        ),
+                        Err(re) => tracing::warn!(
                             session_id = sess.id,
                             error = %re.message,
-                            "[rewind] restoring the previous conversation failed"
-                        );
+                            "[rewind] removing the unused transcript copy failed"
+                        ),
                     }
                 }
                 tracing::warn!(
@@ -426,8 +585,8 @@ pub async fn rewind_conversation(
             // starts exactly where `rewind_script` already wrote the
             // transcript above.
             let project_id = project_id_for_fork(sess.project_id)?;
-            let row = crate::service::sessions::new_session(
-                crate::service::sessions::NewSessionArgs {
+            let row = ops
+                .spawn(crate::service::sessions::NewSessionArgs {
                     host_alias: sess.host_alias.clone(),
                     project_id,
                     worktree_id: sess.worktree_id,
@@ -439,12 +598,8 @@ pub async fn rewind_conversation(
                     start_command: None,
                     friendly_name: None,
                     resume_claude_session_id: Some(new_id.clone()),
-                },
-                store,
-                ssh,
-                reg,
-            )
-            .await?;
+                })
+                .await?;
             // `new_session` records the resumed id through
             // `set_claude_session_id`, which is `rebind_conversation(...,
             // StartSource::Fleet, ...)`: the forked conversation would be
@@ -847,19 +1002,22 @@ mod tests {
     #[tokio::test]
     async fn rewinding_a_working_session_is_refused_before_anything_runs() {
         let (s, id) = store_with_session("running", Some("working"));
-        let err = rewind_conversation(
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, None);
+        let err = rewind_conversation_with(
             RewindArgs {
                 session_id: id,
                 anchor_uuid: Some(A2.into()),
                 mode: RewindMode::Rewind,
                 new_worktree: None,
             },
-            &std::sync::Mutex::new(s),
+            &store,
             &std::sync::Arc::new(SshClient::new()),
-            &CancellationRegistry::new(),
+            &ops,
         )
         .await
         .expect_err("a mid-turn restart throws the turn away");
+        assert_eq!(ops.restarts(), 0);
         assert_eq!(err.code, codes::E_INVALID);
         assert!(
             err.message.contains("interrupt"),
@@ -900,7 +1058,7 @@ mod tests {
         let err = rewind_conversation(
             RewindArgs {
                 session_id: 9999,
-                anchor_uuid: None,
+                anchor_uuid: Some(A2.into()),
                 mode: RewindMode::Rewind,
                 new_worktree: None,
             },
@@ -928,7 +1086,7 @@ mod tests {
         let err = rewind_conversation(
             RewindArgs {
                 session_id: id,
-                anchor_uuid: None,
+                anchor_uuid: Some(A2.into()),
                 mode: RewindMode::Rewind,
                 new_worktree: None,
             },
@@ -1152,5 +1310,430 @@ mod tests {
         .await
         .expect_err("unreachable host");
         assert_ne!(err.code, codes::E_UNSUPPORTED);
+    }
+
+    // ── the anchor is the TOP-LEVEL uuid ───────────────────────────────
+
+    /// A tool result (or any nested object) can carry a `"uuid"` of its own,
+    /// and the anchor also appears as the NEXT entry's `parentUuid`. Neither
+    /// may stop the copy: only the entry whose own `uuid` is the anchor does.
+    /// And the key is found with whitespace around its `:`.
+    #[test]
+    fn only_a_top_level_uuid_is_the_anchor_and_whitespace_is_tolerated() {
+        let d = tmp();
+        let body = format!(
+            concat!(
+                r#"{{"type":"mode","sessionId":"{old}"}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"{a1}","sessionId":"{old}","message":{{"role":"user","content":"one"}}}}"#,
+                "\n",
+                // A nested object whose "uuid" IS the anchor: not the entry.
+                r#"{{"type":"user","uuid":"bbbb","sessionId":"{old}","toolUseResult":{{"uuid":"{a2}","s":"a \"quoted\" {{ brace"}},"message":{{"role":"user","content":[{{"type":"tool_result"}}]}}}}"#,
+                "\n",
+                // A string VALUE equal to "uuid" followed by the anchor text.
+                r#"{{"type":"assistant","uuid":"cccc","note":"uuid","parentUuid":"{a2}","sessionId":"{old}","message":{{"role":"assistant","content":[]}}}}"#,
+                "\n",
+                // The real anchor, pretty-spaced.
+                r#"{{"type": "user", "uuid" : "{a2}", "sessionId":"{old}","message":{{"role":"user","content":"two"}}}}"#,
+                "\n",
+                r#"{{"type":"assistant","uuid":"dddd","sessionId":"{old}","message":{{"role":"assistant","content":[]}}}}"#,
+                "\n",
+            ),
+            old = OLD,
+            a1 = A1,
+            a2 = A2
+        );
+        let src = d.join(format!("{OLD}.jsonl"));
+        std::fs::write(&src, body).unwrap();
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            Some(A2),
+            None,
+            None,
+        ));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let written = std::fs::read_to_string(d.join(format!("{NEW}.jsonl"))).unwrap();
+        assert_eq!(
+            written.lines().count(),
+            4,
+            "header, turn one, the nested-uuid line and the parentUuid line are \
+             all BEFORE the real anchor: {written}"
+        );
+        assert!(written.contains("toolUseResult"));
+        assert!(written.contains("cccc"));
+        assert!(
+            !written.contains("dddd"),
+            "nothing after the anchor survives"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A nested `"uuid"` alone is not the anchor: the script must report it
+    /// missing rather than cut there.
+    #[test]
+    fn a_nested_uuid_alone_is_not_found() {
+        let d = tmp();
+        let body = format!(
+            concat!(
+                r#"{{"type":"user","uuid":"{a1}","sessionId":"{old}","message":{{"role":"user","content":"one"}}}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"bbbb","sessionId":"{old}","toolUseResult":{{"uuid":"{a2}"}}}}"#,
+                "\n",
+            ),
+            old = OLD,
+            a1 = A1,
+            a2 = A2
+        );
+        let src = d.join(format!("{OLD}.jsonl"));
+        std::fs::write(&src, body).unwrap();
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            Some(A2),
+            None,
+            None,
+        ));
+        assert_eq!(out.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&out.stderr).contains(NO_ANCHOR));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    // ── the service, over a fake for its follow-ups (spec §7) ──────────
+
+    /// Records every follow-up `rewind_conversation` makes; answers the pane
+    /// probe with `status`, the restart with `restart_err` (else the row),
+    /// and a spawn by creating a real row the way `new_session` would
+    /// (`set_claude_session_id` = a `Fleet` rebind), so the relabel after it
+    /// has something to act on.
+    struct FakeOps<'a> {
+        store: &'a std::sync::Mutex<Store>,
+        status: Option<String>,
+        restart_err: Option<IpcError>,
+        restarts: std::sync::Mutex<Vec<(String, String)>>,
+        spawns: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl<'a> FakeOps<'a> {
+        fn new(store: &'a std::sync::Mutex<Store>, status: Option<&str>) -> Self {
+            Self {
+                store,
+                status: status.map(String::from),
+                restart_err: None,
+                restarts: Default::default(),
+                spawns: Default::default(),
+            }
+        }
+        fn restarts(&self) -> usize {
+            self.restarts.lock().unwrap().len()
+        }
+        fn spawns(&self) -> usize {
+            self.spawns.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ReplyOps for FakeOps<'_> {
+        async fn pane_status(&self, _session_id: i64) -> Option<String> {
+            self.status.clone()
+        }
+        async fn restart(
+            &self,
+            args: crate::service::sessions::RestartSessionArgs,
+        ) -> Result<SessionRow, IpcError> {
+            self.restarts
+                .lock()
+                .unwrap()
+                .push((args.host_alias.clone(), args.name.clone()));
+            if let Some(e) = &self.restart_err {
+                return Err(IpcError::new(&e.code, e.message.clone()));
+            }
+            let s = self.store.lock().unwrap();
+            Ok(s.get_session(&args.name, &args.host_alias)
+                .unwrap()
+                .unwrap())
+        }
+        async fn spawn(
+            &self,
+            args: crate::service::sessions::NewSessionArgs,
+        ) -> Result<SessionRow, IpcError> {
+            self.spawns
+                .lock()
+                .unwrap()
+                .push(args.resume_claude_session_id.clone());
+            let s = self.store.lock().unwrap();
+            let id = s
+                .upsert_session(
+                    "forked",
+                    &args.host_alias,
+                    Some(args.project_id),
+                    args.worktree_id,
+                    0,
+                    0,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            s.set_claude_session_id(id, args.resume_claude_session_id.as_deref().unwrap())
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        }
+    }
+
+    /// A `local` session (so the script and the cleanup `rm` run here, for
+    /// real) bound to the fixture transcript, with a project to fork into.
+    fn local_session(claude_status: &str) -> (std::path::PathBuf, std::path::PathBuf, Store, i64) {
+        let d = tmp();
+        let src = fixture(&d);
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", d.to_str().unwrap()).unwrap();
+        let id = s
+            .upsert_session("sess", "local", Some(pid), None, 0, 0, "running", None)
+            .unwrap();
+        s.rebind_conversation(
+            id,
+            OLD,
+            StartSource::Fleet,
+            Some(src.to_str().unwrap()),
+            None,
+        )
+        .unwrap();
+        s.set_session_claude_status_for_test(id, claude_status);
+        (d, src, s, id)
+    }
+
+    fn args(id: i64, mode: RewindMode, anchor: Option<&str>) -> RewindArgs {
+        RewindArgs {
+            session_id: id,
+            anchor_uuid: anchor.map(String::from),
+            mode,
+            new_worktree: None,
+        }
+    }
+
+    fn jsonl_files(d: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jsonl"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn rewind_rebinds_to_the_copy_and_restarts_exactly_once() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let row =
+            rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect("an idle session rewinds");
+        assert_eq!(ops.restarts(), 1, "the pane is restarted once");
+        assert_eq!(ops.spawns(), 0, "a rewind spawns nothing");
+        assert_eq!(
+            ops.restarts.lock().unwrap()[0],
+            ("local".to_string(), "sess".to_string())
+        );
+        let new_id = row.claude_session_id.clone().unwrap();
+        assert_ne!(new_id, OLD, "the session is on a NEW conversation");
+        assert!(d.join(format!("{new_id}.jsonl")).exists());
+        let convs = store.lock().unwrap().list_conversations(id, 10).unwrap();
+        let fresh = convs
+            .iter()
+            .find(|c| c.claude_session_id == new_id)
+            .unwrap();
+        assert_eq!(fresh.start_source, "fork");
+        assert!(
+            convs.iter().any(|c| c.claude_session_id == OLD),
+            "the pre-rewind conversation stays listed"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[tokio::test]
+    async fn fork_spawns_once_on_the_copy_and_labels_it_fork() {
+        let (d, _src, s, id) = local_session("working");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("working"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let row =
+            rewind_conversation_with(args(id, RewindMode::Fork, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect("fork is allowed mid-turn");
+        assert_eq!(ops.spawns(), 1, "one new session");
+        assert_eq!(ops.restarts(), 0, "the source pane is left alone");
+        assert_ne!(row.id, id);
+        let new_id = ops.spawns.lock().unwrap()[0].clone().unwrap();
+        assert_eq!(row.claude_session_id.as_deref(), Some(new_id.as_str()));
+        let convs = store
+            .lock()
+            .unwrap()
+            .list_conversations(row.id, 10)
+            .unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].start_source, "fork",
+            "relabelled from new_session's `fleet`"
+        );
+        let expected = d.join(format!("{new_id}.jsonl"));
+        assert_eq!(
+            convs[0].transcript_path.as_deref(),
+            Some(expected.to_str().unwrap())
+        );
+        // The source session is untouched.
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some(OLD)
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Item 4: a restart that fails leaves NOTHING behind — the row is back
+    /// on the old conversation with its old path, no conversation row names
+    /// the copy, and the copy itself is gone from the host.
+    #[tokio::test]
+    async fn a_failed_restart_restores_the_old_binding_and_removes_the_copy() {
+        let (d, src, s, id) = local_session("idle");
+        let before = s.list_conversations(id, 10).unwrap();
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("idle"));
+        ops.restart_err = Some(IpcError::new(codes::E_REPAIR_REQUIRED, "worktree gone"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err =
+            rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect_err("the restart failed");
+        assert_eq!(
+            err.code,
+            codes::E_REPAIR_REQUIRED,
+            "the restart's own error"
+        );
+        assert_eq!(ops.restarts(), 1);
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_session_id.as_deref(), Some(OLD));
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some(src.to_str().unwrap()),
+            "the old transcript path is back"
+        );
+        let after = s.list_conversations(id, 10).unwrap();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "no stray conversation row: {after:?}"
+        );
+        assert!(after.iter().all(|c| c.claude_session_id == OLD));
+        assert!(
+            after[0].ended_at.is_none(),
+            "the old conversation is current again"
+        );
+        assert_eq!(
+            jsonl_files(&d),
+            vec![format!("{OLD}.jsonl")],
+            "the unused copy is removed from the host"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Item 2: `blocked` is mid-turn too (a permission prompt waits INSIDE
+    /// the turn), and the live pane beats a stale stored status.
+    #[tokio::test]
+    async fn a_blocked_or_live_busy_session_is_refused_and_live_quiet_wins() {
+        for (stored, live, ok) in [
+            ("blocked", None, false),
+            ("idle", Some("working"), false),
+            ("idle", Some("blocked"), false),
+            ("working", Some("idle"), true),
+            ("idle", None, true),
+        ] {
+            let (d, _src, s, id) = local_session(stored);
+            let store = std::sync::Mutex::new(s);
+            let ops = FakeOps::new(&store, live);
+            let ssh = std::sync::Arc::new(SshClient::new());
+            let r = rewind_conversation_with(
+                args(id, RewindMode::Rewind, Some(A2)),
+                &store,
+                &ssh,
+                &ops,
+            )
+            .await;
+            if ok {
+                assert!(r.is_ok(), "stored {stored}, live {live:?}: {r:?}");
+            } else {
+                let e = r.expect_err("mid-turn");
+                assert_eq!(e.code, codes::E_INVALID, "stored {stored}, live {live:?}");
+                assert_eq!(ops.restarts(), 0);
+                assert_eq!(
+                    jsonl_files(&d),
+                    vec![format!("{OLD}.jsonl")],
+                    "refused before the copy is written"
+                );
+            }
+            std::fs::remove_dir_all(&d).ok();
+        }
+    }
+
+    /// Item 3: a rewind with no anchor would copy the whole file and restart
+    /// on it — a silent no-op. Fork with none keeps the whole file (spec §3).
+    #[tokio::test]
+    async fn a_rewind_without_an_anchor_is_refused_but_a_fork_is_not() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err = rewind_conversation_with(args(id, RewindMode::Rewind, None), &store, &ssh, &ops)
+            .await
+            .expect_err("no anchor");
+        assert_eq!(err.code, codes::E_INVALID);
+        assert_eq!(ops.restarts(), 0);
+        rewind_conversation_with(args(id, RewindMode::Fork, None), &store, &ssh, &ops)
+            .await
+            .expect("forking the newest turn keeps the whole file");
+        assert_eq!(ops.spawns(), 1);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Item 6: acting on a turn past a rewind point (a stale window) names
+    /// what happened, not just "not found".
+    #[tokio::test]
+    async fn a_turn_past_the_rewind_point_says_the_conversation_was_rewound() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+            .await
+            .unwrap();
+        // The old window still shows turn two; its anchor is not in the copy.
+        let err =
+            rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect_err("the turn is gone from the current conversation");
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(err.message.contains("rewound"), "{}", err.message);
+        std::fs::remove_dir_all(&d).ok();
     }
 }

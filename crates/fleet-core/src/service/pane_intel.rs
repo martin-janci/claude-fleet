@@ -129,6 +129,20 @@ impl ClaudeStatus {
         }
     }
 
+    /// Whether the session is between turns: nothing is generating and
+    /// nothing inside a turn is waiting on the user. `Blocked` is NOT quiet —
+    /// a permission prompt or a question is part of the turn it interrupts.
+    /// The same set as the frontend's `isQuietStatus` (`conversation.ts`).
+    pub fn is_quiet(self) -> bool {
+        match self {
+            ClaudeStatus::Idle
+            | ClaudeStatus::Completed
+            | ClaudeStatus::Stopped
+            | ClaudeStatus::Failed => true,
+            ClaudeStatus::Working | ClaudeStatus::Blocked => false,
+        }
+    }
+
     /// The value list rendered as `a | b | c`, for quoting verbatim in docs.
     pub fn vocabulary_doc() -> String {
         join_vocabulary(Self::ALL.iter().map(|k| k.as_str()))
@@ -1594,6 +1608,19 @@ Enter to select
     /// Write sites outside this module still use string literals (files owned
     /// by other work streams). Pin them here so a renamed value becomes a test
     /// failure instead of silent drift.
+    /// Mirrors `isQuietStatus` in `src/lib/conversation.ts`: a rewind's
+    /// mid-turn guard and the clients' poll cadence must agree on what
+    /// "between turns" means. `blocked` is inside a turn.
+    #[test]
+    fn quiet_is_idle_completed_stopped_failed_and_never_working_or_blocked() {
+        let quiet: Vec<&str> = ClaudeStatus::ALL
+            .iter()
+            .filter(|s| s.is_quiet())
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(quiet, ["completed", "failed", "stopped", "idle"]);
+    }
+
     #[test]
     fn external_write_site_literals_are_in_vocabulary() {
         // service/hooks.rs: the Stop hook stamps "idle".
