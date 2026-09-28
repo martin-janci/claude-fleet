@@ -322,6 +322,7 @@ pub async fn send_message_scoped(
             delivered_to_pane,
             to_row.claude_status.as_deref(),
             to_row.stuck_kind.is_some(),
+            !crate::store::has_no_pane(&to_row.kind),
         ) {
             WakeAction::Skip => {}
             WakeAction::Refuse => {
@@ -384,9 +385,13 @@ pub async fn send_message_scoped(
 /// - `None` (never hooked) refuses too, not treated as idle: a never-hooked
 ///   session is often sitting on the first-run trust prompt with no pane
 ///   read yet, so unknown is not safely idle either.
-/// - `working` / `completed` / `failed` / `stopped` are left alone: a
-///   working session's own Stop hook will carry the message, and the
-///   others are not usefully nudgeable.
+/// - A pane-backed `failed` (a StopFailure: the turn ended in an API error
+///   and the REPL is back at its input) is between turns like `idle`, so it
+///   is pasted — as it was before `failed` split from `idle` (#343); no Stop
+///   hook will follow to carry the message.
+/// - `working` / `completed` / `stopped` and a pane-less `failed` are left
+///   alone: a working session's own Stop hook will carry the message, and
+///   the others are not usefully nudgeable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WakeAction {
     /// Nothing to do — already delivered, or a status this call does not
@@ -404,6 +409,7 @@ pub(crate) fn wake_action(
     already_delivered: bool,
     claude_status: Option<&str>,
     stuck: bool,
+    has_pane: bool,
 ) -> WakeAction {
     if already_delivered {
         return WakeAction::Skip;
@@ -413,6 +419,7 @@ pub(crate) fn wake_action(
     }
     match claude_status {
         Some(s) if s == ClaudeStatus::Idle.as_str() => WakeAction::Paste,
+        Some(s) if s == ClaudeStatus::Failed.as_str() && has_pane => WakeAction::Paste,
         Some(_) => WakeAction::Skip,
         None => WakeAction::RefuseUnknown,
     }
@@ -1621,7 +1628,7 @@ mod tests {
         for status in [None, Some("idle"), Some("blocked"), Some("working")] {
             for stuck in [false, true] {
                 assert_eq!(
-                    wake_action(true, status, stuck),
+                    wake_action(true, status, stuck, true),
                     WakeAction::Skip,
                     "status={status:?} stuck={stuck}"
                 );
@@ -1632,36 +1639,58 @@ mod tests {
     #[test]
     fn wake_action_refuses_blocked_or_stuck_over_pastes_idle() {
         assert_eq!(
-            wake_action(false, Some("blocked"), false),
+            wake_action(false, Some("blocked"), false, true),
             WakeAction::Refuse
         );
         // idle + stuck: `stuck` must win, not the idle claude_status.
-        assert_eq!(wake_action(false, Some("idle"), true), WakeAction::Refuse);
         assert_eq!(
-            wake_action(false, Some("blocked"), true),
+            wake_action(false, Some("idle"), true, true),
+            WakeAction::Refuse
+        );
+        assert_eq!(
+            wake_action(false, Some("blocked"), true, true),
             WakeAction::Refuse
         );
     }
 
     #[test]
     fn wake_action_pastes_only_plain_idle() {
-        assert_eq!(wake_action(false, Some("idle"), false), WakeAction::Paste);
+        assert_eq!(
+            wake_action(false, Some("idle"), false, true),
+            WakeAction::Paste
+        );
     }
 
     #[test]
     fn wake_action_refuses_unknown_status_rather_than_treating_it_as_idle() {
-        assert_eq!(wake_action(false, None, false), WakeAction::RefuseUnknown);
+        assert_eq!(
+            wake_action(false, None, false, true),
+            WakeAction::RefuseUnknown
+        );
         // Unknown status is refused even if (incoherently) stuck were also
         // set — RefuseUnknown, not the generic Refuse, so the caller sees
         // the more specific reason.
-        assert_eq!(wake_action(false, None, true), WakeAction::Refuse);
+        assert_eq!(wake_action(false, None, true, true), WakeAction::Refuse);
     }
 
     #[test]
     fn wake_action_skips_a_working_or_terminal_status() {
-        for status in ["working", "completed", "failed", "stopped"] {
-            assert_eq!(wake_action(false, Some(status), false), WakeAction::Skip);
+        for status in ["working", "completed", "stopped"] {
+            assert_eq!(
+                wake_action(false, Some(status), false, true),
+                WakeAction::Skip
+            );
         }
+        // A StopFailure's REPL is back at its input: wake it like idle. A
+        // pane-less (bg) agent's `failed` is `claude agents`' verdict.
+        assert_eq!(
+            wake_action(false, Some("failed"), false, true),
+            WakeAction::Paste
+        );
+        assert_eq!(
+            wake_action(false, Some("failed"), false, false),
+            WakeAction::Skip
+        );
     }
 
     #[tokio::test]

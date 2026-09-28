@@ -1,7 +1,13 @@
 # Reply actions: Copy, Quote, Retry, Fork here, Rewind here
 
 Date: 2026-09-26
-Status: approved design, not yet implemented
+Status: implemented on the desktop and hub (#338); fleet-mobile follows
+As built, where it differs from the design below: a fork writes its
+transcript beside the source's and reuses the source's worktree — "New
+worktree" (§5.2) ships disabled and the tool parameter, `new_worktree`
+(§6 calls it `worktree`), answers `E_UNSUPPORTED`; Retry resends the
+prompt's text only, not its images; a fork carries the source's confirmed
+work links (source `forked`), as `move_session { keep_source }` does.
 Repos: `claude-fleet` (fleet first), `fleet-mobile` (follows)
 
 ## 1. What this adds

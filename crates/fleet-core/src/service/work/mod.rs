@@ -25,7 +25,7 @@ pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
-use crate::store::{Decider, SessionRow, Store, WorkLinkRow, WorkTarget};
+use crate::store::{Decider, SessionRow, Store, WorkLinkRow, WorkTarget, PERSON_SOURCES};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -890,7 +890,7 @@ pub fn work_link_as<'a>(
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "reconsider needs link_id"))?;
             checked_link(link_id)?;
-            s.reconsider_work_link(session_id, link_id)?;
+            s.reconsider_work_link(session_id, link_id, decider)?;
         }
         _ => {}
     }
@@ -967,6 +967,27 @@ pub fn work_link_as<'a>(
                 Decider::Person => detect::unlink_holds(&s, session_id, link_id)?,
                 Decider::Agent => Vec::new(),
             };
+            // D34: removing a person's rejection ("Not this") would let the
+            // agent's next link — or detection — make it again: unlink, then
+            // link, is the two-step overturn `confirm` already refuses.
+            if decider == Decider::Agent {
+                let own = s.session_work_links(session_id)?;
+                if let Some(l) = own.iter().find(|l| l.id == link_id) {
+                    if l.state == "rejected" && PERSON_SOURCES.contains(&l.source.as_str()) {
+                        return Err(IpcError::new(
+                            codes::E_FORBIDDEN,
+                            format!(
+                                "a person rejected this work for session {session_id} (work \
+                                 link {link_id}); an agent cannot remove a person's rejection"
+                            ),
+                        )
+                        .with_details(serde_json::json!({
+                            "link_id": link_id,
+                            "reason": "rejected_by_person",
+                        })));
+                    }
+                }
+            }
             if !s.unlink_session_work_held(session_id, link_id, &holds)? {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,

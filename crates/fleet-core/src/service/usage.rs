@@ -30,6 +30,7 @@
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::service::orgs::OrgScope;
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -1019,11 +1020,34 @@ pub fn report(
     since_secs: Option<u64>,
     now: i64,
 ) -> Result<UsageReport, IpcError> {
+    report_on(s, host, since_secs, now, &OrgScope::All)
+}
+
+/// [`report`] over only what `scope` sees: the sessions it may list and the
+/// daily roll-up of the hosts in its orgs (an org-bound client, work graph
+/// M14 — the same fence as `fleet_health`'s [`health::scope_to_org`]).
+///
+/// [`health::scope_to_org`]: crate::service::health::scope_to_org
+pub fn report_on(
+    s: &Store,
+    host: Option<&str>,
+    since_secs: Option<u64>,
+    now: i64,
+    scope: &OrgScope,
+) -> Result<UsageReport, IpcError> {
+    let visible: Option<std::collections::BTreeSet<String>> = (!scope.is_all()).then(|| {
+        crate::service::health::hosts_in_scope(s, scope)
+            .into_iter()
+            .map(|h| h.alias)
+            .collect()
+    });
+    let sees_host = |h: &str| visible.as_ref().is_none_or(|v| v.contains(h));
     let since = since_secs.map(|n| now - n.min(settings::MAX_SECS) as i64);
     let rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
         .filter(|r| host.is_none_or(|h| r.host_alias == h))
+        .filter(|r| scope.sees_row(r))
         .filter(|r| !r.usage.totals().is_zero())
         .filter(|r| since.is_none_or(|t| r.usage.usage_updated_at.is_some_and(|u| u >= t)))
         .collect();
@@ -1063,7 +1087,7 @@ pub fn report(
         since,
         total,
         by_host,
-        by_day: daily_totals(s, since_day, host)?,
+        by_day: daily_totals_where(s, since_day, host, &sees_host)?,
         sessions,
         sessions_truncated,
     })

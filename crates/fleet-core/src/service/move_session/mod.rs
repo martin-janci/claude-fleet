@@ -875,7 +875,7 @@ pub fn parse_locate(stdout: &str) -> Result<Located, IpcError> {
 /// status (the `wait_for_session` idle set, plus `failed`) is accepted.
 pub fn require_source_idle(status: Option<&str>) -> Result<(), IpcError> {
     match status {
-        Some(s) if crate::store::IDLE_STATUSES.contains(&s) || s == "failed" => Ok(()),
+        s if crate::store::turn_over(s) => Ok(()),
         other => Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!(

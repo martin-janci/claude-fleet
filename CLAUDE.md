@@ -110,7 +110,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
   verdict is written down once, in `backend/verdicts.rs`, for all 204
-  commands; `backend/tests_routing.rs` holds the handler list, each command's
+  commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
   in `docs/hub.md`. Adding a command means: a row, then `route`/
@@ -274,7 +274,7 @@ downgrade guard (`store::testgen`), the scale fixture and budget tests
 (`service/work/scale_tests.rs`, migration 058), the `work.retention.*`
 windows (`store/work_retention.rs`), trackers in `fleet_health` with a
 Reconnect Attention item, and the review of the decided-against list
-(`reviews/2026-09-26-work-graph-decisions-revisited.md`).
+(`docs/superpowers/reviews/2026-09-26-work-graph-decisions-revisited.md`).
 M13 (live use, `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`)
 is closed (M13.5, #337): M13.1 (partial sync failures, #320), M13.2
 (`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above are on
@@ -284,7 +284,7 @@ small plans. Two items stay open, waiting on the owner: the acceptance run
 and its triage (M13.3), and D5 (M13.4b). Open decisions are the roadmap's table, and a decision-gated
 feature starts only on the user's "yes".
 Work graph M14 (the Work view: org → group → task → every session, and a
-phone paired to one org) is the one milestone after it (D36): plan
+phone paired to one org) is the one milestone after it (roadmap D36): plan
 `docs/superpowers/plans/2026-09-27-work-graph-m14-work-view.md`, design
 `docs/superpowers/specs/2026-09-27-work-view-design.md`. M14.1a–d (the
 backend: `work { tree | task | session_tasks | review | rules | … }` in
@@ -302,7 +302,7 @@ The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
 only in fleet-hub — the models add ~45 MB, kept there by D47). The decision
-envelope is built and OFF (D35–D37): `service::decide` (`gate` / `decide`,
+envelope is built and OFF (Jev spec D35–D37; the roadmap's D31–D36 are other decisions): `service::decide` (`gate` / `decide`,
 `DecisionBackend`, `jev.rs` fenced to api.typesafe.ai), `decide.*` settings,
 per-org consent `orgs.jev_allowed` (migration 068), the record
 `decision_runs` + key `decision_secrets` (069; the key is read ONLY by
@@ -333,6 +333,29 @@ person's Clear work holds against the unchanged branch / PR (R9u, migration
 `docs/superpowers/specs/2026-09-27-jev-test-map.md`.
 Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+
+Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
+here under each reply; Fork, Rewind and Retry are one operation,
+`rewind_conversation` (`service/rewind.rs`), which copies the transcript up
+to the anchor into a new conversation and never changes the original. Spec
+`docs/superpowers/specs/2026-09-26-reply-actions-design.md`.
+
+Session state machine hardening (plan A, #343) is landed: a `working` row
+with no activity for `reconcile.stale_working_secs` turns `idle` with
+`stale_working_at` (migration 065); a StopFailure reads as failed; one
+threshold, `health.context_red_pct`, drives `context_full`; the `oom`
+playbook is capped by `playbooks.oom_max_attempts`; `gc.external_lost_ttl_secs`
+ages out lost external rows. Attention reasons `stop_failed`,
+`context_full`, `stale_working`, `ci_failing`. Plan
+`docs/superpowers/plans/2026-09-27-session-state-machine.md`.
+
+Hub ops and accounting (plan D, #344) is landed: `fleet_health.hub`
+(uptime, reconcile timing), process gauges on `/metrics`, a transcript's
+first read booked as `backfill` apart from the day's live cost (migration
+071 re-keys `usage_daily` by `(day, host_alias, backfill)`), and
+`deploy/hub/backup.sh` / `upgrade.sh` and the `behind-proxy` compose; see
+`docs/hub.md` → *Backups* / *Upgrade with the script*, plan
+`docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

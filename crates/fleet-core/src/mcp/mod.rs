@@ -277,6 +277,10 @@ async fn authorize(
                     .map(|c| c.0.ip()),
                 request.headers(),
             );
+            // The throttle is the log's, not the answer's: a repeat inside
+            // the interval is still `401` (a client reads 401 as "pair
+            // again" and 429 as "the hub is busy, retry" — a revoked desktop
+            // must see the first), logged at debug instead of warn.
             if status == StatusCode::UNAUTHORIZED
                 && state
                     .rate
@@ -286,9 +290,9 @@ async fn authorize(
                 tracing::debug!(
                     %peer,
                     path = %request.uri().path(),
-                    "[mcp] throttled a repeated bad bearer"
+                    "[mcp] rejected request (repeat, not logged at warn)"
                 );
-                return Err(StatusCode::TOO_MANY_REQUESTS);
+                return Err(status);
             }
             // The path only: the URI / query can carry the legacy `?token=`.
             tracing::warn!(%status, %peer, path = %request.uri().path(), "[mcp] rejected request");

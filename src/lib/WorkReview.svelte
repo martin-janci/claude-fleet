@@ -15,7 +15,13 @@
   import { selectSessionExplicitly } from './selection';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
-  import { confirmSessionWork, linkSessionWork, rejectWorkLink, unlinkSessionWork } from './work';
+  import {
+    confirmSessionWork,
+    linkSessionWork,
+    onWorkChangedDebounced,
+    rejectWorkLink,
+    unlinkSessionWork,
+  } from './work';
   import { workTickets, type TicketRow } from './trackers';
   import { timeAgo } from './session_status';
   import {
@@ -29,7 +35,6 @@
     setPrimaryWork,
     taskLabel,
     undoOf,
-    workChanged,
     workReview,
     type BatchDecision,
     type Decision,
@@ -84,20 +89,10 @@
     onchanged?.();
   }
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let first = true;
-  const off = workChanged.subscribe(() => {
-    if (first) {
-      first = false;
-      return;
-    }
-    clearTimeout(timer);
-    timer = setTimeout(() => void load(), debounceMs);
-  });
+  const off = onWorkChangedDebounced(() => void load(), () => debounceMs);
   onMount(() => void load());
   onDestroy(() => {
     off();
-    clearTimeout(timer);
     clearTimeout(changeTimer);
   });
 

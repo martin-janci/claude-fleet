@@ -20,6 +20,7 @@
     rejectWorkLink,
     unlinkSessionWork,
     type WorkRef,
+    onWorkChangedDebounced,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
   import { timeAgo } from './session_status';
@@ -30,7 +31,6 @@
     setPrimaryWork,
     showTaskInWorkView,
     taskLabel,
-    workChanged,
     workSessionTasks,
     type SessionTaskLink,
     type SessionTasks,
@@ -87,19 +87,9 @@
     void load(id);
   });
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let first = true;
-  const off = workChanged.subscribe(() => {
-    if (first) {
-      first = false;
-      return;
-    }
-    clearTimeout(timer);
-    timer = setTimeout(() => void load(session.id), debounceMs);
-  });
+  const off = onWorkChangedDebounced(() => void load(session.id), () => debounceMs);
   onDestroy(() => {
     off();
-    clearTimeout(timer);
     clearTimeout(searchTimer);
   });
 

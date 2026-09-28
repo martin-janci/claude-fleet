@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
   // task (primary ★, secondary, suggested, past). A session under several
@@ -43,7 +44,6 @@
     taskStatus,
     trackerDown,
     trackerDownLabel,
-    workChanged,
     workExpanded,
     workReview,
     workTask,
@@ -222,19 +222,10 @@
   });
 
   // `work:changed` / session events: one debounced re-read.
-  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-  let firstTick = true;
-  const offChanged = workChanged.subscribe(() => {
-    if (firstTick) {
-      firstTick = false;
-      return;
-    }
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => {
-      void load();
-      void loadReviewCount();
-    }, debounceMs);
-  });
+  const offChanged = onWorkChangedDebounced(() => {
+    void load();
+    void loadReviewCount();
+  }, () => debounceMs);
 
   onMount(() => {
     void load();
@@ -244,7 +235,6 @@
     offFilters();
     offChanged();
     offReveal();
-    clearTimeout(refreshTimer);
     workTreeSessionIds.set(new Set());
   });
 
