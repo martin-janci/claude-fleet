@@ -65,9 +65,8 @@ pub fn parse_list(raw: &[u8]) -> Vec<String> {
             && raw.len().is_multiple_of(2)
             && raw.iter().skip(1).step_by(2).all(|&b| b == 0));
     let text = if looks_utf16 {
-        let units: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        let units: Vec<u16> = (0..raw.len() / 2)
+            .map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]]))
             .collect();
         String::from_utf16_lossy(&units)
     } else {
