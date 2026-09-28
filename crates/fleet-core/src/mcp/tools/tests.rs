@@ -1200,7 +1200,8 @@ async fn a_master_caller_is_not_confirm_gated_for_a_rewind() {
             Extension(Caller::master()),
             Parameters(RewindConversationParams {
                 session_id: id,
-                anchor_uuid: None,
+                // A rewind needs its anchor, or it is refused for that first.
+                anchor_uuid: Some("aaaaaaaa-0000-0000-0000-000000000002".into()),
                 mode: "rewind".into(),
                 new_worktree: None,
                 confirm_nonce: None,
