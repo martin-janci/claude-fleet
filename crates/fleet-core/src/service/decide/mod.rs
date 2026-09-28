@@ -59,8 +59,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 /// The setting a desktop paired to a hub carries (`src-tauri`'s
-/// `backend::REMOTE_URL_KEY`): such a process is a window onto someone
-/// else's fleet and never calls out (D35).
+/// `backend::REMOTE_URL_KEY` is this constant): such a process is a window
+/// onto someone else's fleet and never calls out (D35).
 pub const HUB_REMOTE_URL_KEY: &str = "hub.remote_url";
 
 /// Rows the retention sweep deletes per lock, and per sweep.

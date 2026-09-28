@@ -46,8 +46,9 @@ use std::sync::Mutex;
 pub use token_store::{OsTokenStore, TokenStore};
 
 /// The hub's base URL, e.g. `https://fleet.example.com`. Empty or absent means
-/// standalone.
-pub const REMOTE_URL_KEY: &str = "hub.remote_url";
+/// standalone. The one key `fleet-core`'s decision envelope also reads (a
+/// window onto a hub never calls out, D35): the same constant, not a copy.
+pub const REMOTE_URL_KEY: &str = fleet_core::service::decide::HUB_REMOTE_URL_KEY;
 /// The name this desktop was paired under, shown in Settings. Cosmetic.
 pub const CLIENT_NAME_KEY: &str = "hub.client_name";
 /// What Settings shows before pairing has told us otherwise.
