@@ -98,7 +98,8 @@ check "pull precedes stop" test "$(ord 'docker compose pull')" -lt "$(ord 'docke
 check "stop precedes up" test "$(ord 'docker compose stop')" -lt "$(ord 'docker compose up')"
 check "up precedes the healthcheck" test "$(ord 'docker compose up')" -lt "$(ord 'healthcheck')"
 check "the healthcheck precedes --version" test "$(ord 'healthcheck')" -lt "$(ord '--version')"
-check "fleet_health is asked with the readonly token" grep -q 'Bearer cl_readonly' "$FAKE_LOG"
+check "fleet_health is asked with the readonly token, on curl's stdin" grep -q '^curl-stdin .*Bearer cl_readonly' "$FAKE_LOG"
+check "…never on curl's argv" test -z "$(grep '^curl .*cl_readonly' "$FAKE_LOG")"
 check "…against /mcp/json on the public URL" grep -q 'https://fleet.example.com/mcp/json' "$FAKE_LOG"
 check "…and the version is confirmed" grep -q 'fleet_health.version = 0.3.1' "$ROOT/upgrade1.log"
 
