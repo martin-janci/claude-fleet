@@ -54,6 +54,7 @@
     hubBlock,
     hubStrandedToken,
     ownsTheFleet,
+    type HubAction,
   } from './hub';
   import {
     attentionIdleMinutes,
@@ -773,7 +774,23 @@
       {/if}
     </section>
     {:else if currentPage}
-      {#if !ownsFleet}
+      {#if !ownsFleet && currentPage.layout === 'master_detail'}
+        <!-- A resource's list routes to the hub: shown, read-only, with
+             where to change it instead. -->
+        {@const res = $pagesBundle.resources.find((r) => r.id === currentPage.resource)}
+        {#key currentPage.id}
+          <PageView
+            page={currentPage}
+            pages={$pagesBundle.pages}
+            descs={$descriptors}
+            values={$settingValues}
+            sources={$pagesBundle.sources}
+            resources={$pagesBundle.resources}
+            readonly
+            reason={res?.update ? hubBlock(res.update.command as HubAction, $hubStatus) : null}
+            onnavigate={(id) => select(id)} />
+        {/key}
+      {:else if !ownsFleet}
         <section class="block" data-testid="pages-remote">
           <div class="section-header"><h4>{currentPage.title}</h4></div>
           <p class="hook-desc">{hubBlock('get_fleet_settings', $hubStatus)}</p>
@@ -787,6 +804,7 @@
             descs={$descriptors}
             values={$settingValues}
             sources={$pagesBundle.sources}
+            resources={$pagesBundle.resources}
             {focusKey}
             onnavigate={(id) => select(id)} />
         {/key}

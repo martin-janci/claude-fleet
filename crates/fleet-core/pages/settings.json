@@ -39,6 +39,10 @@
         },
         {
           "type": "link",
+          "page": "settings.orgs"
+        },
+        {
+          "type": "link",
           "page": "settings.decisions"
         }
       ]

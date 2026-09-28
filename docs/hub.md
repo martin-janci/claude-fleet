@@ -895,7 +895,7 @@ What a client may do:
   default, as a host sees them; the master turns it off with `fleet-hub org
   set <id> --bound-sees-unassigned off` (`work_admin { action: "update_org",
   org_id, bound_sees_unassigned: false }`; on a standalone desktop, Settings →
-  Work → Organisations → *bound devices see unassigned*), and `org list`
+  Organisations → *Bound devices see unassigned*), and `org list`
   marks such an org *bound devices: own org only*. The org's bound clients then see
   only rows assigned to it. Another org's session or task answers exactly as
   one that does not exist, whatever `isolate_sessions` says (a bound client

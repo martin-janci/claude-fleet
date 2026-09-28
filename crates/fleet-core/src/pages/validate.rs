@@ -58,6 +58,9 @@ fn plain(text: &str, max: usize) -> Result<(), String> {
 struct Ctx<'a> {
     page: &'a str,
     problems: &'a mut Vec<Problem>,
+    /// A `master_detail` page's resource: its `field` items and `when`
+    /// keys name the resource's fields, not settings.
+    resource: Option<&'static super::resources::ResourceType>,
 }
 
 impl Ctx<'_> {
@@ -101,6 +104,10 @@ fn check_condition(cx: &mut Ctx, at: &str, c: &Condition) {
         if tests != 1 {
             cx.bad(at, format!("`{key}`: say exactly one of eq, in or truthy"));
         }
+        if let Some(res) = cx.resource {
+            check_record_condition(cx, at, res, key, c);
+            return;
+        }
         let Some(spec) = settings::spec(key) else {
             cx.bad(at, format!("`{key}` is not a registered setting"));
             return;
@@ -130,6 +137,36 @@ fn check_condition(cx: &mut Ctx, at: &str, c: &Condition) {
     }
     if let Some(sub) = &c.not {
         check_condition(cx, &format!("{at} › not"), sub);
+    }
+}
+
+/// A `when` on a record field: the field exists, and an on/off field is
+/// tested with truthy (or eq "true" / "false").
+fn check_record_condition(
+    cx: &mut Ctx,
+    at: &str,
+    res: &super::resources::ResourceType,
+    key: &str,
+    c: &Condition,
+) {
+    use super::resources::FieldKind;
+    let Some(field) = res.field(key) else {
+        cx.bad(at, format!("`{key}` is not a field of {}", res.id));
+        return;
+    };
+    let on_off = matches!(field.kind, FieldKind::Bool { .. });
+    if c.truthy.is_some() && !on_off {
+        cx.bad(
+            at,
+            format!("`{key}`: truthy is for on/off fields; use eq or in"),
+        );
+    }
+    if on_off {
+        for v in c.eq.iter().chain(c.one_of.iter().flatten()) {
+            if v != "true" && v != "false" {
+                cx.bad(at, format!("`{key}` is on/off: it can never be {v:?}"));
+            }
+        }
     }
 }
 
@@ -168,6 +205,24 @@ fn check_item(
             hint,
             when,
         } => {
+            if let Some(res) = cx.resource {
+                if res.field(key).is_none() {
+                    cx.bad(at, format!("`{key}` is not a field of {}", res.id));
+                }
+                if widget.is_some() {
+                    cx.bad(at, "a record field's control follows its kind: no widget");
+                }
+                if let Some(first) = placed.insert(format!("{}#{key}", page.id), at.to_string()) {
+                    cx.bad(at, format!("`{key}` is already placed at {first}"));
+                }
+                if let Some(h) = hint {
+                    cx.text(at, "hint", h, MAX_HINT);
+                }
+                if let Some(c) = when {
+                    check_condition(cx, &format!("{at} › when"), c);
+                }
+                return;
+            }
             match settings::spec(key) {
                 None => cx.bad(at, format!("`{key}` is not a registered setting")),
                 Some(spec) => {
@@ -295,10 +350,25 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
     let mut placed: BTreeMap<String, String> = BTreeMap::new();
 
     for page in pages {
+        let resource = page
+            .resource
+            .as_deref()
+            .and_then(super::resources::resource);
         let mut cx = Ctx {
             page: &page.id,
             problems: &mut problems,
+            resource,
         };
+        match (&page.resource, resource, page.layout) {
+            (Some(r), None, _) => cx.bad("", format!("`{r}` is not a resource")),
+            (Some(_), Some(_), l) if l != super::model::Layout::MasterDetail => {
+                cx.bad("", "only a master_detail page names a resource")
+            }
+            (None, _, super::model::Layout::MasterDetail) => {
+                cx.bad("", "a master_detail page names its resource")
+            }
+            _ => {}
+        }
         if page.spec != SPEC_VERSION {
             cx.bad("", format!("spec must be {SPEC_VERSION:?}"));
         }
@@ -315,10 +385,7 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
         if !catalog::layout_supported(page.layout) {
             cx.bad(
                 "",
-                format!(
-                    "the {:?} layout needs the resource registry, which this build does not have yet",
-                    page.layout
-                ),
+                format!("this build cannot render the {:?} layout yet", page.layout),
             );
         }
         match &page.parent {
@@ -358,6 +425,28 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
                     section,
                     &mut placed,
                 );
+            }
+        }
+        if !page.list_items.is_empty() && resource.is_none() {
+            cx.bad("", "list_items belong to a master_detail page");
+        }
+        for (i, item) in page.list_items.iter().enumerate() {
+            let at = format!("list item {}", i + 1);
+            if !matches!(item, Item::Notice { .. } | Item::Custom { .. }) {
+                cx.bad(&at, "a list item is a notice or a custom item");
+            }
+            if let Item::Notice { text, .. } = item {
+                cx.text(&at, "text", text, MAX_TEXT);
+            }
+        }
+        if let Some(res) = resource {
+            for f in res.fields {
+                if !placed.contains_key(&format!("{}#{}", page.id, f.id)) {
+                    cx.bad(
+                        "",
+                        format!("{}'s field `{}` is on no section", res.id, f.id),
+                    );
+                }
             }
         }
         for_each_item(page, |at, item| {
@@ -413,6 +502,9 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
 
 /// Call `f` with every item of `page` and where it is.
 pub fn for_each_item(page: &Page, mut f: impl FnMut(String, &Item)) {
+    for (i, item) in page.list_items.iter().enumerate() {
+        f(format!("list item {}", i + 1), item);
+    }
     let mut visit = |prefix: String, sections: &[Section]| {
         for (s, section) in sections.iter().enumerate() {
             for (i, item) in section.items.iter().enumerate() {
@@ -430,7 +522,7 @@ pub fn for_each_item(page: &Page, mut f: impl FnMut(String, &Item)) {
 /// in `pages::UNLISTED` saying why it has none.
 pub fn unplaced_keys<'a>(pages: &[Page], unlisted: &[(&'a str, &'a str)]) -> Vec<&'static str> {
     let mut placed = BTreeSet::new();
-    for page in pages {
+    for page in pages.iter().filter(|p| p.resource.is_none()) {
         for_each_item(page, |_, item| {
             if let Item::Field { key, .. } = item {
                 placed.insert(key.clone());

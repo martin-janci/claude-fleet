@@ -16,6 +16,7 @@
 
 pub mod catalog;
 pub mod model;
+pub mod resources;
 pub mod sources;
 pub mod validate;
 
@@ -56,6 +57,10 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
     (
         "settings.control_api.json",
         include_str!("../../pages/settings.control_api.json"),
+    ),
+    (
+        "settings.orgs.json",
+        include_str!("../../pages/settings.orgs.json"),
     ),
     ("usage.json", include_str!("../../pages/usage.json")),
 ];

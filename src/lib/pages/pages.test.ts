@@ -100,3 +100,26 @@ describe('formatting', () => {
     expect(formatCell('text', null)).toBe('—');
   });
 });
+
+describe('resources on a paired desktop', () => {
+  it('every resource update names a command the hub reasons explain', async () => {
+    const { hubBlock } = await import('../hub');
+    const remote = {
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    };
+    for (const r of bundle.resources) {
+      if (!r.update) continue;
+      const reason = hubBlock(r.update.command as Parameters<typeof hubBlock>[0], remote);
+      expect(reason, r.id).toBeTruthy();
+    }
+  });
+});

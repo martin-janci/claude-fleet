@@ -51,7 +51,8 @@ describe('PageView — every generated page', () => {
     const on = Object.fromEntries(
       allDescriptors.filter((d) => d.kind.type === 'bool').map((d) => [d.key, 'true']),
     );
-    for (const page of bundle.pages) {
+    // A master_detail page's fields are its resource's (ResourcePage.test.ts).
+    for (const page of bundle.pages.filter((p) => p.layout !== 'master_detail')) {
       const { unmount } = render(PageView, {
         props: {
           page,

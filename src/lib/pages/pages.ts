@@ -7,6 +7,7 @@
 import { writable, type Readable, derived } from 'svelte/store';
 import { invokeCmd, type Result } from '../result';
 import { fleetSettings, type FleetSettings } from '../fleet_settings';
+import type { ResourceType } from './resources';
 
 // ── the page DSL, as `crates/fleet-core/src/pages/model.rs` serialises it ──
 
@@ -47,7 +48,7 @@ export interface SourceRef {
   params?: Record<string, unknown>;
 }
 
-export type CustomComponent = 'work_retention' | 'auto_tidy_preview';
+export type CustomComponent = 'work_retention' | 'auto_tidy_preview' | 'org_suggestions';
 
 export type Item =
   | { type: 'field'; key: string; widget?: Widget; hint?: string; when?: Condition }
@@ -81,6 +82,10 @@ export interface Page {
   parent?: string;
   intro?: string;
   layout: Layout;
+  /** A `master_detail` page's resource (`pages/resources.ts`). */
+  resource?: string;
+  /** A `master_detail` page's items about the whole list. */
+  list_items?: Item[];
   sections?: Section[];
   tabs?: Tab[];
 }
@@ -106,6 +111,7 @@ export type SourceSpec = { id: string; label: string; help: string } & SourceSha
 export interface PagesBundle {
   pages: Page[];
   sources: SourceSpec[];
+  resources: ResourceType[];
 }
 
 // ── the settings registry (`service/settings.rs` `Descriptor`) ──
@@ -154,7 +160,7 @@ export interface Descriptor {
 
 // ── stores ──
 
-export const pagesBundle = writable<PagesBundle>({ pages: [], sources: [] });
+export const pagesBundle = writable<PagesBundle>({ pages: [], sources: [], resources: [] });
 export const descriptors = writable<Map<string, Descriptor>>(new Map());
 
 export async function loadPages(): Promise<Result<PagesBundle>> {

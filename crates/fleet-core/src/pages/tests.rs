@@ -168,6 +168,74 @@ fn unknown_keys_sources_and_widgets_are_refused() {
     }
 }
 
+fn org_page(sections: Value) -> Page {
+    page(json!({
+        "spec": "fleet.page/1", "id": "o", "title": "O", "layout": "master_detail",
+        "resource": "org", "sections": sections
+    }))
+}
+
+/// Every org field, once, in one section: the minimal valid org page.
+fn all_org_fields() -> Value {
+    let items: Vec<Value> = super::resources::resource("org")
+        .unwrap()
+        .fields
+        .iter()
+        .map(|f| json!({ "type": "field", "key": f.id }))
+        .collect();
+    json!(items)
+}
+
+#[test]
+fn a_master_detail_page_lays_out_every_field_of_its_resource_once() {
+    let ok = org_page(json!([{ "title": "All", "items": all_org_fields() }]));
+    assert_eq!(messages(&[ok]), "");
+
+    let mut short = all_org_fields();
+    short.as_array_mut().unwrap().pop();
+    let got = messages(&[org_page(json!([{ "title": "All", "items": short }]))]);
+    assert!(got.contains("is on no section"), "{got}");
+
+    let mut twice = all_org_fields();
+    twice
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "type": "field", "key": "name" }));
+    let got = messages(&[org_page(json!([{ "title": "All", "items": twice }]))]);
+    assert!(got.contains("`name` is already placed"), "{got}");
+
+    let mut bad = all_org_fields();
+    bad.as_array_mut().unwrap().extend([
+        json!({ "type": "field", "key": "gc.enabled" }),
+        json!({ "type": "field", "key": "color", "widget": "text" }),
+        json!({ "type": "notice", "tone": "info", "text": "x" }),
+    ]);
+    let got = messages(&[org_page(json!([{ "title": "All", "items": bad,
+        "when": { "key": "name", "truthy": true } }]))]);
+    assert!(got.contains("`gc.enabled` is not a field of org"), "{got}");
+    assert!(got.contains("no widget"), "{got}");
+    assert!(got.contains("truthy is for on/off fields"), "{got}");
+}
+
+#[test]
+fn a_resource_belongs_to_master_detail_only() {
+    let p = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "category", "resource": "org",
+        "sections": [{ "title": "S", "items": [{ "type": "notice", "tone": "info", "text": "x" }] }]
+    }));
+    assert!(messages(&[p]).contains("only a master_detail page names a resource"));
+    let p = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "master_detail",
+        "sections": [{ "title": "S", "items": [{ "type": "notice", "tone": "info", "text": "x" }] }]
+    }));
+    assert!(messages(&[p]).contains("names its resource"));
+    let p = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "master_detail", "resource": "nope",
+        "sections": [{ "title": "S", "items": [{ "type": "notice", "tone": "info", "text": "x" }] }]
+    }));
+    assert!(messages(&[p]).contains("`nope` is not a resource"));
+}
+
 #[test]
 fn custom_items_are_capped() {
     let item = json!({ "type": "custom", "component": "work_retention" });
@@ -191,10 +259,10 @@ fn a_layout_holds_only_its_items() {
     assert!(got.contains("a table shows rows, not series"), "{got}");
 
     let p = page(json!({
-        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "master_detail",
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "flow",
         "sections": [{ "title": "S", "items": [{ "type": "notice", "tone": "info", "text": "x" }] }]
     }));
-    assert!(messages(&[p]).contains("needs the resource registry"));
+    assert!(messages(&[p]).contains("cannot render the Flow layout yet"));
 }
 
 #[test]
@@ -293,6 +361,7 @@ fn render_catalog() -> String {
         "widgets": widgets,
         "settings": settings,
         "sources": SOURCES,
+        "resources": super::resources::RESOURCES,
     });
     serde_json::to_string_pretty(&v).unwrap() + "\n"
 }
@@ -311,6 +380,7 @@ fn render_frontend_fixture() -> String {
         "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
         "pages": super::all(),
         "sources": SOURCES,
+        "resources": super::resources::RESOURCES,
         "descriptors": crate::service::settings::describe(&s),
     });
     serde_json::to_string_pretty(&v).unwrap() + "\n"
@@ -353,7 +423,10 @@ fn the_catalog_names_what_the_validator_accepts() {
         .filter(|l| l["supported"] == true)
         .map(|l| l["id"].as_str().unwrap())
         .collect();
-    assert_eq!(supported, ["category", "cards", "data_page"]);
+    assert_eq!(
+        supported,
+        ["category", "master_detail", "cards", "data_page"]
+    );
     assert_eq!(
         v["settings"].as_array().unwrap().len(),
         SPECS.len(),

@@ -745,7 +745,7 @@ only its own: the other org's task, its title, evidence, conversation and
 summary never reach a device bound to the first org, and a device bound to
 the other org sees the task without the first org's session.
 
-Orgs are managed in Settings → Work → Organisations on a standalone
+Orgs are managed in Settings → Organisations on a standalone
 desktop (read-only on a paired desktop), or with `fleet-hub org …` on a
 hub. **Assign every host of a company before
 connecting a second company's tracker.** The details and commands are in
@@ -930,7 +930,7 @@ in [the settings reference](settings-reference.md).
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
 <!-- END GENERATED: settings work. -->
 
-Per-org settings, set on the org (Settings → Work → Organisations, or
+Per-org settings, set on the org (Settings → Organisations, or
 `work_admin { action: "update_org", org_id, … }` on a hub), not here:
 
 | Org setting | Default | Range | What it does |

@@ -18,8 +18,22 @@
     "layout": {
       "$ref": "#/$defs/Layout"
     },
+    "list_items": {
+      "description": "A `master_detail` page's items about the whole collection, shown\nabove the list: notices and custom items only.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
     "parent": {
       "description": "The page this one sits under in the page tree.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "resource": {
+      "description": "A `master_detail` page's resource (`pages::resources`): the list\nshows its records, and the sections lay out one record's fields —\na `field` item's `key` names a field of the resource there.",
       "type": [
         "string",
         "null"
@@ -138,6 +152,11 @@
           "description": "\"Show what auto-tidy would do\": the tidy candidates the ticked\nreasons would act on (work graph M7.3; `AutoTidyPreview.svelte`).\nWaits on a `work.tidy` data source with a param from the page.",
           "type": "string",
           "const": "auto_tidy_preview"
+        },
+        {
+          "description": "Proposed orgs (from owners of live sessions and tracker sites), one\nclick each to create with their rule and tracker (work graph M5.4;\n`OrgSuggestions.svelte`). Waits on actions that chain.",
+          "type": "string",
+          "const": "org_suggestions"
         }
       ]
     },

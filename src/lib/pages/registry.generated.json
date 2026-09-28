@@ -1506,6 +1506,10 @@
               "type": "link"
             },
             {
+              "page": "settings.orgs",
+              "type": "link"
+            },
+            {
               "page": "settings.decisions",
               "type": "link"
             }
@@ -2071,6 +2075,84 @@
       "title": "Control API"
     },
     {
+      "id": "settings.orgs",
+      "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+      "layout": "master_detail",
+      "list_items": [
+        {
+          "component": "org_suggestions",
+          "type": "custom"
+        }
+      ],
+      "parent": "settings",
+      "resource": "org",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "color",
+              "type": "field"
+            }
+          ],
+          "title": "Organisation"
+        },
+        {
+          "items": [
+            {
+              "key": "rules",
+              "type": "field"
+            },
+            {
+              "key": "hosts",
+              "type": "field"
+            },
+            {
+              "key": "trackers",
+              "type": "field"
+            }
+          ],
+          "title": "What belongs to it"
+        },
+        {
+          "items": [
+            {
+              "key": "isolate_sessions",
+              "type": "field"
+            },
+            {
+              "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
+              "tone": "warn",
+              "type": "notice"
+            },
+            {
+              "key": "bound_sees_unassigned",
+              "type": "field"
+            }
+          ],
+          "title": "Boundary"
+        },
+        {
+          "items": [
+            {
+              "key": "auto_tidy",
+              "type": "field"
+            },
+            {
+              "key": "jev_allowed",
+              "type": "field"
+            }
+          ],
+          "title": "Automation"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Organisations"
+    },
+    {
       "id": "usage",
       "intro": "Token usage and estimated cost, read from each session's Claude transcript.",
       "layout": "data_page",
@@ -2153,6 +2235,425 @@
       ],
       "spec": "fleet.page/1",
       "title": "Usage"
+    }
+  ],
+  "resources": [
+    {
+      "color_field": "color",
+      "create": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "color",
+            {
+              "from": "param",
+              "name": "color"
+            }
+          ]
+        ],
+        "command": "add_org",
+        "envelope": "args",
+        "id": "org.add",
+        "label": "Add organisation",
+        "params": [
+          {
+            "label": "Name",
+            "max": 80,
+            "name": "name",
+            "placeholder": "Company A",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Colour",
+            "name": "color",
+            "required": false,
+            "type": "color"
+          }
+        ]
+      },
+      "delete": {
+        "bind": [
+          [
+            "org_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "remove_org",
+        "confirm": "Its rules go with it, and its hosts and trackers become unassigned. Sessions are not touched.",
+        "envelope": "args",
+        "id": "org.remove",
+        "label": "Remove organisation",
+        "params": []
+      },
+      "empty": "No organisations. Without one, scopes come from GitHub owners and nothing is fenced.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What the scope selector and the Work view call it.",
+          "id": "name",
+          "label": "Name",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "edit": "color",
+          "help": "Marks its sessions in the sidebar.",
+          "id": "color",
+          "label": "Colour",
+          "type": "color"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "owner",
+                  {
+                    "from": "param",
+                    "name": "owner"
+                  }
+                ],
+                [
+                  "repo",
+                  {
+                    "from": "param",
+                    "name": "repo"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_owner_rule",
+              "label": "Add owner rule",
+              "params": [
+                {
+                  "label": "GitHub owner",
+                  "max": 100,
+                  "name": "owner",
+                  "placeholder": "acme",
+                  "required": true,
+                  "type": "text"
+                },
+                {
+                  "label": "Repository (optional)",
+                  "max": 100,
+                  "name": "repo",
+                  "placeholder": "api",
+                  "required": false,
+                  "type": "text"
+                }
+              ]
+            },
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "path_prefix",
+                  {
+                    "from": "param",
+                    "name": "path_prefix"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_path_rule",
+              "label": "Add path rule",
+              "params": [
+                {
+                  "label": "Path prefix",
+                  "max": 1024,
+                  "name": "path_prefix",
+                  "placeholder": "/home/me/work/acme",
+                  "required": true,
+                  "type": "text"
+                }
+              ]
+            },
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host_alias"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_host_rule",
+              "label": "Add host rule",
+              "params": [
+                {
+                  "label": "Host",
+                  "max": 100,
+                  "name": "host_alias",
+                  "placeholder": "hetzner-a",
+                  "required": true,
+                  "type": "text"
+                }
+              ]
+            }
+          ],
+          "help": "Which sessions belong to it: a GitHub owner (or one repository), a path prefix, or a host.",
+          "id": "rules",
+          "item_label": {
+            "type": "org_rule"
+          },
+          "label": "Rules",
+          "remove": {
+            "bind": [
+              [
+                "rule_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "remove_org_rule",
+            "envelope": "args",
+            "id": "org.remove_rule",
+            "label": "Remove rule",
+            "params": []
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "assign_host_org",
+              "envelope": "args",
+              "id": "org.assign_host",
+              "label": "Add host",
+              "params": [
+                {
+                  "label": "Host",
+                  "name": "host",
+                  "required": true,
+                  "source": "hosts",
+                  "type": "options"
+                }
+              ]
+            }
+          ],
+          "help": "A host in an org: its per-host token reads only this org's (and unassigned) work.",
+          "id": "hosts",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Hosts",
+          "remove": {
+            "bind": [
+              [
+                "host_alias",
+                {
+                  "from": "item"
+                }
+              ],
+              [
+                "org_id",
+                {
+                  "from": "null"
+                }
+              ]
+            ],
+            "command": "assign_host_org",
+            "envelope": "args",
+            "id": "org.unassign_host",
+            "label": "Take the host out",
+            "params": []
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "tracker_id",
+                  {
+                    "from": "param",
+                    "name": "tracker"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "assign_tracker_org",
+              "envelope": "args",
+              "id": "org.assign_tracker",
+              "label": "Add tracker",
+              "params": [
+                {
+                  "label": "Tracker",
+                  "name": "tracker",
+                  "required": true,
+                  "source": "trackers",
+                  "type": "options"
+                }
+              ]
+            }
+          ],
+          "help": "Trackers whose tickets belong to this org.",
+          "id": "trackers",
+          "item_label": {
+            "field": "name",
+            "type": "field"
+          },
+          "label": "Trackers",
+          "remove": {
+            "bind": [
+              [
+                "tracker_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ],
+              [
+                "org_id",
+                {
+                  "from": "null"
+                }
+              ]
+            ],
+            "command": "assign_tracker_org",
+            "envelope": "args",
+            "id": "org.unassign_tracker",
+            "label": "Take the tracker out",
+            "params": []
+          },
+          "type": "items"
+        },
+        {
+          "badge": {
+            "text": "isolates sessions",
+            "when": "true"
+          },
+          "confirm": "Hosts outside this org will no longer list or message its sessions, and its hosts will not see other orgs' sessions. It can break a controller that dispatches across companies.",
+          "default": false,
+          "edit": "isolate_sessions",
+          "help": "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
+          "id": "isolate_sessions",
+          "label": "Isolate sessions",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "auto-tidy",
+            "when": "set"
+          },
+          "edit": "auto_tidy",
+          "help": "Auto-tidy for this org's sessions: on or off whatever the fleet-wide setting says, or inherit it. Safe kill only, never a session in use.",
+          "id": "auto_tidy",
+          "label": "Auto-tidy",
+          "type": "inherit"
+        },
+        {
+          "badge": {
+            "text": "sends to Jev",
+            "when": "true"
+          },
+          "confirm": "This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on.",
+          "default": false,
+          "edit": "jev",
+          "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
+          "id": "jev_allowed",
+          "label": "Send to Jev",
+          "on_off": true,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "bound devices: own only",
+            "when": "false"
+          },
+          "default": true,
+          "edit": "bound_sees_unassigned",
+          "help": "Devices paired to this org (fleet-hub pair --org) also see work and sessions that belong to no org, as a host does. Off: only this org's own.",
+          "id": "bound_sees_unassigned",
+          "label": "Bound devices see unassigned",
+          "on_off": false,
+          "type": "bool"
+        }
+      ],
+      "help": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary: a host in an org lets its Claude read only that org's (and unassigned) work.",
+      "id": "org",
+      "id_field": "id",
+      "label": "Organisation",
+      "list": "list_orgs",
+      "plural": "Organisations",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "org_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_org",
+        "envelope": "args",
+        "id": "org.update",
+        "label": "Apply",
+        "params": []
+      }
     }
   ],
   "sources": [

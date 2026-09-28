@@ -4047,3 +4047,22 @@ const SOURCES: &[(&str, &str)] = &[
     ("pty.rs", include_str!("../pty.rs")),
     ("lib.rs", include_str!("../lib.rs")),
 ];
+
+/// Declarative pages P4: a resource action names a desktop command by
+/// string (`fleet_core::pages::resources`), so a renamed or removed command
+/// would leave a page button that fails at the click. Every one it names is
+/// registered, and has a hub verdict like any other command.
+#[test]
+fn resource_commands_exist() {
+    let registered: Vec<String> = registered_commands().into_iter().map(|(_, c)| c).collect();
+    for cmd in fleet_core::pages::resources::commands() {
+        assert!(
+            registered.iter().any(|c| c == cmd),
+            "a resource names `{cmd}`, which lib.rs does not register"
+        );
+        assert!(
+            super::verdicts::verdict(cmd).is_some(),
+            "a resource names `{cmd}`, which has no hub verdict"
+        );
+    }
+}

@@ -6,7 +6,7 @@
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{lock, IpcError};
-use fleet_core::pages::{self, sources, Page};
+use fleet_core::pages::{self, resources, sources, Page};
 use fleet_core::store::Store;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,7 @@ use tauri::State;
 pub struct PagesBundle {
     pub pages: &'static [Page],
     pub sources: &'static [sources::SourceSpec],
+    pub resources: &'static [resources::ResourceType],
 }
 
 /// The page specs this build ships. Compiled into the binary, so the answer
@@ -27,6 +28,7 @@ pub fn list_pages() -> PagesBundle {
     PagesBundle {
         pages: pages::all(),
         sources: sources::SOURCES,
+        resources: resources::RESOURCES,
     }
 }
 

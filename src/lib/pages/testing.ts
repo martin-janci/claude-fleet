@@ -7,7 +7,11 @@
 import registry from './registry.generated.json';
 import type { Descriptor, PagesBundle } from './pages';
 
-export const bundle = { pages: registry.pages, sources: registry.sources } as unknown as PagesBundle;
+export const bundle = {
+  pages: registry.pages,
+  sources: registry.sources,
+  resources: registry.resources,
+} as unknown as PagesBundle;
 export const allDescriptors = registry.descriptors as unknown as Descriptor[];
 
 export function descriptorOf(key: string): Descriptor {

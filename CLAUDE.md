@@ -111,6 +111,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   "General" (`list_pages`, `fetch_page_source`); `hub.*` / `mcp.*` are
   read-only specs (`owned_by`, D-P7), and `settings::set` emits
   `settings:changed` (kind `settings`, never on host/org-bound streams).
+  P4a: resources (`pages/resources.rs`) back `master_detail` pages — an
+  action names an existing desktop command and binds its args, never code,
+  so verdicts and hub routing are unchanged (`resource_commands_exist`);
+  Settings → Organisations is one (OrgSettings.svelte is gone).
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.

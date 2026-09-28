@@ -54,7 +54,6 @@
   import { hubStatus, hubBlock, ownsTheFleet } from './hub';
   import WorkUsage from './WorkUsage.svelte';
   import { pushError, push } from './toasts';
-  import OrgSettings from './OrgSettings.svelte';
 
   let {
     now = () => Math.floor(Date.now() / 1000),
@@ -586,7 +585,6 @@
     </form>
   {/if}
 
-  <OrgSettings />
   {#if owns}<WorkUsage />{/if}
 </section>
 

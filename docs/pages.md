@@ -77,7 +77,8 @@ page tree. `id` is dotted lowercase and is also the page's deep link.
 | `category` | Settings in sections, saved as you change them | `field`, `stat`, `record`, `notice`, `link`, `custom` |
 | `cards` | An overview: numbers and links | `stat`, `record`, `notice`, `link` |
 | `data_page` | Stats, charts and tables | `stat`, `record`, `table`, `chart`, `notice`, `link` |
-| `master_detail`, `flow`, `object_editor`, `review_apply` | Lists of resources, wizards, one object with Apply, reviewing proposed changes | Not yet: these wait on the resource registry (design P4) |
+| `master_detail` | A list of a resource's records beside one record's editor | `field` (naming a field of the resource), `notice`, `custom`; `list_items` above the list: `notice`, `custom` |
+| `flow`, `object_editor`, `review_apply` | Wizards, one object on its own page, reviewing proposed changes | Not yet (design P4b, P5) |
 
 ### Items
 
@@ -92,7 +93,7 @@ Every item is an object tagged by `type`:
 | `chart` | `source`, `chart` (`line` / `bar` / `stacked_bar` / `sparkline`), optional `title` | A series source |
 | `notice` | `tone` (`info` / `warn` / `danger`), `text` | Plain text, 300 characters at most |
 | `link` | `page`, optional `label` | Another page's id |
-| `custom` | `component` (`work_retention` / `auto_tidy_preview`) | A hand-written component registered in code: the one escape hatch, capped at three uses across all pages. Replace one with a data source and an action when the catalog can express it |
+| `custom` | `component` (`work_retention` / `auto_tidy_preview` / `org_suggestions`) | A hand-written component registered in code: the one escape hatch, capped at three uses across all pages. Replace one with a data source and an action when the catalog can express it |
 
 A `source` is `{ "id": "usage.by_day", "params": { "days": 30 } }`. Parameters
 are literals, checked against the source's declared parameters.
@@ -141,6 +142,58 @@ The renderer lives in `src/lib/pages/`:
 Its tests run against `src/lib/pages/registry.generated.json`. That file holds
 exactly what `list_pages` and `describe_fleet_settings` answer on a fresh
 store, so it is never a hand copy. It is regenerated with the other page docs.
+
+### Resources and `master_detail` pages
+
+A resource (`crates/fleet-core/src/pages/resources.rs`) is a collection of
+things, such as organisations, that a person adds, edits and removes. Its
+type declares:
+
+- `list`: the desktop command that returns the records;
+- the fields of a record, each of these kinds:
+  - `text`;
+  - `color`;
+  - `bool`, where `on_off` writes `"on"` / `"off"`;
+  - `inherit`, which is on / off / inherit;
+  - `items`: a list changed through its own `remove` and `add` actions,
+    shown by a closed formatter (`plain`, `field`, `org_rule`);
+- which fields are editable (`edit` names the update argument), with a
+  `badge` shown in the list and a `confirm` asked before Apply;
+- `create`, `update` and `delete`.
+
+Every action names an **existing desktop command** and binds each argument
+to one of: a record field, the sub-item or its field, a form param, or
+`null`. It never names code. The command's hub verdict therefore applies
+unchanged. On a paired desktop the list routes to the hub, and the page is
+read-only with that command's reason.
+
+A `master_detail` page names its resource and lays out one record's fields
+in sections, each field exactly once:
+
+```json
+{ "spec": "fleet.page/1", "id": "settings.orgs", "title": "Organisations",
+  "parent": "settings", "layout": "master_detail", "resource": "org",
+  "list_items": [ { "type": "custom", "component": "org_suggestions" } ],
+  "sections": [
+    { "title": "Organisation", "items": [ { "type": "field", "key": "name" },
+                                           { "type": "field", "key": "color" } ] } ] }
+```
+
+The renderer (`src/lib/pages/ResourcePage.svelte`, `RecordEditor.svelte`,
+`ActionForm.svelte`) edits scalar fields as a draft. **Apply** sends the
+record's id and only the fields that changed, after asking any `confirm`.
+Discard drops the draft. A list changes item by item through its actions,
+and removing a record is always confirmed. A failed command becomes a toast,
+and the list is re-read either way.
+
+To add a resource:
+
+1. Declare it in `RESOURCES`. `resources_are_well_formed` checks the
+   bindings, namespaces and sentences.
+2. Name only commands `lib.rs` registers (`resource_commands_exist`).
+3. Give its update command a hub reason (`pages.test.ts`).
+4. Add its store reloaders to `RESOURCE_RELOADERS` in
+   `src/lib/pages/resources.ts` when other views keep a copy.
 
 ## Rules the validator enforces
 

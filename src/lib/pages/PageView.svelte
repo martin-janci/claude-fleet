@@ -11,6 +11,8 @@
   import Tabs from './Tabs.svelte';
   import WorkRetention from '../WorkRetention.svelte';
   import AutoTidyPreview from '../AutoTidyPreview.svelte';
+  import ResourcePage from './ResourcePage.svelte';
+  import type { ResourceType } from './resources';
   import { evalCondition, sectionsOf, type Descriptor, type Page, type Section, type SourceSpec } from './pages';
 
   let {
@@ -19,8 +21,10 @@
     descs,
     values,
     sources,
+    resources = [],
     focusKey = null,
     readonly = false,
+    reason = null,
     onnavigate,
   }: {
     page: Page;
@@ -28,6 +32,9 @@
     descs: Map<string, Descriptor>;
     values: Record<string, string>;
     sources: SourceSpec[];
+    resources?: ResourceType[];
+    /** Why the page is read-only (a paired desktop), for a resource page. */
+    reason?: string | null;
     /** A setting to bring into view and highlight (a search hit). */
     focusKey?: string | null;
     /** Show every field without editing (a hub client). */
@@ -82,10 +89,16 @@
   </header>
   {#if page.intro}<p class="intro">{page.intro}</p>{/if}
 
-  {#if tabs.length > 0}
+  {#if page.layout === 'master_detail'}
+    {@const res = resources.find((r) => r.id === page.resource)}
+    {#if res}
+      <ResourcePage {page} resource={res} {readonly} {reason} />
+    {/if}
+  {:else if tabs.length > 0}
     <Tabs tabs={tabs.map((t) => t.title)} bind:selected={tab} label={page.title} testidPrefix={`page-${page.id}-tab`} />
   {/if}
 
+  {#if page.layout !== 'master_detail'}
   {#each visibleSections as section (section.title)}
     {#if section.collapsible || section.advanced}
       <Disclosure title={section.title} open={!section.advanced} badge={section.advanced ? 'Advanced' : undefined} testid={`section-${section.title}`}>
@@ -98,6 +111,7 @@
       </section>
     {/if}
   {/each}
+  {/if}
 </div>
 
 {#snippet sectionBody(section: Section)}

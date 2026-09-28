@@ -34,6 +34,15 @@ pub struct Page {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro: Option<String>,
     pub layout: Layout,
+    /// A `master_detail` page's resource (`pages::resources`): the list
+    /// shows its records, and the sections lay out one record's fields —
+    /// a `field` item's `key` names a field of the resource there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// A `master_detail` page's items about the whole collection, shown
+    /// above the list: notices and custom items only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list_items: Vec<Item>,
     /// Either `sections` or `tabs`, never both.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<Section>,
@@ -190,6 +199,10 @@ pub enum CustomComponent {
     /// reasons would act on (work graph M7.3; `AutoTidyPreview.svelte`).
     /// Waits on a `work.tidy` data source with a param from the page.
     AutoTidyPreview,
+    /// Proposed orgs (from owners of live sessions and tracker sites), one
+    /// click each to create with their rule and tracker (work graph M5.4;
+    /// `OrgSuggestions.svelte`). Waits on actions that chain.
+    OrgSuggestions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
