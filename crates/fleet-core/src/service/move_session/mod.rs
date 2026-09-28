@@ -6511,6 +6511,7 @@ mod tests {
     /// The same verdict through the real `target_prep_script`: behind and
     /// dirty is `TARGET_DIRTY`, a genuine divergence is still `DIVERGED`,
     /// and a clean target that is merely behind still fast-forwards.
+    #[cfg(unix)]
     #[test]
     fn target_prep_script_separates_a_dirty_target_from_a_diverged_one() {
         if !carry::tests::require(&["git", "bash"]) {
@@ -6947,6 +6948,7 @@ mod tests {
     /// temp repo that is genuinely mid-merge (two branches editing the same
     /// line, `git merge` left conflicted), then again after `git merge
     /// --abort`. Nobody had run the probe against real git before this test.
+    #[cfg(unix)]
     #[test]
     fn inspect_script_probe_detects_a_real_mid_merge() {
         if !carry::tests::require(&["git", "bash"]) {
@@ -7029,6 +7031,7 @@ mod tests {
     /// FETCH_HEAD, no moved tracking ref — and must not rewrite the index's
     /// stat cache through `git status` either. The count it cannot make is
     /// reported as unknown (`ahead == -1`), never guessed.
+    #[cfg(unix)]
     #[test]
     fn a_dry_run_inspection_writes_nothing_when_origin_has_moved_on() {
         use carry::tests::{bash, git};
@@ -7157,6 +7160,7 @@ mod tests {
         assert!(size_script(evil).contains("f='x'\\''; rm -rf / #'"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn locate_script_prefers_the_stored_path_then_finds_by_id() {
         let tmp = tempfile::tempdir().unwrap();

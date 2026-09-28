@@ -2132,6 +2132,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_clone_guards_exit_3_survives_a_failing_bash_logout() {
         // The live bug: these scripts run under `bash -lc`, a LOGIN shell,
@@ -2314,6 +2315,7 @@ mod tests {
         assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_clone_runs_git_and_a_second_attempt_reports_e_exists() {
         // `clone_url_for` always targets github.com, so exercising the
@@ -2466,6 +2468,7 @@ mod tests {
         assert!(fake.calls().is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adopts_a_real_checkout_and_reads_its_origin() {
         let dir = tempfile::tempdir().unwrap();
@@ -2515,6 +2518,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_without_an_origin_falls_back_to_the_directory_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -2547,6 +2551,7 @@ mod tests {
         assert_eq!(row.project.owner, "local");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_that_is_not_a_checkout_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2570,6 +2575,7 @@ mod tests {
         assert!(err.message.contains("git"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_that_already_exists_as_a_project_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2606,6 +2612,7 @@ mod tests {
         assert_eq!(err.code, codes::E_EXISTS);
     }
 
+    #[cfg(unix)]
     fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
         std::process::Command::new("git")
             .args(args)
@@ -2616,6 +2623,7 @@ mod tests {
             .success()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adopting_a_linked_worktree_registers_the_main_checkout() {
         use crate::projects::test_git::{init_repo, run};
@@ -2669,6 +2677,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adopting_a_bare_repos_worktree_registers_the_worktree_not_the_bare_dir() {
         // A bare repo's worktrees also fail the git-dir/git-common-dir
@@ -2738,6 +2747,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_from_a_subdirectory_registers_the_top_level() {
         let dir = tempfile::tempdir().unwrap();
@@ -2771,6 +2781,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_with_a_non_github_origin_falls_back_to_the_directory_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -2801,6 +2812,7 @@ mod tests {
         assert_eq!(row.project.repo, "gl-repo");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_sanitizes_a_basename_with_spaces_instead_of_storing_it_raw() {
         // `parse_repo_url`'s invariant is that a parsed pair is always safe
@@ -2882,6 +2894,7 @@ mod tests {
         assert_eq!(err.code, codes::E_INVALID);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_refuses_a_path_already_registered_by_another_project() {
         // Today two rows could share one path: adopt with no origin (falls
@@ -2934,6 +2947,7 @@ mod tests {
         assert_eq!(err.code, codes::E_EXISTS);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adoption_writes_nothing_to_the_checkout() {
         fn snapshot(
@@ -3284,6 +3298,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_on_local_runs_a_real_git_init_and_commit() {
         // Exercise the LOCAL branch (no FakeSsh involved) against a real
@@ -3323,6 +3338,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_refuses_when_the_destination_exists_and_is_not_a_git_repository() {
         let projects_root = tempfile::tempdir().unwrap();
@@ -4224,6 +4240,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_host_without_git_is_left_untouched_with_a_clear_message() {
         // `/bin/bash` by absolute path under a PATH holding nothing at all:
@@ -5169,6 +5186,7 @@ mod tests {
     }
 
     /// Wait for `path` to exist (the script got far enough), up to 5 s.
+    #[cfg(unix)]
     async fn wait_for_file(path: &Path) {
         for _ in 0..250 {
             if path.exists() {
@@ -5242,6 +5260,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_local_script_cancel_sends_sigterm_first_so_processes_can_clean_up() {
         // `git clone` removes its half-written destination on SIGTERM but not
@@ -5340,6 +5359,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stderr), "oops\n");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_local_script_gives_the_script_a_null_stdin() {
         // `.spawn()` would otherwise inherit the app's stdin, and under

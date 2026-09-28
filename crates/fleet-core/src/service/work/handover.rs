@@ -1144,6 +1144,7 @@ Verify the git state before acting; this summary may be stale. Full context: the
         assert!(parse_probe("garbage").is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_probe_reads_a_real_worktree_and_a_removed_one_by_branch() {
         use std::process::Command;

@@ -1859,6 +1859,7 @@ mod tests {
         assert!(crate::tmux::transcript_mtimes_script(&["bad".into()]).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn mtimes_script_runs_against_a_real_projects_tree() {
         // The script itself, through `bash -c` with a throwaway $HOME: finds a
@@ -1896,6 +1897,7 @@ mod tests {
         assert!(discover_transcripts_script(50).contains("head -n 50"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn discover_script_runs_under_local_bash() {
         use crate::service::sessions::parse_discover_output;
@@ -2078,6 +2080,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_identity_script_runs_under_local_bash() {
         // Real bash, real `tmux` if installed — CI's `ubuntu-24.04` runner

@@ -2521,6 +2521,7 @@ mod tests {
     /// flight, so the budget would admit it — only the message limit stands
     /// between it and the decoder, and tungstenite's own default for that is
     /// 64 MiB.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fragmented_message_over_the_ceiling_is_refused() {
         let hub = hub_with(|s| s.with_frame_cap(256 * 1024)).await;

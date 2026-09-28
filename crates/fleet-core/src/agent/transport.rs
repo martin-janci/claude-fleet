@@ -492,6 +492,7 @@ mod tests {
     /// The same quoting, seen from the agent's side: a POSIX shell given the
     /// command line we send re-tokenises it into exactly the argv ssh's
     /// remote login shell would have produced.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_command_line_re_splits_into_the_script_the_caller_wrote() {
         let (t, agent) = setup(answer_exit(0));
@@ -531,6 +532,7 @@ mod tests {
         assert_eq!(out.stderr, b"\x00 err");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_negative_exit_code_is_a_failed_status_with_no_code() {
         let (t, _agent) = setup(answer_exit(-1));
@@ -702,6 +704,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn upload_file_carries_an_executable_mode_through() {
         let (t, agent) = setup(answer_exit(0));
@@ -832,6 +835,7 @@ mod tests {
     /// that mode would land the file world-writable on the agent host, where
     /// SSH's `cat >` under a normal umask gives 0644 — another user on that
     /// host could rewrite a file the session is about to read.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_upload_never_carries_group_or_other_write() {
         for (local, sent) in [(0o777, 0o755), (0o666, 0o644), (0o664, 0o644)] {

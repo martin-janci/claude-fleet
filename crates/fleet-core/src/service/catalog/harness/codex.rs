@@ -703,6 +703,7 @@ mod tests {
     /// one real skill file plus a real `config.toml`, and feeds the output
     /// back through `parse_scan`. Mirrors
     /// `Claude::scan_script_runs_under_bash_and_parses_cleanly`.
+    #[cfg(unix)]
     #[test]
     fn scan_script_runs_under_bash_and_parses_cleanly() {
         let tmp = tempfile::TempDir::new().unwrap();

@@ -2005,6 +2005,7 @@ mod tests {
         assert_eq!(err.code, "E_VALIDATE");
     }
 
+    #[cfg(unix)]
     #[test]
     fn worktree_hook_upserts_row_under_known_project() {
         let store = make_store();

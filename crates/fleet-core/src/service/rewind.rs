@@ -478,6 +478,7 @@ mod tests {
 
     /// Run a generated script against a real file in a temp dir. `bash` in a
     /// test is established here (`crate::shell::tests`, `crate::tmux::tests`).
+    #[cfg(unix)]
     fn run(script: &str) -> std::process::Output {
         std::process::Command::new("bash")
             .arg("-c")
@@ -491,6 +492,7 @@ mod tests {
     const A1: &str = "aaaaaaaa-0000-0000-0000-000000000001";
     const A2: &str = "aaaaaaaa-0000-0000-0000-000000000002";
 
+    #[cfg(unix)]
     fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
         // Leading metadata lines carry no uuid and MUST survive: they are the
         // transcript's header (`custom-title`, `mode`, …).
@@ -516,6 +518,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     fn tmp() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("cf-rewind-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
@@ -527,6 +530,7 @@ mod tests {
     /// matches `/src/appXold`, because `.` means "any character". A buggy
     /// `gsub` implementation would clobber both lines; `rep()` must touch
     /// only the one that is an exact literal match.
+    #[cfg(unix)]
     fn fixture_with_gsub_trap(dir: &std::path::Path) -> std::path::PathBuf {
         let body = format!(
             concat!(
@@ -550,6 +554,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     #[test]
     fn keeps_everything_strictly_before_the_anchor() {
         let d = tmp();
@@ -587,6 +592,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn rewrites_the_session_id_on_every_copied_line() {
         let d = tmp();
@@ -611,6 +617,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_anchor_copies_the_whole_file() {
         // Fork on the LAST turn: there is no later prompt, so "keep
@@ -633,6 +640,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_anchor_that_is_not_in_the_file_fails_with_the_sentinel() {
         let d = tmp();
@@ -656,6 +664,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_cross_worktree_fork_rewrites_cwd_literally() {
         // `/src/app.old` read as a REGEX also matches `/src/appXold` (`.`
@@ -704,6 +713,7 @@ mod tests {
     /// which is `/clear` under a misleading label. The engine is the only
     /// layer that can know, so the refusal is a script sentinel, not a
     /// client-side gate.
+    #[cfg(unix)]
     #[test]
     fn a_prefix_with_no_conversation_entry_fails_with_its_own_sentinel() {
         let d = tmp();
@@ -734,6 +744,7 @@ mod tests {
 
     /// The counterpart: a prefix that DOES hold a turn is written, so the
     /// sentinel above cannot be firing on the ordinary case.
+    #[cfg(unix)]
     #[test]
     fn a_prefix_with_one_turn_is_written() {
         let d = tmp();

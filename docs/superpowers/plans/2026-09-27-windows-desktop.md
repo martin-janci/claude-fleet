@@ -15,7 +15,7 @@
 | Phase | State |
 |---|---|
 | 1 compile | done — plus a print-guard fix: the Unix gate on a test module is its own `#[cfg(unix)]` line above a bare `#[cfg(test)]`, which is the only form `no_eprintln_tests` recognises |
-| 2 CI | done — `rust-windows` job (clippy, tests, `tauri build --debug --bundles nsis`), `windows-latest` in the frontend matrix |
+| 2 CI | done — `rust-windows` job (clippy, tests, `tauri build --debug --bundles nsis`) over every crate but `fleet-agent` and `fleet-hub` (both Unix-only), `windows-latest` in the frontend matrix. The first Windows run failed 162 fleet-core tests: ~150 run POSIX host scripts under a local `bash` (on the runner that is the WSL launcher) or cover the Linux-only hub/agent side, and are `#[cfg(unix)]`; two were real Windows bugs, fixed — catalog resource paths came out with `\\` (`catalog::repo::rel`), and `credential_ref` refused a Windows absolute `file:` path |
 | 3 runtime basics | done in code — the Windows reconcile timing is still to be taken on a Windows box |
 | 4 ConPTY matrix | open: manual, needs Windows 11 and a Linux host |
 | 5 token store | done |

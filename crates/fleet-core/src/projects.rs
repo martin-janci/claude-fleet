@@ -573,10 +573,12 @@ branch refs/heads/bugfix
 /// Real-git fixtures shared by the scan and refresh tests.
 #[cfg(test)]
 pub(crate) mod test_git {
+    #[cfg(unix)]
     use std::path::Path;
 
     /// Run git in `dir` with a throwaway identity. `false` when git is
     /// missing or the command fails.
+    #[cfg(unix)]
     pub fn run(dir: &Path, args: &[&str]) -> bool {
         std::process::Command::new("git")
             .arg("-C")
@@ -589,6 +591,7 @@ pub(crate) mod test_git {
     }
 
     /// A repository at `dir` with one commit. `false` when git is unavailable.
+    #[cfg(unix)]
     pub fn init_repo(dir: &Path) -> bool {
         std::fs::create_dir_all(dir).is_ok()
             && run(dir, &["init", "-q"])

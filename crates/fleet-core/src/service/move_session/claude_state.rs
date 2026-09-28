@@ -783,11 +783,13 @@ pub fn parse_merge(stdout: &str) -> Option<MergeResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::service::move_session::carry::tests::{bash, require};
     use crate::service::move_session::carry::{LeftReason, OUT_MARKER};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     /// A source project dir whose NAME begins with `-`, like every real one.
@@ -1116,6 +1118,7 @@ mod tests {
     /// `fail()` used to exit immediately, leaving the staging dir (a partial
     /// copy of the user's conversation history) behind on every failure
     /// path. It must clean up first.
+    #[cfg(unix)]
     #[test]
     fn the_staging_dir_does_not_survive_a_corrupt_archive() {
         if !require(&["bash", "tar"]) {
@@ -1414,6 +1417,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// an exact `carried\t…` report line. Only python3's `tarfile` can put
     /// such names in an archive; `tar` from a real directory cannot be made
     /// to produce the newline one reliably.
+    #[cfg(unix)]
     fn build_archive_with_hostile_names(dir: &std::path::Path, id: &str) -> std::path::PathBuf {
         let builder = dir.join("build_hostile.py");
         std::fs::write(
@@ -1457,6 +1461,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// itself: such a file is never moved, its raw name is never echoed (a
     /// newline in it would otherwise FORGE a `carried\t…` line that
     /// `parse_merge` believes), and it is reported `failed` anonymously.
+    #[cfg(unix)]
     #[test]
     fn a_hostile_member_name_is_never_moved_and_cannot_forge_a_report_line() {
         if !require(&["bash", "tar", "python3"]) {
@@ -1636,6 +1641,7 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_source_without_a_session_directory_lists_nothing_and_succeeds() {
         if !require(&["bash"]) {
@@ -2193,6 +2199,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// The physical path of `p` (symlinks resolved, e.g. macOS `/var` →
     /// `/private/var`), encoded exactly as `memory_list_script`'s own `enc()`
     /// does: every char outside `[A-Za-z0-9]` becomes `-`.
+    #[cfg(unix)]
     fn enc(p: &std::path::Path) -> String {
         let real = std::fs::canonicalize(p).unwrap();
         real.to_string_lossy()
@@ -2201,6 +2208,7 @@ with tarfile.open(out, "w:gz") as tar:
             .collect()
     }
 
+    #[cfg(unix)]
     fn memory_dir_for(home: &std::path::Path, enc_name: &str) -> std::path::PathBuf {
         home.join(".claude/projects").join(enc_name).join("memory")
     }
@@ -2436,6 +2444,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// but `tar` from a real directory cannot be talked into producing
     /// safely: a symlink member, a subdirectory member, a `..` member, the
     /// index under two spellings, and a bare directory member.
+    #[cfg(unix)]
     fn build_memory_archive(dir: &std::path::Path, shape: &str) -> std::path::PathBuf {
         let builder = dir.join("build_memory.py");
         std::fs::write(
@@ -2497,6 +2506,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// user's own notes, so it must not trust the archive: every member is
     /// checked before a single byte is extracted. One bad member refuses the
     /// whole archive and leaves the memory directory byte-identical.
+    #[cfg(unix)]
     #[test]
     fn the_memory_extract_refuses_every_member_it_did_not_ask_for() {
         if !require(&["bash", "tar", "python3"]) {
@@ -2845,6 +2855,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// test's `touch`, if it ran, would leave `pwned.txt` in the memory dir.
     /// The builder must refuse such text (and over-long text) itself, doing
     /// NOTHING to the file, before ever emitting the heredoc.
+    #[cfg(unix)]
     #[test]
     fn memory_append_index_script_refuses_a_delimiter_line_or_over_long_text() {
         if !require(&["bash"]) {
@@ -2926,6 +2937,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// the route that proves this is bash reading the script from a FILE;
     /// that is what this test does. The builder must refuse a NUL exactly
     /// like a bare delimiter line.
+    #[cfg(unix)]
     #[test]
     fn memory_append_index_script_refuses_a_nul_byte_like_a_delimiter_line() {
         if !require(&["bash"]) {
@@ -2978,6 +2990,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// repo's memory. A nonexistent fallback (a normal, expected condition —
     /// not an anomaly, unlike an empty `top`) must never be used as `m`; the
     /// primary is reported instead, exactly as when no fallback applies.
+    #[cfg(unix)]
     #[test]
     fn a_nonexistent_fallback_never_yields_a_double_slash_memory_dir() {
         if !require(&["bash", "git"]) {
@@ -3028,6 +3041,7 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn memory_scripts_fail_cleanly_and_quote_everything() {
         if !require(&["bash", "git"]) {

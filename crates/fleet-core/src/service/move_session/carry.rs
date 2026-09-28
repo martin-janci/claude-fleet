@@ -1037,6 +1037,7 @@ pub(crate) mod tests {
     /// `true` when every binary in `bins` can be run. A missing one lets a
     /// real-git test skip on a bare workstation — but never on CI, where a
     /// silent skip would hide the very regression the test exists for.
+    #[cfg(unix)]
     pub(crate) fn require(bins: &[&str]) -> bool {
         let missing: Vec<&str> = bins
             .iter()
@@ -1215,12 +1216,15 @@ pub(crate) mod tests {
         assert!(v["ignored_left_behind"][0]["bytes"].is_null());
     }
 
+    #[cfg(unix)]
     use std::path::Path;
+    #[cfg(unix)]
     use std::process::{Command, Output};
 
     /// Run a generated script the way a host would, with an isolated `$HOME`
     /// (so `~/.cache/claude-fleet/transfer` lands in the temp dir) and no
     /// user/system git config.
+    #[cfg(unix)]
     pub(crate) fn bash(script: &str, home: &Path) -> Output {
         Command::new("bash")
             .args(["-c", script])
@@ -1231,6 +1235,7 @@ pub(crate) mod tests {
             .expect("bash")
     }
 
+    #[cfg(unix)]
     pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .arg("-C")
@@ -1252,6 +1257,7 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    #[cfg(unix)]
     fn sorted_lines(s: &str) -> Vec<String> {
         let mut v: Vec<String> = s
             .lines()
@@ -1267,6 +1273,7 @@ pub(crate) mod tests {
     /// Commit history shared by every fixture: a `base` commit, a `pushed`
     /// branch standing in for `origin/feat` (a sha is only fetchable as a
     /// ref tip), and two "unpushed" commits on `feat`. Returns the base sha.
+    #[cfg(unix)]
     fn commit_history(dir: &Path) -> String {
         git(dir, &["init", "-q", "-b", "feat"]);
         for (f, body) in [
@@ -1294,6 +1301,7 @@ pub(crate) mod tests {
     /// The dirty mutations every fixture applies on top of `commit_history`:
     /// modified/staged/untracked/deleted files, a mode bit, a symlink and an
     /// ignored file — every kind of state the carry must reproduce.
+    #[cfg(unix)]
     fn make_dirty(dir: &Path) {
         std::fs::write(dir.join("mod.txt"), "v2\n").unwrap(); // modified, unstaged
         std::fs::write(dir.join("staged new.txt"), "new\n").unwrap(); // staged, space in name
@@ -1317,6 +1325,7 @@ pub(crate) mod tests {
 
     /// A source repo with every kind of state the carry must reproduce.
     /// Returns (repo dir, sha of the "pushed" base commit).
+    #[cfg(unix)]
     fn dirty_source(root: &Path) -> (std::path::PathBuf, String) {
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -1329,6 +1338,7 @@ pub(crate) mod tests {
     /// WORKTREE (`git worktree add`) of a separate main repo — the shape
     /// claude-fleet actually moves. Returns (worktree dir, main repo dir,
     /// base sha).
+    #[cfg(unix)]
     fn dirty_source_via_linked_worktree(
         root: &Path,
     ) -> (std::path::PathBuf, std::path::PathBuf, String) {
@@ -1351,6 +1361,7 @@ pub(crate) mod tests {
     /// file (a pointer to the main repo), not a directory, and the
     /// worktree's own index lives under the main repo's
     /// `.git/worktrees/<name>/index`.
+    #[cfg(unix)]
     fn source_fingerprint(src: &Path) -> (String, Vec<u8>, String) {
         let index_path = git(
             src,
@@ -1373,6 +1384,7 @@ pub(crate) mod tests {
     /// generated scripts. `make_source` builds the fixture (a plain repo, or
     /// a linked worktree of one); `seed_target` prepares the target's main
     /// clone.
+    #[cfg(unix)]
     fn round_trip(
         make_source: impl Fn(&Path) -> (std::path::PathBuf, String),
         seed_target: impl Fn(&Path, &Path, &str),
@@ -1532,6 +1544,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn round_trip_into_a_target_that_has_the_base_commit() {
         round_trip(dirty_source, |src, root, base| {
@@ -1554,6 +1567,7 @@ pub(crate) mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn round_trip_into_an_initialized_empty_target() {
         round_trip(dirty_source, |_src, root, _base| {
@@ -1576,6 +1590,7 @@ pub(crate) mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn round_trip_from_a_linked_worktree_source() {
         // The shape claude-fleet actually moves: the "source" is a linked
@@ -1608,6 +1623,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_thin_bundle_is_smaller_than_a_full_one_and_a_clean_source_still_bundles() {
         if !require(&["git", "bash"]) {
@@ -1646,6 +1662,7 @@ pub(crate) mod tests {
         assert!(none.bytes > 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_bundle_over_the_cap_and_a_dirty_or_moved_target_are_recognisable() {
         if !require(&["git", "bash"]) {
@@ -1681,6 +1698,7 @@ pub(crate) mod tests {
         assert!(String::from_utf8_lossy(&out.stderr).contains(HEAD_MISMATCH));
     }
 
+    #[cfg(unix)]
     #[test]
     fn seed_never_deletes_an_existing_non_git_directory() {
         if !require(&["git", "bash"]) {
@@ -1762,6 +1780,7 @@ pub(crate) mod tests {
         assert!(s.contains(&"a".repeat(40)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn ignored_files_are_listed_selected_packed_and_extracted_without_overwriting() {
         if !require(&["git", "bash", "tar"]) {
@@ -1910,6 +1929,7 @@ pub(crate) mod tests {
     /// script's parsed output: haves, snapshot, chunk and apply are each run
     /// with a banner injected before the script body, exactly as a chatty
     /// profile would inject one, and compared against a bannerless run.
+    #[cfg(unix)]
     #[test]
     fn carry_scripts_survive_a_login_shell_banner() {
         if !require(&["git", "bash"]) {
@@ -2046,6 +2066,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn scripts_refuse_a_malicious_or_empty_id_and_leave_a_sibling_transfer_dir_untouched() {
         if !require(&["git", "bash"]) {
@@ -2100,6 +2121,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn scripts_that_build_the_transfer_dir_refuse_an_empty_home() {
         if !require(&["git", "bash"]) {
@@ -2152,6 +2174,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn chunk_script_refuses_a_missing_or_unreadable_file() {
         if !require(&["bash"]) {
@@ -2181,6 +2204,7 @@ pub(crate) mod tests {
     }
 
     /// Like [`git`], but a failure is an answer rather than a panic.
+    #[cfg(unix)]
     fn git_try(dir: &Path, args: &[&str]) -> Output {
         Command::new("git")
             .arg("-C")
@@ -2201,6 +2225,7 @@ pub(crate) mod tests {
     /// [`apply_script`] test needs. `configure` runs on the target clone
     /// right after it is created. Returns (source HEAD, target main clone,
     /// target worktree, target `$HOME`).
+    #[cfg(unix)]
     fn carry_into_target(
         tmp: &Path,
         src: &Path,
@@ -2259,6 +2284,7 @@ pub(crate) mod tests {
         (src_head, root, wt, home_b)
     }
 
+    #[cfg(unix)]
     #[test]
     fn apply_restores_a_clean_worktree_when_a_read_tree_fails_partway() {
         if !require(&["git", "bash"]) {
@@ -2310,6 +2336,7 @@ pub(crate) mod tests {
     /// must still be seen as dirty: otherwise `read-tree -u --reset`
     /// overwrites a colliding untracked file the user has work in, and the
     /// rollback deletes the rest.
+    #[cfg(unix)]
     #[test]
     fn apply_refuses_a_target_whose_config_hides_untracked_files() {
         if !require(&["git", "bash"]) {
@@ -2344,6 +2371,7 @@ pub(crate) mod tests {
     /// different hosts. Hosts disagree about `core.quotePath`, so both sides
     /// must come from the same pinned invocation — or a file with a
     /// diacritic in its name fails a perfectly good move.
+    #[cfg(unix)]
     #[test]
     fn hosts_that_disagree_about_quote_path_still_produce_a_matching_porcelain() {
         if !require(&["git", "bash"]) {
@@ -2395,6 +2423,7 @@ pub(crate) mod tests {
     /// `worktree add --track -b <br> origin/<br>` gave it, or `git pull` and
     /// a bare `git push` fail on the moved session — and only a branch the
     /// fetch created: an existing one's config is the user's.
+    #[cfg(unix)]
     #[test]
     fn fetch_sets_the_upstream_only_for_a_branch_it_creates() {
         if !require(&["git", "bash"]) {
@@ -2557,6 +2586,7 @@ pub(crate) mod tests {
     /// snapshot fail with "Argument list too long". Haves are only an
     /// optimisation, so they are capped — with the session branch offered
     /// first, since that is the one that actually thins the bundle.
+    #[cfg(unix)]
     #[test]
     fn the_haves_list_is_capped_and_still_offers_the_session_branch() {
         if !require(&["git", "bash"]) {
@@ -2653,6 +2683,7 @@ pub(crate) mod tests {
 
     /// (F3) A login profile whose last write has no trailing newline would
     /// otherwise glue itself onto the marker and hide the payload.
+    #[cfg(unix)]
     #[test]
     fn a_banner_without_a_trailing_newline_still_leaves_the_marker_on_its_own_line() {
         if !require(&["git", "bash"]) {
@@ -2806,6 +2837,7 @@ pub(crate) mod tests {
     /// A target seeded by `git init` whose default branch NAME happens to be
     /// the session branch would make `worktree add <branch>` fail as
     /// "already checked out", so the seed parks HEAD on a neutral branch.
+    #[cfg(unix)]
     #[test]
     fn an_init_seeded_target_whose_default_branch_is_the_session_branch_still_works() {
         if !require(&["git", "bash"]) {
@@ -2883,6 +2915,7 @@ pub(crate) mod tests {
     /// Built deterministically: every mtime is pinned in the past, so a plain
     /// copy is strictly newer; ctime (which the rewrite bumps) is taken out of
     /// the stat match; and no `git status` refreshes the index first.
+    #[cfg(unix)]
     #[test]
     fn snapshot_captures_a_racily_clean_edit() {
         if !require(&["git", "bash"]) {
@@ -3025,6 +3058,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn fetch_never_moves_an_existing_local_branch() {
         if !require(&["git", "bash"]) {
@@ -3086,6 +3120,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn ignored_list_script_fails_on_a_non_git_dir_but_succeeds_empty_on_a_clean_repo() {
         if !require(&["git", "bash"]) {
@@ -3125,6 +3160,7 @@ pub(crate) mod tests {
     /// A target clone at the source HEAD, with the transfer refs fetched, and
     /// the snapshot already replayed into it — i.e. exactly the state a move
     /// leaves behind when it fails after the replay.
+    #[cfg(unix)]
     fn replayed_target(root: &Path, src: &Path, home: &Path) -> std::path::PathBuf {
         let head = git(src, &["rev-parse", "HEAD"]).trim().to_string();
         let out = bash(
@@ -3160,6 +3196,7 @@ pub(crate) mod tests {
         tgt
     }
 
+    #[cfg(unix)]
     #[test]
     fn verify_adopts_a_target_that_already_holds_exactly_the_snapshot() {
         if !require(&["git", "bash"]) {
@@ -3192,6 +3229,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn verify_calls_a_changed_snapshot_path_ours_and_a_new_one_theirs() {
         if !require(&["git", "bash"]) {
@@ -3230,6 +3268,7 @@ pub(crate) mod tests {
         assert!(l.ours.is_empty(), "{l:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn verify_ignores_ignored_files_and_refuses_another_head() {
         if !require(&["git", "bash"]) {
@@ -3265,6 +3304,7 @@ pub(crate) mod tests {
         assert!(!err.contains(LEFTOVERS_DIFFER), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn recover_removes_only_what_the_snapshot_added() {
         if !require(&["git", "bash"]) {

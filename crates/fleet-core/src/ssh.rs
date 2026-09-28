@@ -2060,7 +2060,7 @@ mod tests {
             eprintln!("skipping: no sh on this box");
             return;
         }
-        let c = SshClient::new();
+        let c = SshClient::new_with_mux(true);
         let host = "fleet-test-nonexistent-host-2";
         let mut cmd = tokio::process::Command::new("sh");
         cmd.args(["-c", "sleep 30"]);

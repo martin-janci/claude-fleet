@@ -305,11 +305,21 @@ pub fn valid_resource_rel_path(rel_path: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "..")
 }
 
+/// `p` relative to `root`, with `/` separators on every platform: these
+/// strings are resource names and keep-lists that travel to (POSIX) hosts
+/// and are checked by [`valid_resource_rel_path`], so a Windows `\` must never reach
+/// them.
 fn rel(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root)
+    let s = p
+        .strip_prefix(root)
         .unwrap_or(p)
         .to_string_lossy()
-        .to_string()
+        .to_string();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s
+    }
 }
 
 fn read_resources(dir: &Path) -> std::io::Result<Vec<Resource>> {
