@@ -160,6 +160,9 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // `describe_fleet_settings` (declarative pages P1) and
   // `fetch_page_source` (P3) feed the generated pages, which show the same
   // hub reason instead (`pages-remote`) when the app does not own the fleet.
+  // Declarative pages P4b: a resource's create flow. ResourcePage renders a
+  // paired desktop's resource read-only, with no Add, so no flow starts.
+  gatedByReadonlyResourcePage: ['flow_start', 'flow_submit', 'flow_back', 'flow_cancel'],
   gatedBySettingsDialog: [
     'set_fleet_setting',
     'describe_fleet_settings',

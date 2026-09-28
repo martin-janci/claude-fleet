@@ -1120,7 +1120,7 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   shows a short `Asana …123456`. A task in two projects is listed under both.
   Which **sections** mean *in progress* is inferred on the first test from
   their names (progress / doing / review → in progress, done / shipped →
-  done) and shown in Settings → Work with a Confirm button; once confirmed,
+  done) and shown in Settings → Trackers with a Confirm button; once confirmed,
   your map wins (`work_admin update` with `settings.section_map`, or
   `fleet-hub tracker section-map <id> --set 'name=category'`). The names the
   rule cannot classify stay *to do*; with the `status_map` decision feature
@@ -1159,7 +1159,7 @@ recognised.
 ### Sync metrics
 
 `fleet-hub tracker status` (`work_admin { action: status }`, master-only, and
-Settings → Work on the machine that syncs) shows each tracker's last pass:
+Settings → Trackers on the machine that syncs) shows each tracker's last pass:
 its duration, the items the tracker listed or fetched, the items that
 changed, the event frames the pass emitted, and the error it ended with
 (redacted, one line). They are kept in memory only and start empty after a
@@ -1435,7 +1435,7 @@ corrected. `proposals reject <run>` writes only the run's follow-up
 (`rejected`) in `state.db`, like `set-key`: the section stays unmapped and
 the answer is not proposed again until a new one exists (another input,
 question version or model). A paired desktop refuses both (tracker
-administration); a standalone desktop decides them in Settings → Work.
+administration); a standalone desktop decides them in Settings → Trackers.
 
 The offline `work_link` benchmark (test map card J1, phase 0) measures a
 provider against the links people confirmed, before anything is turned on:
@@ -2216,7 +2216,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 207 commands, 99 route to a hub tool, 1 routes except for one argument shape, 85 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 211 commands, 99 route to a hub tool, 1 routes except for one argument shape, 89 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2264,6 +2264,10 @@ Of the 207 commands, 99 route to a hub tool, 1 routes except for one argument sh
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
 | `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
+| `flow_back` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
+| `flow_cancel` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
+| `flow_start` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
+| `flow_submit` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
 | `get_fleet_settings` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; read them on the hub with get_settings (master token) |
 | `hide_host` | hiding a host is fleet administration, which the hub reserves for its own operator — hide it there with `fleet-hub` |
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |

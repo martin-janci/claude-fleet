@@ -35,6 +35,10 @@
       "items": [
         {
           "type": "link",
+          "page": "settings.trackers"
+        },
+        {
+          "type": "link",
           "page": "settings.work"
         },
         {

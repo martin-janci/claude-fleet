@@ -13,6 +13,7 @@ pub mod asana;
 #[cfg(test)]
 pub mod conformance;
 pub mod github;
+pub mod infer;
 pub mod jira;
 pub mod jira_common;
 pub mod jira_dc;

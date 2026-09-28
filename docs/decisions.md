@@ -187,7 +187,7 @@ the section id), not from the record. A section map takes `todo`,
 `in_progress` or `done`: `not_planned` applies as `done` (the task is not
 live work); `unsure` proposes nothing. The printed command is a
 `work_admin update` (master token) that confirms the section map — the
-inferred one kept under your entries, like Settings → Work's **Confirm** —
+inferred one kept under your entries, like Settings → Trackers' **Confirm** —
 with the proposals you accept; edit it to drop or change any. `--json` also
 carries the same change as `work_admin` arguments. In `shadow` the view
 shows, per section, the rule's and the model's category and how often they
@@ -198,7 +198,7 @@ by its run id (`run 812` above). A person decides it three ways:
 
 | | Hub (operator) | Standalone desktop | What it writes | Follow-up |
 |---|---|---|---|---|
-| **Apply** | `fleet-hub decide proposals apply 812` | Settings → Work → **Apply** | the answer's category into your section map (`not_planned` applies as `done`; `unsure` proposes nothing and cannot be applied as is) | `confirmed` |
+| **Apply** | `fleet-hub decide proposals apply 812` | Settings → Trackers → **Apply** | the answer's category into your section map (`not_planned` applies as `done`; `unsure` proposes nothing and cannot be applied as is) | `confirmed` |
 | **Apply as** | `… apply 812 --as in_progress` | **Apply as…** | the category you chose (`todo`, `in_progress` or `done` only) | `corrected` to yours (`confirmed` if it is what the answer applies as) |
 | **Reject** | `fleet-hub decide proposals reject 814` | **Not this** | nothing but the run's follow-up: the section stays unmapped (it counts as to do) | `rejected` |
 

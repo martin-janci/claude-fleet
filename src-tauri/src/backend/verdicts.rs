@@ -628,6 +628,34 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "flow_start",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
+        "flow_submit",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
+        "flow_back",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
+        "flow_cancel",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \

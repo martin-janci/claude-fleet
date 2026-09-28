@@ -15,6 +15,7 @@
 //! generated for editors and agents (`REGEN_PAGE_DOCS=1`).
 
 pub mod catalog;
+pub mod flows;
 pub mod model;
 pub mod resources;
 pub mod sources;
@@ -57,6 +58,10 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
     (
         "settings.control_api.json",
         include_str!("../../pages/settings.control_api.json"),
+    ),
+    (
+        "settings.trackers.json",
+        include_str!("../../pages/settings.trackers.json"),
     ),
     (
         "settings.orgs.json",

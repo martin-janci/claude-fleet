@@ -52,8 +52,9 @@ pub fn item_type(item: &Item) -> &'static str {
 }
 
 /// Most `custom` items all pages together may hold: the escape hatch stays
-/// small (design §8).
-pub const MAX_CUSTOM: usize = 3;
+/// small (design §8). Raised from 3 to 4 for `tracker_extras` (P4b); P5's
+/// review_apply layout pays it back.
+pub const MAX_CUSTOM: usize = 4;
 
 /// Whether this build can render `layout` at all. The resource layouts wait
 /// on the resource and action registries (design P4).

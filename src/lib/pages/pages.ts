@@ -48,7 +48,7 @@ export interface SourceRef {
   params?: Record<string, unknown>;
 }
 
-export type CustomComponent = 'work_retention' | 'auto_tidy_preview' | 'org_suggestions';
+export type CustomComponent = 'work_retention' | 'auto_tidy_preview' | 'org_suggestions' | 'tracker_extras';
 
 export type Item =
   | { type: 'field'; key: string; widget?: Widget; hint?: string; when?: Condition }

@@ -58,6 +58,8 @@ pub enum ParamKind {
         placeholder: &'static str,
     },
     Color,
+    /// Write-only: a password input, sent once, never shown again.
+    Secret,
     Options {
         source: OptionSource,
     },
@@ -87,6 +89,66 @@ pub struct ActionSpec {
     pub params: &'static [ParamSpec],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm: Option<&'static str>,
+    /// Only for records whose `variant_by` field is one of these (all when
+    /// empty).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub variants: &'static [&'static str],
+    /// The command answers `{ ok, error? }`: say which, rather than just
+    /// "done" (a tracker's Test).
+    pub report: bool,
+}
+
+impl ActionSpec {
+    pub const fn new(
+        id: &'static str,
+        label: &'static str,
+        command: &'static str,
+        bind: &'static [(&'static str, Bind)],
+    ) -> Self {
+        ActionSpec {
+            id,
+            label,
+            command,
+            envelope: Envelope::Args,
+            bind,
+            params: &[],
+            confirm: None,
+            variants: &[],
+            report: false,
+        }
+    }
+    pub const fn params(self, params: &'static [ParamSpec]) -> Self {
+        ActionSpec { params, ..self }
+    }
+    pub const fn confirm(self, message: &'static str) -> Self {
+        ActionSpec {
+            confirm: Some(message),
+            ..self
+        }
+    }
+    pub const fn variants(self, variants: &'static [&'static str]) -> Self {
+        ActionSpec { variants, ..self }
+    }
+    pub const fn report(self) -> Self {
+        ActionSpec {
+            report: true,
+            ..self
+        }
+    }
+}
+
+const fn param(
+    name: &'static str,
+    label: &'static str,
+    kind: ParamKind,
+    required: bool,
+) -> ParamSpec {
+    ParamSpec {
+        name,
+        label,
+        kind,
+        required,
+    }
 }
 
 /// How a record field is stored and, if it can be edited, written.
@@ -106,6 +168,12 @@ pub enum FieldKind {
     /// `true` / `false` / `null` (inherit) in the record, written as
     /// `"on"` / `"off"` / `"inherit"`.
     Inherit,
+    /// One of a fixed set, shown by its label (`(value, label)`).
+    Choice {
+        options: &'static [(&'static str, &'static str)],
+    },
+    /// Unix seconds, shown as how long ago ("5 min ago", "never").
+    Time,
     /// A list of sub-items, each shown with `label` and changed through
     /// `remove` / `add` actions rather than the record's Apply.
     Items {
@@ -139,6 +207,8 @@ pub enum Badge {
     False { text: &'static str },
     /// While an `inherit` field is set: `text` then `on` / `off`.
     Set { text: &'static str },
+    /// Always: a `choice` field's option label.
+    Label,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -157,6 +227,57 @@ pub struct FieldSpec {
     /// Asked before Apply writes a change to this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm: Option<&'static str>,
+    /// Non-empty: the value lives at this path inside the record's `edit`
+    /// object (a tracker's `settings`), is read from there, and Apply sends
+    /// the whole object with it set — the rest kept as it is.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub merge_path: &'static [&'static str],
+}
+
+impl FieldSpec {
+    pub const fn new(
+        id: &'static str,
+        label: &'static str,
+        help: &'static str,
+        kind: FieldKind,
+    ) -> Self {
+        FieldSpec {
+            id,
+            label,
+            help,
+            kind,
+            edit: None,
+            badge: None,
+            confirm: None,
+            merge_path: &[],
+        }
+    }
+    pub const fn edit(self, arg: &'static str) -> Self {
+        FieldSpec {
+            edit: Some(arg),
+            ..self
+        }
+    }
+    /// Edited at `path` inside the record's `arg` object.
+    pub const fn merge(self, arg: &'static str, path: &'static [&'static str]) -> Self {
+        FieldSpec {
+            edit: Some(arg),
+            merge_path: path,
+            ..self
+        }
+    }
+    pub const fn badge(self, badge: Badge) -> Self {
+        FieldSpec {
+            badge: Some(badge),
+            ..self
+        }
+    }
+    pub const fn confirm(self, message: &'static str) -> Self {
+        FieldSpec {
+            confirm: Some(message),
+            ..self
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -182,6 +303,16 @@ pub struct ResourceType {
     pub update: Option<ActionSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delete: Option<ActionSpec>,
+    /// Actions on one record besides update and delete (a tracker's Test).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub actions: &'static [ActionSpec],
+    /// A record is added through this flow (`pages::flows`) rather than a
+    /// one-step `create` form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_flow: Option<&'static str>,
+    /// The field an action's `variants` are matched against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant_by: Option<&'static str>,
 }
 
 impl ResourceType {
@@ -195,6 +326,7 @@ impl ResourceType {
             .into_iter()
             .flatten()
             .collect();
+        out.extend(self.actions.iter());
         for f in self.fields {
             if let FieldKind::Items { remove, add, .. } = &f.kind {
                 out.extend(remove.iter());
@@ -206,79 +338,50 @@ impl ResourceType {
 }
 
 const ORG_ID: (&str, Bind) = ("org_id", Bind::Record("id"));
+const TRACKER_ID: (&str, Bind) = ("tracker_id", Bind::Record("id"));
+
+const fn text(max: usize, placeholder: &'static str) -> ParamKind {
+    ParamKind::Text { max, placeholder }
+}
 
 /// An org's rule, added one kind at a time: each form asks for one thing.
-const ADD_OWNER_RULE: ActionSpec = ActionSpec {
-    id: "org.add_owner_rule",
-    label: "Add owner rule",
-    command: "add_org_rule",
-    envelope: Envelope::Args,
-    bind: &[
-        ORG_ID,
-        ("owner", Bind::Param("owner")),
-        ("repo", Bind::Param("repo")),
-    ],
-    params: &[
-        ParamSpec {
-            name: "owner",
-            label: "GitHub owner",
-            kind: ParamKind::Text {
-                max: 100,
-                placeholder: "acme",
-            },
-            required: true,
-        },
-        ParamSpec {
-            name: "repo",
-            label: "Repository (optional)",
-            kind: ParamKind::Text {
-                max: 100,
-                placeholder: "api",
-            },
-            required: false,
-        },
-    ],
-    confirm: None,
-};
+const ORG_RULE_ADDS: &[ActionSpec] = &[
+    ActionSpec::new(
+        "org.add_owner_rule",
+        "Add owner rule",
+        "add_org_rule",
+        &[
+            ORG_ID,
+            ("owner", Bind::Param("owner")),
+            ("repo", Bind::Param("repo")),
+        ],
+    )
+    .params(&[
+        param("owner", "GitHub owner", text(100, "acme"), true),
+        param("repo", "Repository (optional)", text(100, "api"), false),
+    ]),
+    ActionSpec::new(
+        "org.add_path_rule",
+        "Add path rule",
+        "add_org_rule",
+        &[ORG_ID, ("path_prefix", Bind::Param("path_prefix"))],
+    )
+    .params(&[param(
+        "path_prefix",
+        "Path prefix",
+        text(1024, "/home/me/work/acme"),
+        true,
+    )]),
+    ActionSpec::new(
+        "org.add_host_rule",
+        "Add host rule",
+        "add_org_rule",
+        &[ORG_ID, ("host_alias", Bind::Param("host_alias"))],
+    )
+    .params(&[param("host_alias", "Host", text(100, "hetzner-a"), true)]),
+];
 
-const ADD_PATH_RULE: ActionSpec = ActionSpec {
-    id: "org.add_path_rule",
-    label: "Add path rule",
-    command: "add_org_rule",
-    envelope: Envelope::Args,
-    bind: &[ORG_ID, ("path_prefix", Bind::Param("path_prefix"))],
-    params: &[ParamSpec {
-        name: "path_prefix",
-        label: "Path prefix",
-        kind: ParamKind::Text {
-            max: 1024,
-            placeholder: "/home/me/work/acme",
-        },
-        required: true,
-    }],
-    confirm: None,
-};
-
-const ADD_HOST_RULE: ActionSpec = ActionSpec {
-    id: "org.add_host_rule",
-    label: "Add host rule",
-    command: "add_org_rule",
-    envelope: Envelope::Args,
-    bind: &[ORG_ID, ("host_alias", Bind::Param("host_alias"))],
-    params: &[ParamSpec {
-        name: "host_alias",
-        label: "Host",
-        kind: ParamKind::Text {
-            max: 100,
-            placeholder: "hetzner-a",
-        },
-        required: true,
-    }],
-    confirm: None,
-};
-
-/// Every resource type.
-pub const RESOURCES: &[ResourceType] = &[ResourceType {
+const ORG: ResourceType = ResourceType {
     id: "org",
     label: "Organisation",
     plural: "Organisations",
@@ -289,216 +392,177 @@ pub const RESOURCES: &[ResourceType] = &[ResourceType {
     color_field: Some("color"),
     empty: "No organisations. Without one, scopes come from GitHub owners and nothing is fenced.",
     fields: &[
-        FieldSpec {
-            id: "name",
-            label: "Name",
-            help: "What the scope selector and the Work view call it.",
-            kind: FieldKind::Text { max: 80 },
-            edit: Some("name"),
-            badge: None,
-            confirm: None,
-        },
-        FieldSpec {
-            id: "color",
-            label: "Colour",
-            help: "Marks its sessions in the sidebar.",
-            kind: FieldKind::Color,
-            edit: Some("color"),
-            badge: None,
-            confirm: None,
-        },
-        FieldSpec {
-            id: "rules",
-            label: "Rules",
-            help: "Which sessions belong to it: a GitHub owner (or one repository), a path prefix, or a host.",
-            kind: FieldKind::Items {
+        FieldSpec::new("name", "Name", "What the scope selector and the Work view call it.", FieldKind::Text { max: 80 }).edit("name"),
+        FieldSpec::new("color", "Colour", "Marks its sessions in the sidebar.", FieldKind::Color).edit("color"),
+        FieldSpec::new(
+            "rules",
+            "Rules",
+            "Which sessions belong to it: a GitHub owner (or one repository), a path prefix, or a host.",
+            FieldKind::Items {
                 item_label: ItemLabel::OrgRule,
-                remove: Some(ActionSpec {
-                    id: "org.remove_rule",
-                    label: "Remove rule",
-                    command: "remove_org_rule",
-                    envelope: Envelope::Args,
-                    bind: &[("rule_id", Bind::ItemField("id"))],
-                    params: &[],
-                    confirm: None,
-                }),
-                add: &[ADD_OWNER_RULE, ADD_PATH_RULE, ADD_HOST_RULE],
+                remove: Some(ActionSpec::new("org.remove_rule", "Remove rule", "remove_org_rule", &[("rule_id", Bind::ItemField("id"))])),
+                add: ORG_RULE_ADDS,
             },
-            edit: None,
-            badge: None,
-            confirm: None,
-        },
-        FieldSpec {
-            id: "hosts",
-            label: "Hosts",
-            help: "A host in an org: its per-host token reads only this org's (and unassigned) work.",
-            kind: FieldKind::Items {
+        ),
+        FieldSpec::new(
+            "hosts",
+            "Hosts",
+            "A host in an org: its per-host token reads only this org's (and unassigned) work.",
+            FieldKind::Items {
                 item_label: ItemLabel::Plain,
-                remove: Some(ActionSpec {
-                    id: "org.unassign_host",
-                    label: "Take the host out",
-                    command: "assign_host_org",
-                    envelope: Envelope::Args,
-                    bind: &[("host_alias", Bind::Item), ("org_id", Bind::Null)],
-                    params: &[],
-                    confirm: None,
-                }),
-                add: &[ActionSpec {
-                    id: "org.assign_host",
-                    label: "Add host",
-                    command: "assign_host_org",
-                    envelope: Envelope::Args,
-                    bind: &[("host_alias", Bind::Param("host")), ORG_ID],
-                    params: &[ParamSpec {
-                        name: "host",
-                        label: "Host",
-                        kind: ParamKind::Options {
-                            source: OptionSource::Hosts,
-                        },
-                        required: true,
-                    }],
-                    confirm: None,
-                }],
+                remove: Some(ActionSpec::new(
+                    "org.unassign_host",
+                    "Take the host out",
+                    "assign_host_org",
+                    &[("host_alias", Bind::Item), ("org_id", Bind::Null)],
+                )),
+                add: &[ActionSpec::new("org.assign_host", "Add host", "assign_host_org", &[("host_alias", Bind::Param("host")), ORG_ID])
+                    .params(&[param("host", "Host", ParamKind::Options { source: OptionSource::Hosts }, true)])],
             },
-            edit: None,
-            badge: None,
-            confirm: None,
-        },
-        FieldSpec {
-            id: "trackers",
-            label: "Trackers",
-            help: "Trackers whose tickets belong to this org.",
-            kind: FieldKind::Items {
+        ),
+        FieldSpec::new(
+            "trackers",
+            "Trackers",
+            "Trackers whose tickets belong to this org.",
+            FieldKind::Items {
                 item_label: ItemLabel::Field("name"),
-                remove: Some(ActionSpec {
-                    id: "org.unassign_tracker",
-                    label: "Take the tracker out",
-                    command: "assign_tracker_org",
-                    envelope: Envelope::Args,
-                    bind: &[("tracker_id", Bind::ItemField("id")), ("org_id", Bind::Null)],
-                    params: &[],
-                    confirm: None,
-                }),
-                add: &[ActionSpec {
-                    id: "org.assign_tracker",
-                    label: "Add tracker",
-                    command: "assign_tracker_org",
-                    envelope: Envelope::Args,
-                    bind: &[("tracker_id", Bind::Param("tracker")), ORG_ID],
-                    params: &[ParamSpec {
-                        name: "tracker",
-                        label: "Tracker",
-                        kind: ParamKind::Options {
-                            source: OptionSource::Trackers,
-                        },
-                        required: true,
-                    }],
-                    confirm: None,
-                }],
+                remove: Some(ActionSpec::new(
+                    "org.unassign_tracker",
+                    "Take the tracker out",
+                    "assign_tracker_org",
+                    &[("tracker_id", Bind::ItemField("id")), ("org_id", Bind::Null)],
+                )),
+                add: &[ActionSpec::new("org.assign_tracker", "Add tracker", "assign_tracker_org", &[("tracker_id", Bind::Param("tracker")), ORG_ID])
+                    .params(&[param("tracker", "Tracker", ParamKind::Options { source: OptionSource::Trackers }, true)])],
             },
-            edit: None,
-            badge: None,
-            confirm: None,
-        },
-        FieldSpec {
-            id: "isolate_sessions",
-            label: "Isolate sessions",
-            help: "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
-            kind: FieldKind::Bool {
-                on_off: false,
-                default: false,
-            },
-            edit: Some("isolate_sessions"),
-            badge: Some(Badge::True {
-                text: "isolates sessions",
-            }),
-            confirm: Some("Hosts outside this org will no longer list or message its sessions, and its hosts will not see other orgs' sessions. It can break a controller that dispatches across companies."),
-        },
-        FieldSpec {
-            id: "auto_tidy",
-            label: "Auto-tidy",
-            help: "Auto-tidy for this org's sessions: on or off whatever the fleet-wide setting says, or inherit it. Safe kill only, never a session in use.",
-            kind: FieldKind::Inherit,
-            edit: Some("auto_tidy"),
-            badge: Some(Badge::Set { text: "auto-tidy" }),
-            confirm: None,
-        },
-        FieldSpec {
-            id: "jev_allowed",
-            label: "Send to Jev",
-            help: "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
-            kind: FieldKind::Bool {
-                on_off: true,
-                default: false,
-            },
-            edit: Some("jev"),
-            badge: Some(Badge::True {
-                text: "sends to Jev",
-            }),
-            confirm: Some("This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on."),
-        },
-        FieldSpec {
-            id: "bound_sees_unassigned",
-            label: "Bound devices see unassigned",
-            help: "Devices paired to this org (fleet-hub pair --org) also see work and sessions that belong to no org, as a host does. Off: only this org's own.",
-            kind: FieldKind::Bool {
-                on_off: false,
-                default: true,
-            },
-            edit: Some("bound_sees_unassigned"),
-            badge: Some(Badge::False {
-                text: "bound devices: own only",
-            }),
-            confirm: None,
-        },
+        ),
+        FieldSpec::new(
+            "isolate_sessions",
+            "Isolate sessions",
+            "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .edit("isolate_sessions")
+        .badge(Badge::True { text: "isolates sessions" })
+        .confirm("Hosts outside this org will no longer list or message its sessions, and its hosts will not see other orgs' sessions. It can break a controller that dispatches across companies."),
+        FieldSpec::new(
+            "auto_tidy",
+            "Auto-tidy",
+            "Auto-tidy for this org's sessions: on or off whatever the fleet-wide setting says, or inherit it. Safe kill only, never a session in use.",
+            FieldKind::Inherit,
+        )
+        .edit("auto_tidy")
+        .badge(Badge::Set { text: "auto-tidy" }),
+        FieldSpec::new(
+            "jev_allowed",
+            "Send to Jev",
+            "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
+            FieldKind::Bool { on_off: true, default: false },
+        )
+        .edit("jev")
+        .badge(Badge::True { text: "sends to Jev" })
+        .confirm("This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on."),
+        FieldSpec::new(
+            "bound_sees_unassigned",
+            "Bound devices see unassigned",
+            "Devices paired to this org (fleet-hub pair --org) also see work and sessions that belong to no org, as a host does. Off: only this org's own.",
+            FieldKind::Bool { on_off: false, default: true },
+        )
+        .edit("bound_sees_unassigned")
+        .badge(Badge::False { text: "bound devices: own only" }),
     ],
-    create: Some(ActionSpec {
-        id: "org.add",
-        label: "Add organisation",
-        command: "add_org",
-        envelope: Envelope::Args,
-        bind: &[
-            ("name", Bind::Param("name")),
-            ("color", Bind::Param("color")),
-        ],
-        params: &[
-            ParamSpec {
-                name: "name",
-                label: "Name",
-                kind: ParamKind::Text {
-                    max: 80,
-                    placeholder: "Company A",
-                },
-                required: true,
-            },
-            ParamSpec {
-                name: "color",
-                label: "Colour",
-                kind: ParamKind::Color,
-                required: false,
-            },
-        ],
-        confirm: None,
-    }),
-    update: Some(ActionSpec {
-        id: "org.update",
-        label: "Apply",
-        command: "update_org",
-        envelope: Envelope::Args,
-        bind: &[ORG_ID],
-        params: &[],
-        confirm: None,
-    }),
-    delete: Some(ActionSpec {
-        id: "org.remove",
-        label: "Remove organisation",
-        command: "remove_org",
-        envelope: Envelope::Args,
-        bind: &[ORG_ID],
-        params: &[],
-        confirm: Some("Its rules go with it, and its hosts and trackers become unassigned. Sessions are not touched."),
-    }),
-}];
+    create: Some(
+        ActionSpec::new("org.add", "Add organisation", "add_org", &[("name", Bind::Param("name")), ("color", Bind::Param("color"))])
+            .params(&[param("name", "Name", text(80, "Company A"), true), param("color", "Colour", ParamKind::Color, false)]),
+    ),
+    update: Some(ActionSpec::new("org.update", "Apply", "update_org", &[ORG_ID])),
+    delete: Some(
+        ActionSpec::new("org.remove", "Remove organisation", "remove_org", &[ORG_ID])
+            .confirm("Its rules go with it, and its hosts and trackers become unassigned. Sessions are not touched."),
+    ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
+/// `(id, label)` of every provider; the same as `PROVIDERS` in
+/// `src/lib/trackers.ts`.
+pub const TRACKER_PROVIDERS: &[(&str, &str)] = &[
+    ("jira", "Jira Cloud"),
+    ("jira_dc", "Jira Data Center"),
+    ("github", "GitHub"),
+    ("asana", "Asana"),
+    ("linear", "Linear"),
+];
+
+/// A tracker's states as `trackerStateBadge` (`src/lib/trackers.ts`) says them.
+pub const TRACKER_STATES: &[(&str, &str)] = &[
+    ("ok", "ok"),
+    ("auth_failed", "token expired or wrong"),
+    ("captcha", "log in via the browser"),
+    ("rate_limited", "rate-limited"),
+    ("unreachable", "unreachable"),
+    ("unconfigured", "not tested yet"),
+];
+
+const TRACKER: ResourceType = ResourceType {
+    id: "tracker",
+    label: "Tracker",
+    plural: "Trackers",
+    help: "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
+    list: "list_trackers",
+    id_field: "id",
+    title_field: "name",
+    color_field: None,
+    empty: "No trackers. Keys in branch names group sessions without one; connect a tracker for titles and statuses.",
+    fields: &[
+        FieldSpec::new("name", "Name", "What chips and ⌘K call it.", FieldKind::Text { max: 80 }).edit("name"),
+        FieldSpec::new("provider", "Tracker", "Which tracker it is.", FieldKind::Choice { options: TRACKER_PROVIDERS }).badge(Badge::Label),
+        FieldSpec::new("site_url", "Site", "The site or workspace it reads.", FieldKind::Text { max: 2048 }),
+        FieldSpec::new("state", "State", "How the last test or sync went.", FieldKind::Choice { options: TRACKER_STATES }).badge(Badge::Label),
+        FieldSpec::new("last_sync_at", "Last sync", "When a sync last finished for it.", FieldKind::Time),
+        FieldSpec::new("last_error", "Last error", "What the tracker said the last time it refused.", FieldKind::Text { max: 4096 }),
+        FieldSpec::new("username", "Account", "The account its credential belongs to (Jira Cloud).", FieldKind::Text { max: 320 }),
+        FieldSpec::new("credential_hint", "Credential", "The end of the stored credential; the rest is never shown.", FieldKind::Text { max: 64 }),
+        FieldSpec::new("transport", "Reached through", "direct, or gh / requests on a named host.", FieldKind::Text { max: 200 }),
+        FieldSpec::new(
+            "pr_remote_link",
+            "Link pull requests",
+            "Add a session's pull request to its ticket as a link, only for work you linked or started. The token needs permission to edit issues.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .merge("settings", &["write_back", "pr_remote_link"])
+        .confirm("Fleet will write to this tracker: a link on each ticket whose work you linked or started gets a pull request."),
+    ],
+    create: None,
+    update: Some(ActionSpec::new("tracker.update", "Apply", "update_tracker", &[TRACKER_ID])),
+    delete: Some(
+        ActionSpec::new("tracker.remove", "Remove tracker", "remove_tracker", &[TRACKER_ID])
+            .confirm("Its cached tickets go with it; sessions keep their keys and links."),
+    ),
+    actions: &[
+        ActionSpec::new("tracker.test", "Test", "test_tracker", &[TRACKER_ID]).report(),
+        ActionSpec::new(
+            "tracker.replace_login",
+            "Replace credential",
+            "set_tracker_credential",
+            &[TRACKER_ID, ("username", Bind::Param("email")), ("secret", Bind::Param("token"))],
+        )
+        .params(&[
+            param("email", "Atlassian account email", text(320, "you@example.com"), true),
+            param("token", "API token", ParamKind::Secret, true),
+        ])
+        .variants(&["jira"]),
+        ActionSpec::new("tracker.replace_token", "Replace credential", "set_tracker_credential", &[TRACKER_ID, ("secret", Bind::Param("token"))])
+            .params(&[param("token", "Token", ParamKind::Secret, true)])
+            .variants(&["jira_dc", "asana", "linear"]),
+    ],
+    create_flow: Some("tracker.connect"),
+    variant_by: Some("provider"),
+};
+
+/// Every resource type.
+pub const RESOURCES: &[ResourceType] = &[ORG, TRACKER];
 
 pub fn resource(id: &str) -> Option<&'static ResourceType> {
     RESOURCES.iter().find(|r| r.id == id)
@@ -511,6 +575,9 @@ pub fn commands() -> Vec<&'static str> {
         out.push(r.list);
         for a in r.actions() {
             out.push(a.command);
+        }
+        if r.create_flow.is_some() {
+            out.extend(["flow_start", "flow_submit", "flow_back", "flow_cancel"]);
         }
     }
     out.sort_unstable();
@@ -557,6 +624,24 @@ mod tests {
                 if let Some(Badge::Set { .. }) = f.badge {
                     assert_eq!(f.kind, FieldKind::Inherit, "{}.{}", r.id, f.id);
                 }
+                if let Some(Badge::Label) = f.badge {
+                    assert!(
+                        matches!(f.kind, FieldKind::Choice { .. }),
+                        "{}.{}: a label badge is a choice's",
+                        r.id,
+                        f.id
+                    );
+                }
+                if !f.merge_path.is_empty() {
+                    assert!(f.edit.is_some(), "{}.{}: merged into what?", r.id, f.id);
+                }
+            }
+            if let Some(flow) = r.create_flow {
+                assert!(
+                    super::super::flows::FLOWS.iter().any(|(id, _)| *id == flow),
+                    "{}: create_flow {flow} is not a flow",
+                    r.id
+                );
             }
             let mut actions = std::collections::BTreeSet::new();
             for a in r.actions() {
@@ -594,6 +679,23 @@ mod tests {
                 if let Some(c) = a.confirm {
                     assert!(c.ends_with('.'), "{}: confirm is a sentence", a.id);
                 }
+                if !a.variants.is_empty() {
+                    let by = r.variant_by.expect("variants need a variant_by field");
+                    let Some(FieldSpec {
+                        kind: FieldKind::Choice { options },
+                        ..
+                    }) = r.field(by)
+                    else {
+                        panic!("{}: variant_by {by} is a choice field", r.id);
+                    };
+                    for v in a.variants {
+                        assert!(
+                            options.iter().any(|(o, _)| o == v),
+                            "{}: {v} is not a {by}",
+                            a.id
+                        );
+                    }
+                }
             }
         }
     }
@@ -601,6 +703,11 @@ mod tests {
     #[test]
     fn sub_item_actions_bind_the_item_and_record_actions_the_record() {
         let org = resource("org").unwrap();
+        assert_eq!(
+            super::super::flows::FLOWS.len(),
+            1,
+            "a new flow: name the commands of its resource here"
+        );
         for f in org.fields {
             if let FieldKind::Items { remove, .. } = &f.kind {
                 let rm = remove.expect("every org list can be shortened");
@@ -620,10 +727,19 @@ mod tests {
                 "add_org_rule",
                 "assign_host_org",
                 "assign_tracker_org",
+                "flow_back",
+                "flow_cancel",
+                "flow_start",
+                "flow_submit",
                 "list_orgs",
+                "list_trackers",
                 "remove_org",
                 "remove_org_rule",
+                "remove_tracker",
+                "set_tracker_credential",
+                "test_tracker",
                 "update_org",
+                "update_tracker",
             ]
         );
     }

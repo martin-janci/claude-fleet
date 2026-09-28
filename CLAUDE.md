@@ -114,7 +114,11 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   P4a: resources (`pages/resources.rs`) back `master_detail` pages — an
   action names an existing desktop command and binds its args, never code,
   so verdicts and hub routing are unchanged (`resource_commands_exist`);
-  Settings → Organisations is one (OrgSettings.svelte is gone).
+  Settings → Organisations is one (OrgSettings.svelte is gone). P4b:
+  flows (`pages/flows.rs`, `flow_start|submit|back|cancel`, `LocalOnly`)
+  are server-driven wizards — the backend decides each step, a secret is
+  never stored; `tracker.connect` backs Settings → Trackers
+  (`settings.trackers`), which replaced WorkSettings' tracker list.
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
@@ -136,7 +140,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 207
+  verdict is written down once, in `backend/verdicts.rs`, for all 211
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -342,7 +346,7 @@ unclassified section after a clean sync (`StatusMapTrigger`, daily), and
 tracker section-map`; follow-ups are recorded in `work_admin update`.
 Assist is usable one proposal at a time (`status_map::decide_proposal`,
 by run id: apply / apply_as through `work_admin update`, reject → the
-follow-up only, hidden until a new answer): Settings → Work on a
+follow-up only, hidden until a new answer): Settings → Trackers on a
 standalone desktop (`status_map_proposals` / `decide_status_map_proposal`,
 `LocalOnly` when paired) and `fleet-hub decide proposals apply|reject`.
 Phase 0 (offline) is built for J1 `work_link` and J3: `fleet-hub decide bench

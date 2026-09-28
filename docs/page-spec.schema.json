@@ -157,6 +157,11 @@
           "description": "Proposed orgs (from owners of live sessions and tracker sites), one\nclick each to create with their rule and tracker (work graph M5.4;\n`OrgSuggestions.svelte`). Waits on actions that chain.",
           "type": "string",
           "const": "org_suggestions"
+        },
+        {
+          "description": "A tracker's last sync pass, Asana's section map and Jev's proposals\nfor it (work graph M11.4, M6, Jev J3; `TrackerExtras.svelte`). Shown\nin a tracker's detail. Waits on the review_apply layout (P5), which\ntakes the proposals, and a choice-map field for the section map.",
+          "type": "string",
+          "const": "tracker_extras"
         }
       ]
     },

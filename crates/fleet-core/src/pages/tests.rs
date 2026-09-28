@@ -239,8 +239,8 @@ fn a_resource_belongs_to_master_detail_only() {
 #[test]
 fn custom_items_are_capped() {
     let item = json!({ "type": "custom", "component": "work_retention" });
-    let p = category(json!([item, item, item, item]));
-    assert!(messages(&[p]).contains("over the cap of 3"));
+    let p = category(json!([item, item, item, item, item]));
+    assert!(messages(&[p]).contains("over the cap of 4"));
 }
 
 #[test]

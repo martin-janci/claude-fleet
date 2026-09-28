@@ -651,6 +651,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::describe_fleet_settings`
 - `commands::pages::list_pages`
 - `commands::pages::fetch_page_source`
+- `commands::pages::flow_start`
+- `commands::pages::flow_submit`
+- `commands::pages::flow_back`
+- `commands::pages::flow_cancel`
 - `commands::sessions::set_fleet_setting`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`

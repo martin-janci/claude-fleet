@@ -168,6 +168,13 @@ fn check_record_condition(
             }
         }
     }
+    if let FieldKind::Choice { options } = field.kind {
+        for v in c.eq.iter().chain(c.one_of.iter().flatten()) {
+            if !options.iter().any(|(o, _)| o == v) {
+                cx.bad(at, format!("`{key}` can never be {v:?}"));
+            }
+        }
+    }
 }
 
 fn check_source(cx: &mut Ctx, at: &str, source: &super::model::SourceRef) -> Option<Shape> {

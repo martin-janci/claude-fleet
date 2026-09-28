@@ -8,10 +8,11 @@
   import { get } from 'svelte/store';
   import RecordEditor from './RecordEditor.svelte';
   import ActionForm from './ActionForm.svelte';
+  import FlowView from './FlowView.svelte';
   import OrgSuggestions from '../OrgSuggestions.svelte';
   import { hosts } from '../hosts';
   import { trackers } from '../trackers';
-  import { pushError } from '../toasts';
+  import { push, pushError } from '../toasts';
   import type { Page } from './pages';
   import {
     afterChange,
@@ -82,6 +83,12 @@
     const r = await runAction(action, args);
     busy = false;
     if (!r.ok) pushError(r.error, `${action.label} failed`);
+    else if (action.report) {
+      // `{ ok, error? }`: a test that ran and failed is not a failed call.
+      const rep = r.value as { ok?: boolean; error?: string | null } | null;
+      if (rep?.ok) push({ kind: 'success', message: `${action.label}: ok` });
+      else push({ kind: 'error', message: `${action.label}: ${rep?.error ?? 'failed'}` });
+    }
     await reload();
     await afterChange(resource);
     return r.ok;
@@ -151,7 +158,11 @@
         <p class="empty" data-testid="resource-empty">{resource.empty}</p>
       {/if}
       {#if error}<p class="err" role="alert">{error}</p>{/if}
-      {#if !readonly && resource.create}
+      {#if !readonly && resource.create_flow}
+        <button type="button" class="btn" data-testid="resource-add" disabled={adding} onclick={() => (adding = true)}
+          >Add {resource.label.toLowerCase()}</button
+        >
+      {:else if !readonly && resource.create}
         {#if adding}
           <ActionForm action={resource.create} {busy} onrun={(p) => void create(p)} testid="resource-create" />
         {:else}
@@ -161,9 +172,28 @@
     </div>
 
     <div class="detail">
-      {#if current}
+      {#if adding && resource.create_flow}
+        <FlowView
+          flow={resource.create_flow}
+          oncancel={() => (adding = false)}
+          ondone={(message, recordId) => {
+            adding = false;
+            push({ kind: 'success', message });
+            void reload().then(() => {
+              if (recordId !== null) selected = String(recordId);
+              void afterChange(resource);
+            });
+          }} />
+      {:else if current}
         {#key `${selected}:${version}`}
-          <RecordEditor {resource} sections={page.sections ?? []} record={current} {readonly} {options} {run} />
+          <RecordEditor
+            {resource}
+            sections={page.sections ?? []}
+            record={current}
+            {readonly}
+            {options}
+            {run}
+            reload={() => void reload()} />
         {/key}
       {:else if loaded && records.length > 0}
         <p class="empty">Pick one.</p>

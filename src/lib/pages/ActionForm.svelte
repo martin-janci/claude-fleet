@@ -43,6 +43,16 @@
         data-testid={`param-${action.id}-${p.name}`}
         value={values[p.name] ?? ''}
         oninput={(e) => (values = { ...values, [p.name]: (e.currentTarget as HTMLInputElement).value })} />
+    {:else if p.type === 'secret'}
+      <input
+        type="password"
+        autocomplete="off"
+        aria-label={p.label}
+        placeholder={p.label}
+        disabled={busy}
+        data-testid={`param-${action.id}-${p.name}`}
+        value={values[p.name] ?? ''}
+        oninput={(e) => (values = { ...values, [p.name]: (e.currentTarget as HTMLInputElement).value })} />
     {:else if p.type === 'color'}
       <input
         type="color"

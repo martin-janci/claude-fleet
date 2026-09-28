@@ -78,7 +78,8 @@ page tree. `id` is dotted lowercase and is also the page's deep link.
 | `cards` | An overview: numbers and links | `stat`, `record`, `notice`, `link` |
 | `data_page` | Stats, charts and tables | `stat`, `record`, `table`, `chart`, `notice`, `link` |
 | `master_detail` | A list of a resource's records beside one record's editor | `field` (naming a field of the resource), `notice`, `custom`; `list_items` above the list: `notice`, `custom` |
-| `flow`, `object_editor`, `review_apply` | Wizards, one object on its own page, reviewing proposed changes | Not yet (design P4b, P5) |
+| `flow` | A server-driven wizard (see *Flows*); not a page of its own yet, launched by a resource's `create_flow` | — |
+| `object_editor`, `review_apply` | One object on its own page, reviewing proposed changes | Not yet (design P5) |
 
 ### Items
 
@@ -93,7 +94,7 @@ Every item is an object tagged by `type`:
 | `chart` | `source`, `chart` (`line` / `bar` / `stacked_bar` / `sparkline`), optional `title` | A series source |
 | `notice` | `tone` (`info` / `warn` / `danger`), `text` | Plain text, 300 characters at most |
 | `link` | `page`, optional `label` | Another page's id |
-| `custom` | `component` (`work_retention` / `auto_tidy_preview` / `org_suggestions`) | A hand-written component registered in code: the one escape hatch, capped at three uses across all pages. Replace one with a data source and an action when the catalog can express it |
+| `custom` | `component` (`work_retention` / `auto_tidy_preview` / `org_suggestions` / `tracker_extras`) | A hand-written component registered in code: the one escape hatch, capped at four uses across all pages (`MAX_CUSTOM`; design P5 pays it back). Replace one with a data source and an action when the catalog can express it |
 
 A `source` is `{ "id": "usage.by_day", "params": { "days": 30 } }`. Parameters
 are literals, checked against the source's declared parameters.
@@ -155,11 +156,22 @@ type declares:
   - `color`;
   - `bool`, where `on_off` writes `"on"` / `"off"`;
   - `inherit`, which is on / off / inherit;
+  - `choice`, a closed set of values with labels (shown read-only, or as a
+    `label` badge);
+  - `time`, a unix time shown as "5 min ago";
   - `items`: a list changed through its own `remove` and `add` actions,
     shown by a closed formatter (`plain`, `field`, `org_rule`);
 - which fields are editable (`edit` names the update argument), with a
-  `badge` shown in the list and a `confirm` asked before Apply;
-- `create`, `update` and `delete`.
+  `badge` shown in the list and a `confirm` asked before Apply. A field kept
+  inside a JSON argument (a tracker's `settings.write_back.pr_remote_link`)
+  declares `merge(arg, path)`: Apply sends the whole argument with only that
+  path changed, so the other settings survive;
+- `create`, `update` and `delete`, or `create_flow` naming a flow (below);
+- record `actions` shown in the editor's header. An action's params are
+  `text`, `secret` (a password input, never kept), `color` or `options`;
+  `variants` limits an action to records whose `variant_by` field holds one
+  of the listed values (Jira asks an email and a token, Asana a token); a
+  `report` action shows the command's `{ ok, error }` as a toast.
 
 Every action names an **existing desktop command** and binds each argument
 to one of: a record field, the sub-item or its field, a form param, or
@@ -185,6 +197,26 @@ record's id and only the fields that changed, after asking any `confirm`.
 Discard drops the draft. A list changes item by item through its actions,
 and removing a record is always confirmed. A failed command becomes a toast,
 and the list is re-read either way.
+
+### Flows
+
+A flow (`crates/fleet-core/src/pages/flows.rs`, listed in `FLOWS`) is a
+wizard whose steps the **backend** decides: `flow_start { flow, prefill }`
+answers the first step, `flow_submit { flowId, values }` the next step or
+`{ state: done, message, record_id }`, and `flow_back` / `flow_cancel` do
+what they say. A step is a title, an intro, fields (`text`, `secret`,
+`textarea`, `bool`, `select`) and an optional error; the renderer
+(`FlowView.svelte`) only draws it. A `secret` field is never stored in the
+flow and is cleared on screen once sent. A failed check (a tracker's Test)
+answers the same step again with the tracker's own error. Flows live in
+memory for 30 minutes, at most 32 at once.
+
+The one flow is `tracker.connect`: paste a ticket URL (`trackers::infer`
+guesses the provider, the site and GitHub Enterprise's hostname), then give
+what that provider needs; it adds or updates the tracker, stores the
+credential and tests it, through the same service calls as `work_admin`.
+All four commands are `LocalOnly`: on a hub, trackers are fleet
+administration (`fleet-hub tracker add <ticket-url>`).
 
 To add a resource:
 

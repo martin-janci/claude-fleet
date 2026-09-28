@@ -99,7 +99,8 @@
             "required": false,
             "type": "color"
           }
-        ]
+        ],
+        "report": false
       },
       "delete": {
         "bind": [
@@ -116,7 +117,8 @@
         "envelope": "args",
         "id": "org.remove",
         "label": "Remove organisation",
-        "params": []
+        "params": [],
+        "report": false
       },
       "empty": "No organisations. Without one, scopes come from GitHub owners and nothing is fenced.",
       "fields": [
@@ -182,7 +184,8 @@
                   "required": false,
                   "type": "text"
                 }
-              ]
+              ],
+              "report": false
             },
             {
               "bind": [
@@ -214,7 +217,8 @@
                   "required": true,
                   "type": "text"
                 }
-              ]
+              ],
+              "report": false
             },
             {
               "bind": [
@@ -246,7 +250,8 @@
                   "required": true,
                   "type": "text"
                 }
-              ]
+              ],
+              "report": false
             }
           ],
           "help": "Which sessions belong to it: a GitHub owner (or one repository), a path prefix, or a host.",
@@ -269,7 +274,8 @@
             "envelope": "args",
             "id": "org.remove_rule",
             "label": "Remove rule",
-            "params": []
+            "params": [],
+            "report": false
           },
           "type": "items"
         },
@@ -304,7 +310,8 @@
                   "source": "hosts",
                   "type": "options"
                 }
-              ]
+              ],
+              "report": false
             }
           ],
           "help": "A host in an org: its per-host token reads only this org's (and unassigned) work.",
@@ -332,7 +339,8 @@
             "envelope": "args",
             "id": "org.unassign_host",
             "label": "Take the host out",
-            "params": []
+            "params": [],
+            "report": false
           },
           "type": "items"
         },
@@ -367,7 +375,8 @@
                   "source": "trackers",
                   "type": "options"
                 }
-              ]
+              ],
+              "report": false
             }
           ],
           "help": "Trackers whose tickets belong to this org.",
@@ -397,7 +406,8 @@
             "envelope": "args",
             "id": "org.unassign_tracker",
             "label": "Take the tracker out",
-            "params": []
+            "params": [],
+            "report": false
           },
           "type": "items"
         },
@@ -475,8 +485,291 @@
         "envelope": "args",
         "id": "org.update",
         "label": "Apply",
-        "params": []
+        "params": [],
+        "report": false
       }
+    },
+    {
+      "actions": [
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "test_tracker",
+          "envelope": "args",
+          "id": "tracker.test",
+          "label": "Test",
+          "params": [],
+          "report": true
+        },
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "username",
+              {
+                "from": "param",
+                "name": "email"
+              }
+            ],
+            [
+              "secret",
+              {
+                "from": "param",
+                "name": "token"
+              }
+            ]
+          ],
+          "command": "set_tracker_credential",
+          "envelope": "args",
+          "id": "tracker.replace_login",
+          "label": "Replace credential",
+          "params": [
+            {
+              "label": "Atlassian account email",
+              "max": 320,
+              "name": "email",
+              "placeholder": "you@example.com",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "label": "API token",
+              "name": "token",
+              "required": true,
+              "type": "secret"
+            }
+          ],
+          "report": false,
+          "variants": [
+            "jira"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "secret",
+              {
+                "from": "param",
+                "name": "token"
+              }
+            ]
+          ],
+          "command": "set_tracker_credential",
+          "envelope": "args",
+          "id": "tracker.replace_token",
+          "label": "Replace credential",
+          "params": [
+            {
+              "label": "Token",
+              "name": "token",
+              "required": true,
+              "type": "secret"
+            }
+          ],
+          "report": false,
+          "variants": [
+            "jira_dc",
+            "asana",
+            "linear"
+          ]
+        }
+      ],
+      "create_flow": "tracker.connect",
+      "delete": {
+        "bind": [
+          [
+            "tracker_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "remove_tracker",
+        "confirm": "Its cached tickets go with it; sessions keep their keys and links.",
+        "envelope": "args",
+        "id": "tracker.remove",
+        "label": "Remove tracker",
+        "params": [],
+        "report": false
+      },
+      "empty": "No trackers. Keys in branch names group sessions without one; connect a tracker for titles and statuses.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What chips and ⌘K call it.",
+          "id": "name",
+          "label": "Name",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Which tracker it is.",
+          "id": "provider",
+          "label": "Tracker",
+          "options": [
+            [
+              "jira",
+              "Jira Cloud"
+            ],
+            [
+              "jira_dc",
+              "Jira Data Center"
+            ],
+            [
+              "github",
+              "GitHub"
+            ],
+            [
+              "asana",
+              "Asana"
+            ],
+            [
+              "linear",
+              "Linear"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The site or workspace it reads.",
+          "id": "site_url",
+          "label": "Site",
+          "max": 2048,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "How the last test or sync went.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "ok",
+              "ok"
+            ],
+            [
+              "auth_failed",
+              "token expired or wrong"
+            ],
+            [
+              "captcha",
+              "log in via the browser"
+            ],
+            [
+              "rate_limited",
+              "rate-limited"
+            ],
+            [
+              "unreachable",
+              "unreachable"
+            ],
+            [
+              "unconfigured",
+              "not tested yet"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "When a sync last finished for it.",
+          "id": "last_sync_at",
+          "label": "Last sync",
+          "type": "time"
+        },
+        {
+          "help": "What the tracker said the last time it refused.",
+          "id": "last_error",
+          "label": "Last error",
+          "max": 4096,
+          "type": "text"
+        },
+        {
+          "help": "The account its credential belongs to (Jira Cloud).",
+          "id": "username",
+          "label": "Account",
+          "max": 320,
+          "type": "text"
+        },
+        {
+          "help": "The end of the stored credential; the rest is never shown.",
+          "id": "credential_hint",
+          "label": "Credential",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "direct, or gh / requests on a named host.",
+          "id": "transport",
+          "label": "Reached through",
+          "max": 200,
+          "type": "text"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a link on each ticket whose work you linked or started gets a pull request.",
+          "default": false,
+          "edit": "settings",
+          "help": "Add a session's pull request to its ticket as a link, only for work you linked or started. The token needs permission to edit issues.",
+          "id": "pr_remote_link",
+          "label": "Link pull requests",
+          "merge_path": [
+            "write_back",
+            "pr_remote_link"
+          ],
+          "on_off": false,
+          "type": "bool"
+        }
+      ],
+      "help": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
+      "id": "tracker",
+      "id_field": "id",
+      "label": "Tracker",
+      "list": "list_trackers",
+      "plural": "Trackers",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "tracker_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_tracker",
+        "envelope": "args",
+        "id": "tracker.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      },
+      "variant_by": "provider"
     }
   ],
   "settings": [

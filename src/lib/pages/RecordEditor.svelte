@@ -7,11 +7,17 @@
   // each field is.
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import ActionForm from './ActionForm.svelte';
+  import TrackerExtras from '../TrackerExtras.svelte';
+  import type { TrackerRow } from '../trackers';
   import { evalCondition, type Section } from './pages';
   import {
+    ago,
+    applies,
     buildArgs,
-    encodeField,
+    choiceLabel,
     fieldValue,
+    rawOf,
+    updateArgs,
     idOf,
     itemKey,
     itemLabel,
@@ -32,6 +38,8 @@
     readonly = false,
     options,
     run,
+    reload,
+    now = () => Math.floor(Date.now() / 1000),
   }: {
     resource: ResourceType;
     sections: Section[];
@@ -40,7 +48,26 @@
     options: (field: FieldSpec, param: string) => { value: string; label: string }[];
     /** Run an action with its arguments; resolves once the list is re-read. */
     run: (action: ActionSpec, args: Record<string, unknown>) => Promise<boolean>;
+    /** Re-read the list (a custom item changed something). */
+    reload: () => void;
+    /** Unix seconds; injectable for tests. */
+    now?: () => number;
   } = $props();
+
+  const recordActions = $derived((resource.actions ?? []).filter((a) => applies(resource, a, record)));
+  /** The record action whose form is open. */
+  let openAction = $state<string | null>(null);
+
+  /** A field shown, not edited, in words. */
+  function shown(f: FieldSpec): string {
+    const raw = rawOf(f, record);
+    if (f.type === 'time') return ago(raw, now());
+    if (f.type === 'bool') return saved[f.id] ? 'On' : 'Off';
+    if (f.type === 'inherit') return String(saved[f.id]);
+    if (raw === null || raw === undefined || raw === '') return '—';
+    if (f.type === 'choice') return choiceLabel(f, String(raw));
+    return String(raw);
+  }
 
   const fieldOf = (id: string) => resource.fields.find((f) => f.id === id);
   const saved = $derived(
@@ -72,8 +99,13 @@
   function apply() {
     const update = resource.update;
     if (!update || changed.length === 0) return;
-    const args = buildArgs(update, record, null, {});
-    for (const f of changed) args[f.edit!] = encodeField(f, draft[f.id]);
+    const args = {
+      ...buildArgs(update, record, null, {}),
+      ...updateArgs(
+        record,
+        changed.map((f) => ({ f, v: draft[f.id] })),
+      ),
+    };
     ask(
       `Apply changes to ${titleOf(resource, record)}`,
       changed.flatMap((f) => (f.confirm ? [f.confirm] : [])),
@@ -106,6 +138,21 @@
       <span class="swatch" style:background={String(record[resource.color_field] ?? '') || 'transparent'}></span>
     {/if}
     <h5>{titleOf(resource, record)}</h5>
+    {#if !readonly}
+      {#each recordActions as a (a.id)}
+        <button
+          type="button"
+          class="btn"
+          disabled={busy}
+          data-testid={`record-action-${a.id}`}
+          aria-expanded={a.params.length ? openAction === a.id : undefined}
+          onclick={() => {
+            if (a.params.length) openAction = openAction === a.id ? null : a.id;
+            else runItem(a, null, {});
+          }}>{a.label}</button
+        >
+      {/each}
+    {/if}
     {#if !readonly && resource.delete}
       <button type="button" class="btn btn--quiet" disabled={busy} data-testid="record-delete" onclick={remove}
         >{resource.delete.label}</button
@@ -113,12 +160,26 @@
     {/if}
   </header>
 
+  {#each recordActions.filter((a) => a.params.length && openAction === a.id) as a (a.id)}
+    <div class="action-panel">
+      <ActionForm
+        action={a}
+        {busy}
+        onrun={(params) => {
+          openAction = null;
+          runItem(a, null, params);
+        }} />
+    </div>
+  {/each}
+
   {#each sections.filter((s) => evalCondition(s.when, values)) as section (section.title)}
     <section class="section">
       <h6>{section.title}</h6>
       {#each section.items as item, i (i)}
         {#if item.type === 'notice'}
           <p class={`notice ${item.tone}`}>{item.text}</p>
+        {:else if item.type === 'custom' && !readonly && item.component === 'tracker_extras'}
+          <TrackerExtras tracker={record as unknown as TrackerRow} onchanged={reload} />
         {:else if item.type === 'field' && evalCondition(item.when, values)}
           {@const f = fieldOf(item.key)}
           {#if f}
@@ -147,8 +208,8 @@
                       <ActionForm action={a} {busy} options={(p) => options(f, p)} onrun={(params) => runItem(a, null, params)} />
                     {/each}
                   {/if}
-                {:else if readonly || !f.edit}
-                  <span class="value" data-testid={`value-${f.id}`}>{f.type === 'bool' ? (saved[f.id] ? 'On' : 'Off') : saved[f.id] || '—'}</span>
+                {:else if readonly || !f.edit || f.type === 'choice' || f.type === 'time'}
+                  <span class="value" data-testid={`value-${f.id}`}>{shown(f)}</span>
                 {:else if f.type === 'text'}
                   <input
                     type="text"
@@ -331,6 +392,12 @@
   }
   .notice.warn {
     border-left-color: var(--usage-warn);
+  }
+  .action-panel {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
   }
   .apply {
     position: sticky;

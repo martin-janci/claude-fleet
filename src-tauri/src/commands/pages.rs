@@ -50,3 +50,59 @@ pub fn fetch_page_source(
         fleet_core::store::now_unix(),
     )
 }
+
+// ── flows (declarative pages P4b, layout L3) ─────────────────────────────────
+//
+// The backend decides every step (`fleet_core::pages::flows`); these only
+// carry the step and the values. Local-only: the one flow today adds a
+// tracker, fleet administration a paired desktop does not own.
+
+/// Open `flow`, prefilled from `prefill`.
+#[tauri::command]
+pub fn flow_start(
+    flow: String,
+    prefill: Option<std::collections::BTreeMap<String, String>>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<fleet_core::pages::flows::Step, IpcError> {
+    backend.refuse_local_only("flow_start")?;
+    fleet_core::pages::flows::start(&store, &flow, &prefill.unwrap_or_default())
+}
+
+/// Submit the open step's values: the next step, the same one with an
+/// error, or done. A secret in `values` is used here and kept nowhere.
+#[tauri::command]
+pub async fn flow_submit(
+    flow_id: String,
+    values: std::collections::BTreeMap<String, String>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<fleet_core::pages::flows::Outcome, IpcError> {
+    backend.refuse_local_only("flow_submit")?;
+    fleet_core::pages::flows::submit(
+        &store,
+        &fleet_core::service::trackers::default_net(),
+        &flow_id,
+        &values,
+    )
+    .await
+}
+
+/// Back to the first step, what was entered kept.
+#[tauri::command]
+pub fn flow_back(
+    flow_id: String,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<fleet_core::pages::flows::Step, IpcError> {
+    backend.refuse_local_only("flow_back")?;
+    fleet_core::pages::flows::back(&store, &flow_id)
+}
+
+/// Close a flow nobody will finish.
+#[tauri::command]
+pub fn flow_cancel(flow_id: String, backend: State<'_, Arc<FleetBackend>>) -> Result<(), IpcError> {
+    backend.refuse_local_only("flow_cancel")?;
+    fleet_core::pages::flows::cancel(&flow_id);
+    Ok(())
+}

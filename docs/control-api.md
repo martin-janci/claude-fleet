@@ -406,7 +406,7 @@ Index by area (names only; see the reference for details):
   `inferred`) that a person confirms or rejects; a rejected pair stays
   rejected. `source: "agent"` remains a confirmed declaration.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
-  on a paired desktop the Settings → Work section says "configure on the
+  on a paired desktop the Settings → Trackers page says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,
   settings? }` (the site, or any ticket / issue URL on it; the provider —
   `jira`, `github`, `asana`, `linear`, `jira_dc` — is inferred from the URL

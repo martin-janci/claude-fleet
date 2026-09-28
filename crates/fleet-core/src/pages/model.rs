@@ -203,6 +203,11 @@ pub enum CustomComponent {
     /// click each to create with their rule and tracker (work graph M5.4;
     /// `OrgSuggestions.svelte`). Waits on actions that chain.
     OrgSuggestions,
+    /// A tracker's last sync pass, Asana's section map and Jev's proposals
+    /// for it (work graph M11.4, M6, Jev J3; `TrackerExtras.svelte`). Shown
+    /// in a tracker's detail. Waits on the review_apply layout (P5), which
+    /// takes the proposals, and a choice-map field for the section map.
+    TrackerExtras,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

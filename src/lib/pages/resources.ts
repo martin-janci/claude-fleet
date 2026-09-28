@@ -19,6 +19,7 @@ export type OptionSource = 'hosts' | 'trackers';
 export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'text'; max: number; placeholder: string }
   | { type: 'color' }
+  | { type: 'secret' }
   | { type: 'options'; source: OptionSource }
 );
 
@@ -30,6 +31,10 @@ export interface ActionSpec {
   bind: [string, Bind][];
   params: ParamSpec[];
   confirm?: string;
+  /** Only for records whose `variant_by` field is one of these. */
+  variants?: string[];
+  /** The command answers `{ ok, error? }`. */
+  report: boolean;
 }
 
 export type ItemLabel = { type: 'plain' } | { type: 'field'; field: string } | { type: 'org_rule' };
@@ -37,13 +42,16 @@ export type ItemLabel = { type: 'plain' } | { type: 'field'; field: string } | {
 export type Badge =
   | { when: 'true'; text: string }
   | { when: 'false'; text: string }
-  | { when: 'set'; text: string };
+  | { when: 'set'; text: string }
+  | { when: 'label' };
 
 export type FieldKind =
   | { type: 'text'; max: number }
   | { type: 'color' }
   | { type: 'bool'; on_off: boolean; default: boolean }
   | { type: 'inherit' }
+  | { type: 'choice'; options: [string, string][] }
+  | { type: 'time' }
   | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
 
 export type FieldSpec = {
@@ -53,6 +61,8 @@ export type FieldSpec = {
   edit?: string;
   badge?: Badge;
   confirm?: string;
+  /** The value lives at this path inside the record's `edit` object. */
+  merge_path?: string[];
 } & FieldKind;
 
 export interface ResourceType {
@@ -69,6 +79,9 @@ export interface ResourceType {
   create?: ActionSpec;
   update?: ActionSpec;
   delete?: ActionSpec;
+  actions?: ActionSpec[];
+  create_flow?: string;
+  variant_by?: string;
 }
 
 export type ResourceRecord = Record<string, unknown>;
@@ -77,8 +90,16 @@ export type ResourceRecord = Record<string, unknown>;
  *  for on/off, `'on' | 'off' | 'inherit'` for an inherit field. */
 export type FieldValue = string | boolean;
 
+/** A field's raw value: its own key, or its path inside the `edit` object. */
+export function rawOf(f: FieldSpec, record: ResourceRecord): unknown {
+  if (!f.merge_path?.length || !f.edit) return record[f.id];
+  let v: unknown = record[f.edit];
+  for (const k of f.merge_path) v = v && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined;
+  return v;
+}
+
 export function fieldValue(f: FieldSpec, record: ResourceRecord): FieldValue {
-  const raw = record[f.id];
+  const raw = rawOf(f, record);
   switch (f.type) {
     case 'bool':
       return typeof raw === 'boolean' ? raw : f.default;
@@ -93,6 +114,57 @@ export function fieldValue(f: FieldSpec, record: ResourceRecord): FieldValue {
 export function encodeField(f: FieldSpec, v: FieldValue): unknown {
   if (f.type === 'bool') return f.on_off ? (v ? 'on' : 'off') : v === true;
   return v;
+}
+
+/**
+ * Apply's arguments for the changed fields: each under its `edit` name, or
+ * — for a merged field — the record's whole `edit` object with every
+ * changed path set, the rest kept as it is.
+ */
+export function updateArgs(
+  record: ResourceRecord,
+  changed: { f: FieldSpec; v: FieldValue }[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const { f, v } of changed) {
+    if (!f.edit) continue;
+    if (!f.merge_path?.length) {
+      out[f.edit] = encodeField(f, v);
+      continue;
+    }
+    const base = (out[f.edit] ?? JSON.parse(JSON.stringify(record[f.edit] ?? {}))) as Record<string, unknown>;
+    let at = base;
+    f.merge_path.forEach((k, i) => {
+      if (i === f.merge_path!.length - 1) at[k] = encodeField(f, v);
+      else {
+        if (!at[k] || typeof at[k] !== 'object') at[k] = {};
+        at = at[k] as Record<string, unknown>;
+      }
+    });
+    out[f.edit] = base;
+  }
+  return out;
+}
+
+/** A choice's label for its value. */
+export function choiceLabel(f: FieldSpec, v: string): string {
+  return f.type === 'choice' ? (f.options.find(([o]) => o === v)?.[1] ?? v) : v;
+}
+
+/** Unix seconds as how long ago, from `now`. */
+export function ago(secs: unknown, now: number): string {
+  if (typeof secs !== 'number') return 'never';
+  const d = Math.max(0, now - secs);
+  if (d < 60) return 'just now';
+  if (d < 3600) return `${Math.floor(d / 60)} min ago`;
+  if (d < 86_400) return `${Math.floor(d / 3600)} h ago`;
+  return `${Math.floor(d / 86_400)} d ago`;
+}
+
+/** The action applies to this record: no variants, or its variant is one. */
+export function applies(r: ResourceType, a: ActionSpec, record: ResourceRecord): boolean {
+  if (!a.variants?.length || !r.variant_by) return true;
+  return a.variants.includes(String(record[r.variant_by] ?? ''));
 }
 
 /** Record fields as the strings a `when` compares. */
@@ -137,6 +209,7 @@ export function badgesOf(r: ResourceType, record: ResourceRecord): string[] {
     if (f.badge.when === 'true' && v === true) out.push(f.badge.text);
     else if (f.badge.when === 'false' && v === false) out.push(f.badge.text);
     else if (f.badge.when === 'set' && v !== 'inherit') out.push(`${f.badge.text} ${v}`);
+    else if (f.badge.when === 'label' && v !== '') out.push(choiceLabel(f, String(v)));
   }
   return out;
 }
@@ -209,6 +282,7 @@ export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> 
  */
 export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
   org: [loadOrgs, loadTrackers],
+  tracker: [loadTrackers, loadOrgs],
 };
 
 export async function afterChange(r: ResourceType): Promise<void> {
