@@ -296,9 +296,10 @@ impl Store {
     }
 
     /// A person is using the session (a prompt, or an attach): stamp
-    /// `last_touch_at` (the tidy planner's one-hour protection) and
-    /// un-archive it. Emits the row only when it was archived. `false` for a
-    /// row that does not exist.
+    /// `last_touch_at` (the tidy planner's one-hour protection), un-archive
+    /// it, and clear a `stale_working` stamp — the reason asked a person to
+    /// look, and one just did. Emits the row when it was archived or
+    /// stamped. `false` for a row that does not exist.
     pub fn touch_session(&self, session_id: i64) -> Result<bool, IpcError> {
         let n = self.conn.execute(
             "UPDATE sessions SET last_touch_at = ?2 WHERE id = ?1",
@@ -307,7 +308,17 @@ impl Store {
         if n == 0 {
             return Ok(false);
         }
-        self.unarchive_session_work(session_id)?;
+        let acknowledged = self.conn.execute(
+            "UPDATE sessions SET stale_working_at = NULL \
+             WHERE id = ?1 AND stale_working_at IS NOT NULL",
+            rusqlite::params![session_id],
+        )?;
+        // `unarchive_session_work` bumps and emits the row itself when it
+        // un-archived anything; emit here only when it did not.
+        if self.unarchive_session_work(session_id)? == 0 && acknowledged > 0 {
+            self.bump_row_for_lifecycle(session_id)?;
+            self.emit_session(session_id)?;
+        }
         Ok(true)
     }
 
