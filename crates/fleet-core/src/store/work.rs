@@ -1676,11 +1676,21 @@ impl Store {
     }
 
     /// session id → its primary work, for every live session that has one.
+    ///
+    /// `status_category` and `kind` are unconditional (native item status
+    /// task 4, fix round 1): this had the same tracker-only `CASE` that
+    /// hid a local item's status on the session row, before that was
+    /// fixed. Zero non-test callers today, so nothing downstream depended
+    /// on the old hiding — but a latent copy of a just-fixed bug is exactly
+    /// what waits for its first caller.
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT p.session_id, l.id, l.item_id, COALESCE(i.key, l.ref_key), \
                     COALESCE(i.title, ''), l.source, \
-                    CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                    CASE WHEN i.id IS NULL THEN 'ref' \
+                         WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                         ELSE 'local' END, \
+                    i.status_category, \
                     i.status_name, i.url, i.unavailable_at IS NOT NULL \
              FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
@@ -1697,10 +1707,11 @@ impl Store {
                     key: r.get(3)?,
                     title: r.get(4)?,
                     source: r.get(5)?,
-                    status_category: r.get(6)?,
-                    status_name: r.get(7)?,
-                    url: r.get(8)?,
-                    unavailable: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
+                    kind: r.get(6)?,
+                    status_category: r.get(7)?,
+                    status_name: r.get(8)?,
+                    url: r.get(9)?,
+                    unavailable: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
                     state: "confirmed".into(),
                     ..Default::default()
                 },

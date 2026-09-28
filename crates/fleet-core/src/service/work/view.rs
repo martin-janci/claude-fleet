@@ -1693,9 +1693,19 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
             None => "ref",
         }
         .into(),
-        status_category: item
-            .map(|i| i.item.status_category.clone())
-            .filter(|c| !c.is_empty()),
+        // The same live precedence `to_task` projects (§2, fix round 1):
+        // two views of the same item must not disagree about its status.
+        // `working_session_items` is the same page-wide one-join set —
+        // this adds no second query.
+        status_category: item.map(|i| {
+            effective_status(
+                &i.item.status_category,
+                i.item.status_set_by.as_deref(),
+                &i.item.source,
+                g.working_session_items.contains(&i.item.id),
+            )
+            .to_string()
+        }),
         status_name: item.and_then(|i| i.item.status_name.clone()),
         url: item.and_then(|i| i.item.url.clone()),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),

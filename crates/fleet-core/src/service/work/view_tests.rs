@@ -1335,3 +1335,28 @@ fn a_working_session_never_lifts_a_tracker_item() {
     let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
     assert_eq!(task_of(&p, "TK-4").status_category.as_deref(), Some("todo"));
 }
+
+/// Fix round 1: the tree (`to_task`) and a session's own task list
+/// (`brief_of`, via `session_tasks`) must not disagree about the same
+/// item's status — both project through `effective_status` with the same
+/// page-wide working set, never a query per caller.
+#[test]
+fn the_tree_and_a_sessions_own_tasks_agree_on_a_working_items_status() {
+    let w = world();
+    w.st.lock()
+        .unwrap()
+        .name_session_work(w.s1, Some("LOC-79"), "Agree with me")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-79");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let tree_status = task_of(&p, "LOC-79").status_category.clone();
+    assert_eq!(tree_status.as_deref(), Some("in_progress"));
+
+    let links = links_of(&w, w.s1);
+    assert_eq!(links.links.len(), 1);
+    assert_eq!(
+        links.links[0].task.status_category, tree_status,
+        "the tree and the session's own task list must agree"
+    );
+}
