@@ -793,7 +793,7 @@ fn a_resume_id_is_used_for_both_the_pane_command_and_the_stored_id() {
     );
     assert_eq!(
         pane,
-        recreate_pane_command("work", Some(RESUME_ID), "dev-z")
+        recreate_pane_command("work", Some(RESUME_ID), "dev-z", &Default::default())
     );
 }
 
@@ -821,7 +821,10 @@ fn model_and_effort_ride_on_every_launch_in_the_chain() {
     );
     // Without either, the command is the plain one a recreate would run.
     let (cid, pane) = claude_id_and_pane_cmd(&args_named("dev-z", Some(RESUME_ID)));
-    assert_eq!(pane, recreate_pane_command("work", cid.as_deref(), "dev-z"));
+    assert_eq!(
+        pane,
+        recreate_pane_command("work", cid.as_deref(), "dev-z", &Default::default())
+    );
 }
 
 #[test]

@@ -1075,6 +1075,16 @@ pub struct ClaudeLaunch {
 }
 
 impl ClaudeLaunch {
+    /// Stored launch options, each kept only when it still validates: a
+    /// value read back from the DB never reaches the shell unchecked (an
+    /// invalid one degrades to the host's default, like a bad claude id).
+    pub fn checked(model: Option<String>, effort: Option<String>) -> Self {
+        Self {
+            model: model.filter(|m| crate::validate::claude_model(m).is_ok()),
+            effort: effort.filter(|e| crate::validate::effort_level(e).is_ok()),
+        }
+    }
+
     /// ` --model 'm' --effort 'e'`, each only when set; empty otherwise.
     fn flags(&self) -> String {
         let mut out = String::new();
