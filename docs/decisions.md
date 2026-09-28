@@ -131,11 +131,11 @@ evaluation is judged on. They are few: one per decision a person made.
 ## Turning it off
 
 - **Instantly, everything:** Settings → *Decisions (Jev)* → off, or on a hub
-  `set_setting { key: "decide.jev.enabled", value: "false" }` with the
-  master token. The next call is refused; nothing in flight is retried.
+  `fleet-hub decide disable` (the same `set_setting` a master-token client
+  can send). The next call is refused; nothing in flight is retried.
 - **One org:** `fleet-hub org set <id> --jev off`, or its checkbox in
   Settings → Organisations.
-- **One feature:** its mode to `off`.
+- **One feature:** its mode to `off` (`fleet-hub decide mode status_map off`).
 - **The key:** `fleet-hub decide clear-key`.
 
 ## `status_map` — Asana section proposals (J3)
@@ -280,8 +280,10 @@ are yours).
 | `decide.retention_days` | `90` | Days a run is kept (`0` = forever). |
 
 On a standalone desktop they are in Settings → *Decisions (Jev)*. On a hub
-they are set over the API with `set_setting` (master token), like the
-`work.*` settings; a paired desktop shows them read-only there.
+they are set with `fleet-hub decide enable | disable | mode | unassigned |
+set` (below), which send `set_setting` to the running hub with the master
+token — the hub checks each value and audits the change; a paired desktop
+shows them read-only there.
 
 `decide.jev.work_link` has no live path yet (decision D32: J1 is measured
 offline only, until it passes its acceptance lines), so Settings shows it
@@ -290,6 +292,10 @@ read-only, with whatever value it holds; the benchmark does not need it.
 ## The command line (hub)
 
 ```bash
+fleet-hub decide enable                     # the kill switch on (disable: off, at once)
+fleet-hub decide mode status_map shadow     # a feature's mode: off | shadow | assist
+fleet-hub decide unassigned on              # rows with no org may be sent too (off by default)
+fleet-hub decide set decide.jev.timeout_ms 2000   # any other decide.* setting; the hub checks it
 fleet-hub decide set-key                    # the key on stdin (one line)
 fleet-hub decide set-key --from-env JEV_KEY # from this shell's variable
 fleet-hub decide set-key --ref file:/run/secrets/jev   # or env:NAME, read at use
@@ -656,8 +662,9 @@ A checklist for the owner, on the hub, before any feature leaves `off`:
    `fleet-hub decide bench status-map --labels sections.jsonl` and
    `fleet-hub decide bench work-link --split all --labels h.jsonl`.
 4. **Jev, gated** — the key (`fleet-hub decide set-key`), the kill switch
-   on, and consent for the orgs to be measured (`fleet-hub org set <id>
-   --jev on`; `decide.jev.unassigned` for rows with no org). Leave the
+   on (`fleet-hub decide enable`), and consent for the orgs to be measured
+   (`fleet-hub org set <id> --jev on`; `fleet-hub decide unassigned on` for
+   rows with no org). Leave the
    features' modes `off`: the benchmark does not need them, and
    `decide.jev.status_map` at `shadow` would also start the daily live runs
    on every consenting org's Asana trackers. Then add `--provider jev` to the same commands (J1 with
