@@ -1,0 +1,1090 @@
+{
+  "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+  "layouts": [
+    {
+      "id": "category",
+      "items": [
+        "field",
+        "stat",
+        "record",
+        "notice",
+        "link"
+      ],
+      "supported": true
+    },
+    {
+      "id": "master_detail",
+      "items": [],
+      "supported": false
+    },
+    {
+      "id": "flow",
+      "items": [],
+      "supported": false
+    },
+    {
+      "id": "object_editor",
+      "items": [],
+      "supported": false
+    },
+    {
+      "id": "cards",
+      "items": [
+        "stat",
+        "record",
+        "notice",
+        "link"
+      ],
+      "supported": true
+    },
+    {
+      "id": "review_apply",
+      "items": [],
+      "supported": false
+    },
+    {
+      "id": "data_page",
+      "items": [
+        "stat",
+        "record",
+        "table",
+        "chart",
+        "notice",
+        "link"
+      ],
+      "supported": true
+    }
+  ],
+  "settings": [
+    {
+      "default_widget": "duration",
+      "key": "reconcile.interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Reconcile interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "reconcile.stale_working_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Stale working timeout",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "sessions.lost_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep lost sessions",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "restore.batch_size",
+      "kind": {
+        "max": 16,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Concurrent restores",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "restore.stagger_ms",
+      "kind": {
+        "max": 60000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Delay between restores",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "playbooks.press_enter",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Press Enter when stuck",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "playbooks.oom_recreate",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Recreate out-of-memory sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "playbooks.oom_max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Out-of-memory budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "gc.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Garbage-collect idle sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.bg_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Background agent idle limit",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.shell_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Shell idle limit",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.work_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Work session idle limit",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.sweep_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "GC sweep interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.external_lost_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep lost outside sessions",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "key_value_table",
+      "key": "projects.base_path",
+      "kind": {
+        "type": "path_map"
+      },
+      "label": "Projects roots",
+      "widgets": [
+        "textarea",
+        "key_value_table",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "projects.layout",
+      "kind": {
+        "options": [
+          "github",
+          "flat"
+        ],
+        "type": "choice"
+      },
+      "label": "Projects layout",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "tasks.max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Task timeout",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "repair.auto_on_tick",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Re-create vanished worktrees",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "repair.tick_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 60,
+        "type": "secs"
+      },
+      "label": "Workspace check interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.max_transcript_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: transcript cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.max_bundle_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: git bundle cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.ignored_entry_kb",
+      "kind": {
+        "max": 1048576,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: ignored entry cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.ignored_total_mb",
+      "kind": {
+        "max": 1024,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: ignored total cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.max_session_state_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: session state cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.wait_max_mins",
+      "kind": {
+        "max": 10080,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: wait timeout",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "usage.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Collect token usage",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "usage.interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Usage interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "textarea",
+      "key": "usage.prices_json",
+      "kind": {
+        "type": "price_map"
+      },
+      "label": "Price overrides",
+      "widgets": [
+        "textarea",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "reports.max_rows",
+      "kind": {
+        "max": 100000,
+        "min": 100,
+        "type": "int"
+      },
+      "label": "Error reports kept",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "reports.max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Error report age",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.context_red_pct",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Context red threshold",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.retention.journal_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: work journal",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.retention.tracker_items_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: done tickets",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.retention.timeline_work_events_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: work timeline",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.recent_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Recent work",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "work.sync_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Tracker sync interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "id_list",
+      "key": "work.trusted_branch_projects",
+      "kind": {
+        "type": "id_set"
+      },
+      "label": "Trusted branch projects",
+      "widgets": [
+        "textarea",
+        "id_list",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.evidence_snippets",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Keep evidence snippets",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.session_start_context",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Ticket context at session start",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.classify_nudge",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Classification nudge",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "work.summary_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Summary model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.tidy_done_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: done for",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.tidy_idle_hours",
+      "kind": {
+        "max": 720,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: idle for",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.tidy_idle_unlinked_days",
+      "kind": {
+        "max": 90,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: unlinked for",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.auto_tidy",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Auto-tidy",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "multiselect",
+      "key": "work.auto_tidy_reasons",
+      "kind": {
+        "options": [
+          "done_idle",
+          "pr_merged_idle",
+          "not_planned"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Auto-tidy reasons",
+      "widgets": [
+        "multiselect",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "decide.jev.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Decisions (Jev)",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.status_map",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: status map",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.work_link",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: work link",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "decide.jev.unassigned",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Jev: send unassigned",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.timeout_ms",
+      "kind": {
+        "max": 30000,
+        "min": 100,
+        "type": "int"
+      },
+      "label": "Jev: timeout",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.breaker_failures",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Jev: breaker failures",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.breaker_open_secs",
+      "kind": {
+        "max": 86400,
+        "min": 10,
+        "type": "int"
+      },
+      "label": "Jev: breaker pause",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.daily_token_budget",
+      "kind": {
+        "max": 1000000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Jev: daily token budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.model",
+      "kind": {
+        "options": [
+          "jev-1.13.0",
+          "jev-latest"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.retention_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Jev: keep runs",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "fields": [
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cache_write_tokens",
+          "label": "Cache write",
+          "ty": "tokens"
+        },
+        {
+          "id": "cache_read_tokens",
+          "label": "Cache read",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost over every session row that still exists, each over its whole lifetime.",
+      "id": "usage.total",
+      "label": "Token usage",
+      "params": [
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "record"
+    },
+    {
+      "help": "Tokens and estimated cost per UTC day from the durable roll-up, killed sessions included.",
+      "id": "usage.by_day",
+      "label": "Usage by day",
+      "params": [
+        {
+          "default": 14,
+          "help": "How many UTC days back, today included.",
+          "name": "days",
+          "ty": {
+            "max": 365,
+            "min": 1,
+            "type": "days"
+          }
+        },
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "series",
+      "x": {
+        "id": "day",
+        "label": "Day",
+        "ty": "day"
+      },
+      "y": [
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        }
+      ]
+    },
+    {
+      "columns": [
+        {
+          "id": "host",
+          "label": "Host",
+          "ty": "text"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost per host over the session rows that still exist.",
+      "id": "usage.by_host",
+      "label": "Usage by host",
+      "params": [],
+      "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "model",
+          "label": "Model",
+          "ty": "text"
+        },
+        {
+          "id": "sessions",
+          "label": "Sessions",
+          "ty": "int"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost per model over the session rows that still exist, by each session's latest model.",
+      "id": "usage.by_model",
+      "label": "Usage by model",
+      "params": [
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "rows"
+    }
+  ],
+  "spec": "fleet.page/1",
+  "widgets": [
+    {
+      "id": "switch",
+      "kinds": [
+        "bool"
+      ]
+    },
+    {
+      "id": "number",
+      "kinds": [
+        "int",
+        "secs"
+      ]
+    },
+    {
+      "id": "duration",
+      "kinds": [
+        "secs"
+      ]
+    },
+    {
+      "id": "select",
+      "kinds": [
+        "choice"
+      ]
+    },
+    {
+      "id": "radio",
+      "kinds": [
+        "choice"
+      ]
+    },
+    {
+      "id": "multiselect",
+      "kinds": [
+        "choice_set"
+      ]
+    },
+    {
+      "id": "textarea",
+      "kinds": [
+        "id_set",
+        "path_map",
+        "price_map"
+      ]
+    },
+    {
+      "id": "key_value_table",
+      "kinds": [
+        "path_map"
+      ]
+    },
+    {
+      "id": "id_list",
+      "kinds": [
+        "id_set"
+      ]
+    },
+    {
+      "id": "readonly",
+      "kinds": [
+        "bool",
+        "choice",
+        "choice_set",
+        "id_set",
+        "int",
+        "path_map",
+        "price_map",
+        "secs"
+      ]
+    }
+  ]
+}

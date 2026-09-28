@@ -1,7 +1,7 @@
 # Declarative pages and forms: research and design
 
 **Status:** accepted 2026-09-28. The owner took every recommendation in §9 and
-widened D-P1 to a general page engine. P1 is landed; P2 is next.
+widened D-P1 to a general page engine. P1 and P2 are landed; P3 is next.
 
 **Goal.** A small framework in claude-fleet that renders pages and forms from a
 declarative spec: settings, and also pages with dynamic setup, prefilled data,
@@ -185,6 +185,14 @@ JSON Schema is an **export**, not the authoring format. The registry generates:
 This follows the repo's existing `REGEN_*` pattern.
 
 ### Page DSL: ten node types, one way to do each thing
+
+> **As built (P2):** every item is an object tagged by `type` (`field`,
+> `stat`, `record`, `table`, `chart`, `notice`, `link`), rather than the
+> per-kind arrays (`fields: [...]`, `derived: [...]`) used in the sketches
+> below and in §7. One shape per purpose is easier for an agent to produce
+> and easier for a schema to check. `action` and `collection` arrive with the
+> resource registry in P4. The authoring guide is `docs/pages.md`, and the
+> model is `crates/fleet-core/src/pages/model.rs`.
 
 | Node | Purpose |
 |---|---|
@@ -386,6 +394,8 @@ precise enough for the model to fix in one retry.
 
 ## 7. Worked example: Work → Trackers
 
+This is P4's target, in the sketch syntax. The built DSL tags each item (see §3).
+
 ```json
 {
   "spec": "fleet.page/1",
@@ -443,7 +453,7 @@ never coexist for long.
 | Slice | Content | Replaces |
 |---|---|---|
 | **P1** ✅ | `Spec` metadata for all 56 keys (label, help, unit, `zero`, tags, danger, restart, ai), held by `every_spec_has_consistent_metadata`; `settings::describe()`, served by `get_settings { describe: true }` and the `describe_fleet_settings` command (`LocalOnly`, like `get_fleet_settings`); `docs/settings-reference.md` and the `work.*` / `decide.*` guide tables generated (`REGEN_SETTINGS_DOCS=1`). **Moved out:** `RowChange::Setting` goes to P3, where a page first listens for it and the wire-contract bump is justified. Registering `hub.*` / `mcp.*` / `operator.*` goes to P2 | Rustdoc-only help; the hand-kept doc tables |
-| **P2** | The DSL, its Rust validator with the coverage test, and the preview route; the `DataSource` registry and `describe_sources`, with the first sources (`usage.by_model`, `work.today`) | `every_spec_has_a_settings_dialog_row` |
+| **P2** ✅ | `fleet-core::pages`, built:<br>• the `fleet.page/1` model, with unknown fields refused<br>• the catalog (a widget per setting kind, items per layout)<br>• data sources `usage.total`, `usage.by_day`, `usage.by_host` and `usage.by_model`, whose shapes are held by their readers<br>• the validator, which names the page and place of each problem<br>• seven pages in `crates/fleet-core/pages/` that give all 56 settings one home each (`every_setting_has_one_home`), plus a usage `data_page`<br>• generated `docs/page-spec.schema.json` and `docs/page-catalog.json` (`REGEN_PAGE_DOCS=1`)<br>• the guide `docs/pages.md`<br>**Moved out:**<br>• the preview route and the transport to the UI (`list_pages`, `fetch_source`) go to P3, with the renderer that consumes them<br>• `work.today` waits for an org-scoped source<br>• registering `hub.*` / `mcp.*` / `operator.*` is D-P7 | `every_spec_has_a_settings_dialog_row`, once P3's renderer replaces the dialog rows |
 | **P3** | The renderer: L1 and L5, twelve widgets, `Tabs` and `Disclosure`, search, modified and provenance chips. Migrate Automation, Limits and Decisions | About 900 lines of `SettingsDialog.svelte` and most of `fleet_settings.ts` |
 | **P4** | L2, L4 and L3, with resources for orgs and then trackers | `OrgSettings.svelte`, then `WorkSettings.svelte` |
 | **P4b** | L7 `data_page` and the data widgets (`stat`, `table`, `chart`, `record`, `list_editor`, `form`). First page: usage by model and host | Hand-built usage views, where a spec covers them |
@@ -466,6 +476,7 @@ L4 covers it.
 | D-P4 | Do agents write settings at runtime (P5), or only author pages? | Both. Runtime writes go only through `propose` → review, with `AiPolicy` gates |
 | D-P5 | Should Settings stay a modal, or become a full view with a page tree? | A full view with a left page tree and search. A 640 px modal cannot host master-detail |
 | D-P6 | Should settings be routed on a hub client (P6)? | Yes, which revives audit iteration 03 |
+| D-P7 | *Open.* Should `hub.*`, `mcp.*` and `operator.*` join the registry? They are deliberately not writable through `set_setting` (its tests refuse `mcp.confirm_destructive` and `hub.allow_plaintext`), and some are security posture. | Proposed: register them as **read-only** specs, so they get metadata and a place on a page (e.g. Settings → Hub, shown but not editable), while `set` keeps refusing them. Writing any of them from a page is a separate yes |
 
 ---
 

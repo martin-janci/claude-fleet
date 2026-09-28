@@ -1,0 +1,125 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.work",
+  "title": "Work graph",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "How sessions are linked to tickets, tidied up and remembered.",
+  "tabs": [
+    {
+      "title": "Detection",
+      "sections": [
+        {
+          "title": "Trackers",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.sync_interval_secs"
+            },
+            {
+              "type": "field",
+              "key": "work.recent_days"
+            }
+          ]
+        },
+        {
+          "title": "Linking",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.evidence_snippets"
+            },
+            {
+              "type": "field",
+              "key": "work.session_start_context"
+            },
+            {
+              "type": "field",
+              "key": "work.classify_nudge"
+            },
+            {
+              "type": "field",
+              "key": "work.trusted_branch_projects",
+              "hint": "Set from the work popover; clear it here."
+            }
+          ]
+        },
+        {
+          "title": "Summaries",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.summary_model"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Tidy-up",
+      "sections": [
+        {
+          "title": "When to suggest",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.tidy_done_days"
+            },
+            {
+              "type": "field",
+              "key": "work.tidy_idle_hours"
+            },
+            {
+              "type": "field",
+              "key": "work.tidy_idle_unlinked_days"
+            }
+          ]
+        },
+        {
+          "title": "Auto-tidy",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.auto_tidy"
+            },
+            {
+              "type": "field",
+              "key": "work.auto_tidy_reasons",
+              "when": {
+                "key": "work.auto_tidy",
+                "truthy": true
+              }
+            },
+            {
+              "type": "notice",
+              "tone": "warn",
+              "text": "On, the sweep safe-kills finished sessions without asking. A session that is working, waiting on you, linked to in-progress work or used in the last hour is never touched."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Retention",
+      "sections": [
+        {
+          "title": "How long work history is kept",
+          "items": [
+            {
+              "type": "field",
+              "key": "work.retention.journal_days"
+            },
+            {
+              "type": "field",
+              "key": "work.retention.tracker_items_days"
+            },
+            {
+              "type": "field",
+              "key": "work.retention.timeline_work_events_days"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

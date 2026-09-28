@@ -1,0 +1,24 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.projects",
+  "title": "Projects",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "Where fleet looks for your repositories on each host.",
+  "sections": [
+    {
+      "title": "Projects roots",
+      "items": [
+        {
+          "type": "field",
+          "key": "projects.layout",
+          "widget": "radio"
+        },
+        {
+          "type": "field",
+          "key": "projects.base_path"
+        }
+      ]
+    }
+  ]
+}

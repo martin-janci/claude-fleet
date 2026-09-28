@@ -98,6 +98,14 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current`.
   This is P1 of the declarative pages framework
   (`docs/superpowers/specs/2026-09-28-declarative-pages-design.md`).
+- **Declarative pages** (`crates/fleet-core/src/pages/`, P2): pages are JSON
+  specs in `crates/fleet-core/pages/<id>.json`, listed in `PAGE_FILES`,
+  that NAME registered settings, data sources (`pages/sources.rs`) and
+  catalog widgets and layouts; `pages::validate` refuses anything else, and
+  every setting has exactly one home (`every_setting_has_one_home`: a new
+  `SPECS` row needs a `field` on a page). Authoring guide `docs/pages.md`;
+  regenerate `docs/page-spec.schema.json` / `docs/page-catalog.json` with
+  `REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current`.
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
