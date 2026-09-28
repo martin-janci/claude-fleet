@@ -21,12 +21,13 @@
     onWorkChangedDebounced,
     rejectWorkLink,
     unlinkSessionWork,
+    type WorkRef,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
   import { timeAgo } from './session_status';
   import {
     ackWorkLink,
-    conflictOf,
+    conflictNotice,
     decideWorkBatch,
     openTask,
     readErrorText,
@@ -36,10 +37,15 @@
     taskLabel,
     undoOf,
     workReview,
+    workSessionTasks,
     type BatchDecision,
+    type BatchResult,
+    type ConflictNotice,
     type Decision,
     type ReviewItem,
+    type SessionTaskLink,
   } from './work_view';
+  import WorkConflictNotice from './WorkConflictNotice.svelte';
   import type { IpcError, Result } from './result';
 
   let {
@@ -57,8 +63,9 @@
   let loadError = $state<IpcError | null>(null);
   let busy = $state(false);
   let picked = $state<Set<string>>(new Set());
-  // link id → why the last decision on it failed (kept until it succeeds).
-  let failures = $state<Map<number, string>>(new Map());
+  // link id → why the last decision on it failed (kept until it succeeds);
+  // a conflict carries the current value and Reload.
+  let failures = $state<Map<number, string | ConflictNotice>>(new Map());
   let summary = $state<string | null>(null);
   let undo = $state<{ label: string; decisions: BatchDecision[] } | null>(null);
   let focusIdx = $state(0);
@@ -107,7 +114,7 @@
   }
 
   function fail(linkId: number, e: IpcError) {
-    failures = new Map(failures).set(linkId, conflictOf(e) ? 'It changed elsewhere; reloaded — check it again.' : e.message);
+    failures = new Map(failures).set(linkId, conflictNotice(e, 'It') ?? e.message);
   }
   function cleared(linkId: number) {
     if (!failures.has(linkId)) return;
@@ -124,14 +131,36 @@
     busy = false;
     if (!r.ok) {
       fail(it.link_id, r.error);
-      if (conflictOf(r.error)) await reload();
+      if (r.error.code === 'E_CONFLICT') await reload();
       return;
     }
     cleared(it.link_id);
-    const d = undoable ? undoOf({ session_id: it.session_id, link_id: it.link_id, decision: undoable }) : null;
-    undo = d ? { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d] } : null;
     summary = `${what}: ${taskLabel(it.task)} · ${sessionName(it)}`;
+    undo = null;
+    if (undoable) {
+      // The Undo is a compare-and-set too (M14.3): it names the version the
+      // decision left — answered with the write (`link_version`), else read
+      // back from the session's links, where a link someone moved on
+      // meanwhile (not in the state this decision left) offers no Undo
+      // rather than one that would overwrite them.
+      const answered = (r.value as { link_version?: unknown } | null)?.link_version;
+      const version = typeof answered === 'number' ? answered : await versionAfter(it, undoable);
+      const d = undoOf({ session_id: it.session_id, link_id: it.link_id, decision: undoable }, version);
+      if (d?.expected_version != null) undo = { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d] };
+    }
     await reload();
+  }
+
+  /** Link `it`'s version now, if it is in the state `decision` left it in
+   *  (null otherwise, or when it cannot be read). The fallback for a hub
+   *  that does not answer the version with the decision. */
+  async function versionAfter(it: ReviewItem, decision: Decision): Promise<number | null> {
+    const r = await workSessionTasks(it.session_id);
+    if (!r.ok) return null;
+    const l = (r.value?.links ?? []).find((x) => x.link_id === it.link_id);
+    if (!l || typeof l.link_version !== 'number') return null;
+    const want = decision === 'confirm' ? ['active', 'confirmed'] : ['rejected'];
+    return want.includes(l.state) ? l.link_version : null;
   }
 
   const confirm = (it: ReviewItem) =>
@@ -170,17 +199,68 @@
     changeQuery = '';
     changeResults = [];
   }
+  /** A key as the backend keeps it: a ticket key upper-cased, any other
+   *  reference trimmed. */
+  function normRef(k: string): string {
+    const t = k.trim();
+    return /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(t) ? t.toUpperCase() : t;
+  }
+
+  /** The session's live link to `to`, if it has one. */
+  function linkTo(links: readonly SessionTaskLink[], to: { link_id?: number | null; item_id?: number; key?: string }) {
+    const live = links.filter((l) => l.state !== 'ended');
+    if (to.link_id != null) return live.find((l) => l.link_id === to.link_id) ?? null;
+    if (to.item_id != null) return live.find((l) => l.task?.task_id === `item:${to.item_id}`) ?? null;
+    const k = normRef(to.key ?? '');
+    return live.find((l) => (l.task?.key != null && normRef(l.task.key) === k) || l.task?.task_id === `ref:${k}`) ?? null;
+  }
+
+  /** Change…: link the right task, then "not this" for the guess — as one
+   *  change. Both writes name the version they were decided on (the new
+   *  task's link as the session's links say now, 0 when it has none); when
+   *  the second is refused the first is taken back, so a refused Change…
+   *  never leaves the session with both. */
   async function changeTo(it: ReviewItem, to: { link_id?: number | null; item_id?: number; key?: string }) {
     const primary = !hasPrimary(it.session_id);
     await run(it, 'Changed', async () => {
-      const linked =
-        to.link_id != null
-          ? await confirmSessionWork(it.session_id, to.link_id, { primary })
-          : await linkSessionWork(it.session_id, to.item_id != null ? { item_id: to.item_id } : { key: to.key ?? '' }, { primary });
+      const before = await workSessionTasks(it.session_id);
+      if (!before.ok) return before;
+      const had = linkTo(before.value?.links ?? [], to);
+      const ref: WorkRef | null = to.item_id != null ? { item_id: to.item_id } : to.key ? { key: to.key } : null;
+      let linked: Result<unknown>;
+      if (to.link_id != null || !ref) {
+        if (to.link_id == null) return { ok: false, error: { code: 'E_INVALID', message: 'nothing to change to' } };
+        linked = await confirmSessionWork(it.session_id, to.link_id, { primary, expectedVersion: had?.link_version });
+      } else {
+        linked = await linkSessionWork(it.session_id, ref, { primary, expectedVersion: had?.link_version ?? 0 });
+      }
       if (!linked.ok) return linked;
-      return rejectWorkLink(it.session_id, it.link_id, { expectedVersion: it.link_version });
+      const rejected = await rejectWorkLink(it.session_id, it.link_id, { expectedVersion: it.link_version });
+      if (rejected.ok) return rejected;
+      const back = await takeBack(it.session_id, to, had);
+      if (back === null) return rejected;
+      return { ok: false, error: { ...rejected.error, message: `${rejected.error.message} (and taking the new link back failed: ${back})` } };
     });
     changing = null;
+  }
+
+  /** Undo the first half of a Change…: a link that was a suggestion goes
+   *  back to one, a link that did not exist is removed. Null when done,
+   *  else why not. */
+  async function takeBack(
+    sessionId: number,
+    to: { link_id?: number | null; item_id?: number; key?: string },
+    had: SessionTaskLink | null,
+  ): Promise<string | null> {
+    if (had && had.state !== 'suggested') return null; // it was already linked: nothing changed
+    const now = await workSessionTasks(sessionId);
+    if (!now.ok) return now.error.message;
+    const l = linkTo(now.value?.links ?? [], to);
+    if (!l) return null;
+    const r = had
+      ? await reconsiderWorkLink(sessionId, l.link_id, l.link_version)
+      : await unlinkSessionWork(sessionId, l.link_id, { expectedVersion: l.link_version });
+    return r.ok ? null : r.error.message;
   }
 
   // ── several at once ──
@@ -216,24 +296,14 @@
       summary = readErrorText(r.error);
       return;
     }
-    const results = Array.isArray(r.value?.results) ? r.value.results : [];
-    const byLink = new Map(results.map((x) => [x.link_id, x]));
-    const nextFail = new Map(failures);
+    const { ok, failed, byLink } = countBatch(decisions, r.value);
     const undos: BatchDecision[] = [];
-    let ok = 0;
     for (const d of decisions) {
       const res = byLink.get(d.link_id);
-      if (res?.ok) {
-        ok++;
-        nextFail.delete(d.link_id);
-        const u = undoOf(d, res.version);
-        if (u) undos.push(u);
-      } else {
-        nextFail.set(d.link_id, res?.message ?? res?.code ?? 'no answer for this item');
-      }
+      // Only a decision whose new version is known can be undone safely.
+      const u = res?.ok && res.version != null ? undoOf(d, res.version) : null;
+      if (u) undos.push(u);
     }
-    failures = nextFail;
-    const failed = decisions.length - ok;
     const verb = decision === 'confirm' ? 'confirmed' : decision === 'reject' ? 'rejected' : 'kept';
     summary = `${ok} ${verb}${failed > 0 ? ` · ${failed} failed` : ''}`;
     undo = undos.length > 0 ? { label: `${undos.length} ${verb}`, decisions: undos } : null;
@@ -247,14 +317,55 @@
     const u = undo;
     if (!u || busy) return;
     busy = true;
-    const r =
-      u.decisions.length === 1
-        ? await reconsiderWorkLink(u.decisions[0].session_id, u.decisions[0].link_id, u.decisions[0].expected_version)
-        : await decideWorkBatch(u.decisions);
+    if (u.decisions.length === 1) {
+      const d = u.decisions[0];
+      const r = await reconsiderWorkLink(d.session_id, d.link_id, d.expected_version);
+      busy = false;
+      undo = null;
+      if (r.ok) {
+        summary = `Undone: ${u.label} — back to suggestions`;
+      } else {
+        summary = `Undo failed: ${readErrorText(r.error)}`;
+        fail(d.link_id, r.error);
+      }
+      await reload();
+      return;
+    }
+    const r = await decideWorkBatch(u.decisions);
     busy = false;
     undo = null;
-    summary = r.ok ? `Undone: ${u.label} — back to suggestions` : `Undo failed: ${readErrorText(r.error)}`;
+    if (!r.ok) {
+      summary = `Undo failed: ${readErrorText(r.error)}`;
+      await reload();
+      return;
+    }
+    // Each undo is checked on its own, like the batch it undoes.
+    const { ok, failed } = countBatch(u.decisions, r.value);
+    summary =
+      failed === 0
+        ? `Undone: ${u.label} — back to suggestions`
+        : `Undone: ${ok} of ${u.decisions.length} — ${failed} changed elsewhere or failed`;
     await reload();
+  }
+
+  /** How many decisions of a batch answer succeeded; the failures are kept
+   *  per link with their reason. */
+  function countBatch(decisions: readonly BatchDecision[], value: BatchResult | null | undefined) {
+    const results = Array.isArray(value?.results) ? value.results : [];
+    const byLink = new Map(results.map((x) => [x.link_id, x]));
+    const nextFail = new Map(failures);
+    let ok = 0;
+    for (const d of decisions) {
+      const res = byLink.get(d.link_id);
+      if (res?.ok) {
+        ok++;
+        nextFail.delete(d.link_id);
+      } else {
+        nextFail.set(d.link_id, res?.message ?? res?.code ?? 'no answer for this item');
+      }
+    }
+    failures = nextFail;
+    return { ok, failed: decisions.length - ok, byLink };
   }
 
   function openSession(it: ReviewItem) {
@@ -370,7 +481,10 @@
             <p class="why" data-testid="work-review-why">{w}</p>
           {/each}
           {#if failures.get(it.link_id)}
-            <p class="fail" role="alert" data-testid="work-review-item-error">{failures.get(it.link_id)}</p>
+            {@const f = failures.get(it.link_id)}
+            <p class="fail" role="alert" data-testid="work-review-item-error">
+              {#if typeof f === 'string'}{f}{:else if f}<WorkConflictNotice notice={f} onreload={() => void reload()} />{/if}
+            </p>
           {/if}
           <div class="actions">
             {#if it.kind === 'suggestion'}

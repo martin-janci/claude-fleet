@@ -3775,6 +3775,7 @@ fn seed_usage(fx: &Fx) {
                     last_msg_usage: None,
                     now,
                     by_day: Vec::new(),
+                    backfill_until: None,
                 },
             )
             .unwrap();

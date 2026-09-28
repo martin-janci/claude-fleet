@@ -82,6 +82,7 @@ fn row(org: Option<i64>, work: Option<i64>) -> SessionRow {
     r.work = work.map(|o| summary(Some(o)));
     r.work_suggested = Some(summary(work));
     r.work_rejected = vec!["X-1".into()];
+    r.work_rev = 42;
     r
 }
 
@@ -97,13 +98,19 @@ fn a_row_loses_the_work_its_reader_may_not_see() {
     a.redact_row(&mut r);
     assert!(r.work.is_none());
     assert!(r.work_rejected.is_empty(), "bare keys never reach a host");
+    assert_eq!(
+        r.work_rev, 0,
+        "a digest over every link never reaches a host"
+    );
     // Its own org's work stays; the master keeps everything.
     let mut r = row(Some(1), Some(1));
     a.redact_row(&mut r);
     assert!(r.work.is_some());
+    assert_eq!(r.work_rev, 0);
     let mut r = row(Some(2), Some(2));
     OrgScope::All.redact_row(&mut r);
     assert!(r.work.is_some());
+    assert_eq!(r.work_rev, 42);
 }
 
 #[test]
@@ -127,6 +134,10 @@ fn serialised_rows_are_redacted_wherever_they_nest() {
     assert!(w.get("work_rejected").is_none());
     assert!(v["rows"][0].get("work").is_none());
     assert!(v["rows"][1].get("work").is_some());
+    assert!(
+        v["rows"][1].get("work_rev").is_none(),
+        "cleared even in its own org"
+    );
     assert_eq!(v["work"]["key"], "ZZ-1");
     // The lookup, not the object, decides: a projection that dropped
     // `org_id` cannot make a row look unassigned.

@@ -238,16 +238,21 @@ impl FleetTools {
             None,
             "the session to rewind",
         )?;
-        // Rewind rebuilds a live pane, so it needs a person (D12), the same
-        // rule restart_session follows. Fork starts something new and does not.
-        if mode == rewind::RewindMode::Rewind {
-            self.confirm_gate(
-                "rewind_conversation",
-                p.confirm_nonce.as_deref(),
-                &format!("session_id={} anchor={:?}", p.session_id, p.anchor_uuid),
-                &caller,
-            )?;
-        }
+        // Both modes need a person when the operator asks (D12): rewind
+        // rebuilds a live pane, the same rule restart_session follows, and
+        // fork starts a new session — an operator's start is always
+        // confirmed (M9.7). The mode is bound into the summary, so an
+        // approved fork cannot be replayed as a rewind. For anyone else the
+        // gate is a no-op (`rewind_conversation` is not `confirm: true`).
+        self.confirm_gate(
+            "rewind_conversation",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "session_id={} mode={} anchor={:?} new_worktree={:?}",
+                p.session_id, p.mode, p.anchor_uuid, p.new_worktree
+            ),
+            &caller,
+        )?;
         let row = rewind::rewind_conversation(
             rewind::RewindArgs {
                 session_id: row.id,
@@ -546,5 +551,48 @@ impl FleetTools {
         .await
         .map_err(to_mcp_err)?;
         ok_json(&rep)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `new_worktree` reaches the fork engine: before this build it came back
+    /// `E_UNSUPPORTED` at the top of `rewind_conversation`; now the first
+    /// refusal it can meet is the engine's own (a session with no project
+    /// has nowhere to create a worktree), before any I/O.
+    #[tokio::test]
+    async fn a_new_worktree_fork_is_no_longer_unsupported() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h1").unwrap();
+        let id = s
+            .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "11111111-1111-1111-1111-111111111111")
+            .unwrap();
+        let t = FleetTools::new(
+            Arc::new(Mutex::new(s)),
+            Arc::new(SshClient::new()),
+            CancellationRegistry::new(),
+            Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+            McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+        );
+        let err = t
+            .rewind_conversation(
+                Extension(Caller::master()),
+                Parameters(RewindConversationParams {
+                    session_id: id,
+                    anchor_uuid: None,
+                    mode: "fork".into(),
+                    new_worktree: Some("fork-of-sess".into()),
+                    confirm_nonce: None,
+                }),
+            )
+            .await
+            .expect_err("no project to fork into");
+        let text = format!("{err:?}");
+        assert!(!text.contains("E_UNSUPPORTED"), "{text}");
+        assert!(text.contains("no project to fork"), "{text}");
     }
 }

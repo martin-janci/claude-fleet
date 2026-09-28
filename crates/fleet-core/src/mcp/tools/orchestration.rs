@@ -1069,10 +1069,15 @@ impl FleetTools {
         })?;
         self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
         // The caller, not the `source` it passes, decides whether this is a
-        // person's decision or an agent's (D34).
-        let row =
-            crate::service::work::work_link_as(&args, &self.store, &scope, caller.work_decider())
-                .map_err(to_mcp_err)?;
+        // person's decision or an agent's (D34). A decision on one link by
+        // id also answers that link's new version (`link_version`).
+        let row = crate::service::work::work_link_decided(
+            &args,
+            &self.store,
+            &scope,
+            caller.work_decider(),
+        )
+        .map_err(to_mcp_err)?;
         ok_json(&row)
     }
 

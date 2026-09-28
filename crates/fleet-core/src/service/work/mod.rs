@@ -686,9 +686,60 @@ pub fn work_link(
 /// passed (only `agent_inferred`, a suggestion, is kept), so it never reads
 /// as a person's decision; a person's `link` keeps its `source` (default
 /// `manual`). An agent cannot overturn a person's rejection (`E_FORBIDDEN`).
-pub fn work_link_as<'a>(
-    args: &'a WorkLinkArgs,
+pub fn work_link_as(
+    args: &WorkLinkArgs,
     store: &Mutex<Store>,
+    scope: &OrgScope,
+    decider: Decider,
+) -> Result<SessionRow, IpcError> {
+    let s = lock(store)?;
+    work_link_locked(args, &s, scope, decider)
+}
+
+/// What a decision on one link by id answers: the session's row, and
+/// (additively, on the wire) that link's version after the write — read
+/// under the same lock, so a client's next compare-and-set (the Review's
+/// Undo) names it without re-reading the session's links and racing
+/// another device. `link_version` is absent for any other action, when
+/// the link is no longer one of the session's live links, and from a hub
+/// built before it (a client then re-reads).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecidedRow {
+    #[serde(flatten)]
+    pub row: SessionRow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_version: Option<i64>,
+}
+
+/// [`work_link_as`] answering a [`DecidedRow`]: `link_version` is set for
+/// `confirm` and `reject { link_id }`.
+pub fn work_link_decided(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    decider: Decider,
+) -> Result<DecidedRow, IpcError> {
+    let s = lock(store)?;
+    let row = work_link_locked(args, &s, scope, decider)?;
+    let decided = match args.action.as_str() {
+        "confirm" => args.link_id,
+        "reject" if args.key.is_none() && args.item_id.is_none() => args.link_id,
+        _ => None,
+    };
+    // The link was checked visible to the caller before the write; it must
+    // still be one of this session's live links to be named.
+    let link_version = match (decided, args.session_id) {
+        (Some(id), Some(sid)) if s.session_work_links(sid)?.iter().any(|l| l.id == id) => {
+            s.work_link_version(id)?
+        }
+        _ => None,
+    };
+    Ok(DecidedRow { row, link_version })
+}
+
+fn work_link_locked<'a>(
+    args: &'a WorkLinkArgs,
+    s: &Store,
     scope: &OrgScope,
     decider: Decider,
 ) -> Result<SessionRow, IpcError> {
@@ -720,7 +771,6 @@ pub fn work_link_as<'a>(
             format!("{} needs session_id", args.action),
         )
     })?;
-    let s = lock(store)?;
     // A client bound to an org never reaches another org's session (the
     // transport's session gate says so first; this keeps the service's own
     // answer the same — the unknown session's — for every entry point, the
@@ -810,7 +860,7 @@ pub fn work_link_as<'a>(
                 )
             };
             s.archive_session_links(session_id, only.as_deref())?;
-            return lifecycle_row(&s, session_id);
+            return lifecycle_row(s, session_id);
         }
         // A click, or an attach: a person's touch un-archives.
         "unarchive" => {
@@ -820,7 +870,7 @@ pub fn work_link_as<'a>(
                     format!("session {session_id} not found"),
                 ));
             }
-            return lifecycle_row(&s, session_id);
+            return lifecycle_row(s, session_id);
         }
         "snooze" => {
             let link_id = tidy_target()?;
@@ -833,12 +883,12 @@ pub fn work_link_as<'a>(
             }
             let until = crate::service::catalog::now_secs() + i64::from(days) * 86_400;
             s.snooze_tidy(session_id, Some(link_id), until)?;
-            return lifecycle_row(&s, session_id);
+            return lifecycle_row(s, session_id);
         }
         "never" => {
             let link_id = tidy_target()?;
             s.never_tidy(session_id, Some(link_id))?;
-            return lifecycle_row(&s, session_id);
+            return lifecycle_row(s, session_id);
         }
         _ => {}
     }
@@ -875,7 +925,7 @@ pub fn work_link_as<'a>(
                 }
             }
             s.set_primary_work_link(session_id, link_id, Some(actual.unwrap_or(0)))?;
-            return lifecycle_row(&s, session_id);
+            return lifecycle_row(s, session_id);
         }
         // D32: a person keeps a conflict (a forced cross-org link, a link
         // to an unavailable ticket); the review inbox stops listing it.
@@ -885,7 +935,7 @@ pub fn work_link_as<'a>(
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "ack needs link_id"))?;
             checked_link(link_id)?;
             s.ack_work_link(session_id, link_id)?;
-            return lifecycle_row(&s, session_id);
+            return lifecycle_row(s, session_id);
         }
         // Undo: a person's confirm / reject goes back to a suggestion. A
         // reconsidered primary frees the primary: the resolver below picks
@@ -917,8 +967,8 @@ pub fn work_link_as<'a>(
             if source == AGENT_INFERRED {
                 // The classification nudge's answer (work graph M4.6): a
                 // guess, so a pre-selected suggestion (R11), never a link.
-                let (key, tracker) = inferred_target(&s, t)?;
-                detect::on_agent_inference(&s, session_id, &key, tracker)?;
+                let (key, tracker) = inferred_target(s, t)?;
+                detect::on_agent_inference(s, session_id, &key, tracker)?;
             } else {
                 s.link_session_work_as(session_id, t, source, take_primary, args.expected_version)?;
             }
@@ -930,7 +980,7 @@ pub fn work_link_as<'a>(
             if !scope.is_all() || args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
-            detect::decide(&s, session_id, link_id, false, decider)?;
+            detect::decide(s, session_id, link_id, false, decider)?;
         }
         "reject" => {
             let (t, _) = visible_target(target()?)?;
@@ -955,7 +1005,7 @@ pub fn work_link_as<'a>(
             if args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
-            detect::decide_as(&s, session_id, link_id, true, take_primary, decider)?;
+            detect::decide_as(s, session_id, link_id, true, take_primary, decider)?;
         }
         "unlink" => {
             let link_id = args
@@ -969,7 +1019,7 @@ pub fn work_link_as<'a>(
             // the same link again (R9u). An agent's unlink stays a plain
             // unlink: it never writes a hold a person did not ask for.
             let holds = match decider {
-                Decider::Person => detect::unlink_holds(&s, session_id, link_id)?,
+                Decider::Person => detect::unlink_holds(s, session_id, link_id)?,
                 Decider::Agent => Vec::new(),
             };
             // D34: removing a person's rejection ("Not this") would let the
@@ -1013,7 +1063,7 @@ pub fn work_link_as<'a>(
         }
     }
     // A decision can leave a sole candidate or free a primary (M4.3).
-    if let Err(e) = detect::resolve_session(&s, session_id) {
+    if let Err(e) = detect::resolve_session(s, session_id) {
         tracing::debug!(error = %e.message, "[work] resolve after a decision failed");
     }
     s.get_session_by_id(session_id)?
@@ -1319,6 +1369,71 @@ mod tests {
         // A person may still correct their own rejection.
         work_link(&by_id(b, "confirm"), &st, &OrgScope::All).unwrap();
         assert_eq!(get(b).state, "confirmed");
+    }
+
+    /// A decision on one link by id answers that link's version after the
+    /// write (the Review's Undo names it); any other action answers none,
+    /// and the wire row stays a plain session row plus the one key.
+    #[test]
+    fn a_decision_by_link_id_answers_the_links_new_version() {
+        let (st, sid) = store();
+        let suggestion = |key: &str| -> i64 {
+            let s = st.lock().unwrap();
+            let l = s
+                .link_session_work(sid, WorkTarget::Key(key), "manual")
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE work_links SET state = 'suggested', source = 'prompt', \
+                       rule = 'R6', is_primary = 0, decided_at = NULL WHERE id = ?1",
+                    [l.id],
+                )
+                .unwrap();
+            l.id
+        };
+        let by_id = |id: i64, action: &str| WorkLinkArgs {
+            link_id: Some(id),
+            ..link(sid, action)
+        };
+        let version = |id: i64| st.lock().unwrap().work_link_version(id).unwrap();
+        for action in ["confirm", "reject"] {
+            let id = suggestion(if action == "confirm" {
+                "ABC-1"
+            } else {
+                "DEF-2"
+            });
+            let before = version(id).unwrap();
+            let d = work_link_decided(&by_id(id, action), &st, &OrgScope::All, Decider::Person)
+                .unwrap();
+            let after = version(id).unwrap();
+            assert!(after > before, "{action}: the write moved it");
+            assert_eq!(d.link_version, Some(after), "{action}");
+            assert_eq!(d.row.id, sid);
+            let wire = serde_json::to_value(&d).unwrap();
+            assert_eq!(wire["link_version"], after);
+            assert_eq!(wire["tmux_name"], "dev", "flattened: still a session row");
+            // A client reading it as a plain row (an older desktop) still can.
+            let plain: SessionRow = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(plain, d.row);
+            let back: DecidedRow = serde_json::from_value(wire).unwrap();
+            assert_eq!(back, d);
+        }
+        // Not a decision on one link by id: nothing to name.
+        let d = work_link_decided(
+            &WorkLinkArgs {
+                key: Some("GHI-3".into()),
+                ..link(sid, "link")
+            },
+            &st,
+            &OrgScope::All,
+            Decider::Person,
+        )
+        .unwrap();
+        assert_eq!(d.link_version, None);
+        assert!(serde_json::to_value(&d)
+            .unwrap()
+            .get("link_version")
+            .is_none());
     }
 
     /// Work graph M4.6: an agent's answer to the classification nudge is a

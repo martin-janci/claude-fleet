@@ -17,7 +17,7 @@ Parameters: `alias`, `ssh_alias`, `transport`
 
 Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local host only) or create a new repository (create_remote is refused once with a confirm token to send back). git and gh run on the host with its own credentials. Returns the project row.
 
-Parameters: `host_alias`, `source`
+Parameters: `confirm_nonce`, `host_alias`, `source`
 
 ### `agent_status`
 

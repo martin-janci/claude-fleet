@@ -39,15 +39,16 @@ use super::{bootstrap_acc_diff, f3, percentile, Calibration, Criterion, Paired, 
 use crate::ipc_error::lock;
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
-use crate::service::decide::{decide, gate_at, DecideCtx, DecideRequest, Fallback, Feature};
+use crate::service::decide::{decide, gate_bench_at, DecideCtx, DecideRequest, Fallback, Feature};
 use crate::service::trackers::asana::{infer_section, section_key};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The question's version, recorded on every Jev run of the benchmark.
 pub const QUESTION_VERSION: &str = "status_map.bench.v1";
-/// `decision_runs.subject_kind` of a benchmark call.
-pub const SUBJECT_KIND: &str = "bench";
+/// `decision_runs.subject_kind` of a benchmark call: gated without the
+/// feature's mode, and kept out of the live breaker, budget and stats.
+pub const SUBJECT_KIND: &str = crate::store::DECISION_BENCH_SUBJECT;
 /// The built-in synthetic set (D43).
 pub const FIXTURE: &str = include_str!("../../testdata/decide/status_map_sections.jsonl");
 /// Where it lives in the repository.
@@ -132,8 +133,88 @@ pub struct SectionLabel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// The org whose consent a Jev call needs (none: `decide.jev.unassigned`).
+    /// Checked against the database before anything is sent
+    /// ([`resolve_label_orgs`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// The Asana tracker the section is on: its org, read from the
+    /// database, is the case's org (a different `org_id` is refused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<i64>,
+}
+
+/// Every label's org, from the DATABASE, before any case is sent (Jev's
+/// consent gate and the haiku org fence trust it): a label naming its
+/// `tracker_id` takes that tracker's org, and an `org_id` that differs is
+/// refused; a label with only an `org_id` must name an org the database
+/// knows, and when the section is on Asana trackers of the database, one
+/// of them must be of that org. A label with neither has no org
+/// (`decide.jev.unassigned`, a host with no org). An error names the row.
+pub fn resolve_label_orgs(
+    store: &crate::store::Store,
+    labels: &mut [SectionLabel],
+) -> Result<(), String> {
+    let trackers = store.list_trackers().map_err(|e| e.message)?;
+    let orgs: std::collections::HashSet<i64> = store
+        .list_orgs()
+        .map_err(|e| e.message)?
+        .into_iter()
+        .map(|o| o.id)
+        .collect();
+    let org_name = |o: Option<i64>| o.map_or_else(|| "none".to_string(), |o| o.to_string());
+    for (i, l) in labels.iter_mut().enumerate() {
+        let row = i + 1;
+        if let Some(t) = l.tracker_id {
+            let tr = trackers
+                .iter()
+                .find(|r| r.id == t)
+                .ok_or_else(|| format!("row {row}: no tracker {t} in the database"))?;
+            if l.org_id.is_some() && l.org_id != tr.org_id {
+                return Err(format!(
+                    "row {row}: org_id {} but tracker {t} is in org {}",
+                    org_name(l.org_id),
+                    org_name(tr.org_id)
+                ));
+            }
+            l.org_id = tr.org_id;
+            continue;
+        }
+        let Some(org) = l.org_id else {
+            continue;
+        };
+        if !orgs.contains(&org) {
+            return Err(format!("row {row}: no org {org} in the database"));
+        }
+        let Some(key) = section_key(&l.section) else {
+            continue;
+        };
+        let on: Vec<&crate::store::TrackerRow> = trackers
+            .iter()
+            .filter(|r| r.provider == sm::PROVIDER && lists_section(r, &key))
+            .collect();
+        if !on.is_empty() && !on.iter().any(|r| r.org_id == Some(org)) {
+            return Err(format!(
+                "row {row}: org_id {org}, but the trackers that list this section are in                  org(s) {}; give the row its tracker_id",
+                on.iter()
+                    .map(|r| org_name(r.org_id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// PURE: `row`'s stored config or its person's map names section `key`.
+fn lists_section(row: &crate::store::TrackerRow, key: &str) -> bool {
+    row.config.unmapped_sections.iter().any(|n| n == key)
+        || row.config.section_map.contains_key(key)
+        || row.settings.section_map.contains_key(key)
+        || row
+            .config
+            .project_sections
+            .iter()
+            .any(|(_, names)| names.iter().any(|n| n == key))
 }
 
 /// PURE: the rows of a label file (JSON lines; blank lines and lines
@@ -291,7 +372,7 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[SectionCase], max_calls: usize) -
     let mut calls = 0usize;
     for c in cases {
         let gated = match lock(&ctx.store) {
-            Ok(s) => gate_at(&s, Feature::StatusMap, c.org_id, ctx.now()),
+            Ok(s) => gate_bench_at(&s, Feature::StatusMap, c.org_id, ctx.now()),
             Err(_) => Err(Fallback::FlagOff),
         };
         if let Err(f) = gated {

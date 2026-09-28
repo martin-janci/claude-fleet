@@ -9,14 +9,16 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import {
-    conflictOf,
+    conflictNotice,
     placementNote,
     placeWork,
     taskLabel,
     workTreeMeta,
+    type ConflictNotice,
     type WorkRuleDraft,
     type WorkTask,
   } from './work_view';
+  import WorkConflictNotice from './WorkConflictNotice.svelte';
 
   let {
     task,
@@ -48,7 +50,7 @@
   let label = $state(untrack(() => (task.group?.source === 'manual' ? task.group.label : '')));
   let note = $state(untrack(() => currentNote ?? ''));
   let busy = $state(false);
-  let failure = $state<string | null>(null);
+  let failure = $state<string | ConflictNotice | null>(null);
   let placed = $state<string | null>(null);
 
   const labels = $derived(
@@ -65,8 +67,12 @@
     const r = await placeWork(task.task_id, group, task.placement_version ?? 0, note);
     busy = false;
     if (!r.ok) {
-      if (conflictOf(r.error)) {
-        failure = 'This task was placed elsewhere in the meantime; reloaded — check where it is now and try again.';
+      const c = conflictNotice(r.error, 'Its placement');
+      if (c) {
+        failure = {
+          ...c,
+          text: 'This task was placed elsewhere in the meantime; reloaded — check where it is now and try again.',
+        };
         onreload?.();
       } else {
         failure = r.error.message;
@@ -157,7 +163,11 @@
         <span>Note (optional)</span>
         <input type="text" bind:value={note} maxlength="200" data-testid="work-place-note-input" />
       </label>
-      {#if failure}<p class="err" role="alert" data-testid="work-place-error">{failure}</p>{/if}
+      {#if failure}
+        <p class="err" role="alert" data-testid="work-place-error">
+          {#if typeof failure === 'string'}{failure}{:else}<WorkConflictNotice notice={failure} onreload={onreload} />{/if}
+        </p>
+      {/if}
       {#if blocked}<p class="note">{blocked}</p>{/if}
       <div class="actions">
         {#if isManual}
