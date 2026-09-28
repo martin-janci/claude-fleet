@@ -246,6 +246,52 @@ fn only_links_a_person_decided_become_cases() {
         .all(|c| c.truth.as_deref() == Some(option_id(i).as_str())));
 }
 
+/// Shaped like the six of 25 `--export-unlinked` rows on the production hub
+/// (2026-09-28) that were Claude Code's, as the store keeps them: the first
+/// 200 characters, so the block is never closed.
+fn task_notification() -> String {
+    "<task-notification>\n<task-id>afb11347d54b0e640</task-id>\n\
+     <tool-use-id>toolu_01B2ZchuQiWa4VttKoDRjQUd</tool-use-id>\n\
+     <output-file>/tmp/claude-1000/-home-dev-projects-github-com-acme-api/tasks/\
+     afb11347d54b0e640.output</output-file>\n<status>completed</status>\n\
+     <summary>Agent \"Fix the login redirect\" completed</summary>\n</task-notification>"
+        .chars()
+        .take(200)
+        .collect()
+}
+
+#[test]
+fn what_claude_code_submitted_itself_is_left_out_of_both_datasets() {
+    let mut w = world();
+    let i = w.item("PAY-1", "Login redirect loops", *NOW - 10 * DAY);
+    w.case("fix the login thing please", i, "manual", *NOW - 5 * DAY);
+    w.case(&task_notification(), i, "manual", *NOW - 5 * DAY);
+    w.case(
+        "<system-reminder>Plan mode is on.</system-reminder>\nthe login keeps looping on mobile",
+        i,
+        "manual",
+        *NOW - 4 * DAY,
+    );
+    let got = load(&w.s, &Words, &opts(Split::All, vec![]), None).unwrap();
+    assert_eq!(got.sizes.a_links_read.0, 3);
+    assert_eq!(got.sizes.a_fleet_typed.0, 1);
+    let states: Vec<&str> = a_truths(&got).iter().map(|c| c.state.as_str()).collect();
+    assert_eq!(states.len(), 2);
+    assert!(
+        states.iter().all(|s| !s.contains('<')),
+        "the harness head is not part of a state: {states:?}"
+    );
+
+    for n in 0..3 {
+        w.unlinked(&format!("look at the search page number {n}"), *NOW - DAY);
+    }
+    let harness = w.unlinked(&task_notification(), *NOW - DAY);
+    let o = opts(Split::All, vec![]);
+    let rows = export_unlinked(&w.s, &o, 10).unwrap();
+    assert!(rows.iter().all(|r| r.session_id != harness));
+    assert!(rows.iter().all(|r| !r.prompt.starts_with('<')), "{rows:?}");
+}
+
 #[test]
 fn the_org_filter_keeps_one_org() {
     let mut w = world();

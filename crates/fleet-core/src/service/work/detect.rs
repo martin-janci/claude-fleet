@@ -430,13 +430,21 @@ fn state_candidates(
     (branch, Some(pr), events)
 }
 
-/// Why a prompt is not evidence (the loop guard, C14), or `None`.
+/// Why a prompt is not evidence (the loop guard, C14), or `None`. The one
+/// test of "a person typed this": the census and the J1 benchmark
+/// (`nl::census::FleetPrompts`) and the hook's touch go through it too.
 pub fn loop_guard(
     prompt: &str,
     last_prompt: Option<&str>,
     handovers: &[String],
 ) -> Option<&'static str> {
-    let p = prompt.trim();
+    // Claude Code's own blocks at the head are nobody's words; what follows
+    // them is checked as the prompt.
+    let p = match crate::service::prompt_origin::human_part(prompt) {
+        Some(p) => p,
+        None if prompt.trim().is_empty() => return None,
+        None => return Some("harness"),
+    };
     if p.contains("[claude-fleet") {
         return Some("fleet_marked");
     }
@@ -774,13 +782,15 @@ pub fn resolve_session(s: &Store, session_id: i64) -> Result<bool, IpcError> {
 
 /// The UserPromptSubmit trigger: recognise references in the FULL prompt
 /// (only matches are kept), apply the loop and dump guards, and resolve.
-/// `first_prompt`: this is the conversation's first prompt.
+/// `first_prompt`: this is the conversation's first prompt. Harness blocks
+/// at the prompt's head are not the person's and are not read.
 pub fn on_prompt(
     s: &Store,
     session_id: i64,
     prompt: &str,
     first_prompt: bool,
 ) -> Result<bool, IpcError> {
+    let prompt = crate::service::prompt_origin::human_part(prompt).unwrap_or(prompt);
     let Some(st) = s.detection_state(session_id)? else {
         return Ok(false);
     };
