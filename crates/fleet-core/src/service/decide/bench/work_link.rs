@@ -779,7 +779,7 @@ pub fn load(
         let slug = (row.source == "started")
             .then(|| branch_slug(truth.key.as_deref().unwrap_or_default(), &truth.title));
         let state = redact_prompt(
-            prompt,
+            &prompt,
             &ctx,
             &Redact {
                 branch: row.branch.as_deref(),

@@ -1414,14 +1414,22 @@ impl Store {
 
     /// The tick's stale-`working` rule (lifecycle F2): a live tmux row that
     /// says `working` but has had no hook, no turn, no transcript growth
-    /// (`context_at`, `usage_updated_at`) and no pane output
+    /// (`context_at`, `usage_updated_at`), no spinner on its pane
+    /// (`pane_working_at`, stamped by every reconcile pass that captured the
+    /// pane showing a live turn) and no tmux session activity
     /// (`last_activity_at`) for `stale_secs` is demoted to `idle` and stamped
     /// `stale_working_at = now`, which is what the attention model reads,
     /// and `stale_demoted_at = now`, which arms the reconcile's
-    /// `stale_working_veto`. Pane-less and `shell` rows are never judged (no
-    /// hooks or turns to miss); a demoted row is not judged twice — even
-    /// once an attach or the TTL has lifted its attention stamp, since the
-    /// demotion itself still stands; `stale_secs <= 0` is off.
+    /// `stale_working_veto`. `last_activity_at` is tmux's
+    /// `#{session_activity}`, which moves on a client's input and an attach,
+    /// NOT on pane output (a detached pane can print for hours without
+    /// moving it) — the spinner stamp is the pane evidence. A demoted row's
+    /// `idle` is a guess: `store::trusted_status` makes turn-over checks ask
+    /// the pane before believing it while `stale_demoted_at` is set.
+    /// Pane-less and `shell` rows are never judged (no hooks or turns to
+    /// miss); a demoted row is not judged twice — even once an attach or the
+    /// TTL has lifted its attention stamp, since the demotion itself still
+    /// stands; `stale_secs <= 0` is off.
     /// Returns the demoted rows; each gets `session_updated`, a
     /// `status_change idle` and a `stale_working` timeline entry.
     pub fn age_out_stale_working(
@@ -1442,13 +1450,16 @@ impl Store {
                    AND kind NOT IN ('bg','external','shell') AND stale_demoted_at IS NULL \
                    AND COALESCE(last_hook_at, 0) < ?2 AND COALESCE(last_turn_at, 0) < ?2 \
                    AND COALESCE(context_at, 0) < ?2 AND COALESCE(usage_updated_at, 0) < ?2 \
+                   AND COALESCE(pane_working_at, 0) < ?2 \
                    AND last_activity_at < ?2 AND created_at < ?2 \
                  RETURNING id",
             )?
             .query_map(rusqlite::params![now, cutoff], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut out = Vec::with_capacity(ids.len());
-        let detail = format!("no hook, turn, transcript growth or pane output for {stale_secs}s");
+        let detail = format!(
+            "no hook, turn, transcript growth, pane spinner or tmux session activity for {stale_secs}s"
+        );
         for id in ids {
             for (kind, d) in [
                 ("status_change", "idle"),
@@ -1532,6 +1543,23 @@ impl Store {
                 "SELECT stale_demoted_at IS NOT NULL FROM sessions \
                  WHERE host_alias = ?1 AND tmux_name = ?2",
                 rusqlite::params![host_alias, tmux_name],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// [`Store::stale_demoted`] by row id: whether the tick's stale-working
+    /// rule demoted this row and nothing has lifted the demotion since. What
+    /// `store::trusted_status` takes as `demoted`. `false` for a row that
+    /// does not exist.
+    pub fn stale_demoted_by_id(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT stale_demoted_at IS NOT NULL FROM sessions WHERE id = ?1",
+                [id],
                 |r| r.get::<_, bool>(0),
             )
             .optional()?
@@ -3666,7 +3694,7 @@ mod tests {
                 .claude_status
                 .as_deref(),
             Some("working"),
-            "pane output 500 s ago is not stale"
+            "tmux session activity 500 s ago is not stale"
         );
         assert_eq!(
             s.get_session_by_id(sh).unwrap().unwrap().stale_working_at,

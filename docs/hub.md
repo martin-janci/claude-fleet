@@ -303,15 +303,23 @@ version's arm64 leg failed and the tag carries an amd64-only manifest (see
 
 `deploy/hub/upgrade.sh <version>` does the sequence above for a deployment
 whose tag lives in `.env` (the `deploy/hub/behind-proxy` compose): it pulls
-first (a tag ghcr does not have stops it with the hub untouched), takes a
-consistent online backup (`backup.sh`, kept as `backups/pre-<version>-*.db`,
-the newest three *of that version*), `docker compose stop`s the hub so the
-30 s grace applies, moves `FLEET_HUB_TAG`, starts it, waits for the image's
-own healthcheck, and checks `fleet-hub --version`. With a readonly client
-token in `readonly.token` beside the compose file (`fleet-hub pair --mode
-readonly upgrade-check`) it also asks `fleet_health` over the public URL —
-never the master token, and passed to `curl` on stdin, not its command line.
-On any failure after the stop it prints the rollback.
+first (a tag ghcr does not have stops it with the hub untouched), notes the
+image the hub runs now (its id and digest), `docker compose stop`s the hub so
+the 30 s grace applies, and only then takes the backup (`backup.sh`, kept as
+`backups/pre-<version>-*.db`, the newest three *of that version*) — a copy
+of the stopped hub, so no write between the backup and the upgrade is lost
+by a rollback. It then moves `FLEET_HUB_TAG`, starts the hub, waits for the
+image's own healthcheck, and checks `fleet-hub --version`. With a readonly
+client token in `readonly.token` beside the compose file (`fleet-hub pair
+--mode readonly upgrade-check`) it also asks `fleet_health` over the public
+URL — never the master token, and passed to `curl` on stdin, not its command
+line. On any failure after the stop it prints the rollback, naming the image
+that ran before: a tag can be re-pushed, so if `<old tag>` no longer points
+at it, the printed `docker tag <image id> <repo>:<old tag>` puts it back
+before the `up -d`. If the backup itself fails, the script starts the old
+container again and exits 1 without touching the pin — it never upgrades
+without a backup. `KEEP` and `HEALTH_TRIES` (seconds to wait for the
+healthcheck, default 60) must be numbers; anything else exits 2 up front.
 
 The image pulled is the compose file's own `image:` line at the new tag, and
 every `docker compose` call reads `FLEET_HUB_ENV_FILE` (default `.env`
@@ -319,9 +327,9 @@ beside the compose file) through `--env-file`. The tag must match
 `[0-9A-Za-z._-]+`. On a fresh copy of `.env.example` (`FLEET_HUB_TAG=`
 empty) there is nothing to stop and no `state.db` to back up: the script
 says so and skips those steps, so the same command is also the first
-install. With a tag set, a missing `state.db` stops the upgrade before the
-hub is touched (point `FLEET_HUB_DATA` at the right directory) — it never
-migrates without a backup. An upgrade never prunes an older
+install. With a tag set, a missing `state.db` (or no `sqlite3`) stops the
+upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
+directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
 **Order across the three binaries.** Today (contract 4 on both sides,
@@ -353,11 +361,15 @@ layout below); point it at the compose directory's `data/` anywhere else.
 It runs `.backup`, then `PRAGMA integrity_check` on the copy (a failed check
 removes it and exits 1; a run killed mid-copy removes its `.part`), then
 prunes to the newest `KEEP` files of its own `PREFIX` — other prefixes are
-never touched. On a
+never touched (`PREFIX=pre-1.0.0` prunes `pre-1.0.0-<stamp>.db`, never
+`pre-1.0.0-rc1-*.db`). A backup holds everything `state.db` does, the master
+token included, so every copy is written `0600` into a `0700` directory
+(an existing looser one is tightened first), whoever runs it; as root it
+also `chown`s the directory to `FLEET_HUB_OWNER` (default `1000`). On a
 Synology: Control Panel → Task Scheduler → user `root`, daily 03:30,
 `bash /volume1/docker/fleet-hub/backup.sh`; add `backups/` to Hyper Backup
 or any off-box target. `upgrade.sh` calls the same script with
-`PREFIX=pre-<version> KEEP=3` before it stops the hub, so each version
+`PREFIX=pre-<version> KEEP=3` right after it stops the hub, so each version
 keeps its own three and older versions' `pre-*` files stay until you delete
 them.
 
@@ -956,7 +968,11 @@ What a client may do:
   itself is fleet state in the hub's database, not a device preference, so a
   chip written on the laptop is on the phone and the other way round — its
   order and each chip's `auto_send` (a tap sends at once instead of only
-  filling the box) included.
+  filling the box) included. Only a person's token replaces it: a per-host
+  token and the operator may read the list but get `E_FORBIDDEN` on `set`,
+  since an auto-send chip is a prompt one tap away. A `set` may name the list
+  it last read as `expected`; if another device saved in between, it answers
+  `E_CONFLICT` instead of overwriting that edit.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are

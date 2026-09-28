@@ -311,11 +311,12 @@ pub(crate) const WORKTREE_BASE_SNIPPET: &str = "if [ -d .worktrees ]; then base=
      else base=.worktrees\n\
      fi\n";
 
-/// The name rule for a NEW worktree (and so its branch): a valid git ref,
-/// never `main` / `master`. `new_session { new_worktree }` and a fork into
-/// a new worktree both apply it.
+/// The name rule for a NEW worktree (and so its branch): a name git accepts
+/// for a branch ([`crate::validate::branch_name`]), never `main` /
+/// `master`. `new_session { new_worktree }` and a fork into a new worktree
+/// both apply it.
 pub(crate) fn validate_new_worktree_name(name: &str) -> Result<(), IpcError> {
-    crate::validate::git_ref(name)?;
+    crate::validate::branch_name(name)?;
     if name == "main" || name == "master" {
         return Err(IpcError::new(
             codes::E_INVALID,

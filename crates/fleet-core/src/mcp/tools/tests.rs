@@ -1206,6 +1206,35 @@ fn docs_track_background_runs_with_session_transcript() {
     );
 }
 
+/// Every `needs_attention.reason` a row can carry is named in the guide's
+/// status vocabulary, next to the `claude_status` values.
+#[test]
+fn the_control_api_guide_names_every_attention_reason_and_status() {
+    use crate::service::attention::Reason;
+    for r in [
+        Reason::Waiting,
+        Reason::Stuck,
+        Reason::StopFailed,
+        Reason::Failed,
+        Reason::ContextFull,
+        Reason::StaleWorking,
+        Reason::CiFailing,
+        Reason::Lifecycle,
+    ] {
+        assert!(
+            CONTROL_API_GUIDE.contains(&format!("`{}`", r.as_str())),
+            "docs/control-api.md does not name the attention reason {}",
+            r.as_str()
+        );
+    }
+    for k in ClaudeStatus::ALL {
+        assert!(CONTROL_API_GUIDE.contains(k.as_str()), "{k}");
+    }
+    for k in StuckKind::ALL {
+        assert!(CONTROL_API_GUIDE.contains(k.as_str()), "{k}");
+    }
+}
+
 // ---- handler-level gates (review of #50) ----
 
 fn test_tools(store: Store) -> FleetTools {
@@ -1871,17 +1900,44 @@ async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = t.store.lock().unwrap();
     s.record_stop_hook("uuid-w").unwrap();
     let row = s.get_session_by_id(id).unwrap().unwrap();
-    assert!(run_prompt_ready(&row).is_ok());
+    assert!(run_prompt_ready(&row, false, None).is_ok());
     // A turn that ended in an API error has ended: re-prompt it.
     let failed = crate::store::SessionRow {
         claude_status: Some("failed".into()),
-        ..row
+        ..row.clone()
     };
-    assert!(run_prompt_ready(&failed).is_ok());
+    assert!(run_prompt_ready(&failed, false, None).is_ok());
     assert!(crate::service::tasks::session_satisfies(
         &failed,
+        false,
         crate::service::tasks::WaitCond::Idle
     ));
+    // F2 x S5: a row the tick demoted for staleness reads `idle` because
+    // nothing moved — exactly what one long tool call looks like. Its stored
+    // status alone must not let run_prompt through (the reply it would hand
+    // back is the PREVIOUS turn's); only a pane that shows it quiet does.
+    // Keyed on the demotion (`stale_demoted_at`, the `demoted` flag): an
+    // attach or the TTL clears the attention stamp but not the guess.
+    let stamped = crate::store::SessionRow {
+        stale_working_at: Some(5),
+        ..row.clone()
+    };
+    // Stamp and memory, memory alone (acknowledged), stamp alone (a failed
+    // flag read errs towards asking).
+    for (r, demoted) in [(&stamped, true), (&row, true), (&stamped, false)] {
+        let e = run_prompt_ready(r, demoted, None).unwrap_err();
+        assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+        assert!(e.message.contains("could not confirm"), "{}", e.message);
+        let e = run_prompt_ready(r, demoted, Some("working")).unwrap_err();
+        assert!(e.message.contains("working"), "{}", e.message);
+        assert!(run_prompt_ready(r, demoted, Some("blocked")).is_err());
+        assert!(run_prompt_ready(r, demoted, Some("idle")).is_ok());
+        assert!(!crate::service::tasks::session_satisfies(
+            r,
+            demoted,
+            crate::service::tasks::WaitCond::Idle
+        ));
+    }
 }
 
 #[tokio::test]
@@ -3338,10 +3394,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 65,862 on 2026-09-28
-    /// (update S4a's `update_status` / `update_admin` merged over plan B's
-    /// host identity & health).
-    const BUDGET_BYTES: usize = 65_962;
+    /// comment conflicted on every merge. Measured at 66,115 on 2026-09-28
+    /// (the second gap review's `quick_replies` `expected` and the `work`
+    /// tree's `archived` over update S4a and plan B's host identity).
+    const BUDGET_BYTES: usize = 66_215;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8417,4 +8473,132 @@ fn add_projects_audit_line_never_carries_a_raw_clone_url() {
         url: "https://github.com/acme/widget.git".into(),
     });
     assert_eq!(line, "kind=clone repo=acme/widget");
+}
+
+fn quick_replies_tools() -> (FleetTools, Arc<Mutex<Store>>) {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let tools = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    (tools, store)
+}
+
+fn one_chip(text: &str) -> Vec<crate::service::quick_replies::QuickReply> {
+    vec![crate::service::quick_replies::QuickReply {
+        label: "Planted".into(),
+        text: text.into(),
+        auto_send: Some(true),
+    }]
+}
+
+/// An agent token must not rewrite the person's chip row: an auto-send chip
+/// is a prompt one tap away. A per-host token and the operator may read it.
+#[tokio::test]
+async fn quick_replies_set_is_refused_to_agent_tokens_and_reads_stay_open() {
+    let (tools, store) = quick_replies_tools();
+    for caller in [
+        host_caller("mefistos", TokenMode::Full),
+        client_caller(
+            crate::service::operator::OPERATOR_CLIENT_NAME,
+            TokenMode::Full,
+        ),
+    ] {
+        let label = caller.label();
+        let err = tools
+            .quick_replies(
+                Extension(caller.clone()),
+                Parameters(QuickRepliesParams {
+                    set: Some(one_chip("rm -rf the tree")),
+                    expected: None,
+                }),
+            )
+            .await
+            .expect_err(&label);
+        assert!(
+            err.message.starts_with("E_FORBIDDEN"),
+            "{label}: {}",
+            err.message
+        );
+        let read = tools
+            .quick_replies(
+                Extension(caller),
+                Parameters(QuickRepliesParams {
+                    set: None,
+                    expected: None,
+                }),
+            )
+            .await
+            .expect("a read");
+        assert!(result_json(&read).is_array(), "{label}");
+    }
+    assert_eq!(
+        crate::service::quick_replies::list(&store).unwrap(),
+        crate::service::quick_replies::defaults(),
+        "nothing was stored"
+    );
+}
+
+#[tokio::test]
+async fn quick_replies_set_is_open_to_the_master_and_a_paired_phone_with_cas() {
+    let (tools, store) = quick_replies_tools();
+    for (caller, text) in [
+        (Caller::master(), "from the desktop"),
+        (client_caller("phone", TokenMode::Full), "from the phone"),
+    ] {
+        tools
+            .quick_replies(
+                Extension(caller),
+                Parameters(QuickRepliesParams {
+                    set: Some(one_chip(text)),
+                    expected: None,
+                }),
+            )
+            .await
+            .expect(text);
+        assert_eq!(
+            crate::service::quick_replies::list(&store).unwrap(),
+            one_chip(text)
+        );
+    }
+    // `expected` naming a list that is no longer stored is a conflict.
+    let err = tools
+        .quick_replies(
+            Extension(Caller::master()),
+            Parameters(QuickRepliesParams {
+                set: Some(one_chip("late edit")),
+                expected: Some(one_chip("from the desktop")),
+            }),
+        )
+        .await
+        .expect_err("stale");
+    assert!(err.message.starts_with("E_CONFLICT"), "{}", err.message);
+}
+
+/// An MCP caller's `call_id` is never bound: the field is the desktop
+/// dialog's Cancel handle (schema-skipped, but serde still reads it), and
+/// binding it would replace a desktop call's token of the same id and then
+/// release that slot, so the dialog's Cancel would find nothing to cancel.
+#[cfg(unix)]
+#[tokio::test]
+async fn add_project_never_binds_an_mcp_callers_call_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    // A desktop Add-project dialog's call in flight under id 7.
+    let desktop = tokio_util::sync::CancellationToken::new();
+    t.reg.bind(7, desktop.clone());
+    let mut params = add_params("hostb", clone_src());
+    params.args.call_id = Some(7);
+    t.add_project(Extension(Caller::master()), Parameters(params))
+        .await
+        .expect("the clone succeeds on the fake host");
+    t.reg.cancel(7);
+    assert!(
+        desktop.is_cancelled(),
+        "the desktop's slot survives the MCP call and its Cancel still works"
+    );
 }

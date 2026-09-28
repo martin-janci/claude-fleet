@@ -111,6 +111,10 @@
 }
 
 /* Conversation composer presets */
+/* A handle for focus lookups only: the rows stay items of .hook-section. */
+.settings-dialog .preset-rows {
+  display: contents;
+}
 .settings-dialog .preset-row {
   display: flex;
   gap: 0.4rem;

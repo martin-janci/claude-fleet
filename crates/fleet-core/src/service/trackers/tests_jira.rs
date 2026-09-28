@@ -799,7 +799,8 @@ async fn describe_reads_the_single_issue_endpoint_uncapped() {
         .await
         .unwrap()
         .expect("a describe answer");
-    assert_eq!(out.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+    assert_eq!(out.text.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+    assert_eq!(out.chars, (DESCRIPTION_MAX_CHARS + 500) as i64);
     let sent = f.requests();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].method, Method::Get);
@@ -820,6 +821,29 @@ async fn describe_reads_the_single_issue_endpoint_uncapped() {
         .unwrap()
         .is_none());
     assert!(f.requests().is_empty());
+}
+
+/// Past `DESCRIBE_MAX_CHARS` the text is cut there, and the true length is
+/// reported with it — `describe` turns that into "shown N of M".
+#[tokio::test]
+async fn describe_reports_the_true_length_past_its_own_cap() {
+    let cap = crate::service::trackers::DESCRIBE_MAX_CHARS;
+    let f = FakeTransport::new();
+    let body = json!({ "fields": { "description": {"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text": "x".repeat(cap + 99)}]}
+    ]} } });
+    f.once(
+        Method::Get,
+        "/issue/ABC-101?fields=description",
+        Ok(Response::json(200, &body)),
+    );
+    let out = jira(&f)
+        .describe(&ItemRef::Key("ABC-101".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(out.text.chars().count(), cap);
+    assert!(out.chars >= (cap + 99) as i64, "{}", out.chars);
 }
 
 // --- the provider conformance suite (M6.0) -----------------------------------
@@ -872,6 +896,7 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
             ],
             bare_repo: "",
             secret: Some("ATATT3xFfGF0-test-token-not-real-0000"),
+            describe: true,
         }
     }
 
@@ -950,10 +975,8 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
         }
     }
 
-    async fn provider_for_describe(&self) -> Box<dyn TrackerProvider> {
-        let f = FakeTransport::new();
+    fn script_describe(&self, f: &FakeTransport) {
         f.once(Method::Get, "/issue/ABC-101", ok("issue_description.json"));
-        self.provider(&f)
     }
 
     fn describe_ref(&self) -> &'static str {

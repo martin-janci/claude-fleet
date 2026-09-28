@@ -25,8 +25,8 @@
 
 use super::{
     check_http, description_and_len, map_transport, retry_after, CallKind, Caps, Fetched,
-    Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider,
-    ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
+    FullDescription, Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo,
+    TrackerProvider, ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerSettings};
@@ -576,7 +576,7 @@ impl TrackerProvider for GitHub {
         out
     }
 
-    async fn describe(&self, r: &ItemRef) -> Result<Option<String>, TrackerError> {
+    async fn describe(&self, r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         // The same node fetched by `fetch` — by node id, or by repository and
         // number — but its `body` read straight off the GraphQL answer,
         // never through `snapshot` (which cuts it at DESCRIPTION_MAX_CHARS).
@@ -607,7 +607,7 @@ impl TrackerProvider for GitHub {
             .as_str()
             .map(str::trim)
             .filter(|b| !b.is_empty())
-            .map(|b| b.chars().take(super::DESCRIBE_MAX_CHARS).collect()))
+            .map(FullDescription::capped))
     }
 }
 

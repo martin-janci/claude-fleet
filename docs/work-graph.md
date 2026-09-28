@@ -113,13 +113,21 @@ filters (hosts, recency, org scope) do not apply here and step aside.
 Archived tasks (done, or every session archived, with nothing running)
 are hidden by default; the end of the tree says how many, with *Show
 archived*, and the panel has an *Archived tasks* switch. *Status: Done*
-shows done tasks regardless. ⌘⇧O cycles the Work view's organisation.
+shows done tasks regardless, and *Sessions: Past only* shows past work
+(which is archived work), as the Sessions list's *Past only* does. A task
+is archived only when it is archived for everyone: a session on another
+host or in another org that you cannot see still keeps it in the tree.
+⌘⇧O cycles the Work view's organisation.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its
 state and *why* it is linked (the branch, the ticket URL in a prompt, a
 person), the last known outcome of its newest past session, and **Open**,
-**Continue** (resume the last conversation) and **Start new**.
+**Continue** (resume the last conversation) and **Start new**. The ticket's
+description shows its first 600 characters; when the ticket holds more, a
+line under it says so — *Shown 600 of 6812 characters — open the ticket* —
+and *open the ticket* opens it in the tracker. A description that fits has
+no such line.
 
 **Where things come from.** Every value that fleet did not get from a person
 says so:
@@ -190,18 +198,23 @@ including tasks with no session at all — as reads of the `work` tool
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
   `suggested`), `review`, `query`, `group`, `archived`. A task is
   *archived* when it has no active session and is done, or every one of
-  its links (at least one of them past) is archived; the tree hides
-  archived tasks unless `archived: true` (or `status: "done"`) asks for
-  them, and `archived_hidden` says how many passed every other filter but
-  were hidden that way (over the whole result, not the page). Each task
-  carries `archived`; `task` / `session_tasks` / `review` answer archived
+  its links (at least one of them past) is archived, judged over every
+  link of the task, not only the ones the caller sees. The tree hides
+  archived tasks only when asked, with `archived: false` (the desktop
+  always sends it); absent shows them, so a client from before the archive
+  keeps seeing every task. `status: "done"` and `has: "past_only"` show
+  them anyway. `archived_hidden` says how many passed every other filter
+  but were hidden that way (over the whole result, not the page). Each
+  task carries `archived`; `task` / `session_tasks` / `review` answer archived
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
   meanwhile may be skipped until the next full read.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
-  with every session and why it is linked, its tracker description, the
-  last known outcome, its placement and the rules that match it.
+  with every session and why it is linked, its tracker description (at
+  most 600 characters, with `description_chars`, the full length fleet
+  knows, and `description_truncated` when it shows less), the last known
+  outcome, its placement and the rules that match it.
 - `work { action: session_tasks, session_id }`: every link of one session
   (active, suggested, rejected, ended), each with its task.
 - `work { action: review, cursor?, limit? }`: suggestions and conflicts
@@ -548,7 +561,9 @@ there really is more.
 Only Jira (Cloud and Data Center) and GitHub serve a full description on
 demand; for Asana and Linear the line says *open the ticket* instead, and the
 ticket's URL is in every answer that carries its description. Nothing is
-written to the tracker either way — this is a read.
+written to the tracker either way — this is a read. `describe` itself stops
+at 32,000 characters; a longer description ends with the same kind of line,
+saying *open the ticket* for the rest.
 
 What Claude fetches is held briefly (`work.describe_cache_secs`, 300 s by
 default) so a second question about the same ticket costs no second request,
@@ -755,7 +770,9 @@ it. `0` keeps a table forever.
   window is also the ceiling on how long an entry is *served*: a longer
   `work.describe_cache_secs` is clamped to it. Disconnecting a tracker
   deletes its items' cached descriptions at once, and so does a sync that
-  changes a description.
+  changes a description — its first 2,000 characters, its length, or the
+  ticket's "updated" time at the tracker, so an edit past the excerpt is not
+  served stale.
 - `work.retention.timeline_work_events_days` (180): handover, nudge, tidy and withdrawn-suggestion
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:

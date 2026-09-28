@@ -128,6 +128,7 @@ impl Harness for AsanaHarness {
             ],
             bare_repo: "",
             secret: Some(pat()),
+            describe: false,
         }
     }
 
@@ -702,4 +703,25 @@ fn connect_by_pasting_a_task_url() {
     let policy = crate::service::trackers::host_policy(&row);
     assert!(policy("app.asana.com"));
     assert!(!policy("app.asana.com.evil.com") && !policy("169.254.169.254"));
+}
+
+/// A task's notes become the excerpt: cut at `DESCRIPTION_MAX_CHARS`, with
+/// the true length beside it (what `lookup`'s "shown N of M" is made of),
+/// and an uncut one reports exactly its own length.
+#[test]
+fn notes_are_cut_to_the_excerpt_with_their_true_length() {
+    let cap = crate::service::trackers::DESCRIPTION_MAX_CHARS;
+    let f = FakeTransport::new();
+    let mut t = fixture("asana", "tasks_mine_p1.json")["data"][0].clone();
+    t["notes"] = serde_json::json!("n".repeat(cap + 321));
+    let s = asana(&f).snapshot(&t).expect("a snapshot");
+    assert_eq!(
+        s.description.as_deref().map(|d| d.chars().count()),
+        Some(cap)
+    );
+    assert_eq!(s.description_chars, Some((cap + 321) as i64));
+    t["notes"] = serde_json::json!("  short notes \n");
+    let s = asana(&f).snapshot(&t).expect("a snapshot");
+    assert_eq!(s.description.as_deref(), Some("short notes"));
+    assert_eq!(s.description_chars, Some(11));
 }
