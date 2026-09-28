@@ -399,7 +399,9 @@ pub(crate) fn attach_argv(
 /// otherwise [`SshClient::mux_opts_for_pty`] — the terminal's own
 /// ControlPath and a gentler keepalive, so a probe's master reset (a
 /// DIFFERENT ssh call, on the DIFFERENT `cm-<host>.sock`) never takes the
-/// user's attached terminal down with it.
+/// user's attached terminal down with it. Where ssh cannot multiplex
+/// (Windows) there is no ControlPath at all: the attach is its own
+/// connection.
 pub(crate) fn attach_mux_opts(ssh: &SshClient, host: &str) -> Vec<String> {
     if host == "local" {
         Vec::new()
@@ -920,12 +922,22 @@ mod tests {
 
     #[test]
     fn attach_mux_opts_gives_local_nothing_and_remote_the_pty_socket() {
-        assert!(attach_mux_opts(&SshClient::new(), "local").is_empty());
-        let opts = attach_mux_opts(&SshClient::new(), "h").join(" ");
+        let ssh = SshClient::new_with_mux(true);
+        assert!(attach_mux_opts(&ssh, "local").is_empty());
+        let opts = attach_mux_opts(&ssh, "h").join(" ");
         assert!(
             opts.contains("cm-h-tty.sock"),
             "attach must use its own ControlPath, not the probe's: {opts}"
         );
+    }
+
+    /// Windows: `ssh.exe` has no ControlMaster, so the attach is its own
+    /// connection with no control socket, and keeps the gentler keepalive.
+    #[test]
+    fn attach_without_mux_has_no_control_socket() {
+        let opts = attach_mux_opts(&SshClient::new_with_mux(false), "h").join(" ");
+        assert!(!opts.contains("Control"), "{opts}");
+        assert!(opts.contains("ServerAliveInterval=15"), "{opts}");
     }
 
     // ---- environment ----
