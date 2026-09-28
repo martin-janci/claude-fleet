@@ -958,7 +958,7 @@ pub fn ticket_brief_with(
                     .count()
                 + 2;
             let max_total = crate::service::work::handover::BRIEF_MAX_CHARS;
-            let mut budget = max_total.saturating_sub(overhead);
+            let budget = max_total.saturating_sub(overhead);
             // budget 0 no longer means silence: fence_ticket says it did not
             // fit. The notice it may append sits outside `budget`, so a cut
             // that fills the whole budget can push the total past
@@ -972,11 +972,8 @@ pub fn ticket_brief_with(
             // text is actually being truncated — so the budget would depend
             // on the notice's own length, which depends on the budget. One
             // fixpoint iteration (build once, measure the real overflow,
-            // shrink, build once more) is the correct shape here: shrinking
-            // `budget` only ever shortens `shown`, which only ever
-            // shortens-or-holds the notice's digit count, so the second
-            // build can only ever fit. Do not "simplify" this back into a
-            // circle.
+            // shrink, build once more) is the correct shape here. Do not
+            // "simplify" this back into a circle.
             let mut fenced = crate::mcp::guard::fence_ticket(
                 &d,
                 FROM,
@@ -993,7 +990,23 @@ pub fn ticket_brief_with(
             let total = out.chars().count() + 2 + fenced.chars().count();
             let over = total.saturating_sub(max_total);
             if over > 0 {
-                budget = budget.saturating_sub(over);
+                // `shown` is the number of characters actually inside the
+                // fence — `min(budget, len(text))` — not `budget` itself. A
+                // stored description is capped at `DESCRIPTION_MAX_CHARS`
+                // (Task 1), so it is usually *shorter* than `budget`
+                // (content-bound, not budget-bound): shrinking `budget` by
+                // `over` then only starts reducing `shown` once the shrunk
+                // budget drops below the text's length, wasting up to
+                // `budget - shown` of the shrink and leaving the brief still
+                // over by that much (this is exactly the failure a fix
+                // review caught: a band of `extra` lengths that stayed
+                // 1–76 chars over). `defuse` is a same-length substitution,
+                // so it never changes the character count: `shown` here
+                // matches exactly what `fence_ticket` computed internally.
+                // Shrinking `shown` itself, not `budget`, always lands on or
+                // under the limit in one step.
+                let shown = d.chars().count().min(budget);
+                let budget = shown.saturating_sub(over);
                 fenced = crate::mcp::guard::fence_ticket(
                     &d,
                     FROM,

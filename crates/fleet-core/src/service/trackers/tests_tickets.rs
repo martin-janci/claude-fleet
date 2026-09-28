@@ -1258,6 +1258,54 @@ async fn a_long_descriptions_retry_lands_close_to_the_budget_not_far_under_it() 
     assert!((max - 40..=max).contains(&len), "{len} vs budget {max}");
 }
 
+/// Fix round 2, A-1 (the real bug): a stored description is capped at
+/// exactly `DESCRIPTION_MAX_CHARS` by Task 1, so in the common case `shown`
+/// is content-bound (`len(text) < budget`), not budget-bound. Shrinking
+/// `budget` by the overshoot only starts reducing `shown` once the shrunk
+/// budget drops below the text's length, so a retry that shrinks `budget`
+/// can leave the brief over by up to `budget - shown`. That failure shows up
+/// only across a *band* of header sizes (whichever `extra` lengths put the
+/// pre-retry overshoot inside that wasted slack), not at any single fixed
+/// point — which is exactly why the round-1 test (a budget-bound, always
+/// 10,000-char description) could not catch it. Sweep the band and assert
+/// every point in it fits.
+#[tokio::test]
+async fn every_extra_length_in_the_overflow_band_still_fits_the_budget() {
+    let fx = Fx::new();
+    let mut w = item("70", "ABC-70", ("To Do", "todo"), true, 1);
+    w.description = Some("x".repeat(crate::service::trackers::DESCRIPTION_MAX_CHARS));
+    w.description_chars = Some(6812);
+    let tracker = fx_tracker(&fx);
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_tracker_item(tracker, &w)
+        .unwrap();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-70".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    for n in 1600..=1800 {
+        let extra = "E".repeat(n);
+        let brief = ticket_brief_with(&fx.store, &plan, &extra).unwrap();
+        assert!(
+            brief.chars().count() <= max,
+            "extra len {n}: brief {} chars vs budget {max}",
+            brief.chars().count()
+        );
+    }
+}
+
 fn fx_tracker(fx: &Fx) -> i64 {
     fx.store.lock().unwrap().list_trackers().unwrap()[0].id
 }
