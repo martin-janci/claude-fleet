@@ -6,7 +6,7 @@
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
   import { Screen, rowToRuns, runsKey, runStyleCss, type Run } from './ansi';
-  import { pointInRect } from './geometry';
+  import { pointInRect, dropPoint } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
   import { nativeWriteText } from './clipboard_native';
   import { hintAnchor } from './hints';
@@ -259,13 +259,14 @@
     selFocus = null;
   }
 
-  /** Is a drag-drop point inside the terminal grid? Tauri delivers the macOS
-   *  drag position in logical points (see geometry.ts), the same space as
-   *  getBoundingClientRect(), so we compare directly — no devicePixelRatio
-   *  scaling, which previously halved the point on Retina and missed the grid. */
-  function pointOverGrid(px: number, py: number): boolean {
+  /** Is a drag-drop point inside the terminal grid? `dropPoint` puts it in
+   *  the logical pixels getBoundingClientRect() uses: unchanged on macOS and
+   *  Linux (dividing there halved the point on Retina and missed the grid),
+   *  divided by the scale factor on Windows (see geometry.ts). */
+  function pointOverGrid(position: { x: number; y: number }): boolean {
     if (!container) return false;
-    return pointInRect(px, py, container.getBoundingClientRect());
+    const { x, y } = dropPoint(position);
+    return pointInRect(x, y, container.getBoundingClientRect());
   }
 
   async function handleDrop(paths: string[]) {
@@ -334,11 +335,11 @@
       .onDragDropEvent((event) => {
         const p = event.payload;
         if (p.type === 'enter' || p.type === 'over') {
-          dragOver = pointOverGrid(p.position.x, p.position.y);
+          dragOver = pointOverGrid(p.position);
         } else if (p.type === 'leave') {
           dragOver = false;
         } else if (p.type === 'drop') {
-          const over = pointOverGrid(p.position.x, p.position.y);
+          const over = pointOverGrid(p.position);
           dragOver = false;
           if (over) void handleDrop(p.paths);
         }
