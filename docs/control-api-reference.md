@@ -649,6 +649,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::quick_replies::set_quick_replies`
 - `commands::sessions::get_fleet_settings`
 - `commands::sessions::describe_fleet_settings`
+- `commands::pages::list_pages`
+- `commands::pages::fetch_page_source`
 - `commands::sessions::set_fleet_setting`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
