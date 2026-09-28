@@ -31,9 +31,9 @@ pub use super::jira_common::{
 };
 use super::jira_common::{check, current_sprint, is_key, key_in_path};
 use super::{
-    map_transport, CallKind as Call, Caps, Fetched, Incremental, ItemRef, Page, RefCtx,
-    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp,
-    NOT_FOUND_OR_NO_PERMISSION,
+    map_transport, CallKind as Call, Caps, Fetched, FullDescription, Incremental, ItemRef, Page,
+    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
+    WriteOp, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential};
@@ -599,7 +599,7 @@ impl TrackerProvider for JiraCloud {
         out
     }
 
-    async fn describe(&self, r: &ItemRef) -> Result<Option<String>, TrackerError> {
+    async fn describe(&self, r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         let Some(key) = self.describe_key(r) else {
             return Ok(None);
         };

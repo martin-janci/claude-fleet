@@ -685,8 +685,14 @@ pub async fn describe<H: Harness>(h: &H) {
         .await
         .unwrap_or_else(|e| panic!("{}: describe failed: {e:?}", h.name()));
     if p.caps().describe {
-        let text = out.unwrap_or_else(|| panic!("{}: a describe provider answers", h.name()));
-        let n = text.chars().count();
+        let full = out.unwrap_or_else(|| panic!("{}: a describe provider answers", h.name()));
+        let n = full.text.chars().count();
+        assert!(
+            full.chars >= n as i64,
+            "{}: true length {} below the {n} chars served",
+            h.name(),
+            full.chars
+        );
         assert!(
             n > super::DESCRIPTION_MAX_CHARS,
             "{}: only {n} chars, not past the excerpt cap",

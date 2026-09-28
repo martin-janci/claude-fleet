@@ -548,7 +548,9 @@ there really is more.
 Only Jira (Cloud and Data Center) and GitHub serve a full description on
 demand; for Asana and Linear the line says *open the ticket* instead, and the
 ticket's URL is in every answer that carries its description. Nothing is
-written to the tracker either way — this is a read.
+written to the tracker either way — this is a read. `describe` itself stops
+at 32,000 characters; a longer description ends with the same kind of line,
+saying *open the ticket* for the rest.
 
 What Claude fetches is held briefly (`work.describe_cache_secs`, 300 s by
 default) so a second question about the same ticket costs no second request,
@@ -755,7 +757,9 @@ it. `0` keeps a table forever.
   window is also the ceiling on how long an entry is *served*: a longer
   `work.describe_cache_secs` is clamped to it. Disconnecting a tracker
   deletes its items' cached descriptions at once, and so does a sync that
-  changes a description.
+  changes a description — its first 2,000 characters, its length, or the
+  ticket's "updated" time at the tracker, so an edit past the excerpt is not
+  served stale.
 - `work.retention.timeline_work_events_days` (180): handover, nudge, tidy and withdrawn-suggestion
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:

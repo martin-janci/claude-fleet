@@ -188,26 +188,32 @@ fn legacy_field(t: &str, key: &str) -> Option<String> {
 /// a description spread across several blocks (a heading, paragraphs, a
 /// list) that individually stay small but add up past the cap.
 pub fn adf_excerpt(v: &Value) -> (Option<String>, Option<i64>) {
+    match adf_capped(v, DESCRIPTION_MAX_CHARS) {
+        Some((text, chars)) => (Some(text), Some(chars)),
+        None => (None, None),
+    }
+}
+
+/// [`adf_excerpt`]'s walk at any `cap`: the text (at most `cap` characters)
+/// and the length to report for it, by the C1 rule above.
+fn adf_capped(v: &Value, cap: usize) -> Option<(String, i64)> {
     let mut acc = Acc::default();
     match v {
         Value::String(s) => acc.take_string(s),
-        Value::Object(_) => adf_walk(v, &mut acc, DESCRIPTION_MAX_CHARS),
-        _ => return (None, None),
+        Value::Object(_) => adf_walk(v, &mut acc, cap),
+        _ => return None,
     }
     let text = normalized(&acc.out);
     if text.is_empty() {
-        return (None, None);
+        return None;
     }
     let shown = text.chars().count() as i64;
-    if !acc.cut && shown <= DESCRIPTION_MAX_CHARS as i64 {
+    if !acc.cut && shown <= cap as i64 {
         // Nothing was left out of the walk, and the cap below will take
         // nothing either: the whole description is what is returned.
-        return (Some(text), Some(shown));
+        return Some((text, shown));
     }
-    (
-        Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect()),
-        Some(acc.total.max(shown)),
-    )
+    Some((text.chars().take(cap).collect(), acc.total.max(shown)))
 }
 
 /// One body's whitespace normalisation, shared by [`adf_excerpt`] and
@@ -309,20 +315,14 @@ fn adf_walk(node: &Value, acc: &mut Acc, cap: usize) {
     }
 }
 
-/// The WHOLE plain text of an ADF value, at most `cap` characters — unlike
-/// [`adf_excerpt`], this is not the 2k excerpt plus a true length: `describe`
-/// wants the full description (capped much higher, at
-/// [`super::DESCRIBE_MAX_CHARS`]), and has no separate use for "how much more
-/// there is" once it is serving all of it up to `cap`.
-pub fn adf_text(v: &Value, cap: usize) -> Option<String> {
-    let mut acc = Acc::default();
-    match v {
-        Value::String(s) => acc.take_string(s),
-        Value::Object(_) => adf_walk(v, &mut acc, cap),
-        _ => return None,
-    }
-    let text = normalized(&acc.out);
-    (!text.is_empty()).then(|| text.chars().take(cap).collect())
+/// The WHOLE plain text of an ADF value, at most `cap` characters, with its
+/// true length — the same walk and the same C1 counting as [`adf_excerpt`],
+/// at `describe`'s much higher ceiling ([`super::DESCRIBE_MAX_CHARS`]). The
+/// length is not decoration: a description past that ceiling is cut, and
+/// `describe` must be able to say so ("shown N of M") instead of serving
+/// the first 32,000 characters as the whole requirement.
+pub fn adf_text(v: &Value, cap: usize) -> Option<super::FullDescription> {
+    adf_capped(v, cap).map(|(text, chars)| super::FullDescription { text, chars })
 }
 
 /// The issue key a Jira URL path names.
@@ -484,19 +484,30 @@ mod tests {
         let long = json!({"type":"doc","content":[{"type":"paragraph","content":[
             {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS * 3)}]}]});
         let cap = DESCRIPTION_MAX_CHARS * 2;
-        let text = adf_text(&long, cap).unwrap();
-        assert_eq!(text.chars().count(), cap);
-        // Under the cap: the whole thing, past DESCRIPTION_MAX_CHARS.
+        let d = adf_text(&long, cap).unwrap();
+        assert_eq!(d.text.chars().count(), cap);
+        // The cut is reported: the true length, not the capped one.
+        assert!(
+            d.chars >= (DESCRIPTION_MAX_CHARS * 3) as i64,
+            "a cut description reports its true length, got {}",
+            d.chars
+        );
+        // Under the cap: the whole thing, past DESCRIPTION_MAX_CHARS, and a
+        // length equal to what is returned (no notice on an uncut body).
         let short_of_cap = json!({"type":"doc","content":[{"type":"paragraph","content":[
             {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS + 500)}]}]});
-        let text = adf_text(&short_of_cap, cap).unwrap();
-        assert_eq!(text.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+        let d = adf_text(&short_of_cap, cap).unwrap();
+        assert_eq!(d.text.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+        assert_eq!(d.chars, (DESCRIPTION_MAX_CHARS + 500) as i64);
         assert_eq!(adf_text(&Value::Null, cap), None);
         assert_eq!(adf_text(&json!({"type":"doc","content":[]}), cap), None);
-        assert_eq!(
-            adf_text(&json!("plain string body"), cap).as_deref(),
-            Some("plain string body")
-        );
+        let d = adf_text(&json!("plain string body"), cap).unwrap();
+        assert_eq!(d.text, "plain string body");
+        assert_eq!(d.chars, 17);
+        // A plain (v2) string past the cap: cut, true length kept.
+        let d = adf_text(&json!("y".repeat(cap + 7)), cap).unwrap();
+        assert_eq!(d.text.chars().count(), cap);
+        assert_eq!(d.chars, (cap + 7) as i64);
     }
 
     /// The C1 rule, at the unit the drift lived in: a description nothing was

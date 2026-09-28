@@ -81,7 +81,8 @@ async fn describe_reads_the_v2_issue_endpoint_uncapped() {
         .await
         .unwrap()
         .expect("a describe answer");
-    assert_eq!(out.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+    assert_eq!(out.text.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+    assert_eq!(out.chars, (DESCRIPTION_MAX_CHARS + 500) as i64);
     let sent = f.requests();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].method, Method::Get);
@@ -108,6 +109,27 @@ async fn describe_reads_the_v2_issue_endpoint_uncapped() {
         .unwrap();
     assert!(out.is_none());
     assert!(f.requests().is_empty());
+}
+
+/// Past `DESCRIBE_MAX_CHARS` (a v2 plain-string body, as Data Center
+/// answers): cut there, the true length reported with it.
+#[tokio::test]
+async fn describe_reports_the_true_length_past_its_own_cap() {
+    let cap = crate::service::trackers::DESCRIBE_MAX_CHARS;
+    let f = FakeTransport::new();
+    let body = json!({ "fields": { "description": "x".repeat(cap + 99) } });
+    f.once(
+        Method::Get,
+        "/issue/OPS-1?fields=description",
+        Ok(Response::json(200, &body)),
+    );
+    let out = dc(&f)
+        .describe(&ItemRef::Key("OPS-1".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(out.text.chars().count(), cap);
+    assert_eq!(out.chars, (cap + 99) as i64);
 }
 
 struct DcHarness;

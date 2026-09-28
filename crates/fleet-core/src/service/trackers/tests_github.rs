@@ -227,9 +227,27 @@ async fn describe_by_node_id_reads_body_uncapped() {
         .unwrap()
         .expect("a describe answer");
     assert_eq!(
-        out.chars().count(),
+        out.text.chars().count(),
         crate::service::trackers::DESCRIPTION_MAX_CHARS + 500
     );
+    assert_eq!(
+        out.chars,
+        (crate::service::trackers::DESCRIPTION_MAX_CHARS + 500) as i64
+    );
+
+    // Past `DESCRIBE_MAX_CHARS`: cut there, the true length reported.
+    let cap = crate::service::trackers::DESCRIBE_MAX_CHARS;
+    let f = FakeTransport::new();
+    let mut huge = body.clone();
+    huge["data"]["nodes"][0]["body"] = json!("w".repeat(cap + 99));
+    f.once(Method::Post, "/graphql", Ok(Response::json(200, &huge)));
+    let out = github(&f)
+        .describe(&ItemRef::Id("I_kwDOAcme0001".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(out.text.chars().count(), cap);
+    assert_eq!(out.chars, (cap + 99) as i64);
 
     // A reference this tracker cannot resolve to any id or repo/number: no
     // answer, no request sent.

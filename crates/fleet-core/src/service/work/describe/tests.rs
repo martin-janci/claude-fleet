@@ -367,6 +367,42 @@ async fn a_host_token_gets_the_body_fenced_a_person_gets_it_plain() {
     assert_eq!(for_person.chars, for_host.chars);
 }
 
+/// fleet's OWN cap is not silent: a description past
+/// [`trackers::DESCRIBE_MAX_CHARS`] reports its true length in `chars`, and
+/// a per-host token's fenced body says "shown N of M" and points at the
+/// ticket — on the fresh fetch and on the cache hit alike (the cache keeps
+/// the tracker's length, not the capped body's).
+#[tokio::test]
+async fn a_description_past_fleets_own_cap_says_it_was_cut() {
+    let cap = trackers::DESCRIBE_MAX_CHARS;
+    let w = fake_jira_with_description(&"q".repeat(cap + 1234));
+    let net = w.net();
+    let host = OrgScope::for_host(&w.store.lock().unwrap(), "hosta").unwrap();
+    let first = describe(&w.store, &host, "ABC-1", &net).await.unwrap();
+    assert!(!first.from_cache);
+    // The walk's running total: the text plus the paragraph's separator.
+    let full = first.chars;
+    assert!(full >= (cap + 1234) as i64, "{full}");
+    let want = format!("shown {cap} of {full} chars");
+    assert!(
+        first.body.contains(&want),
+        "{}",
+        &first.body[first.body.len() - 200..]
+    );
+    assert!(first.body.ends_with("open the ticket for the rest]"));
+    let second = describe(&w.store, &host, "ABC-1", &net).await.unwrap();
+    assert!(second.from_cache);
+    assert_eq!(second.chars, full);
+    assert!(second.body.contains(&want));
+    // A person reads it plain, the length above the body's saying the same.
+    let person = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap();
+    assert_eq!(person.body.chars().count(), cap);
+    assert_eq!(person.chars, full);
+    assert_eq!(w.fetches(), 1);
+}
+
 /// Mirrors `tests_tickets.rs`'s `ticket_text_cannot_escape_the_fence`: a
 /// ticket cannot close the untrusted block early, forge a second one, or
 /// have its "Ignore previous instructions" line read as fleet's own — for
