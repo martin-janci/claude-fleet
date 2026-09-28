@@ -38,24 +38,24 @@ Paths are relative to `crates/fleet-core/src/` unless they start with `src/`,
 
 ### Step 3. Migration and write path
 
-- `crates/fleet-core/migrations/0NN_result_evidence.sql` (next free number):
-  the four columns of design §2. Add the migrate arm and bump the
-  schema-version assertions.
-- The `row_version` trigger (latest definition: migration 065; drop and re-create it): add
-  `OR NEW.pr_evidence IS NOT OLD.pr_evidence`, and **not** `pr_checked_at`.
-- `store/work_detect.rs` (or a new `store/evidence.rs`):
-  `set_pr_evidence(host, tmux, Option<&str>)`, which writes `pr_evidence`
-  when it changed and always stamps `pr_checked_at`.
-- `service/sessions/reconcile.rs`: in the loop that writes `pr_signals`
-  (about line 979), write evidence for every observed target. A definite "no
-  PR" clears `pr_evidence` and still stamps `pr_checked_at`.
-- `SessionRow` + `src/lib/sessions.ts`: `pr_evidence: PrEvidence | null`,
-  `pr_checked_at: number | null`. Check `mcp/tools/views.rs`: the compact
-  row must not grow (token budget). Full rows get the fields in phase 3.
-- Tests: a store test for change vs stamp-only, and a trigger test that a
-  stamp-only write leaves `row_version` alone while an evidence change bumps
-  it. A reconcile test with the fake `HostShell` checks that a failed probe
-  leaves both columns untouched.
+- `crates/fleet-core/migrations/082_result_evidence.sql`: `sessions.pr_evidence`
+  and `sessions.pr_checked_at`, plus `sessions_row_version_bump` rebuilt from
+  065 with both columns watched. One guard (`sessions_has_pr_evidence`).
+- The write rides the reconcile upsert (`store/reconcile.rs`), not a second
+  UPDATE: `pr_evidence` under `ci_status`'s rule (authoritative when
+  `pr_observed`), `pr_checked_at` stamped for a new or changed reading and
+  otherwise once it is `PR_CHECKED_REFRESH_SECS` old. No PR means no stamp.
+  One event per pass, as today.
+- `SessionRow.pr_evidence` / `pr_checked_at` (`SESSION_COLUMNS` + mapper;
+  malformed JSON reads as none), `ReconcileSession.pr_evidence` from
+  `PrInfo.evidence`, TS mirror in `src/lib/sessions.ts`. The phone view
+  (`PHONE_SESSION_FIELDS`) does not grow. Full MCP rows carry the fields
+  for PR sessions only (`skip_serializing_if`).
+- Tests: the store test covers first sight, not probed, steady inside the
+  window (no event), steady after the window (one event), changed, old
+  `gh`, no PR and malformed JSON. The fails-late rollback test now also
+  covers evidence rolling back. The existing trigger-coverage test passes
+  with both columns watched.
 
 ## Phase 2: assess and show
 
@@ -101,6 +101,7 @@ Paths are relative to `crates/fleet-core/src/` unless they start with `src/`,
 
 ### Step 7. `result_commit` on dispatch tasks
 
+- Its own migration: `tasks.result_commit`, `tasks.result_dirty`.
 - `service/tasks.rs::handle_stop_for_worker`: before the store lock, run one
   command in `cwd` (design §4), bounded by the existing SSH timeout.
   `complete_task` takes `Option<(String, bool)>` and passes it to

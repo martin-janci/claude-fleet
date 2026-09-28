@@ -75,12 +75,16 @@ git reads that cost no network:
 ```sh
 head="$(git rev-parse HEAD 2>/dev/null)"
 ahead="$(git rev-list --count '@{u}..HEAD' 2>/dev/null)"
-dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -n 1)"
+git diff --quiet HEAD -- 2>/dev/null
+case $? in 0) dirty=0;; 1) dirty=1;; *) dirty='';; esac
 ```
 
 printed as `__FLEET_GIT__\t<name>\t<head>\t<ahead>\t<dirty 0|1>`, next to the
-existing `__FLEET_TRAILERS__` line. `--untracked-files=no` keeps a stray build
-artefact from reading as "uncommitted work".
+existing `__FLEET_TRAILERS__` line. `git diff --quiet HEAD` looks at tracked
+files only, so a stray build artefact does not read as "uncommitted work". It
+exits 1 for a change and above 1 when it cannot tell, and that case is empty,
+not "clean". A missing upstream prints no count, which is stored as "unknown"
+and never as 0.
 
 **Failing checks by name.** `reduce_ci_status` keeps its return value (the
 badge, Attention's `CiFailing`, the work roll-up and Today all read it). A
@@ -93,21 +97,22 @@ is stamped with `headRefOid`.
 
 ## 2. Storage
 
-One migration (next free number; `082` at the time of writing):
+Migration 082 (phase 1; the task columns of §4 come with phase 3):
 
 ```sql
 ALTER TABLE sessions ADD COLUMN pr_evidence TEXT;      -- JSON, see below
-ALTER TABLE sessions ADD COLUMN pr_checked_at INTEGER; -- every OBSERVED probe
-ALTER TABLE tasks ADD COLUMN result_commit TEXT;       -- §4
-ALTER TABLE tasks ADD COLUMN result_dirty INTEGER;     -- §4
+ALTER TABLE sessions ADD COLUMN pr_checked_at INTEGER; -- last observation, see below
 ```
 
-`pr_evidence` is written the way `pr_signals` is: by the probe, outside the
-reconcile upsert's `ON CONFLICT` list, only for sessions actually observed this
-pass. It is kept apart from `pr_signals` on purpose. A `pr_signals` change
-re-runs work resolution (`detect::resolve_session`). Check results and the
-local HEAD change far more often than branch names and ticket keys, and must
-not trigger link resolution.
+`pr_evidence` is written by the reconcile upsert under `ci_status`'s rule. It
+is authoritative when the probe ran this pass: a `None` clears it, so an old
+`gh` that answers only the basic fields leaves no reading that looks current.
+It is kept when the probe did not run. It is kept apart from `pr_signals` on
+purpose. A `pr_signals` change re-runs work resolution
+(`detect::resolve_session`). Check results and the local HEAD change far more
+often than branch names and ticket keys, and must not trigger link resolution.
+Riding the upsert also means an evidence change is part of the one
+`session:updated` event the pass already emits, not a second one.
 
 ```json
 {
@@ -123,14 +128,21 @@ not trigger link resolution.
 }
 ```
 
-`pr_checked_at` is stamped on every observation, changed or not. It is **not**
-added to the `row_version` triggers (migrations 063, 065): a stamp every five
-minutes per PR session would turn into a row event every five minutes for no
-visible change. The session row a client holds may therefore carry an older
-`pr_checked_at` than the store. That errs on the safe side (the evidence looks
-older than it is), and the detail card reads fresh anyway (§3).
+Both columns are `SessionRow` fields and both are watched by the `row_version`
+trigger (082 rebuilds 065's). An unwatched `pr_checked_at` was the first draft,
+and it is wrong. The client would only ever hold the stamp from the last
+*visible* change, so a PR that sits green would dim as "stale" a quarter of an
+hour after its last change, however often it was probed.
 
-`pr_evidence` changes *do* bump `row_version`, like `ci_status`.
+Stamping every observation would cost a row event per PR session per probe
+(every five minutes, forever, for an idle green PR). The stamp is therefore
+exact when the reading changes, and otherwise refreshed only once it is
+`PR_CHECKED_REFRESH_SECS` (2 × TTL = 600 s) old. While probes succeed, the
+stored stamp is at most about 640 s old (refresh + one TTL + tick jitter), below
+`PR_EVIDENCE_STALE_SECS` (3 × TTL = 900 s), the age at which a reading counts
+as the past. A steady PR thus costs one event per ten minutes, and dimming
+never fires falsely. A session without a PR has no stamp at all, so the many
+worktree sessions with no PR emit nothing.
 
 ## 3. The on-demand read
 
@@ -264,12 +276,14 @@ merge" is not something that needs a person urgently.
   and four more JSON fields in a call already made.
 - On demand: one to two `gh` calls per refresh, only when a person opens the
   card or an agent asks.
-- Store: two TEXT/INTEGER columns per session, two per task.
+- Store: two columns per session (phase 1), two per task (phase 3).
+- Events: one `session:updated` per PR session per ten minutes while
+  nothing changes (the `pr_checked_at` refresh), plus one per real change.
 
 ## Open questions
 
-1. Should `pr_checked_at` bump `row_version` after all, so the list's dimming
-   is exact? Recommended: no (§2). Revisit if the dimming misleads in practice.
+1. ~~Should `pr_checked_at` bump `row_version`?~~ Decided in phase 1: yes,
+   with the sparse refresh of §2.
 2. Should a `stale` review count as Waiting, or only as a note? Recommended:
    Waiting. A stale approval is the case the card exists to catch.
 3. Should `ahead > 0` with CI green on the older commit be Blocked or Waiting?

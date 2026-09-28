@@ -456,6 +456,8 @@ fn row(
         last_stop_at: None,
         stale_working_at: None,
         work_rev: 0,
+        pr_evidence: None,
+        pr_checked_at: None,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -6679,7 +6681,10 @@ fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
                 head: Some("feat/x".into()),
                 ..Default::default()
             }),
-            evidence: None,
+            evidence: Some(crate::service::outcome::PrEvidence {
+                head_oid: Some("abc1234".into()),
+                ..Default::default()
+            }),
         },
     );
     let agents = vec![
@@ -6735,6 +6740,13 @@ fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
         })
         .unwrap();
     assert!(signals.is_some(), "without the fault the PR signals land");
+    let landed = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(
+        landed.pr_evidence.and_then(|e| e.head_oid).as_deref(),
+        Some("abc1234"),
+        "without the fault the PR evidence lands"
+    );
+    assert!(landed.pr_checked_at.is_some());
     assert!(s.get_session("bg:bg-1", "vps").unwrap().is_some());
     assert!(s.list_session_events(id, 100).unwrap().len() > events_before);
 }

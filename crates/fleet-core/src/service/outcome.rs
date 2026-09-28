@@ -17,6 +17,19 @@ use std::time::{Duration, Instant};
 /// How long a session's PR probe result is trusted before `gh` is asked again.
 pub const PR_PROBE_TTL: Duration = Duration::from_secs(300);
 
+/// How often a steady PR's `sessions.pr_checked_at` is re-stamped. A changed
+/// reading is stamped at once; an unchanged one only when the stored stamp
+/// is at least this old, so a PR that sits green costs one row event per
+/// refresh instead of one per probe. Two probe windows.
+pub const PR_CHECKED_REFRESH_SECS: i64 = 2 * PR_PROBE_TTL.as_secs() as i64;
+
+/// A `pr_checked_at` older than this describes the past: the probe has not
+/// observed the PR for a while (host unreachable, `gh` failing). Three
+/// probe windows, so a steady PR re-stamped every
+/// [`PR_CHECKED_REFRESH_SECS`] and probed every [`PR_PROBE_TTL`] never
+/// crosses it while its probes succeed.
+pub const PR_EVIDENCE_STALE_SECS: i64 = 3 * PR_PROBE_TTL.as_secs() as i64;
+
 /// Line prefix the probe script prints before each session's result.
 const RESULT_PREFIX: &str = "__FLEET_PR__\t";
 /// Sentinel the script prints (and exits with) when `gh` is not on PATH.
