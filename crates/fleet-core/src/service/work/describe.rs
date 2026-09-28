@@ -86,8 +86,7 @@ pub async fn describe(
         };
         let org_id = s.item_org(item.id)?;
         if let Some(allowed) = tickets::allowed(scope, &s)? {
-            if !allowed.contains(&item.id)
-                && (item.tracker_id.is_some() || !scope.sees_org(org_id))
+            if !allowed.contains(&item.id) && (item.tracker_id.is_some() || !scope.sees_org(org_id))
             {
                 return Err(orgs::not_visible_to(scope, &key));
             }

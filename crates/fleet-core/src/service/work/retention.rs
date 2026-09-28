@@ -246,12 +246,11 @@ pub fn sweep_capped(store: &Mutex<Store>, now: i64, batch: usize, cap: usize) ->
     // most one row per tracker item that was ever described, far fewer than
     // the tables above.
     let cutoff = describe_cutoff(days.tracker_items, now);
-    match store.lock() {
-        Ok(s) => match s.sweep_descriptions(cutoff) {
+    if let Ok(s) = store.lock() {
+        match s.sweep_descriptions(cutoff) {
             Ok(n) => out.describe_cache = n,
             Err(e) => tracing::warn!(error = %e, "[gc] describe cache sweep failed"),
-        },
-        Err(_) => {}
+        }
     }
     if let Ok(s) = store.lock() {
         if let Ok(v) = serde_json::to_string(&out) {
@@ -485,7 +484,10 @@ mod tests {
         let swept = sweep(&st, now);
         assert_eq!(swept.describe_cache, 1);
         let s = st.lock().unwrap();
-        assert_eq!(s.cached_description(old_id, 100_000_000, now).unwrap(), None);
+        assert_eq!(
+            s.cached_description(old_id, 100_000_000, now).unwrap(),
+            None
+        );
         assert_eq!(
             s.cached_description(fresh_id, 100_000_000, now)
                 .unwrap()
@@ -559,7 +561,10 @@ mod tests {
         assert_eq!(swept.tracker_items, 0, "0 keeps the tracker item forever");
         assert_eq!(swept.describe_cache, 1, "but not the describe cache");
         let s = st.lock().unwrap();
-        assert_eq!(s.cached_description(old_id, 100_000_000, now).unwrap(), None);
+        assert_eq!(
+            s.cached_description(old_id, 100_000_000, now).unwrap(),
+            None
+        );
         assert_eq!(
             s.cached_description(fresh_id, 100_000_000, now)
                 .unwrap()

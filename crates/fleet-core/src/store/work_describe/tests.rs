@@ -35,10 +35,15 @@ fn a_cached_description_expires_with_its_ttl() {
     let id = seed_item(&s);
     s.put_description(id, "the whole thing", 15).unwrap();
     assert_eq!(
-        s.cached_description(id, 300, now_unix()).unwrap().as_deref(),
+        s.cached_description(id, 300, now_unix())
+            .unwrap()
+            .as_deref(),
         Some("the whole thing")
     );
-    assert_eq!(s.cached_description(id, 300, now_unix() + 301).unwrap(), None);
+    assert_eq!(
+        s.cached_description(id, 300, now_unix() + 301).unwrap(),
+        None
+    );
     // ttl 0 turns the cache off, without deleting what is there.
     assert_eq!(s.cached_description(id, 0, now_unix()).unwrap(), None);
 }
@@ -89,7 +94,9 @@ fn sweep_descriptions_drops_only_what_is_older_than_the_cutoff() {
     assert_eq!(n, 1);
     assert_eq!(s.cached_description(old_id, 10_000, now).unwrap(), None);
     assert_eq!(
-        s.cached_description(fresh_id, 10_000, now).unwrap().as_deref(),
+        s.cached_description(fresh_id, 10_000, now)
+            .unwrap()
+            .as_deref(),
         Some("fresh")
     );
 }

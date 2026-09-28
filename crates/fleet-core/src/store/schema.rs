@@ -669,10 +669,7 @@ const MIGRATIONS: &[Migration] = &[
     // whole description, held for `work.describe_cache_secs`. `CREATE TABLE
     // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` are idempotent on their
     // own, so this needs no `already_applied` guard.
-    Migration::plain(
-        68,
-        include_str!("../../migrations/068_describe_cache.sql"),
-    ),
+    Migration::plain(68, include_str!("../../migrations/068_describe_cache.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

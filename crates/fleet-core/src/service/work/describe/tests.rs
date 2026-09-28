@@ -246,9 +246,7 @@ async fn a_warm_describe_cache_does_not_suppress_the_lookup_or_brief_notice() {
     let host = OrgScope::for_host(&store.lock().unwrap(), "hosta").unwrap();
     let net = TrackerNet::fake(Arc::new(FakeTransport::new()));
 
-    let looked_up = tickets::lookup(&store, "ABC-1", &host, &net)
-        .await
-        .unwrap();
+    let looked_up = tickets::lookup(&store, "ABC-1", &host, &net).await.unwrap();
     let d = looked_up.description.unwrap();
     assert!(d.contains("shown 2000 of 6812 chars"), "{d}");
     assert!(
