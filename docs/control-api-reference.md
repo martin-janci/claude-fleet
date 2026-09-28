@@ -361,7 +361,7 @@ Parameters: `name`
 
 ### `rewind_conversation`
 
-Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the updated row.
+Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the row (a fork's is the new session).
 
 Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 

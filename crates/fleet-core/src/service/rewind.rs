@@ -87,8 +87,12 @@ if [ -z "$destdir" ]; then destdir=$(dirname -- "$f"); fi
 mkdir -p -- "$destdir" || exit 1
 dest="$destdir/$newid.jsonl"
 tmp="$dest.part.$$"
+# Whole lines only: a Claude still appending (a fork mid-turn) leaves an
+# unterminated last line, which copied would be broken JSON.
+n=$(wc -l < "$f") || exit 1
 awk -v anchor="$anchor" -v oldid={id_q} -v newid="$newid" \
-    -v oldcwd="$oldcwd" -v newcwd="$newcwd" '
+    -v oldcwd="$oldcwd" -v newcwd="$newcwd" -v n="$n" '
+NR > n + 0 {{ exit }}
 function rep(s, from, to,    out, p) {{
   if (from == "") return s
   out = ""
@@ -307,9 +311,20 @@ pub async fn rewind_conversation(
         (sess, claude_id, stored_transcript_path, fallback_cwd)
     };
 
-    // Rewind respawns the pane, so doing it mid-turn throws the turn away.
-    // Fork is exempt: it touches nothing live.
-    if args.mode == RewindMode::Rewind && sess.claude_status.as_deref() == Some("working") {
+    // A shell row has no Claude: its restart respawns a bare shell, which
+    // would kill whatever it runs and bind a conversation nothing resumes.
+    if sess.kind == "shell" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a shell session has no Claude conversation to rewind or fork",
+        ));
+    }
+    // Rewind respawns the pane, so doing it mid-turn — working, or waiting
+    // on a dialog the turn raised — throws the turn away. Fork is exempt: it
+    // touches nothing live.
+    if args.mode == RewindMode::Rewind
+        && matches!(sess.claude_status.as_deref(), Some("working" | "blocked"))
+    {
         return Err(IpcError::new(
             codes::E_INVALID,
             "this session is mid-turn; interrupt it first, then rewind",
@@ -454,6 +469,16 @@ pub async fn rewind_conversation(
             // script actually wrote. Best-effort: the spawn has succeeded and
             // its row is what the caller asked for; a label is not worth
             // failing it.
+            // A fork does the same work, as `move_session { keep_source }`'s
+            // does: the source's confirmed links come along (source
+            // `forked`). Best-effort, like the label below.
+            if let Err(e) = lock(store).and_then(|s| s.copy_work_links(sess.id, row.id)) {
+                tracing::warn!(
+                    session_id = row.id,
+                    error = %e.message,
+                    "[rewind] copying the work links to the fork failed"
+                );
+            }
             match lock(store).and_then(|s| {
                 s.relabel_conversation(row.id, &new_id, StartSource::Fork, Some(&new_path))
             }) {
@@ -608,6 +633,36 @@ mod tests {
             "no copied line may still name the old conversation"
         );
         assert_eq!(written.lines().filter(|l| l.contains(NEW)).count(), 3);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A fork mid-turn: Claude is still appending, so the last line has no
+    /// newline yet. It is left out rather than copied as broken JSON.
+    #[test]
+    fn an_unterminated_last_line_is_not_copied() {
+        let d = tmp();
+        let src = fixture(&d);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        std::io::Write::write_all(&mut f, br#"{"type":"assistant","uuid":"dddd","mess"#).unwrap();
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            None,
+            None,
+            None,
+        ));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let written = std::fs::read_to_string(d.join(format!("{NEW}.jsonl"))).unwrap();
+        assert!(!written.contains("dddd"), "the partial line stays behind");
+        assert!(written.contains("cccc"), "every whole line is copied");
+        assert!(written.ends_with('\n'));
         std::fs::remove_dir_all(&d).ok();
     }
 
