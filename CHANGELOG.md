@@ -8,6 +8,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.1] - 2026-09-29
+
+### Added
+- **update:** sign the release manifest and publish the update channels (S2)
+- **diagnostics:** hub state, earlier errors and UTC times in the bundle
+- **update:** the hub side of the update wire — /update routes, updater token, desired/observed (S4a)
+
+### Changed
+- **update:** trust the release key
+- **trackers:** conformance scenario 12 asks the real adapter
+
+### Fixed
+- **attention:** an attach or the TTL ends the stale_working reason, not the demotion (sessions.stale_demoted_at)
+- **nl:** the census and J1 bench read person_text's Cow
+- **work:** a key two orgs' trackers share resolves to the caller's item
+- **work:** one harness-tag list for the hook and the transcript
+- **mcp:** fence_ticket counts what it shows on the tracker's own text
+- **work:** the task detail says when it cut the description
+- **windows:** Disconnect removes the legacy token file even if CredDeleteW fails
+- **windows:** keep the app data in the Local profile, moved once
+- **provision:** say when a WSL distribution's hooks cannot reach the desktop
+- **ssh:** cap concurrent connections per host when there is no mux
+- **ssh:** toolchain probe finds the login shell when $SHELL is unset
+- **wsl:** detect again when a wsl- alias is missing; start in $HOME
+- **sidebar:** migrate saved work filters field by field
+- **filters:** announce clearing the last filter; keep focus when a chip goes
+- **sidebar:** the "N archived hidden" count matches a search as the list does
+- **work:** the tree hides archived tasks only when asked, judged over every link
+- **attention:** the tick lifts a resumed or expired stale_working stamp (reconcile.stale_working_ttl_secs)
+- **test:** hub-deploy-scripts-test follows upgrade.sh — compose --env-file, compose pull, the token on curl's stdin
+- **work:** describe says when its own 32,000-char cap cut the text
+- **work:** a tail edit past the excerpt drops the stale describe cache
+- **settings:** stale_working_secs says what it watches, not pane output
+- **settings:** chip editor saves against the list it read; rows keyed by chip
+- **mcp:** quick_replies set is a person's; compare-and-set and no control bytes
+- **sessions:** a stale-demoted idle is not a finished turn until the pane says so
+- **reconcile:** a pane showing the spinner is never demoted as stale working
+- **mcp:** add_project never binds an MCP caller's call_id
+- **usage:** date a line by its top-level timestamp, not the last match
+- **decide:** one daily token budget for live and benchmark runs
+- **rewind:** pass awk values through the environment, read an escaped cwd, refuse names git would
+- **deploy:** private backups, offline pre-upgrade copy, safer prune and rollback
+- **conversation:** a quick-reply chip never sends into a session waiting on an answer
+- **attention:** an attach acknowledges a stale_working stamp
+
+### Documentation
+- **roadmap:** record D15 narrowed for cross-org links on the phone
+- stale_working ends on a hook, an attach, a resumed row or reconcile.stale_working_ttl_secs; hub-deploy-scripts-test asserts the token rides curl's stdin only
+- **windows:** WSL hosts are standalone-only; Cygwin config, dev ConPTY, data dir
+- session state machine — plan ticked, OOM window, status vocabulary
+- **plans:** stale_working acknowledgement — an attach, a resumed row or a TTL lifts the stamp
 ## [0.4.0] - 2026-09-28
 
 ### Added
@@ -2167,6 +2218,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.1
 [0.4.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.0
 [0.3.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.3
 [0.3.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.2

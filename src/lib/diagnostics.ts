@@ -1,5 +1,6 @@
 // Settings → Diagnostics: copy a redacted plain-text bundle (version, schema,
-// hosts, tunnels, MCP state, session counts, last log lines) for bug reports,
+// hosts, tunnels, MCP state, session counts, hub-client state, SSH resets,
+// earlier warnings/errors, last log lines) for bug reports,
 // and open the log folder. The bundle is built and redacted on the backend
 // (`service::diagnostics`); it never contains a token.
 import { invokeCmd, type Result } from './result';
