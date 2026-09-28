@@ -4616,10 +4616,19 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
 /// join or column that reaches into the cache table fails this test, the
 /// same day it is written, rather than needing someone to notice a leak.
 ///
-/// (An earlier version of this test only checked that no
+/// An earlier version of this test only checked that no
 /// `PHONE_SESSION_FIELDS` name contained `"desc"` — true today, but it would
 /// stay true even if `views.rs` joined the cache table under an unrelated
-/// column name, so it could not fail. This version greps the real files.)
+/// column name, so it could never fail. The source greps below fix that for
+/// `store/rows.rs` (where a join or a new column really would show up as
+/// SQL text); `views.rs` and `events.rs` carry no SQL at all, so those two
+/// legs can never fail on their own — kept anyway, as a positive statement
+/// this test still means what it says for the day either file might. The
+/// field-name loop is kept alongside them rather than replaced: it is the
+/// only check here that would catch a new *field* added to the phone
+/// projection under a plausible name (fed from anywhere, not only a join
+/// text-matched by the grep), even though on its own it cannot tell a real
+/// leak from a coincidentally-named column.
 #[test]
 fn no_projection_carries_a_full_description() {
     const TABLE: &str = "work_item_descriptions";
@@ -4638,6 +4647,13 @@ fn no_projection_carries_a_full_description() {
             !src.contains(TABLE),
             "{what} names {TABLE:?}: the describe cache's full text must \
              reach the wire only through work {{ action: describe }}"
+        );
+    }
+    for f in PHONE_SESSION_FIELDS {
+        assert!(
+            !f.contains("desc"),
+            "{f} looks like a description field; the phone projection must \
+             never carry the describe cache's full text"
         );
     }
 }
