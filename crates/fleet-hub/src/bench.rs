@@ -8,8 +8,9 @@
 //! By default the database is opened **read-only** and nothing is sent:
 //! the providers `none` and `bm25` run in this process. `--provider jev` is
 //! the one network path. It goes through the envelope, so a case is asked
-//! only when `decide.jev.enabled` is on, `decide.jev.work_link` is `shadow`
-//! or `assist`, the case's org consented and a key is set; every call is
+//! only when `decide.jev.enabled` is on, the case's org consented, a key is
+//! set and the breaker and budget allow it — the feature's live mode
+//! (`decide.jev.<feature>`) may stay `off`; every call is
 //! recorded in `decision_runs` (which is why that run opens the database
 //! for writing). `--export-unlinked` writes the D39 hand-label file: new
 //! only, `0600`, and it holds prompt and title text.

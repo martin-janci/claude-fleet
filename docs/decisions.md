@@ -24,7 +24,9 @@ and nothing is sent:
 2. **The kill switch is on** (`flag_off`): `decide.jev.enabled`, the toggle
    in Settings → *Decisions (Jev)*. Turning it off stops every call at once.
 3. **The feature's mode is not `off`** (`mode_off`): `decide.jev.status_map`,
-   `decide.jev.work_link`.
+   `decide.jev.work_link`. The offline benchmark (`fleet-hub decide bench`)
+   skips this one check — measuring a feature must not turn on its live runs
+   — and every other check applies to it; its calls are always `shadow`.
 4. **The org consented** (`org_off`). Each organisation opts in on its own
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
@@ -36,6 +38,11 @@ and nothing is sent:
    call goes through, and a success closes it.
 7. **Today's budget is not spent** (`budget`): `decide.jev.daily_token_budget`
    input tokens per UTC day, counted from the record.
+
+The breaker and the budget of the live features count their own runs only:
+a benchmark's runs (subject `bench`) never open the live breaker or spend
+the live budget. A benchmark call is gated on every run, its own and the
+live ones, so a failing API or a spent day stops it too.
 
 ## Modes
 
@@ -288,8 +295,9 @@ webhook`; the running hub reads the key at its next call. `status`,
 `runs` and `proposals` (the listing) open the database read-only (no running hub needed; `--db FILE`
 reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
-(never the key), the breaker, today's tokens and cost, and runs per
-feature, provider, fallback and org.
+(never the key), the live breaker, today's tokens and cost (the live
+features', which the budget counts, and the benchmark's apart), and runs
+per feature, `live` or `bench`, provider, fallback and org.
 
 ## Benchmarking work_link
 
@@ -347,7 +355,7 @@ chosen on dev and applied to what is reported.
 |---|---|
 | `none` | Always abstains: what fleet does today when nothing links a session. |
 | `bm25` | BM25 over each candidate's title (counted twice) and cached description, against the redacted prompt; lower-cased, diacritics folded (`č` → `c`, `ß` → `ss`), split on anything not a letter or digit, cut to a 6-character stem. Abstains under a score threshold chosen on dev (the one that maximises right answers plus right abstentions); the report names it. |
-| `jev` | One Choice over the candidates (option keys are item ids like `i123`, each described by its title) plus `none`, through the envelope: question version `work_link.bench.v1`, subject `bench:<case>`, recorded in `decision_runs` like any call. A case whose org the gate refuses — flag off, mode `off`, no consent, no key, breaker, budget — is **skipped with that fallback** and nothing is sent for it. At most `--max-calls` calls a run. |
+| `jev` | One Choice over the candidates (option keys are item ids like `i123`, each described by its title) plus `none`, through the envelope: question version `work_link.bench.v1`, subject `bench:<case>`, recorded in `decision_runs` like any call. A case whose org the gate refuses — flag off, no consent, no key, breaker, budget (the feature's live mode is not needed) — is **skipped with that fallback** and nothing is sent for it. At most `--max-calls` calls a run. |
 | `haiku` | The same Choice — the same redacted first prompt, candidate ids and titles, and `none` — asked of `claude -p` on `--haiku-host` (below, *The `claude -p haiku` baseline*), on the same cases as Jev. Its pick is the answer (`none` abstains) at its own operating point, its stated confidence the score; an answer outside the options is an abstention counted as `invalid`; a failed call (timeout, SSH, `claude`) is skipped with its reason. A case whose org is not the host's is skipped as `other_org` and nothing is sent for it. Not gated by the envelope and never recorded in `decision_runs`. At most `--max-calls` calls. |
 
 **Question shape** (`--shape`, Jev only). `choice` (the default) is the one
@@ -474,7 +482,7 @@ section and at most 30 board names), so the benchmark measures what
 | `none` | Always abstains. |
 | `todo` | Always `todo`: what fleet does today with a section the rule cannot classify. |
 | `rule` | The keyword rule `infer_section` (progress / doing / review / wip / started / active / testing / qa → in progress; done / shipped / complete / released / closed → done); abstains where it says nothing. |
-| `jev` | One Choice through the envelope — question version `status_map.bench.v1`, subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent. At most `--max-calls` calls. |
+| `jev` | One Choice through the envelope — question version `status_map.bench.v1`, subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent; `decide.jev.status_map` may stay `off` (in `shadow` or `assist` it would also start the daily live runs). At most `--max-calls` calls. |
 | `haiku` | The adapter's own request — the same redacted section, board and options — asked of `claude -p` on `--haiku-host` (below), at the same floor: `unsure`, an answer under 0.5 and an answer outside the options (counted as `invalid`) are abstentions; an answer that states no confidence stands and is left out of calibration. A failed call is skipped with its reason. A row whose org is not the host's is skipped as `other_org` (the built-in set has no org: it needs a host with no org). Not gated by the envelope; the database is opened read-only for the host's org; nothing is recorded. At most `--max-calls` calls. |
 
 Without `--provider jev` or `--provider haiku` no database is opened at
@@ -597,9 +605,11 @@ A checklist for the owner, on the hub, before any feature leaves `off`:
    `fleet-hub decide bench status-map --labels sections.jsonl` and
    `fleet-hub decide bench work-link --split all --labels h.jsonl`.
 4. **Jev, gated** — the key (`fleet-hub decide set-key`), the kill switch
-   on, the feature's mode `shadow`, and consent for the orgs to be measured
-   (`fleet-hub org set <id> --jev on`; `decide.jev.unassigned` for rows
-   with no org). Then add `--provider jev` to the same commands (J1 with
+   on, and consent for the orgs to be measured (`fleet-hub org set <id>
+   --jev on`; `decide.jev.unassigned` for rows with no org). Leave the
+   features' modes `off`: the benchmark does not need them, and
+   `decide.jev.status_map` at `shadow` would also start the daily live runs
+   on every consenting org's Asana trackers. Then add `--provider jev` to the same commands (J1 with
    `--split all`, and once more with `--shape choice+noul`); `--max-calls`
    bounds the spend, `fleet-hub decide status` shows it.
    Add `--provider haiku --haiku-host ALIAS` to the same runs (a host whose
@@ -610,7 +620,7 @@ A checklist for the owner, on the hub, before any feature leaves `off`:
    against the thresholds registered in the test map, the calibration, and
    the per-language cells (a cell that falls back stays off for that
    language). A threshold changes only with a new decision row.
-6. **Shadow per org** — only for a card that passed: keep
+6. **Shadow per org** — only for a card that passed: set
    `decide.jev.<feature>` at `shadow`, consent only the orgs whose cells
    passed, and leave the rest off. Assist comes after shadow's own exit
    criteria (test map §2).

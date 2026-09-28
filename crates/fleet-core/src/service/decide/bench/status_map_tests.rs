@@ -286,13 +286,18 @@ async fn jev_is_asked_only_through_the_gate_with_the_adapters_request() {
         .all(|o| !o.ran && o.reason.as_deref() == Some("flag_off")));
     assert!(runs(&store).is_empty());
 
-    // Flag, mode and key, but rows with no org are not allowed: org_off.
+    // Flag and key, but rows with no org are not allowed: org_off. The
+    // feature's live mode stays `off`: the benchmark does not need it (it
+    // would start the daily live runs).
     {
         let s = store.lock().unwrap();
         settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
-        settings::set(&s, settings::DECIDE_JEV_STATUS_MAP, "shadow").unwrap();
         s.set_decision_credential(Some(&Secret::new(KEY)), None)
             .unwrap();
+        assert_eq!(
+            crate::service::decide::FeatureMode::of(&s, crate::service::decide::Feature::StatusMap),
+            crate::service::decide::FeatureMode::Off
+        );
     }
     let outs = run_providers(&cases, &ps, Some(&ctx), DEFAULT_MAX_CALLS).await;
     assert_eq!(oracle.calls.load(Ordering::SeqCst), 0);

@@ -47,6 +47,30 @@ pub const DECISION_CALL_FAILURES: &[&str] = &["timeout", "http_error", "rate_lim
 /// its adapter.
 pub const DECISION_FOLLOWUPS: &[&str] = &["confirmed", "rejected", "corrected", "ignored"];
 
+/// `decision_runs.subject_kind` of an offline benchmark's call (`fleet-hub
+/// decide bench`). Such a run is not the live adapters': the live circuit
+/// breaker and daily budget never count it ([`RunScope::Live`]), and
+/// [`Store::decision_stats`] reports it apart.
+pub const DECISION_BENCH_SUBJECT: &str = "bench";
+
+/// Which runs the circuit breaker and the daily budget count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunScope {
+    /// The live adapters' runs: a benchmark's never open the live breaker
+    /// or spend the live budget.
+    Live,
+    /// Every run, a benchmark's included — what a benchmark call is gated
+    /// on (so a failing API or a spent day stops it too).
+    All,
+}
+
+impl RunScope {
+    /// `?n = 1` in SQL: count benchmark runs too.
+    fn with_bench(self) -> i64 {
+        i64::from(self == RunScope::All)
+    }
+}
+
 /// `decision_runs.mode`.
 pub const DECISION_MODES: &[&str] = &["off", "shadow", "assist"];
 
@@ -151,6 +175,10 @@ pub struct DecisionRunFilter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionStatRow {
     pub feature: String,
+    /// Offline benchmark runs ([`DECISION_BENCH_SUBJECT`]), grouped apart
+    /// from the live ones.
+    #[serde(default)]
+    pub bench: bool,
     pub provider: String,
     pub fallback: Option<String>,
     pub org_id: Option<i64>,
@@ -431,10 +459,12 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Runs since `since`, grouped per feature, provider, fallback and org.
+    /// Runs since `since`, grouped per feature, live or benchmark
+    /// ([`DECISION_BENCH_SUBJECT`]), provider, fallback and org — live
+    /// first, so a benchmark never mixes into the live counts.
     pub fn decision_stats(&self, since: i64) -> Result<Vec<DecisionStatRow>, IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT feature, provider, fallback, org_id, COUNT(*), \
+            "SELECT feature, subject_kind = ?2 AS bench, provider, fallback, org_id, COUNT(*), \
                COALESCE(SUM(called), 0), COALESCE(SUM(input_tokens), 0), \
                COALESCE(SUM(cost_microusd), 0), \
                COALESCE(SUM(followup = 'confirmed'), 0), COALESCE(SUM(followup = 'rejected'), 0), \
@@ -442,57 +472,67 @@ impl Store {
                COALESCE(SUM(answer IS NOT NULL AND baseline_answer IS NOT NULL), 0), \
                COALESCE(SUM(answer IS NOT NULL AND answer = baseline_answer), 0) \
              FROM decision_runs WHERE at >= ?1 \
-             GROUP BY feature, provider, fallback, org_id \
-             ORDER BY feature, provider, fallback IS NOT NULL, fallback, org_id",
+             GROUP BY feature, bench, provider, fallback, org_id \
+             ORDER BY feature, bench, provider, fallback IS NOT NULL, fallback, org_id",
         )?;
-        let rows = stmt.query_map([since], |r| {
+        let rows = stmt.query_map(rusqlite::params![since, DECISION_BENCH_SUBJECT], |r| {
             Ok(DecisionStatRow {
                 feature: r.get(0)?,
-                provider: r.get(1)?,
-                fallback: r.get(2)?,
-                org_id: r.get(3)?,
-                runs: r.get(4)?,
-                called: r.get(5)?,
-                input_tokens: r.get(6)?,
-                cost_microusd: r.get(7)?,
-                confirmed: r.get(8)?,
-                rejected: r.get(9)?,
-                corrected: r.get(10)?,
-                ignored: r.get(11)?,
-                compared: r.get(12)?,
-                agreed: r.get(13)?,
+                bench: r.get::<_, i64>(1)? != 0,
+                provider: r.get(2)?,
+                fallback: r.get(3)?,
+                org_id: r.get(4)?,
+                runs: r.get(5)?,
+                called: r.get(6)?,
+                input_tokens: r.get(7)?,
+                cost_microusd: r.get(8)?,
+                confirmed: r.get(9)?,
+                rejected: r.get(10)?,
+                corrected: r.get(11)?,
+                ignored: r.get(12)?,
+                compared: r.get(13)?,
+                agreed: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// `(input tokens, cost in micro-USD)` of `provider`'s runs since `since`
-    /// (the daily budget's count).
-    pub fn decision_usage_since(&self, provider: &str, since: i64) -> Result<(i64, i64), IpcError> {
+    /// `(input tokens, cost in micro-USD)` of `provider`'s runs in `scope`
+    /// since `since` (the daily budget's count).
+    pub fn decision_usage_since(
+        &self,
+        provider: &str,
+        since: i64,
+        scope: RunScope,
+    ) -> Result<(i64, i64), IpcError> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cost_microusd), 0) \
-             FROM decision_runs WHERE provider = ?1 AND at >= ?2",
-            rusqlite::params![provider, since],
+             FROM decision_runs WHERE provider = ?1 AND at >= ?2 \
+               AND (?3 = 1 OR subject_kind != ?4)",
+            rusqlite::params![provider, since, scope.with_bench(), DECISION_BENCH_SUBJECT],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
     }
 
     /// The circuit breaker's evidence: how many of `provider`'s latest calls
-    /// (rows that sent a request, at most `max`) failed in a row, and when
-    /// the newest of those failures was. `(0, None)` when the latest call
-    /// succeeded or there was none.
+    /// in `scope` (rows that sent a request, at most `max`) failed in a row,
+    /// and when the newest of those failures was. `(0, None)` when the
+    /// latest call succeeded or there was none.
     pub fn decision_failure_streak(
         &self,
         provider: &str,
         max: u32,
+        scope: RunScope,
     ) -> Result<(u32, Option<i64>), IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT fallback, at FROM decision_runs WHERE provider = ?1 AND called = 1 \
+               AND (?3 = 1 OR subject_kind != ?4) \
              ORDER BY id DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![provider, max], |r| {
-            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![provider, max, scope.with_bench(), DECISION_BENCH_SUBJECT],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)),
+        )?;
         let mut streak = 0;
         let mut newest = None;
         for row in rows {
@@ -816,7 +856,10 @@ mod tests {
             answer: None,
             ..run("work_link")
         };
-        assert_eq!(s.decision_failure_streak("jev", 5).unwrap(), (0, None));
+        assert_eq!(
+            s.decision_failure_streak("jev", 5, RunScope::Live).unwrap(),
+            (0, None)
+        );
         s.insert_decision_run(&fail(10, "timeout")).unwrap();
         s.insert_decision_run(&run("work_link")).unwrap();
         s.insert_decision_run(&fail(20, "http_error")).unwrap();
@@ -828,12 +871,25 @@ mod tests {
             ..fail(40, "breaker_open")
         })
         .unwrap();
-        assert_eq!(s.decision_failure_streak("jev", 5).unwrap(), (2, Some(30)));
-        assert_eq!(s.decision_failure_streak("jev", 1).unwrap(), (1, Some(30)));
+        assert_eq!(
+            s.decision_failure_streak("jev", 5, RunScope::Live).unwrap(),
+            (2, Some(30))
+        );
+        assert_eq!(
+            s.decision_failure_streak("jev", 1, RunScope::Live).unwrap(),
+            (1, Some(30))
+        );
         // An invalid answer is a call that came back: it ends a streak.
         s.insert_decision_run(&fail(50, "invalid_answer")).unwrap();
-        assert_eq!(s.decision_failure_streak("jev", 5).unwrap(), (0, None));
-        assert_eq!(s.decision_failure_streak("rules", 5).unwrap(), (0, None));
+        assert_eq!(
+            s.decision_failure_streak("jev", 5, RunScope::Live).unwrap(),
+            (0, None)
+        );
+        assert_eq!(
+            s.decision_failure_streak("rules", 5, RunScope::Live)
+                .unwrap(),
+            (0, None)
+        );
     }
 
     #[test]
@@ -861,8 +917,14 @@ mod tests {
             ..run("status_map")
         })
         .unwrap();
-        assert_eq!(s.decision_usage_since("jev", 150).unwrap(), (500, 21));
-        assert_eq!(s.decision_usage_since("jev", 0).unwrap(), (1000, 42));
+        assert_eq!(
+            s.decision_usage_since("jev", 150, RunScope::Live).unwrap(),
+            (500, 21)
+        );
+        assert_eq!(
+            s.decision_usage_since("jev", 0, RunScope::Live).unwrap(),
+            (1000, 42)
+        );
         let stats = s.decision_stats(0).unwrap();
         let wl = stats.iter().find(|r| r.feature == "work_link").unwrap();
         assert_eq!((wl.runs, wl.called, wl.compared, wl.agreed), (2, 2, 2, 1));
@@ -880,6 +942,51 @@ mod tests {
         assert_eq!(s.sweep_decision_runs(250, 1).unwrap(), 1);
         assert_eq!(s.sweep_decision_runs(250, 10).unwrap(), 1);
         assert_eq!(s.decision_run_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_benchmarks_runs_never_count_toward_the_live_breaker_budget_or_stats() {
+        let s = Store::open_in_memory().unwrap();
+        let bench = |at: i64, fallback: Option<&str>| NewDecisionRun {
+            at,
+            subject_kind: DECISION_BENCH_SUBJECT.into(),
+            subject_id: format!("s{at}"),
+            fallback: fallback.map(str::to_string),
+            answer: fallback.is_none().then(|| "ACME-1".into()),
+            ..run("work_link")
+        };
+        s.insert_decision_run(&run("work_link")).unwrap();
+        for at in [2_000, 2_001, 2_002] {
+            s.insert_decision_run(&bench(at, Some("timeout"))).unwrap();
+        }
+        // The live breaker and budget see the live run only.
+        assert_eq!(
+            s.decision_failure_streak("jev", 5, RunScope::Live).unwrap(),
+            (0, None)
+        );
+        assert_eq!(
+            s.decision_usage_since("jev", 0, RunScope::Live).unwrap(),
+            (500, 21)
+        );
+        // A benchmark call is gated on everything.
+        assert_eq!(
+            s.decision_failure_streak("jev", 5, RunScope::All).unwrap(),
+            (3, Some(2_002))
+        );
+        assert_eq!(
+            s.decision_usage_since("jev", 0, RunScope::All).unwrap(),
+            (2_000, 84)
+        );
+        // The stats keep them apart: the live row counts one run.
+        let stats = s.decision_stats(0).unwrap();
+        let live: Vec<_> = stats.iter().filter(|r| !r.bench).collect();
+        assert_eq!(live.len(), 1);
+        assert_eq!((live[0].runs, live[0].called), (1, 1));
+        let b = stats.iter().find(|r| r.bench).unwrap();
+        assert_eq!(
+            (b.feature.as_str(), b.fallback.as_deref(), b.runs),
+            ("work_link", Some("timeout"), 3)
+        );
     }
 
     const KEY: &str = "tsk_live_0123456789abcdefghijklmnop";

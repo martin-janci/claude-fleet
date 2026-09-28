@@ -39,15 +39,16 @@ use super::{bootstrap_acc_diff, f3, percentile, Calibration, Criterion, Paired, 
 use crate::ipc_error::lock;
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
-use crate::service::decide::{decide, gate_at, DecideCtx, DecideRequest, Fallback, Feature};
+use crate::service::decide::{decide, gate_bench_at, DecideCtx, DecideRequest, Fallback, Feature};
 use crate::service::trackers::asana::{infer_section, section_key};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The question's version, recorded on every Jev run of the benchmark.
 pub const QUESTION_VERSION: &str = "status_map.bench.v1";
-/// `decision_runs.subject_kind` of a benchmark call.
-pub const SUBJECT_KIND: &str = "bench";
+/// `decision_runs.subject_kind` of a benchmark call: gated without the
+/// feature's mode, and kept out of the live breaker, budget and stats.
+pub const SUBJECT_KIND: &str = crate::store::DECISION_BENCH_SUBJECT;
 /// The built-in synthetic set (D43).
 pub const FIXTURE: &str = include_str!("../../testdata/decide/status_map_sections.jsonl");
 /// Where it lives in the repository.
@@ -291,7 +292,7 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[SectionCase], max_calls: usize) -
     let mut calls = 0usize;
     for c in cases {
         let gated = match lock(&ctx.store) {
-            Ok(s) => gate_at(&s, Feature::StatusMap, c.org_id, ctx.now()),
+            Ok(s) => gate_bench_at(&s, Feature::StatusMap, c.org_id, ctx.now()),
             Err(_) => Err(Fallback::FlagOff),
         };
         if let Err(f) = gated {

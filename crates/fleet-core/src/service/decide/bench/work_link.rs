@@ -60,7 +60,7 @@ use super::{bootstrap_acc_diff, mix, percentile, Calibration, Criterion, Paired,
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::{
-    decide, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
+    decide, gate_bench_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
 };
 use crate::service::nl::census::{FleetPrompts, Shown};
 use crate::service::nl::{self, Ranker};
@@ -88,8 +88,9 @@ pub const ACCEPT_BELOW_HAIKU: f64 = 0.03;
 pub const ACCEPT_CELL_BELOW_ENGLISH: f64 = 0.10;
 /// The English cell the language rule compares against.
 pub const ENGLISH_CELL: &str = "en×en";
-/// `decision_runs.subject_kind` of a benchmark call.
-pub const SUBJECT_KIND: &str = "bench";
+/// `decision_runs.subject_kind` of a benchmark call: gated without the
+/// feature's mode, and kept out of the live breaker, budget and stats.
+pub const SUBJECT_KIND: &str = crate::store::DECISION_BENCH_SUBJECT;
 /// The option that means "none of these".
 pub const NONE_OPTION: &str = "none";
 /// The most candidates a case offers (test map J1: ≤ 50).
@@ -1258,7 +1259,7 @@ pub async fn run_jev(
     let mut calls = 0usize;
     for case in cases {
         let gated = match lock(&ctx.store) {
-            Ok(s) => gate_at(&s, Feature::WorkLink, case.org_id, ctx.now()),
+            Ok(s) => gate_bench_at(&s, Feature::WorkLink, case.org_id, ctx.now()),
             Err(_) => Err(crate::service::decide::Fallback::FlagOff),
         };
         if let Err(f) = gated {
