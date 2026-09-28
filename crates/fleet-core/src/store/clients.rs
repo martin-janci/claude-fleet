@@ -10,12 +10,13 @@ use crate::ipc_error::codes;
 /// short enough that a name cannot be used to pad a log line or a prompt.
 pub const MAX_CLIENT_NAME_LEN: usize = 64;
 
-/// The three modes a client token may carry. Anything else is refused at the
+/// The modes a client token may carry. Anything else is refused at the
 /// insert: `TokenMode::parse_client` reads an unknown string as `readonly`,
 /// so a typo would silently downgrade a client rather than fail. `peer`
 /// identifies a linked hub (federation) rather than an operator's own
-/// device — see `TokenMode::Peer` and `set_client_trust`.
-pub const CLIENT_MODES: &[&str] = &["full", "readonly", "peer"];
+/// device — see `TokenMode::Peer` and `set_client_trust`. `updater` is
+/// `fleet-updater` acting for this hub, `/update/*` only (`TokenMode::Updater`).
+pub const CLIENT_MODES: &[&str] = &["full", "readonly", "peer", "updater"];
 
 /// The three line separators [`char::is_control`] does NOT cover. A renderer,
 /// a terminal, a JSON log viewer or an LLM reading a transcript may all treat

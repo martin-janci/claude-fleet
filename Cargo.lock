@@ -1402,6 +1402,7 @@ dependencies = [
  "directories",
  "fleet-agent",
  "fleet-proto",
+ "fleet-update",
  "futures-util",
  "hex",
  "hmac",

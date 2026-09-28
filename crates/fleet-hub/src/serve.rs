@@ -1045,6 +1045,18 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         fleet_core::service::trackers::default_net(),
         ticks_cancel.clone(),
     );
+    // Application updates (update design S4): re-read the signed release
+    // channel every `update.check_interval_secs`, and record this hub's own
+    // build as `hub:self`. Stopped with the ticks.
+    let update_handle = fleet_core::service::update::spawn_refresh_tick(
+        Arc::clone(&store),
+        fleet_core::service::update::HubSelf {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: crate::ready::COMMIT.to_string(),
+            build_id: crate::ready::BUILD_ID.to_string(),
+        },
+        ticks_cancel.clone(),
+    );
 
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
@@ -1079,6 +1091,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     tick_handles.push(usage_handle);
     tick_handles.push(peer_handle);
     tick_handles.push(ready_handle);
+    tick_handles.push(update_handle);
     if let Some(h) = tracker_handle {
         tick_handles.push(h);
     }

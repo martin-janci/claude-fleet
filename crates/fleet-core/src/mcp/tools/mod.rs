@@ -55,6 +55,7 @@ mod tests;
 mod tests_isolation;
 #[cfg(test)]
 mod tests_read_pool;
+mod updates;
 mod views;
 
 // `rmcp::model::*` also exports a `CancelTaskParams`. Name ours explicitly:
@@ -348,6 +349,7 @@ impl FleetTools {
             + Self::repo_router()
             + Self::assets_router()
             + Self::peer_router()
+            + Self::updates_router()
     }
 }
 

@@ -164,6 +164,17 @@ pub(super) fn enforce_mode(caller: &Caller, tool: &str) -> Result<(), McpError> 
             None,
         ));
     }
+    // `fleet-updater`'s token reaches `/update/*` only, never a tool.
+    if caller.mode == TokenMode::Updater {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{tool} is not available to an updater token ({})",
+                caller.label()
+            ),
+            None,
+        ));
+    }
     if peer_tool && caller.mode != TokenMode::Peer {
         return Err(mcp_err(
             "E_FORBIDDEN",
@@ -721,7 +732,7 @@ pub(super) fn persist_audit(
     // to the controller when the peer-supplied args name no real session. A
     // hub link may only ever reach `peer_exchange` (handled above), so any
     // other tool it names is refused and must leave no trace.
-    if caller.mode == TokenMode::Peer {
+    if caller.mode.is_single_purpose() {
         return;
     }
     // Task 2: a read-only tool (`guard::READONLY_TOOLS` — the exact set a

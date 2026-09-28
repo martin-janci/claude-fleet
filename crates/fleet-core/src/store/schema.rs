@@ -150,7 +150,7 @@ fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 079: `sessions` already has its
+/// `already_applied` guard of migration 080: `sessions` already has its
 /// `stale_demoted_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again (the backfill is `backfill_stale_demoted`, idempotent, outside the
 /// migration). See [`Migration`].
@@ -839,14 +839,17 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/078_host_provision_fingerprint.sql"),
         already_applied: Some(hosts_has_provision_fingerprint),
     },
+    // Application updates (S4): desired / observed / events / the signed
+    // document cache. `CREATE TABLE IF NOT EXISTS` only.
+    Migration::plain(79, include_str!("../../migrations/079_update_state.sql")),
     // Stale-working acknowledgement: `sessions.stale_demoted_at`, the
     // reconcile veto's memory apart from the attention stamp (one ADD
     // COLUMN, its own guard; the backfill is `backfill_stale_demoted`,
     // after the collision repair). Not a `SessionRow` field, so 065's
     // row_version trigger does not watch it.
     Migration {
-        version: 79,
-        sql: include_str!("../../migrations/079_stale_demoted.sql"),
+        version: 80,
+        sql: include_str!("../../migrations/080_stale_demoted.sql"),
         already_applied: Some(sessions_has_stale_demoted_at),
     },
 ];
@@ -3329,7 +3332,7 @@ mod tests {
     /// deliberately does NOT watch: `row_version` itself (an explicit
     /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
     /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
-    /// backfill mark, 079's stale-working veto memory). Every other column is
+    /// backfill mark, 080's stale-working veto memory). Every other column is
     /// watched, so a write that changes it bumps the counter.
     const ROW_VERSION_UNWATCHED: [&str; 5] = [
         "row_version",
@@ -3535,14 +3538,14 @@ mod tests {
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
-    /// Migration 079 on a populated v78 database: a row already demoted
+    /// Migration 080 on a populated v79 database: a row already demoted
     /// keeps its veto (backfilled from `stale_working_at`), an unstamped row
     /// stays unarmed, no `row_version` moves (the column is not watched),
     /// and re-running it (the tests' roll back and re-migrate, or any later
     /// open) neither fails nor overwrites a veto already set.
     #[test]
-    fn migration_079_backfills_stale_demoted_at_and_is_safe_to_rerun() {
-        let s = store_at_version(78);
+    fn migration_080_backfills_stale_demoted_at_and_is_safe_to_rerun() {
+        let s = store_at_version(79);
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias) VALUES ('h');
@@ -3593,7 +3596,7 @@ mod tests {
             "a stale_demoted_at change is not visible"
         );
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 79;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 80;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

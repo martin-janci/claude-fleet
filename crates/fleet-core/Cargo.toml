@@ -42,6 +42,10 @@ async-trait = "0.1"
 # The hub/agent wire types, shared with the `fleet-agent` binary (which never
 # depends on this crate). See crates/fleet-proto/src/lib.rs.
 fleet-proto = { path = "../fleet-proto" }
+# The update engine (manifests, signatures, decide()): the hub decides for
+# its fleet with the same pure function a standalone client runs. It depends
+# on nothing of ours, so this adds no cycle.
+fleet-update = { path = "../fleet-update" }
 
 # Control API: the app embeds an MCP server (streamable-HTTP transport) on
 # localhost so an AI assistant can drive it. See docs/specs/2026-05-21-control-api-mcp-design.md.
@@ -103,6 +107,8 @@ toml = "0.8"
 libc = "0.2"
 
 [dev-dependencies]
+# Signed test documents for `service::update`'s tests.
+fleet-update = { path = "../fleet-update", features = ["testkit"] }
 tempfile = "3"
 # `trace` only in tests: the work graph's scale tests (M12.2,
 # store/scale_fixture.rs) capture the statements a call runs and check each

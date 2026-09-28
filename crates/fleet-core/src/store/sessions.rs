@@ -1516,7 +1516,7 @@ impl Store {
     }
 
     /// Whether the tick's stale-working rule demoted this row and nothing
-    /// has lifted the demotion since (`stale_demoted_at`, migration 079):
+    /// has lifted the demotion since (`stale_demoted_at`, migration 080):
     /// the reconcile's `stale_working_veto` reads it for the prior row,
     /// since an attach or the TTL may have cleared `stale_working_at` while
     /// the demotion still stands. `false` for a row that does not exist.
@@ -3766,7 +3766,7 @@ mod tests {
     }
 
     /// Final review of the acknowledgement: `stale_demoted_at` (the veto's
-    /// memory, migration 079) outlives the attention stamp. Every hook
+    /// memory, migration 080) outlives the attention stamp. Every hook
     /// clears both; the TTL clears only the stamp; a row working or blocked
     /// again clears both — silently when the stamp was already gone, since
     /// nothing a client sees changes.
