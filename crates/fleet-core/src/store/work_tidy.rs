@@ -59,7 +59,7 @@ impl Store {
                 "SELECT p.session_id, l.id, COALESCE(i.key, l.ref_key), i.status_category, \
                         i.status_name, i.resolution, i.status_changed_at, l.archived_at, \
                         l.tidy_snoozed_until, l.tidy_never, \
-                        (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
+                        COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END) \
                  FROM work_links l \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  LEFT JOIN work_items i ON i.id = l.item_id \
@@ -487,7 +487,7 @@ impl Store {
                     (SELECT l.snap_host FROM work_links l WHERE l.item_id = i.id \
                        AND l.ended_at IS NOT NULL AND l.state = 'confirmed' \
                      ORDER BY l.ended_at DESC, l.id DESC LIMIT 1), \
-                    (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
+                    COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END) \
              FROM work_items i \
              WHERE i.reopened_at IS NOT NULL AND i.status_category <> 'done' \
                AND NOT EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = i.id \

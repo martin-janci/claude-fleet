@@ -893,6 +893,22 @@ where
             ));
         }
     }
+    // A client bound to an org (M14) resumes only where the new session
+    // would be its org's (the landing host can be overridden).
+    // (With D31 off, an unassigned one is not its to see either.)
+    if let (Some(_), Some(host), Some(pid)) = (
+        scope.bound_org(),
+        plan.host_alias.as_deref(),
+        plan.project_id,
+    ) {
+        let org = lock(store)?.org_for_new_session(host, pid)?;
+        if !scope.sees_org(org) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "a client bound to an org resumes work only on its own org's projects and hosts",
+            ));
+        }
+    }
     let (new_args, _claim) = {
         let s = lock(store)?;
         // The plan's guards (no live session for the key; for `last`, the

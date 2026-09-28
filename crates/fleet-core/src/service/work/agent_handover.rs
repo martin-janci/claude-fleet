@@ -245,6 +245,9 @@ pub async fn request(
             if row.host_alias != h || !scope.sees_row(&row) {
                 return Err(orgs::not_found("session", session_id));
             }
+        } else if !scope.sees_row(&row) {
+            // A client bound to another org (M14): an unknown session.
+            return Err(orgs::not_found("session", session_id));
         }
         crate::service::operator::refuse_if_operator(
             &s,

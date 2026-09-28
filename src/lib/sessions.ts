@@ -143,6 +143,11 @@ export interface SessionRow {
   /** The session's org (work graph M5): the most specific org rule, else
    *  its host's org. Absent = unassigned (or a hub older than M5). */
   org_id?: number | null;
+  /** A digest of the versions and ids of the session's live (non-ended)
+   *  work links (work graph M14): it moves whenever any of them changes —
+   *  added, removed, primary, state — a secondary link too. Absent = 0 (no
+   *  live links, or a hub older than the Work view). */
+  work_rev?: number;
 }
 
 /** `SessionRow.work`: the primary link's summary. `key` is the item's key or
@@ -413,6 +418,31 @@ export async function setFriendlyName(
 export async function restartSession(hostAlias: string, name: string): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('restart_session', {
     args: { host_alias: hostAlias, name },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Truncate this session's transcript into a new conversation.
+ *
+ *  `mode: 'rewind'` restarts THIS session on the copy; `'fork'` leaves it
+ *  running and starts a new session on the copy. `anchorUuid` is the turn's
+ *  `prompt_uuid` for a rewind, and the NEXT later turn's for a fork — `null`
+ *  keeps the whole transcript, which is what forking the newest turn means.
+ */
+export async function rewindConversation(
+  sessionId: number,
+  mode: 'rewind' | 'fork',
+  anchorUuid: string | null,
+  newWorktree: string | null = null,
+): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('rewind_conversation', {
+    args: {
+      session_id: sessionId,
+      mode,
+      anchor_uuid: anchorUuid,
+      new_worktree: newWorktree,
+    },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;

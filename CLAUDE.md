@@ -109,7 +109,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 173
+  verdict is written down once, in `backend/verdicts.rs`, for all 201
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -282,10 +282,19 @@ small plans. Two items stay open, waiting on the owner: the acceptance run
 and its triage (M13.3), and D5 (M13.4b). Open decisions are the roadmap's table, and a decision-gated
 feature starts only on the user's "yes".
 Work graph M14 (the Work view: org → group → task → every session, and a
-phone paired to one org) is the one milestone after it (D36), planned,
-M14.0 done: plan
+phone paired to one org) is the one milestone after it (D36): plan
 `docs/superpowers/plans/2026-09-27-work-graph-m14-work-view.md`, design
-`docs/superpowers/specs/2026-09-27-work-view-design.md`.
+`docs/superpowers/specs/2026-09-27-work-view-design.md`. M14.1a–d (the
+backend: `work { tree | task | session_tasks | review | rules | … }` in
+`service/work/view.rs`, `work_link { set_primary | place | assign_org | … }`
+in `service/work/structure.rs`, migrations 066–067, org-bound clients as
+`OrgScope::Org`, compare-and-set with `E_CONFLICT`, the desktop commands
+and `work:changed`) and M14.2–M14.4 (the desktop Work view — `WorkTree`,
+`WorkTaskDetail`, `WorkReview`, the rules / place / org dialogs, state in
+`src/lib/work_view.ts` — and fleet-mobile's *My work*) are landed; the
+desktop re-reads on `onWorkChanged` and the `workChanged` tick in
+`work.ts`. `scripts/hub-e2e.sh` hub W section 10 runs the contract on a
+real hub. M14.5, the acceptance run (Part R), waits on the owner.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

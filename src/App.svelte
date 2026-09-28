@@ -11,6 +11,8 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
+  import { bumpWorkChanged, noteWorkChanged, noteWorkEvents, sessionEventsTouchWork, toggleSidebarView } from './lib/work_view';
+  import type { SessionEvent } from './lib/sessions';
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
@@ -177,6 +179,8 @@
   // its FIRST sync, the sessions whose keys it owns just got titles and
   // status (retro-binding); say how many, and offer the Group-by-Work view.
   function onWorkEvents(events: WorkEvent[]) {
+    // The Work view (M14) re-reads what it shows when an item moved.
+    noteWorkEvents(events);
     for (const t of applyWorkEvents(events)) {
       const keys = get(sessions).map((s) => s.work?.key ?? null);
       const { count, prefixes } = sessionsMentioning(t, keys);
@@ -187,6 +191,14 @@
         action: { label: 'Review', run: () => sidebarGroupBy.set('work') },
       });
     }
+  }
+
+  // Session events that move a session's work (or the attention of one the
+  // Work view shows) refresh the Work view too; compared before the store
+  // takes them.
+  function onSessionEvents(events: SessionEvent[]) {
+    if (sessionEventsTouchWork(events)) bumpWorkChanged();
+    applySessionEvents(events);
   }
 
   onMount(async () => {
@@ -227,7 +239,7 @@
     // the list is in flight would otherwise be emitted to no listener and
     // lost until the row changes again.
     unlistenEvents = await subscribeToRowEvents({
-      onSessionEvents: applySessionEvents,
+      onSessionEvents: onSessionEvents,
       onHostEvents: applyHostEvents,
       onAccountEvents: applyAccountEvents,
       onProjectEvents: applyProjectEvents,
@@ -241,6 +253,8 @@
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
       onWorkEvents: onWorkEvents,
+      // `work:changed` (M14): the Work view re-reads.
+      onWorkChanged: noteWorkChanged,
     });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
@@ -355,6 +369,7 @@
     if (get(hubStatus).unavailable) return;
     if (outcomeRefreshInFlight) return;
     outcomeRefreshInFlight = true;
+    bumpWorkChanged();
     void Promise.all([loadProjects(), loadSessions()]).finally(() => {
       outcomeRefreshInFlight = false;
     });
@@ -624,6 +639,10 @@
     else if (chord === 'agent') void toggleAgent();
     else if (chord === 'scope') cycleScope();
     else if (chord === 'today') todayOpen.update((v) => !v);
+    else if (chord === 'work-view') {
+      sidebarCollapsed = false;
+      toggleSidebarView();
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {

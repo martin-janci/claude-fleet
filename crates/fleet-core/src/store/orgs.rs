@@ -88,6 +88,16 @@ pub struct OrgRow {
     /// `work.auto_tidy`. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tidy: Option<bool>,
+    /// D31 (work graph M14.1b, migration 067): the org's bound paired
+    /// clients also see unassigned work and sessions (the default), as a
+    /// host does; off, only rows assigned to the org. Absent from an older
+    /// hub, which has no bound client.
+    #[serde(default = "bound_sees_unassigned_default")]
+    pub bound_sees_unassigned: bool,
+}
+
+fn bound_sees_unassigned_default() -> bool {
+    true
 }
 
 /// One placement rule. At least one of `owner`, `path_prefix`, `host_alias`
@@ -264,7 +274,8 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
     Ok(r)
 }
 
-const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy";
+const ORG_COLUMNS: &str =
+    "id, name, color, isolate_sessions, created_at, auto_tidy, bound_sees_unassigned";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -275,6 +286,7 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         isolate_sessions: r.get::<_, i64>(3)? != 0,
         created_at: r.get(4)?,
         auto_tidy: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
+        bound_sees_unassigned: r.get::<_, i64>(6)? != 0,
     })
 }
 
@@ -387,6 +399,20 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE orgs SET auto_tidy = ?2 WHERE id = ?1",
             rusqlite::params![id, on.map(|b| b as i64)],
+        )?;
+        if n == 0 {
+            return Err(org_not_found(id));
+        }
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
+    /// Set D31 for an org (work graph M14.1b): whether its bound paired
+    /// clients also see unassigned work and sessions. A change bumps the
+    /// auth epoch (migration 067's trigger).
+    pub fn set_org_bound_sees_unassigned(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        let n = self.conn.execute(
+            "UPDATE orgs SET bound_sees_unassigned = ?2 WHERE id = ?1",
+            rusqlite::params![id, on as i64],
         )?;
         if n == 0 {
             return Err(org_not_found(id));
@@ -571,11 +597,15 @@ impl Store {
     /// A work item's org: its tracker's; `None` for a local item, an
     /// unassigned tracker or an unknown id.
     pub fn item_org(&self, item_id: i64) -> Result<Option<i64>, IpcError> {
+        // A tracker item's org is its tracker's; a local item's is its own
+        // (work graph M14, `work_items.org_id`, set only on a local item).
         Ok(self
             .conn
             .query_row(
-                "SELECT t.org_id FROM work_items i JOIN trackers t ON t.id = i.tracker_id \
-                 WHERE i.id = ?1",
+                "SELECT CASE WHEN i.tracker_id IS NOT NULL \
+                             THEN (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
+                             ELSE i.org_id END \
+                 FROM work_items i WHERE i.id = ?1",
                 rusqlite::params![item_id],
                 |r| r.get::<_, Option<i64>>(0),
             )
@@ -619,20 +649,21 @@ impl Store {
         if let Some(org) = l.item_id.map(|i| self.item_org(i)).transpose()?.flatten() {
             return Ok(Some(org));
         }
-        if l.ended_at.is_none() {
-            if let Some(p) = l.participant_id {
-                let sid: Option<i64> = self
-                    .conn
-                    .query_row(
-                        "SELECT session_id FROM participants WHERE id = ?1 AND retired_at IS NULL",
-                        rusqlite::params![p],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-                if let Some(sid) = sid {
-                    return self.session_org(sid);
-                }
+        // A live participant decides — also for a link that ended while its
+        // session lives on (a branch change), which has no snapshot to read
+        // (work graph M14; it read as unassigned before).
+        if let Some(p) = l.participant_id {
+            let sid: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT session_id FROM participants WHERE id = ?1 AND retired_at IS NULL",
+                    rusqlite::params![p],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(sid) = sid {
+                return self.session_org(sid);
             }
         }
         // `org_id` holds `snap_org_id` straight from the row (see `map_link`).
@@ -739,6 +770,51 @@ impl Store {
     }
 
     /// Resolve every link's `org_id` in place ([`Store::link_org`]).
+    /// Every work item with its org ([`Self::item_org`]'s rule), for the
+    /// fences that must decide over all of them at once.
+    pub fn work_item_orgs(&self) -> Result<Vec<(i64, Option<i64>)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT i.id, CASE WHEN i.tracker_id IS NOT NULL \
+                               THEN (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
+                               ELSE i.org_id END \
+             FROM work_items i",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The live session a link is on (its participant's session), if any.
+    pub fn link_session_id(&self, l: &super::WorkLinkRow) -> Result<Option<i64>, IpcError> {
+        let Some(p) = l.participant_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT session_id FROM participants WHERE id = ?1 AND retired_at IS NULL",
+                rusqlite::params![p],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Where an ended link's session ran: its snapshot's host and org.
+    pub fn link_snapshot_place(
+        &self,
+        link_id: i64,
+    ) -> Result<(Option<String>, Option<i64>), IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT snap_host, snap_org_id FROM work_links WHERE id = ?1",
+                rusqlite::params![link_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None)))
+    }
+
     pub fn fill_link_orgs(&self, links: &mut [super::WorkLinkRow]) -> Result<(), IpcError> {
         for l in links.iter_mut() {
             l.org_id = self.link_org(l)?;

@@ -61,7 +61,8 @@ pub enum OrgCmd {
         #[arg(long, value_enum)]
         isolate_sessions: Option<OnOff>,
     },
-    /// Rename, recolour, or turn session isolation on or off.
+    /// Rename, recolour, or change the org's switches (session isolation,
+    /// auto-tidy, what its bound devices see).
     Set {
         /// The org's id, from `org list`.
         id: i64,
@@ -75,6 +76,11 @@ pub enum OrgCmd {
         /// `work.auto_tidy` for its sessions, inherit follows it.
         #[arg(long, value_enum)]
         auto_tidy: Option<AutoTidy>,
+        /// Devices bound to this org (`pair --org`) also see unassigned work
+        /// and sessions, as a host does (on, the default); off: only the
+        /// org's own (decision D31).
+        #[arg(long, value_enum)]
+        bound_sees_unassigned: Option<OnOff>,
     },
     /// Remove an org: its rules go, its hosts become unassigned. Refused
     /// while a tracker belongs to it.
@@ -152,16 +158,17 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             color,
             isolate_sessions,
             auto_tidy,
+            bound_sees_unassigned,
         } => {
             if name.is_none()
                 && color.is_none()
                 && isolate_sessions.is_none()
                 && auto_tidy.is_none()
+                && bound_sees_unassigned.is_none()
             {
-                return Err(
-                    "nothing to set: pass --name, --color, --isolate-sessions or --auto-tidy"
-                        .into(),
-                );
+                return Err("nothing to set: pass --name, --color, --isolate-sessions, \
+                     --auto-tidy or --bound-sees-unassigned"
+                    .into());
             }
             let mut a = json!({ "action": "update_org", "org_id": id });
             if let Some(n) = name {
@@ -175,6 +182,9 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             }
             if let Some(t) = auto_tidy {
                 a["auto_tidy"] = json!(t.as_str());
+            }
+            if let Some(b) = bound_sees_unassigned {
+                a["bound_sees_unassigned"] = json!(b.on());
             }
             a
         }
@@ -253,7 +263,7 @@ fn org_lines(o: &Value) -> Vec<String> {
                 .map(|c| format!("  {c}"))
                 .unwrap_or_default(),
             format!(
-                "{}{}",
+                "{}{}{}",
                 if o["isolate_sessions"].as_bool().unwrap_or(false) {
                     "  [isolates sessions]"
                 } else {
@@ -263,6 +273,13 @@ fn org_lines(o: &Value) -> Vec<String> {
                     Some(true) => "  [auto-tidy on]",
                     Some(false) => "  [auto-tidy off]",
                     None => "",
+                },
+                // D31: only the off state is news (on is the default, and an
+                // older hub that sends no field has no bound devices).
+                if o["bound_sees_unassigned"].as_bool() == Some(false) {
+                    "  [bound devices: own org only]"
+                } else {
+                    ""
                 }
             )
         ),
@@ -384,6 +401,10 @@ mod tests {
             json!({ "action": "update_org", "org_id": 2, "auto_tidy": "inherit" })
         );
         assert_eq!(
+            args(&["set", "2", "--bound-sees-unassigned", "off"]),
+            json!({ "action": "update_org", "org_id": 2, "bound_sees_unassigned": false })
+        );
+        assert_eq!(
             args(&["rm", "2"]),
             json!({ "action": "remove_org", "org_id": 2 })
         );
@@ -446,5 +467,11 @@ mod tests {
         assert!(lines[1].contains("#5 path: /w/acme"));
         assert!(lines[2].contains("hetzner-a"));
         assert!(lines[3].contains("acme (#2)"));
+        assert!(
+            !lines[0].contains("bound devices"),
+            "on (or absent) is the default"
+        );
+        let own = org_lines(&json!({ "id": 2, "name": "B", "bound_sees_unassigned": false }));
+        assert!(own[0].contains("[bound devices: own org only]"));
     }
 }

@@ -36,6 +36,7 @@ use fleet_core::service::bg_sessions::{
     self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs,
 };
 use fleet_core::service::repair::{self, RepairReport};
+use fleet_core::service::rewind::{self, RewindArgs};
 use fleet_core::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
 };
@@ -160,6 +161,25 @@ pub async fn restart_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     routed::restart_session(&backend, args, &store, &ssh).await
+}
+
+/// `RewindArgs` is also `service::rewind`'s own parameter type (it derives
+/// `Serialize`/`Deserialize` for exactly this reason), so the frontend's
+/// `mode: 'rewind' | 'fork'` deserialises straight into `RewindMode` with no
+/// second params struct in between.
+///
+/// Needs `reg`, unlike `restart_session` beside it: the Fork arm spawns a new
+/// session through `sessions::new_session`, which hard-requires a
+/// `CancellationRegistry` for its remote git/clone step.
+#[tauri::command]
+pub async fn rewind_conversation(
+    args: RewindArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<SessionRow, IpcError> {
+    routed::rewind_conversation(&backend, args, &store, &ssh, &reg).await
 }
 
 #[tauri::command]
@@ -577,6 +597,19 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("restart_session", &args).await,
             None => sessions::restart_session(args, store, ssh).await,
+        }
+    }
+
+    pub async fn rewind_conversation(
+        backend: &FleetBackend,
+        args: RewindArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("rewind_conversation", &args).await,
+            None => rewind::rewind_conversation(args, store, ssh, reg).await,
         }
     }
 

@@ -613,6 +613,7 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         | "work:tracker"
         | "work:tracker_removed" => integer("id"),
         "host:added" | "host:probed" | "host:removed" => string("alias"),
+        "work:changed" => string("what"),
         "session:event" | "session:conversations" => integer("session_id"),
         "account:upserted" => string("uuid"),
         "account_usage:updated" => string("account_uuid"),
@@ -812,11 +813,20 @@ impl FleetResync for HubResync {
                 "[hub events] could not re-list accounts after reconnecting"
             ),
         }
+        // The Work view (work graph M14.1d) is read through the hub, not
+        // held in a store a re-list could refill: after a gap it reloads
+        // whole. A resync runs only when the hub could not resume the stream
+        // (`resumed: false`: a fresh subscription, or one past the replay
+        // ring), so every resync is that gap. Only once the hub answered: a
+        // reload against a hub that is down would only trade the view for
+        // an error.
         if reached {
             self.sink.emit_remote(
                 RESYNCED_EVENT,
                 serde_json::json!({ "projects": true, "work": true }),
             );
+            self.sink
+                .emit_remote("work:changed", serde_json::json!({ "what": "resync" }));
         }
     }
 }

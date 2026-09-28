@@ -506,7 +506,9 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
         "probe": 1, "id": 1, "session_id": 1, "alias": "trn", "uuid": "u-1", "account_uuid": "u-1",
         "host_alias": "trn", "harness": "claude",
         // `move:progress` is read field by field rather than merged on a key.
-        "to_host": "trn", "step": "git", "state": "done", "index": 4
+        "to_host": "trn", "step": "git", "state": "done", "index": 4,
+        // `work:changed` (work graph M14) says what changed.
+        "what": "rule"
     });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES
         .iter()
@@ -1716,11 +1718,13 @@ async fn a_resync_emits_the_rows_it_re_listed_as_the_events_the_stores_apply() {
             "host:probed",
             "host:probed",
             "hub:resynced",
+            "work:changed"
         ],
         "a re-list has to reach the stores as the events they already apply — \
          there is no `refetch` event for THESE stores and giving them one would \
-         be a store change; `hub:resynced` at the end is for the window's own \
-         loaders (projects, work), never a row"
+         be a store change; `hub:resynced` is for the window's own loaders \
+         (projects, work), never a row, and the Work view, which no store \
+         holds, is told to reload whole"
     );
     assert_eq!(
         table.asked(),
@@ -1729,6 +1733,31 @@ async fn a_resync_emits_the_rows_it_re_listed_as_the_events_the_stores_apply() {
          tools answer ProjectTreeRow/WorktreeOccupancy while the events carry \
          ProjectRow/WorktreeRow, and a wrong payload is worse than a stale one"
     );
+}
+
+/// Work graph M14.1d: every resync closes a gap the hub could not replay
+/// (a resync runs only on `resumed: false`), so the Work view — read
+/// through the hub, held in no store — is told to reload whole, with ids
+/// only and after the rows.
+#[tokio::test]
+async fn a_resync_tells_the_work_view_to_reload_whole() {
+    let (resync, seen, _) = resync_over(&[
+        ("list_sessions", &sessions_payload(&[1])),
+        ("list_hosts", &hosts_payload(&["trn"])),
+        ("list_tasks", "[]"),
+        ("list_accounts", "[]"),
+    ]);
+    resync.resync().await;
+    let last = seen.events().pop().expect("the resync emitted");
+    assert_eq!(last, ("work:changed", json!({ "what": "resync" })));
+    assert!(
+        crate::backend::events::payload_fits(last.0, &last.1).is_ok(),
+        "the frame passes the bridge's own payload check"
+    );
+    // The hub down: nothing at all, the reload included.
+    let (resync, seen, _) = resync_over(&[]);
+    resync.resync().await;
+    assert!(!seen.names().contains(&"work:changed"));
 }
 
 /// The resync emits the hub's `list_tasks` rows as `task:updated`, so it
@@ -1937,10 +1966,12 @@ async fn a_resync_ends_by_telling_the_window_to_refetch_projects_and_work() {
         ("list_accounts", "[]"),
     ]);
     resync.resync().await;
+    let names = seen.names();
     assert_eq!(
-        seen.names().last().map(|n| n.to_string()),
-        Some(crate::backend::events::RESYNCED_EVENT.to_string()),
+        names[names.len().saturating_sub(2)..].to_vec(),
+        vec![crate::backend::events::RESYNCED_EVENT, "work:changed"],
         "projects, worktrees and work have list shapes the events cannot carry; \
-         the window re-fetches them with its own loaders on this signal"
+         the window re-fetches them with its own loaders on this signal, after \
+         every row; only the Work view's own reload (M14.1d) follows it"
     );
 }
