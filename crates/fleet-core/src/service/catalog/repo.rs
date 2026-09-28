@@ -40,7 +40,7 @@ struct CatalogFile {
 /// this directly; everything else goes through `git`, which turns a non-zero
 /// status into an `E_CATALOG_GIT`.
 fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcError> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::proc::std_command("git");
     cmd.args(args).current_dir(dir);
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the

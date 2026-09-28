@@ -90,7 +90,7 @@ pub fn map_tunnel_states(
 /// can't stall onboarding; a timeout, spawn error, or non-zero exit all yield
 /// `None`.
 async fn tool_version(bin: &str, arg: &str) -> Option<String> {
-    let fut = tokio::process::Command::new(bin).arg(arg).output();
+    let fut = crate::proc::command(bin).arg(arg).output();
     let out = tokio::time::timeout(std::time::Duration::from_secs(3), fut)
         .await
         .ok()? // timed out

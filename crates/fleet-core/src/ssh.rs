@@ -191,7 +191,7 @@ impl SshClient {
     /// production, a fake script under test — see
     /// [`SshClient::with_ssh_binary`]).
     fn ssh_command(&self) -> tokio::process::Command {
-        tokio::process::Command::new(&self.inner.ssh_bin)
+        crate::proc::command(&self.inner.ssh_bin)
     }
 
     /// The registry this client routes agent hosts through, if it has one.
@@ -941,7 +941,7 @@ impl SshClient {
         let hosts: Vec<String> = self.inner.seen.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
             for path in [self.control_path(&host), self.control_path_for_pty(&host)] {
-                let _ = std::process::Command::new(&self.inner.ssh_bin)
+                let _ = crate::proc::std_command(&self.inner.ssh_bin)
                     .args([
                         "-o",
                         &format!("ControlPath={}", path.display()),
@@ -1154,7 +1154,7 @@ pub async fn run_shell_bounded(
 }
 
 async fn run_local_shell(script: &str, wall_clock: Duration) -> Result<Output, IpcError> {
-    let child = tokio::process::Command::new("bash")
+    let child = crate::proc::command("bash")
         .args(["-lc", script])
         .kill_on_drop(true)
         .output();
@@ -1180,7 +1180,7 @@ async fn run_local_with_stdin(
     max_output: usize,
 ) -> Result<Output, IpcError> {
     let host = crate::service::projects::LOCAL_HOST;
-    let mut child = tokio::process::Command::new("bash")
+    let mut child = crate::proc::command("bash")
         .arg("-c")
         .arg(args.join(" "))
         .stdin(std::process::Stdio::piped())
@@ -1592,7 +1592,7 @@ impl LocalExec {
     }
 
     fn command(&self, args: &[&str]) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("bash");
+        let mut cmd = crate::proc::command("bash");
         cmd.arg("-c").arg(args.join(" "));
         for k in &self.env_remove {
             cmd.env_remove(k);

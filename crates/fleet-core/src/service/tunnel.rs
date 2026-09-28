@@ -102,7 +102,7 @@ fn tail_stderr(s: &str) -> String {
 fn ssh_spawner() -> TunnelSpawner {
     Arc::new(|argv: Vec<String>| {
         Box::pin(async move {
-            let out = tokio::process::Command::new("ssh")
+            let out = crate::proc::command("ssh")
                 .args(&argv)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -131,7 +131,7 @@ fn ssh_spawner() -> TunnelSpawner {
 /// Linux).
 fn ps_lister() -> ProcessLister {
     Arc::new(|| {
-        let out = std::process::Command::new("ps")
+        let out = crate::proc::std_command("ps")
             .args(["-A", "-o", "pid=,args="])
             .output();
         let Ok(out) = out else {

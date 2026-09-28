@@ -477,7 +477,7 @@ fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>)
 pub(crate) fn probe_local_in(
     home: &std::path::Path,
 ) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    let tmux = std::process::Command::new("tmux")
+    let tmux = crate::proc::std_command("tmux")
         .arg("-V")
         .output()
         .ok()
@@ -488,7 +488,7 @@ pub(crate) fn probe_local_in(
                 None
             }
         });
-    let claude = std::process::Command::new("claude")
+    let claude = crate::proc::std_command("claude")
         .arg("--version")
         .output()
         .ok()

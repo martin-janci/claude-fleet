@@ -159,7 +159,7 @@ async fn run_tmux_script(
 ) -> Result<(), IpcError> {
     let out = if host_alias == "local" {
         crate::service::hub::ensure_local_allowed(host_alias)?;
-        tokio::process::Command::new("bash")
+        crate::proc::command("bash")
             .args(["-c", script])
             .output()
             .await

@@ -1,7 +1,6 @@
 use crate::ipc_error::{codes, IpcError};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 pub mod path_identity;
 use path_identity::canonical;
@@ -216,7 +215,7 @@ fn origin_owner(config: &str) -> Option<String> {
 /// `service::projects::refresh_projects` awaits N git children instead of
 /// blocking N tokio worker threads (BE-4).
 pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<DiscoveredWorktree>, IpcError> {
-    let output = Command::new("git")
+    let output = crate::proc::command("git")
         .arg("-C")
         .arg(repo_path)
         .args(["worktree", "list", "--porcelain"])
@@ -246,7 +245,7 @@ pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<DiscoveredWorktree>,
 /// flag back and prints the dir relative to `repo_path`, so the last output
 /// line is taken and joined onto `repo_path` when relative.
 pub async fn git_common_dir(repo_path: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = crate::proc::command("git")
         .arg("-C")
         .arg(repo_path)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])

@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod net;
 #[cfg(test)]
 mod no_eprintln_tests;
+pub mod proc;
 pub mod projects;
 pub mod repo_url;
 pub mod rt;

@@ -128,6 +128,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   SSH/bash command string MUST be quoted with it. The former duplicate copies
   (`shell_quote`/`shell_quote_str`/`shell_escape`) were consolidated — do not
   reintroduce them.
+- Every child process is built by `fleet_core::proc::command` /
+  `std_command`, never `Command::new`: on Windows they set `CREATE_NO_WINDOW`,
+  without which each `ssh.exe` a probe spawns flashes a console window.
+  `no_eprintln_tests::production_code_spawns_through_proc` enforces it.
 - SQLite access goes through `Store` behind a `std::sync::Mutex`. Never hold the
   guard across an `.await`.
 - No blocking I/O under `Mutex<PtyState>` and none on a sync Tauri command (a
