@@ -3475,6 +3475,11 @@ fn the_served_definition_budget_stays_bounded() {
     // 14 optional parameters (the nested `rule` / `view` / `decisions`
     // served as a bare object / array) and one description clause; no new
     // tool. Measured at 58,977 on 2026-09-27; plus 100.
+    // Task 5 of visible-truncation-and-describe: `work` gains `describe`
+    // (one action, no new parameter — `key` already existed) and one clause
+    // on the tool description. Measured at 59,046 on 2026-09-28: inside the
+    // headroom (31 bytes left), so the constant was not raised — the next
+    // addition here has to pay for itself.
     const BUDGET_BYTES: usize = 59_077;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
@@ -4601,6 +4606,29 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "work_suggested",
         ]
     );
+}
+
+/// Task 5 of the visible-truncation-and-describe plan: the describe cache
+/// (`work_item_descriptions`, one item's WHOLE, uncapped description) must
+/// never reach a session row, an event frame or the phone projection — only
+/// `work { action: describe }` reads it. The brief's own draft of this test
+/// (`include_str!` on `mcp/tools/views.rs` from inside
+/// `service::work::describe`) cannot resolve that relative path from there;
+/// this is the coordinator's fix, placed where the phone projection is
+/// already pinned column-by-column above. `PHONE_SESSION_FIELDS` names
+/// `work` / `work_suggested` (a key and a title only, from
+/// [`crate::store::WorkLinkSummary`]-shaped data) and nothing that could
+/// hold a whole description; this pins that so a future column addition
+/// cannot reopen the leak silently.
+#[test]
+fn no_projection_carries_a_full_description() {
+    for f in PHONE_SESSION_FIELDS {
+        assert!(
+            !f.contains("desc"),
+            "{f} looks like a description field; the phone projection must \
+             never carry the describe cache's full text"
+        );
+    }
 }
 
 /// A view names fields by string, so a renamed column would not fail to
