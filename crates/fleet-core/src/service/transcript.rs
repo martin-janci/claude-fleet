@@ -820,7 +820,7 @@ fn unwrap_pasted(text: &str) -> String {
 /// prompt. Snake case is out (the one snake-cased block Claude Code writes,
 /// `<pasted_content …>`, has its own handling in [`unwrap_pasted`]); so are
 /// upper case and every unhyphenated HTML element.
-fn is_harness_tag(tag: &str) -> bool {
+pub(crate) fn is_harness_tag(tag: &str) -> bool {
     tag.len() >= 3
         && tag.contains('-')
         && !tag.starts_with('-')

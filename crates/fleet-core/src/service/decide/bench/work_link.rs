@@ -4,8 +4,10 @@
 //! **Dataset A** is every confirmed link a PERSON decided (source `manual`
 //! or `started`; never `agent`, `agent_inferred` or a resolver's) whose
 //! conversation kept a first prompt. Its truth is the linked item. Prompts
-//! fleet typed itself (a start, a resume, a quick-reply chip…) are left out
-//! as the census leaves them out. For every case with other candidates a
+//! fleet typed itself (a start, a resume, a quick-reply chip…) and prompts
+//! Claude Code submitted itself (a `<task-notification>`) are left out as
+//! the census leaves them out ([`FleetPrompts::person_text`]; dataset H's
+//! export too). For every case with other candidates a
 //! **none-case** is added: the same state, the candidates without the truth,
 //! and "abstain" as the right answer.
 //!
@@ -543,7 +545,7 @@ impl BenchOptions {
 pub struct Sizes {
     /// Person-decided links with a first prompt in the window.
     pub a_links_read: Shown,
-    /// Of them, prompts fleet typed itself: left out.
+    /// Of them, prompts fleet (or Claude Code) typed itself: left out.
     pub a_fleet_typed: Shown,
     /// Of them, in another org than `--org`: left out.
     pub a_other_org: Shown,
@@ -794,10 +796,10 @@ pub fn load(
             sizes.a_other_org.0 += 1;
             continue;
         }
-        if fleet.is_fleet(&row.first_prompt, row.last_prompt.as_deref()) {
+        let Some(prompt) = fleet.person_text(&row.first_prompt, row.last_prompt.as_deref()) else {
             sizes.a_fleet_typed.0 += 1;
             continue;
-        }
+        };
         let Some(truth) = pool.item(row.item_id) else {
             continue;
         };
@@ -805,7 +807,7 @@ pub fn load(
         let slug = (row.source == "started")
             .then(|| branch_slug(truth.key.as_deref().unwrap_or_default(), &truth.title));
         let state = redact_prompt(
-            &row.first_prompt,
+            prompt,
             &ctx,
             &Redact {
                 branch: row.branch.as_deref(),
@@ -959,8 +961,13 @@ pub fn export_unlinked(
         .bench_unlinked_conversations(opts.since(), opts.max_cases)?
         .into_iter()
         .filter(|r| opts.org.is_none() || opts.org == r.org_id)
-        .filter(|r| !fleet.is_fleet(&r.first_prompt, r.last_prompt.as_deref()))
-        .filter(|r| seen.insert(r.session_id))
+        .filter_map(|r| {
+            let p = fleet
+                .person_text(&r.first_prompt, r.last_prompt.as_deref())?
+                .to_string();
+            Some((r, p))
+        })
+        .filter(|(r, _)| seen.insert(r.session_id))
         .collect();
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -969,9 +976,9 @@ pub fn export_unlinked(
     let mut out = Vec::new();
     let mut at = 0.0;
     while (at as usize) < rows.len() && out.len() < n {
-        let r = &rows[at as usize];
+        let (r, first_prompt) = &rows[at as usize];
         let prompt = redact_prompt(
-            &r.first_prompt,
+            first_prompt,
             &ctx,
             &Redact {
                 branch: r.branch.as_deref(),

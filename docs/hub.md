@@ -1401,7 +1401,11 @@ What it reads, per org:
 
 Prompts fleet typed itself — a ticket start or resume, a handover or
 safe-kill request, a quick-reply chip, anything `[claude-fleet`-marked —
-are counted as `fleet-typed` and left out. Each text is read as one of `en
+and prompts Claude Code submitted itself (a `<task-notification>`, a
+slash command's echo) are counted as `fleet-typed` and left out; a
+person's words after a `<system-reminder>` head are read without it.
+fleet no longer stores such a prompt as a conversation's first, so the
+person's next prompt is. Each text is read as one of `en
 sk cs de pl hu other mixed unknown`, with Slovak and Czech written without
 diacritics flagged, and how much of it is code (`none`, `low`, `high`).
 The output lists what it cannot count (later prompts, Claude's replies as
