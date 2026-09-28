@@ -328,6 +328,18 @@ export const ROUTED_ACTIONS = [
   'dismiss_reopened',
   'name_session_work',
   'rename_work_item',
+  // The Work view (work graph M14): every write is `work_link { … }` on the
+  // hub, so a paired desktop sends them while the link is up.
+  'set_primary_work',
+  'reconsider_work_link',
+  'ack_work_link',
+  'decide_work_batch',
+  'place_work',
+  'assign_work_org',
+  'save_work_rule',
+  'delete_work_rule',
+  'save_work_view',
+  'delete_work_view',
   'add_project',
 ] as const;
 

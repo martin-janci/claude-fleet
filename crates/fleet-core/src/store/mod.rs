@@ -43,6 +43,7 @@ mod work_local;
 mod work_retention;
 mod work_tidy;
 mod work_usage;
+mod work_view;
 
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
@@ -79,8 +80,8 @@ pub use trackers::{
     TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
-    canonical_key, github_ref, normalize_work_ref, split_github_repo, WorkItemRow, WorkLinkRow,
-    WorkSummary, WorkTarget, WORK_LINK_SOURCES,
+    canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo,
+    WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, WORK_LINK_SOURCES,
 };
 pub use work_detect::DetectionState;
 pub use work_journal::{
@@ -90,6 +91,9 @@ pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
+pub use work_view::{
+    version_conflict, Placement, RuleConditions, ViewItem, ViewLink, WorkRule, WorkView,
+};
 
 /// One number per `Store` ever built in this process, never reused — see
 /// [`Store::instance_id`].

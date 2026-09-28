@@ -1029,6 +1029,153 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Work graph M14: the Work view's reads.
+        (
+            "work_tree",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "tree", "limit": 25,
+                    "cursor": "c1", "per_task": 3,
+                    "filters": { "org": "none", "status": "open", "has": "active" } }),
+            r#"{"tasks":[],"groups":[],"orgs":[],"trackers":[],"total":0,"generated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_tree(
+                    b,
+                    commands::work_view::WorkTreeCmdArgs {
+                        filters: Some(fleet_core::service::work::view::WorkTreeFilters {
+                            org: Some(fleet_core::service::work::view::IdOrWord::Word(
+                                "none".into(),
+                            )),
+                            status: Some("open".into()),
+                            has: Some("active".into()),
+                            ..Default::default()
+                        }),
+                        cursor: Some("c1".into()),
+                        limit: Some(25),
+                        per_task: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_task",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "task", "task_id": "item:3" }),
+            r#"{"task":{"task_id":"item:3","title":"t","kind":"local","unavailable":false,"mine":false,"org_source":"none","org_fenced":false,"org_mixed":false,"group":{"id":"none","label":"No group","source":"none","editable":true},"counts":{"active":0,"ended":0,"suggested":0},"needs_you":false,"review":false,"placement_version":0,"sessions":[],"sessions_more":0}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_task(
+                    b,
+                    commands::work_view::WorkTaskCmdArgs {
+                        task_id: "item:3".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_session_tasks",
+            "work",
+            json!({ "session_id": 7, "key": null, "action": "session_tasks" }),
+            r#"{"session_id":7,"links":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_session_tasks(
+                    b,
+                    commands::work_view::WorkSessionTasksArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_review",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "review", "limit": 10 }),
+            r#"{"items":[],"total":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_review(
+                    b,
+                    commands::work_view::WorkReviewArgs {
+                        cursor: None,
+                        limit: Some(10),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_rules",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "rules" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_rules(
+                    b,
+                    commands::work_view::NoArgs {},
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_rule_preview",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "rule_preview",
+                    "rule": { "name": "Pay", "conditions": { "key_prefix": "PAY" }, "group": "Payments" } }),
+            r#"{"affected":[],"total":0,"kept_manual":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_rule_preview(
+                    b,
+                    commands::work_view::WorkRuleArgs {
+                        rule: fleet_core::service::work::structure::RuleInput {
+                            name: "Pay".into(),
+                            conditions: fleet_core::store::RuleConditions {
+                                key_prefix: Some("PAY".into()),
+                                ..Default::default()
+                            },
+                            group: "Payments".into(),
+                            ..Default::default()
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_views",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "views" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_views(
+                    b,
+                    commands::work_view::NoArgs {},
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_org_impact",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "org_impact",
+                    "task_id": "item:3", "org_id": 0 }),
+            r#"{"task_id":"item:3","allowed":false,"reason":"same_org","links":[],"hosts_losing":[],"hosts_gaining":[],"bound_clients_losing":0,"bound_clients_gaining":0,"journal_entries":0,"summaries":0,"impact_token":"t"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::work_org_impact(
+                    b,
+                    commands::work_view::WorkOrgImpactArgs {
+                        task_id: "item:3".into(),
+                        org_id: 0,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
 
@@ -1173,6 +1320,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         key: Some("ABC-1".into()),
                         item_id: None,
                         force_cross_org: false,
+                        ..Default::default()
                     },
                     s,
                 ))
@@ -1305,6 +1453,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                         key: None,
                         item_id: Some(3),
                         link_id: None,
+                        ..Default::default()
                     },
                     s,
                 ))
@@ -1323,6 +1472,7 @@ fn routed_mutation_cases() -> Vec<Case> {
                     commands::work::UnlinkSessionWorkArgs {
                         session_id: 7,
                         link_id: 5,
+                        ..Default::default()
                     },
                     s,
                 ))
@@ -1342,6 +1492,91 @@ fn routed_mutation_cases() -> Vec<Case> {
                         session_id: 7,
                         link_id: 5,
                         force_cross_org: false,
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Work graph M14.1d: a secondary link and the compare-and-set guard
+        // travel on the existing decisions.
+        (
+            "link_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "link", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": "manual", "primary": false,
+                    "expected_version": 2 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::link_session_work(
+                    b,
+                    commands::work::LinkSessionWorkArgs {
+                        session_id: 7,
+                        key: Some("ABC-1".into()),
+                        primary: Some(false),
+                        expected_version: Some(2),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "confirm_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "confirm", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "primary": false, "expected_version": 3 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::confirm_session_work(
+                    b,
+                    commands::work::ConfirmSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        primary: Some(false),
+                        expected_version: Some(3),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reject_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "reject", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "expected_version": 3 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::reject_session_work(
+                    b,
+                    commands::work::RejectSessionWorkArgs {
+                        session_id: 7,
+                        link_id: Some(5),
+                        expected_version: Some(3),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unlink_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "unlink", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "expected_version": 4 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::unlink_session_work(
+                    b,
+                    commands::work::UnlinkSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        expected_version: Some(4),
                     },
                     s,
                 ))
@@ -1928,6 +2163,217 @@ fn routed_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Work graph M14: the Work view's decisions.
+        (
+            "set_primary_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "set_primary", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "expected_primary": 4 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::set_primary_work(
+                    b,
+                    commands::work_view::SetPrimaryWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        expected_primary: Some(4),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reconsider_work_link",
+            "work_link",
+            json!({ "session_id": 7, "action": "reconsider", "key": null, "item_id": null,
+                    "link_id": 5, "source": null, "expected_version": 3 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::reconsider_work_link(
+                    b,
+                    commands::work_view::WorkLinkDecisionArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        expected_version: Some(3),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "ack_work_link",
+            "work_link",
+            json!({ "session_id": 7, "action": "ack", "key": null, "item_id": null,
+                    "link_id": 5, "source": null }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::ack_work_link(
+                    b,
+                    commands::work_view::WorkLinkDecisionArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        expected_version: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_work_batch",
+            "work_link",
+            json!({ "session_id": null, "action": "decide_batch", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "decisions": [{ "session_id": 7, "link_id": 5, "decision": "confirm",
+                                    "expected_version": 2, "primary": false }] }),
+            r#"{"results":[{"link_id":5,"session_id":7,"ok":true,"version":3}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::decide_work_batch(
+                    b,
+                    commands::work_view::DecideWorkBatchArgs {
+                        decisions: vec![fleet_core::service::work::structure::LinkDecision {
+                            session_id: 7,
+                            link_id: 5,
+                            decision: "confirm".into(),
+                            expected_version: Some(2),
+                            primary: Some(false),
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "place_work",
+            "work_link",
+            json!({ "session_id": null, "action": "place", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "task_id": "item:3",
+                    "group": "Payments", "expected_version": 0 }),
+            r#"{"task_id":"item:3","title":"t","kind":"local","unavailable":false,"mine":false,"org_source":"none","org_fenced":false,"org_mixed":false,"group":{"id":"label:Payments","label":"Payments","source":"manual","editable":true},"counts":{"active":0,"ended":0,"suggested":0},"needs_you":false,"review":false,"placement_version":1,"sessions":[],"sessions_more":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::place_work(
+                    b,
+                    commands::work_view::PlaceWorkArgs {
+                        task_id: "item:3".into(),
+                        group: "Payments".into(),
+                        note: None,
+                        expected_version: 0,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "assign_work_org",
+            "work_link",
+            json!({ "session_id": null, "action": "assign_org", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "task_id": "item:3", "org_id": 2,
+                    "impact_token": "abc" }),
+            r#"{"task_id":"item:3","title":"t","kind":"local","unavailable":false,"mine":false,"org_id":2,"org_source":"item","org_fenced":true,"org_mixed":false,"group":{"id":"none","label":"No group","source":"none","editable":true},"counts":{"active":0,"ended":0,"suggested":0},"needs_you":false,"review":false,"placement_version":0,"sessions":[],"sessions_more":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::assign_work_org(
+                    b,
+                    commands::work_view::AssignWorkOrgArgs {
+                        task_id: "item:3".into(),
+                        org_id: 2,
+                        impact_token: "abc".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "save_work_rule",
+            "work_link",
+            json!({ "session_id": null, "action": "rule_save", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "rule": { "name": "Pay", "conditions": { "key_prefix": "PAY" }, "group": "Payments" } }),
+            r#"{"id":1,"name":"Pay","enabled":true,"version":1,"conditions":{"key_prefix":"PAY"},"group":"Payments","created_at":1,"updated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::save_work_rule(
+                    b,
+                    commands::work_view::WorkRuleArgs {
+                        rule: fleet_core::service::work::structure::RuleInput {
+                            name: "Pay".into(),
+                            conditions: fleet_core::store::RuleConditions {
+                                key_prefix: Some("PAY".into()),
+                                ..Default::default()
+                            },
+                            group: "Payments".into(),
+                            ..Default::default()
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_rule",
+            "work_link",
+            json!({ "session_id": null, "action": "rule_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "rule_id": 4, "expected_version": 2 }),
+            r#"{"deleted":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_rule(
+                    b,
+                    commands::work_view::DeleteWorkRuleArgs {
+                        rule_id: 4,
+                        expected_version: Some(2),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "save_work_view",
+            "work_link",
+            json!({ "session_id": null, "action": "view_save", "key": null, "item_id": null,
+                    "link_id": null, "source": null,
+                    "view": { "name": "Mine", "filters": { "mine": true } } }),
+            r#"{"id":1,"name":"Mine","filters":{"mine":true},"version":1,"updated_at":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::save_work_view(
+                    b,
+                    commands::work_view::SaveWorkViewArgs {
+                        view: fleet_core::service::work::structure::ViewInput {
+                            name: "Mine".into(),
+                            filters: fleet_core::service::work::view::WorkTreeFilters {
+                                mine: Some(true),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_work_view",
+            "work_link",
+            json!({ "session_id": null, "action": "view_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "view_id": 9, "expected_version": 1 }),
+            r#"{"deleted":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::delete_work_view(
+                    b,
+                    commands::work_view::DeleteWorkViewArgs {
+                        view_id: 9,
+                        expected_version: Some(1),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
 
@@ -2209,6 +2655,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 key: Some("ABC-1".into()),
                 item_id: None,
                 force_cross_org: false,
+                ..Default::default()
             },
             &st,
         )),
@@ -2219,6 +2666,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 key: Some("ABC-1".into()),
                 item_id: None,
                 link_id: None,
+                ..Default::default()
             },
             &st,
         )),
@@ -2227,6 +2675,7 @@ fn standalone_work_links_are_decided_in_the_local_store() {
             commands::work::UnlinkSessionWorkArgs {
                 session_id: 99,
                 link_id: 1,
+                ..Default::default()
             },
             &st,
         )),
@@ -3554,6 +4003,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/work.rs", include_str!("../commands/work.rs")),
+    (
+        "commands/work_view.rs",
+        include_str!("../commands/work_view.rs"),
+    ),
     (
         "commands/trackers.rs",
         include_str!("../commands/trackers.rs"),

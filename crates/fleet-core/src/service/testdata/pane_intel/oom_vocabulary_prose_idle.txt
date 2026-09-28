@@ -1,0 +1,10 @@
+⏺ The tool descriptions carry the fleet's stuck vocabulary verbatim:
+  stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter.
+  A session is flagged oom when its pane says "out of memory" — that is the false positive.
+
+✻ Baked for 2m 10s · done 11:46 PM
+───────────────────────────────────────────────────────────────
+❯
+───────────────────────────────────────────────────────────────
+  Opus 5 (1M context)  [███░░░░░░░] 31% (310k/1.0M)  |  ~/projects/claude-fleet
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

@@ -439,6 +439,60 @@ this design's.
 
 ## Revisions
 
+- 2026-09-27 (M14.1d, desktop commands and events): the eighteen commands
+  above, each `Routed` to its `work` / `work_link` action (no `LocalOnly`
+  row), and `link_session_work` / `confirm_session_work` take `primary`
+  and `expected_version`, `reject_session_work` / `unlink_session_work`
+  `expected_version`. `delete_work_view` takes the optional
+  `expected_version` M14.1c gave `view_delete`. `work:changed` is emitted
+  by the store after the write commits: `placement` (`task_id`), `rule`
+  (`rule_id`, on save and delete), `view` (`view_id`, on save and delete)
+  and `org` (`task_id`, a local task's org; its sessions' rows also go out
+  as `session:updated`). The desktop's hub bridge never resumes a stream
+  (every connection, the one after `lagged` included, re-lists), so its
+  resync ends with a desktop-only `work:changed { what: "resync" }` —
+  emitted only when the hub answered the re-list — which the Work view
+  reads as "reload whole"; a hub never sends it. `SessionRow.work_rev`
+  (*Events* above) is not built: neither #342 nor #345 has it, and it is
+  service logic, which M14.1d does not add.
+- 2026-09-27 (M14.1c, the writes): no migration (066's columns carry every
+  version). `E_CONFLICT` is a new `IpcError` code. A link's version is
+  compared only after the link is known to be the caller's to name (this
+  session's live link, in scope), so neither a version nor a state is an
+  oracle for a hidden link. `link { expected_version }` compares against
+  the session's live link to that work (`0`: none). `set_primary`'s
+  compare-and-set is on the primary the caller sees, so a scoped caller
+  whose session's primary is another org's (a forced link) expects `0`
+  and is never told that link's id. `view_delete` also takes an optional
+  `expected_version`; the master reaches every view (a replaced view keeps
+  its owner); a bound client's view may name only an org or tracker it
+  sees (`E_NOTFOUND` otherwise). A batch does not carry `force_cross_org`.
+  The service refuses a bound client another org's session itself, not
+  only at the transport's gate. `work:changed` and the Tauri commands are
+  M14.1d's: the writes here emit only the existing `session:updated`.
+- 2026-09-27 (M14.1b, the reads): migration `0NN` is two, **066**
+  (`work_view`) and **067** (`orgs.bound_sees_unassigned`, its own
+  migration because an `orgs` column is re-added when that table is rebuilt,
+  as 053's `auto_tidy` is); 065 went to lifecycle F2's `stale_working` on
+  `main` (#343) first. 066 carries `work_links.version` and its trigger
+  although only M14.1c writes against it: the reads answer `link_version`.
+  Security changes against the backend branch: `org_impact` is refused
+  (`E_FORBIDDEN`) to every scoped caller — hosts and bound clients may not
+  move an org (D33), and the impact named other orgs' hosts, bound-client
+  counts and journal counts; a bound client's `rules` are only the rules
+  that place a task it sees and name no tracker outside its org; a task with
+  no work at all is unassigned data, so it follows D31; a bound client whose
+  org was deleted sees no unassigned data either (stricter than *Scopes*
+  above, which said it would). With D31 off, a bound client also may not
+  start or resume a session in an unassigned project or host. `pair --org`
+  takes the org's id.
+  The inference the PR's threat note listed — a bound client reading
+  fleet-wide daily spend in `fleet_health` and so another org's activity —
+  is closed: for a bound client every roll-up there that sums across hosts
+  (spend by day and by host, host / session / status counts, tunnels, the
+  detection backlog) is taken over the hosts it sees only, its org's and,
+  under D31, unassigned ones (`health::scope_to_org`). The master, unbound
+  clients and host tokens read as before.
 - 2026-09-27 (M14.0, brought to `main`): based on `main` `f10d0b92` instead
   of `be0e2bc`; the acceptance section is Part R (Part P is GHES on `main`);
   the migration is `0NN_work_view.sql`, numbered at merge time, not 063

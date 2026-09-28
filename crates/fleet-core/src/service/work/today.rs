@@ -342,7 +342,8 @@ pub fn today(
         .filter(|r| counts(r, operator.as_ref()))
         .filter(|r| match scope.host() {
             Some(h) => r.host_alias == h && scope.sees_row(r),
-            None => true,
+            // `All` sees every row; a bound client (M14) its org's.
+            None => scope.sees_row(r),
         })
         .collect();
     for r in &mut rows {

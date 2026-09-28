@@ -319,6 +319,29 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_local_work_items", Verdict::Routed { tool: "work" }),
     ("name_session_work", Verdict::Routed { tool: "work_link" }),
     ("rename_work_item", Verdict::Routed { tool: "work_link" }),
+    // Work graph M14: the Work view — eight reads of `work` and ten
+    // decisions of `work_link`, every one the same on a paired desktop.
+    ("work_tree", Verdict::Routed { tool: "work" }),
+    ("work_task", Verdict::Routed { tool: "work" }),
+    ("work_session_tasks", Verdict::Routed { tool: "work" }),
+    ("work_review", Verdict::Routed { tool: "work" }),
+    ("work_rules", Verdict::Routed { tool: "work" }),
+    ("work_rule_preview", Verdict::Routed { tool: "work" }),
+    ("work_views", Verdict::Routed { tool: "work" }),
+    ("work_org_impact", Verdict::Routed { tool: "work" }),
+    ("set_primary_work", Verdict::Routed { tool: "work_link" }),
+    (
+        "reconsider_work_link",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("ack_work_link", Verdict::Routed { tool: "work_link" }),
+    ("decide_work_batch", Verdict::Routed { tool: "work_link" }),
+    ("place_work", Verdict::Routed { tool: "work_link" }),
+    ("assign_work_org", Verdict::Routed { tool: "work_link" }),
+    ("save_work_rule", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_rule", Verdict::Routed { tool: "work_link" }),
+    ("save_work_view", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_view", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
