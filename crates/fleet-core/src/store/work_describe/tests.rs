@@ -185,3 +185,44 @@ fn the_cache_sweeps_in_batches_oldest_item_id_first() {
     );
     assert_eq!(s.retention_rows(Descriptions).unwrap(), 0);
 }
+
+/// A sync drops the cached whole description when the description moved,
+/// even when the 2,000-character excerpt did not: an edit past the excerpt
+/// changes the true length, and a same-length one there still moves the
+/// tracker's "updated" stamp. A sync that changes nothing keeps it.
+#[test]
+fn a_tail_edit_past_the_excerpt_drops_the_cached_description() {
+    let s = store();
+    let t = s
+        .add_tracker("jira", "J", "https://acme.atlassian.net")
+        .unwrap()
+        .id;
+    let excerpt = "a".repeat(2000);
+    let write = |chars: i64, updated: i64| TrackerItemWrite {
+        external_id: "1".into(),
+        key: Some("ABC-1".into()),
+        title: "Refund".into(),
+        status_name: "In Progress".into(),
+        status_category: "in_progress".into(),
+        updated_ext: Some(updated),
+        description: Some(excerpt.clone()),
+        description_chars: Some(chars),
+        ..Default::default()
+    };
+    let id = s.upsert_tracker_item(t, &write(5000, 100)).unwrap().id;
+    let cached = |s: &Store| s.cached_description(id, 300, now_unix()).unwrap();
+
+    // Unchanged: kept.
+    s.put_description(id, "whole v1", 5000).unwrap();
+    s.upsert_tracker_item(t, &write(5000, 100)).unwrap();
+    assert!(cached(&s).is_some(), "an unchanged sync keeps the cache");
+
+    // Same excerpt, longer tail.
+    s.upsert_tracker_item(t, &write(5040, 101)).unwrap();
+    assert_eq!(cached(&s), None, "a longer tail must drop the cache");
+
+    // Same excerpt, same length, only the tracker's stamp moved.
+    s.put_description(id, "whole v2", 5040).unwrap();
+    s.upsert_tracker_item(t, &write(5040, 102)).unwrap();
+    assert_eq!(cached(&s), None, "a same-length tail edit must drop it too");
+}
