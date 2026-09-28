@@ -1069,7 +1069,7 @@
           disabled={automationBusy}
           data-testid="reconcile-stale-working-secs"
           onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingSecs, e)} />
-        <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth or pane output before it reads idle (0 = never)</span>
+        <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth, spinner on its pane or tmux session activity before it reads idle (0 = never)</span>
       </div>
       {#if automationError}<p class="err">{automationError}</p>{/if}
     </section>
