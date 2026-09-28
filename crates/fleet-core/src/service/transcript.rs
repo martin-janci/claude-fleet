@@ -58,8 +58,9 @@ const AGENT_LAUNCH_ACK: &str = "Async agent launched successfully";
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
 /// The read script does this on the host (after `pwd -P`) with an
-/// equivalent `sed`; this is the tested reference for that rule.
-#[cfg(test)]
+/// equivalent `sed`; this is the tested reference for that rule, and what
+/// a fork into a new worktree names its copy's directory with (the new
+/// tree's path is known here, as `pwd -P` printed it).
 pub fn encode_project_dir(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })

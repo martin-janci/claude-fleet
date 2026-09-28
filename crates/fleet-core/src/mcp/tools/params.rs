@@ -243,7 +243,7 @@ pub struct RewindConversationParams {
     /// "rewind" restarts this session on the truncated copy; "fork" leaves
     /// it alone and starts a new session on the copy.
     pub mode: String,
-    /// Unsupported (E_UNSUPPORTED): a fork reuses this worktree.
+    /// Fork into a new worktree+branch of this name, off HEAD.
     #[serde(default)]
     pub new_worktree: Option<String>,
     /// Approved confirmation; required for "rewind".

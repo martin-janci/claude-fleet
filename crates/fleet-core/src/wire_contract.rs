@@ -98,4 +98,9 @@
 //!   belongs here too. v0.3.3 shipped it as a routed hub tool while still
 //!   on revision 4, so a revision-4 hub may or may not serve it — the same
 //!   skew revision 5 exists to refuse; from 5 on every hub serves it.
+//!
+//!   Its `new_worktree` parameter later became functional (a fork into a
+//!   new worktree) with no bump: a hub before that refuses it with
+//!   `E_UNSUPPORTED` — a clear refusal, never a silent different action —
+//!   and the Fork sheet reads that code as "update the hub".
 pub const CONTRACT_REVISION: u32 = 5;

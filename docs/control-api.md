@@ -286,8 +286,11 @@ Index by area (names only; see the reference for details):
   fleet can read them (`session_transcript`) but not control them.
 - **Lifecycle & recovery** — `restart_session`, `rewind_conversation`
   (truncate a session's Claude transcript into a new conversation: mode
-  `fork` starts a new session from that point, mode `rewind` restarts this
-  one there; the original transcript is never changed), `recreate_session`,
+  `fork` starts a new session from that point — in this worktree, or with
+  `new_worktree: "<name>"` in a new worktree and branch cut from the
+  session's HEAD (uncommitted changes stay behind; an existing name is
+  `E_CONFLICT`) — mode `rewind` restarts this one there; the original
+  transcript is never changed), `recreate_session`,
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation
