@@ -55,6 +55,14 @@ jobs:
           v="$(node -p 'require("./package.json").version')"
           scripts/changelog-section.sh "$v" >/dev/null
           echo "CHANGELOG.md has a section for $v"
+      # deploy/hub/backup.sh and upgrade.sh against a fake docker and curl.
+      # It ran only from ci-local.sh, so when upgrade.sh started passing
+      # --env-file the fake stopped matching and 8 checks failed on main
+      # with CI green. bash + sqlite3, a few seconds.
+      - name: Hub deploy scripts
+        run: |
+          command -v sqlite3 >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq sqlite3; }
+          bash scripts/hub-deploy-scripts-test.sh
 
   rust:
     strategy:
