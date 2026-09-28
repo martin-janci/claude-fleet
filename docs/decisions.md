@@ -433,6 +433,8 @@ fleet-hub decide bench status-map --fixture                     # the built-in s
 fleet-hub decide bench status-map --labels sections.jsonl       # the owner's hand set
 fleet-hub decide bench status-map --fixture --provider rule --provider jev [--max-calls 500] [--db FILE] [--json]
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host ALIAS
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host ALIAS \
+    [--split dev|test|all] [--question FILE]
 ```
 
 **The cases** are labeled sections, one JSON line each:
@@ -474,15 +476,56 @@ section and at most 30 board names), so the benchmark measures what
 | `none` | Always abstains. |
 | `todo` | Always `todo`: what fleet does today with a section the rule cannot classify. |
 | `rule` | The keyword rule `infer_section` (progress / doing / review / wip / started / active / testing / qa → in progress; done / shipped / complete / released / closed → done); abstains where it says nothing. |
-| `jev` | One Choice through the envelope — question version `status_map.bench.v1`, subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent. At most `--max-calls` calls. |
+| `jev` | One Choice through the envelope — question version `status_map.bench.v1` (`status_map.bench.q.<version>` with `--question`, below), subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent. At most `--max-calls` calls. |
 | `haiku` | The adapter's own request — the same redacted section, board and options — asked of `claude -p` on `--haiku-host` (below), at the same floor: `unsure`, an answer under 0.5 and an answer outside the options (counted as `invalid`) are abstentions; an answer that states no confidence stands and is left out of calibration. A failed call is skipped with its reason. A row whose org is not the host's is skipped as `other_org` (the built-in set has no org: it needs a host with no org). Not gated by the envelope; the database is opened read-only for the host's org; nothing is recorded. At most `--max-calls` calls. |
 
 Without `--provider jev` or `--provider haiku` no database is opened at
 all (`haiku` opens it read-only, for the host's org). With `jev`, the hub's
 database (or `--db FILE`) is opened for writing: it holds the gate's
 settings, and every call is recorded in `decision_runs`. No threshold is
-tuned on the set — the rule is fixed and Jev runs at the adapter's floor —
-so there is no dev/test split.
+tuned on the set — the rule is fixed and Jev runs at the adapter's floor.
+
+**A question file** (`--question FILE`) rewords the question for one run,
+so the wording can be tried on the hub (where the Jev key lives) without a
+release per attempt:
+
+```json
+{"version": "v2-draft1",
+ "instructions": "state.section is the name of one section … Choose unsure when …",
+ "options": {"todo": "…", "in_progress": "…", "done": "…", "not_planned": "…", "unsure": "…"}}
+```
+
+It replaces the instructions and each option's criterion for **both**
+`jev` and `haiku`; the option ids and their order, the confidence floor and
+the state (the section and its board window, redacted as ever) stay the
+adapter's, so what leaves the hub about a section does not change. The file
+must hold exactly those five options, no text may be empty, and `version`
+must match `^[a-z0-9][a-z0-9._-]{0,39}$`; otherwise the run is refused
+before anything is sent. It needs `--provider jev` or `--provider haiku`.
+Jev's runs are recorded with question version
+`status_map.bench.q.<version>` (never `status_map.bench.v1`, so the two
+wordings never mix in `decision_runs`), and the report's header names the
+question: `the adapter's status_map.v1` or `file <version>`. Without the
+flag nothing changes.
+
+**The dev/test split** (`--split dev|test|all`, default `all`) keeps a
+reworded question honest. It is by **board**, never by case: a case's
+board is its normalised section names in order (after the de-duplication
+above) joined with a newline, and the board is *dev* when the first 8 bytes
+of that key's SHA-256, read as a big-endian integer, are even — about half
+of the boards, the same on every run and machine. All sections of a board
+land on the same side, so a wording cannot learn a board's layout on dev
+and be scored on it in test. The report states the split and both sides'
+board and case counts; with `all` that line (and a note naming the
+split's purpose) is the only difference. The
+intended workflow: iterate the wording with `--split dev --question FILE`;
+when it is settled, run it **once** with `--split test` and read that
+verdict; then a code change adopts the wording in the adapter
+(`status_map::INSTRUCTIONS` / `OPTIONS`) as `status_map.v2`. On the
+built-in set dev is 44 boards with 206 sections and test 47 boards with
+185: the test side is under the 200 cases a verdict needs, and the haiku
+line (paired where the rule abstains) is NOT JUDGED on either side, so the
+split is meant for the owner's hand set.
 
 **Metrics** per provider: accuracy on answered and coverage over every case,
 and the same **where the rule abstains** (the sections that today silently

@@ -1485,6 +1485,8 @@ labeled Asana sections — the owner's file, or the built-in synthetic set
 fleet-hub decide bench status-map --fixture                      # todo + rule, offline
 fleet-hub decide bench status-map --labels sections.jsonl --provider rule --provider jev
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1 \
+    --split dev --question q.json   # try a reworded question on the dev boards
 ```
 
 Without `--provider jev` or `--provider haiku` neither sends anything
