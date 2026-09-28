@@ -59,28 +59,44 @@ const ALREADY_CLONED_MARKER: &str = "__add_project_clone_dest_exists__";
 /// there), so the success path and errexit aborts need nothing.
 const SCRIPT_PROLOGUE: &str = "set -e\ncf_exit() { set +e; exit \"$1\"; }\n";
 
-#[derive(Deserialize)]
+/// Where the project comes from. The hub tool `add_project` serves this
+/// schema, so every variant and field is documented here.
+#[derive(serde::Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AddProjectSource {
+    /// Clone a GitHub repository onto the host.
     Clone {
+        /// `https://github.com/<owner>/<repo>` or `git@github.com:<owner>/<repo>.git`.
         url: String,
     },
+    /// Adopt a checkout that already exists on the `local` host.
     Folder {
+        /// Absolute path of the checkout (or a directory inside one).
         path: String,
     },
+    /// Create a new repository on the host, optionally on GitHub too.
     New {
+        /// GitHub owner (user or organisation).
         owner: String,
+        /// Repository name.
         repo: String,
+        /// Also run `gh repo create` on the host; the first call is refused
+        /// with a `confirm` token to send back.
         #[serde(default)]
         create_remote: bool,
+        /// The token the previous `create_remote` refusal returned.
         #[serde(default)]
         confirm: Option<String>,
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "AddProjectParams")]
 pub struct AddProjectArgs {
+    /// Fleet alias of the host to add the project on.
     pub host_alias: String,
+    /// What to add: `kind` is `clone`, `folder` or `new`.
     pub source: AddProjectSource,
     /// Injected by the frontend's `invokeCmdAbortable` (see `cancel.rs`) so
     /// the Add-project dialog's Cancel button can abort a clone / new-project
@@ -94,7 +110,11 @@ pub struct AddProjectArgs {
     /// stopping at the command layer, where cancelling would do nothing.
     /// A remote cancel only stops the local ssh client, not the run on the
     /// host: see [`add_project`]'s doc comment.
+    ///
+    /// Never part of the hub tool's schema: on a hub the registry mints an
+    /// anonymous token, and the desktop's routed call does not send it.
     #[serde(default)]
+    #[schemars(skip)]
     pub call_id: Option<u64>,
 }
 
@@ -5430,5 +5450,48 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code, codes::E_CANCELLED, "{}", err.message);
         assert_no_push(&fake);
+    }
+
+    // ── wire shape (hub tool `add_project`) ─────────────────────────────
+
+    #[test]
+    fn the_source_enum_serialises_with_its_kind_tag_for_the_hub_call() {
+        let v = serde_json::to_value(AddProjectSource::New {
+            owner: "o".into(),
+            repo: "r".into(),
+            create_remote: true,
+            confirm: Some("tok".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "kind": "new", "owner": "o", "repo": "r",
+                "create_remote": true, "confirm": "tok"
+            })
+        );
+        let v = serde_json::to_value(AddProjectSource::Clone {
+            url: "https://github.com/o/r".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "kind": "clone", "url": "https://github.com/o/r" })
+        );
+    }
+
+    #[test]
+    fn the_served_schema_has_no_call_id_and_documents_every_field() {
+        let schema = serde_json::to_value(rmcp::schemars::schema_for!(AddProjectArgs)).unwrap();
+        let props = schema["properties"].as_object().expect("an object schema");
+        assert!(props.contains_key("host_alias"));
+        assert!(props.contains_key("source"));
+        assert!(
+            !props.contains_key("call_id"),
+            "call_id is this process's cancellation key, never a hub argument: {props:?}"
+        );
+        for (name, p) in props {
+            assert!(p.get("description").is_some(), "{name} has no description");
+        }
     }
 }

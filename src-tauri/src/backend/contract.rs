@@ -104,7 +104,13 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// failing round-trip per panel per tick. Refusing that hub with an honest
 /// skew banner is the whole point of the bump; leaving it `InRange` would
 /// keep the silent version.
-pub const MIN_HUB_CONTRACT: u32 = 4;
+///
+/// Raised to 5 for revision 5: `add_project` and `list_github_repos` became
+/// hub tools the desktop routes to. A revision-4 hub does not serve them, so
+/// a desktop paired with one would offer "Add project" and fail every
+/// attempt with an unknown tool. Refusing that hub with the skew banner says
+/// what to do (update the hub); leaving it `InRange` would not.
+pub const MIN_HUB_CONTRACT: u32 = 5;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -113,11 +119,11 @@ pub const MIN_HUB_CONTRACT: u32 = 4;
 /// Moves in lockstep with [`fleet_core::wire_contract::CONTRACT_REVISION`]:
 /// this build's own hub must be `InRange`, so bumping the revision without
 /// bumping this is a shipped outage against itself.
-pub const MAX_HUB_CONTRACT: u32 = 4;
+pub const MAX_HUB_CONTRACT: u32 = 5;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `4..=4` today, and unlike the original `0..=1` range this one CAN
+/// are `5..=5` today, and unlike the original `0..=1` range this one CAN
 /// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
 /// `4`) — see `tests_contract.rs`, independent of whichever bounds
 /// a future release ships.

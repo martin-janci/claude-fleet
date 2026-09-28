@@ -1,10 +1,12 @@
 //! Tauri IPC wrappers for project discovery. Logic lives in `service::projects`;
 //! this file only adapts `tauri::State` to plain references.
 //!
-//! Remote mode: `list_projects` and `refresh_projects` route to their tools.
-//! `add_project` and `list_github_repos` do not — both act on a checkout on a
-//! host, through this machine's SSH and `gh` credentials, and neither has a
-//! hub tool.
+//! Remote mode: all four commands route to the hub tools of the same names.
+//! `add_project` and `list_github_repos` clone / run `gh` ON THE HOST over
+//! the hub's transport to it, so the credentials are the host's, not this
+//! machine's. `call_id` stays local: it keys this process's cancellation
+//! registry, and on a hub the run simply completes (or hits its deadline)
+//! after the desktop stops waiting.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -44,8 +46,7 @@ pub async fn add_project(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProjectTreeRow, IpcError> {
-    backend.refuse_local_only("add_project")?;
-    add_project::add_project(args, &store, &*ssh, &reg).await
+    routed::add_project(&backend, args, &store, &ssh, &reg).await
 }
 
 #[derive(Deserialize)]
@@ -62,8 +63,7 @@ pub async fn list_github_repos(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<GithubRepo>, IpcError> {
-    backend.refuse_local_only("list_github_repos")?;
-    add_project::list_github_repos(&args.host_alias, &store, &ssh).await
+    routed::list_github_repos(&backend, args, &store, &ssh).await
 }
 
 pub(crate) mod routed {
@@ -86,6 +86,49 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.refresh_projects().await,
             None => projects::refresh_projects(store).await,
+        }
+    }
+
+    /// `commands::projects::add_project`. `call_id` is this process's own
+    /// cancellation-registry key and has no hub counterpart, so the hub
+    /// branch spells the arguments out rather than serialising the struct.
+    pub async fn add_project(
+        backend: &FleetBackend,
+        args: AddProjectArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<ProjectTreeRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "add_project",
+                    &serde_json::json!({
+                        "host_alias": args.host_alias,
+                        "source": args.source,
+                    }),
+                )
+                .await
+            }
+            None => add_project::add_project(args, store, &**ssh, reg).await,
+        }
+    }
+
+    pub async fn list_github_repos(
+        backend: &FleetBackend,
+        args: ListGithubReposArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<Vec<GithubRepo>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "list_github_repos",
+                    &serde_json::json!({ "host_alias": args.host_alias }),
+                )
+                .await
+            }
+            None => add_project::list_github_repos(&args.host_alias, store, ssh).await,
         }
     }
 }

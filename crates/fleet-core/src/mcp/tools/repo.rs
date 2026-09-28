@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
-use crate::service::{repo, repo_read};
+use crate::service::{add_project, repo, repo_read};
 
 /// `repo_diff`'s snapshot cursor key: one file in one session's worktree.
 /// Two different files (or the same file across two sessions) never share a
@@ -56,6 +56,47 @@ impl FleetTools {
                 .await
                 .map_err(to_mcp_err)?,
         )
+    }
+
+    #[tool(description = "Add a project on a host: clone a GitHub URL, adopt a \
+        folder (the hub's local host only) or create a new repository \
+        (create_remote is refused once with a confirm token to send back). \
+        git and gh run on the host with its own credentials. Returns the \
+        project row.")]
+    pub(super) async fn add_project(
+        &self,
+        Parameters(args): Parameters<add_project::AddProjectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let target = match &args.source {
+            add_project::AddProjectSource::Clone { url } => format!("kind=clone url={url}"),
+            add_project::AddProjectSource::Folder { path } => format!("kind=folder path={path}"),
+            add_project::AddProjectSource::New {
+                owner,
+                repo,
+                create_remote,
+                ..
+            } => format!("kind=new repo={owner}/{repo} create_remote={create_remote}"),
+        };
+        audit("add_project", &format!("host={} {target}", args.host_alias));
+        // `call_id` is never set here (it is `#[schemars(skip)]`): the
+        // registry mints an anonymous token and `CancelGuard` releases it.
+        let row = add_project::add_project(args, &self.store, &*self.ssh, &self.reg)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json_compact(&row)
+    }
+
+    #[tool(description = "Repositories gh on the host can see, for choosing \
+        what to clone with add_project.")]
+    pub(super) async fn list_github_repos(
+        &self,
+        Parameters(p): Parameters<ListGithubReposParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("list_github_repos", &format!("host={}", p.host_alias));
+        let repos = add_project::list_github_repos_with(&p.host_alias, &self.store, &*self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&repos)
     }
 
     // ---- sessions ----
