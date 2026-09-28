@@ -65,4 +65,4 @@ CREATE TABLE IF NOT EXISTS update_docs (
   PRIMARY KEY (kind, key)
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (76);
+INSERT OR IGNORE INTO schema_version (version) VALUES (79);

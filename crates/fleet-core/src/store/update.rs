@@ -1,4 +1,4 @@
-//! Application updates (migration 076): the hub's desired and observed state
+//! Application updates (migration 079): the hub's desired and observed state
 //! for the fleet's own software, the transition log, and the cache of signed
 //! documents it decides from. The rules are `service::update`'s; this module
 //! only stores. Design: `docs/superpowers/specs/2026-09-28-update-channel-design.md`

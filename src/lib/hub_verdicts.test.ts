@@ -108,6 +108,12 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // `catalog_config` check. Its commands route to the hub's `catalog_admin`
   // now; the two that still refuse — `catalog_import_host` and
   // `catalog_spawn_author_session` — have REASONS entries of their own.)
+  // No frontend UI calls these at all.
+  noUiControl: [
+    // Host identity & health, task 5: the alias merge is an operator's
+    // `fleet-hub host merge` / master-token tool; no Svelte control calls it.
+    'merge_host',
+  ],
   // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
   // !ownsFleet}` swaps the whole Projects section for the remote note, and
   // the Limits section (with WorkRetention.svelte, work graph M12.3) too.

@@ -112,7 +112,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 204
+  verdict is written down once, in `backend/verdicts.rs`, for all 205
   commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -431,7 +431,7 @@ fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
   args).
 
 **S4a (the hub side) is landed:**
-- migration 076 (`update_desired`, `update_observed`, `update_events`, and
+- migration 079 (`update_desired`, `update_observed`, `update_events`, and
   `update_docs`, the signed-document cache, re-verified on every read);
 - `service/update/` (`check` / `report` / `status` / `pin` / `refresh`,
   plus the refresh tick in `fleet-hub serve`, which records `hub:self`);

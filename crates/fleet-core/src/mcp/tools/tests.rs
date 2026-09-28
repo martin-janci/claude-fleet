@@ -330,6 +330,8 @@ fn fleet_admin_tools_are_master_only() {
         "provision_hosts",
         "add_host",
         "remove_host",
+        "merge_host",
+        "forget_project",
         "hide_host",
         "apply_sync",
         "set_secret",
@@ -448,6 +450,62 @@ fn keys_test_tools() -> (FleetTools, Arc<Mutex<Store>>, i64) {
 /// Validation happens before any tmux/ssh delivery is attempted, so this
 /// needs no real backend: an unknown key name, and text alongside `keys`,
 /// are both refused up front.
+/// Host identity & health, task 7: `forget_project` over the tool surface.
+#[tokio::test]
+async fn forget_project_refuses_a_live_project_then_drops_it() {
+    let (t, store, _sid) = keys_test_tools();
+    let (pid, sid) = {
+        let s = store.lock().unwrap();
+        let pid = s.upsert_project("o", "gone", "/p/o/gone").unwrap();
+        let sid = s
+            .upsert_session("dev-gone", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        (pid, sid)
+    };
+    let err = t
+        .forget_project(Parameters(ForgetProjectParams { project_id: pid }))
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("E_INVALID_STATE"), "{}", err.message);
+    store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute("UPDATE sessions SET status='ghost' WHERE id=?1", [sid])
+        .unwrap();
+    t.forget_project(Parameters(ForgetProjectParams { project_id: pid }))
+        .await
+        .unwrap();
+    assert!(store.lock().unwrap().get_project(pid).unwrap().is_none());
+}
+
+/// Host identity & health, task 5: the master folds a renamed alias in one
+/// call and the old row is gone.
+#[tokio::test]
+async fn merge_host_folds_the_old_alias_into_the_new_one() {
+    let (t, store, _sid) = keys_test_tools();
+    {
+        let s = store.lock().unwrap();
+        s.insert_host("old", Some("old")).unwrap();
+        s.upsert_session("dev-old", "old", None, None, 1, 1, "ghost", None)
+            .unwrap();
+    }
+    let res = t
+        .merge_host(
+            Extension(Caller::master()),
+            Parameters(crate::service::hosts::MergeHostArgs {
+                from: "old".into(),
+                into: "local".into(),
+                confirm_nonce: None,
+            }),
+        )
+        .await;
+    assert!(res.is_ok(), "{res:?}");
+    let s = store.lock().unwrap();
+    assert!(s.get_host_row("old").unwrap().is_none());
+    assert!(s.get_session("dev-old", "local").unwrap().is_some());
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -2033,7 +2091,8 @@ fn capture_default_cap_matches_docs() {
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
 /// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
-/// `catalog_admin`: 93; `update_status` / `update_admin`: 95.)
+/// `catalog_admin`, and host identity & health's `merge_host` and
+/// `forget_project`: 95; `update_status` / `update_admin`: 97.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2055,7 +2114,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 95);
+    assert_eq!(served, 97);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3279,9 +3338,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 64,528 on 2026-09-28
-    /// (`update_status` / `update_admin`, `pair_client`'s `updater` mode).
-    const BUDGET_BYTES: usize = 64_628;
+    /// comment conflicted on every merge. Measured at 65,862 on 2026-09-28
+    /// (update S4a's `update_status` / `update_admin` merged over plan B's
+    /// host identity & health).
+    const BUDGET_BYTES: usize = 65_962;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

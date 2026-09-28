@@ -17,6 +17,35 @@ export interface HostRow {
   transport: 'ssh' | 'agent';
   /** The host's org (work graph M5): its per-host token's boundary. */
   org_id?: number | null;
+  /** When claude/tmux versions were last read from the host; null = never. Absent from an older hub. */
+  claude_version_at?: number | null;
+  /** Health sample from the last reachable probe; absent from an older hub. */
+  disk_home_free_kb?: number | null;
+  disk_home_total_kb?: number | null;
+  disk_tmp_free_kb?: number | null;
+  load_1m?: number | null;
+  mem_avail_kb?: number | null;
+  uptime_secs?: number | null;
+  health_at?: number | null;
+  /** Last hook accepted from this host's own token. */
+  last_hook_at?: number | null;
+  /** The fleet-agent version its last hello reported (agent hosts). */
+  agent_version?: string | null;
+  /** When provision_hosts last completed on this host; absent from an older hub. */
+  provisioned_at?: number | null;
+  /** Provisioned, but with content older than this build ships (or unknown). */
+  provision_stale?: boolean;
+}
+
+/** The volatile half of a host row, as `host:pinged` carries it. */
+export interface HostHealth {
+  disk_home_free_kb: number | null;
+  disk_home_total_kb: number | null;
+  disk_tmp_free_kb: number | null;
+  load_1m: number | null;
+  mem_avail_kb: number | null;
+  uptime_secs: number | null;
+  health_at: number | null;
 }
 
 export interface SshHost {
@@ -133,7 +162,14 @@ function removeHost(alias: string): void {
 export type HostEvent =
   | { type: 'added' | 'probed'; row: HostRow }
   /** A probe that changed nothing but the stamp — patched onto the row we hold. */
-  | { type: 'pinged'; alias: string; last_pinged_at: number; reachable: boolean }
+  | {
+      type: 'pinged';
+      alias: string;
+      last_pinged_at: number;
+      reachable: boolean;
+      claude_version_at?: number | null;
+      health?: HostHealth | null;
+    }
   | { type: 'removed'; alias: string };
 
 /** Apply a burst of host events in ONE store update, in order (see
@@ -155,7 +191,10 @@ export function applyHostEvents(events: readonly HostEvent[]): void {
           next = rows.mergeInto(next, {
             ...have,
             last_pinged_at: ev.last_pinged_at,
+            claude_version_at: ev.claude_version_at ?? have.claude_version_at,
             reachable: ev.reachable,
+            // The health sample rides the ping (it moves every pass).
+            ...(ev.health ?? {}),
           });
         }
       } else {

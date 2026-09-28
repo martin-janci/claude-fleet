@@ -764,6 +764,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       its own operator — remove it there with `fleet-hub`",
         },
     ),
+    // Host identity & health, task 5. LocalOnly, not Routed: the hub tool
+    // is `Access::Master` and a paired desktop holds a client token, so
+    // routing would be a guaranteed `E_FORBIDDEN` — the same reasoning as
+    // `remove_host` (`commands/hosts.rs`).
+    (
+        "merge_host",
+        Verdict::LocalOnly {
+            instead: "merging one host's rows into another is fleet administration, which the \
+                      hub reserves for its own operator — run it there with `fleet-hub host merge \
+                      <from> <into>`",
+        },
+    ),
     (
         "hide_host",
         Verdict::LocalOnly {
@@ -819,7 +831,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "provision_hosts",
         Verdict::LocalOnly {
             instead: "it rewrites every host's hook block to report to this app; provision \
-                      from the hub with `fleet-hub`",
+                      from the hub with `fleet-hub provision [--host <alias>] [--content-only]`",
         },
     ),
     (

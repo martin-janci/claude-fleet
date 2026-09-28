@@ -38,6 +38,17 @@ pub fn apply_hook(
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Result<(), IpcError> {
+    // hosts F9: the only proof a host's hooks still authenticate used to be
+    // indirect. A per-host token names its host; the master token maps to
+    // `local` (`caller_host`), which a hub without a local host has hidden —
+    // so only a bound caller stamps.
+    if let Some(host) = ctx.caller.host_alias.as_deref() {
+        if let Ok(s) = store.lock() {
+            if let Err(e) = s.set_host_last_hook_at(host, crate::store::now_unix()) {
+                tracing::debug!(host, error = %e, "[hook] last_hook_at not stamped");
+            }
+        }
+    }
     match payload.hook_event_name.as_deref() {
         Some("Stop") => apply_stop_hook(store, ssh, payload, ctx),
         Some("UserPromptSubmit") => apply_prompt_submit_hook(store, payload, ctx),
@@ -3257,6 +3268,42 @@ mod tests {
         apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%4"))).unwrap();
         assert_eq!(claude_id(&store, id2).as_deref(), Some(NEW));
         assert!(last_hook_at(&store, id2).is_some());
+    }
+
+    /// hosts F9: every accepted hook from a per-host token stamps the
+    /// host's `last_hook_at`; the master token, which maps to `local`,
+    /// stamps nothing.
+    #[test]
+    fn a_bound_caller_stamps_its_host_last_hook_at_and_the_master_does_not() {
+        let store = make_store();
+        store.lock().unwrap().upsert_host("h").unwrap();
+        let _id = pane_session(&store, "s", "%3");
+        let bound = host_caller("h");
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&bound, None),
+        )
+        .unwrap();
+        let row = store.lock().unwrap().get_host_row("h").unwrap().unwrap();
+        assert!(row.last_hook_at.is_some(), "a bound caller stamps its host");
+
+        let master = Caller::master();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&master, None),
+        )
+        .unwrap();
+        let local = store
+            .lock()
+            .unwrap()
+            .get_host_row("local")
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.last_hook_at, None, "the master token names no host");
     }
 
     #[test]

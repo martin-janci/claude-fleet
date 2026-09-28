@@ -201,6 +201,70 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
+    /// Stamp when the host's versions were last read from the host itself
+    /// (migration 072). Written by the reconcile pass only on a pass whose
+    /// probe carried a `versions` section, and by `probe_host`; the
+    /// versions themselves still travel through `update_host_probe`. No
+    /// event: the same transaction's `update_host_probe_in_tx` announces
+    /// the row (as a ping, carrying this stamp).
+    pub fn set_host_versions_at(&self, alias: &str, at: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET claude_version_at = ?1 WHERE alias = ?2",
+            rusqlite::params![at, alias],
+        )?;
+        Ok(())
+    }
+
+    /// Write one health sample (migration 073). No event: the reconcile
+    /// transaction's `update_host_probe_in_tx` announces the row and puts
+    /// this sample on the ping.
+    pub fn set_host_health(
+        &self,
+        alias: &str,
+        h: &crate::tmux::HostHealthSample,
+        at: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
+             disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
+             health_at = ?7 WHERE alias = ?8",
+            rusqlite::params![
+                h.disk_home_free_kb,
+                h.disk_home_total_kb,
+                h.disk_tmp_free_kb,
+                h.load_1m,
+                h.mem_avail_kb,
+                h.uptime_secs,
+                at,
+                alias
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp the last hook accepted from this host's own token (hosts F9).
+    /// Silent: hooks arrive several times per turn.
+    pub fn set_host_last_hook_at(&self, alias: &str, at: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET last_hook_at = ?1 WHERE alias = ?2",
+            rusqlite::params![at, alias],
+        )?;
+        Ok(())
+    }
+
+    /// The fleet-agent version the host's hello reported (hosts F5).
+    pub fn set_host_agent_version(
+        &self,
+        alias: &str,
+        version: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET agent_version = ?1 WHERE alias = ?2 AND agent_version IS NOT ?1",
+            rusqlite::params![version, alias],
+        )?;
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
+    }
+
     pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE hosts SET hidden=?1 WHERE alias=?2",
@@ -385,16 +449,168 @@ impl Store {
         Ok(())
     }
 
+    /// Mark a host provisioned (or not). With `true` the content fingerprint
+    /// this build ships and the time are recorded too (migration 074), so
+    /// `HostRow::provision_stale` can compare on every later read; with
+    /// `false` both are cleared.
     pub fn set_host_provisioned(
         &self,
         alias: &str,
         provisioned: bool,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE hosts SET provisioned=?1 WHERE alias=?2",
-            rusqlite::params![if provisioned { 1 } else { 0 }, alias],
-        )?;
+        if provisioned {
+            self.conn.execute(
+                "UPDATE hosts SET provisioned=1, provision_fingerprint=?1, provisioned_at=?2 \
+                 WHERE alias=?3",
+                rusqlite::params![crate::service::provision::fingerprint(), now_unix(), alias],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE hosts SET provisioned=0, provision_fingerprint=NULL, provisioned_at=NULL \
+                 WHERE alias=?1",
+                rusqlite::params![alias],
+            )?;
+        }
         Ok(())
+    }
+
+    /// Re-home everything keyed on `from` under `into` in ONE transaction,
+    /// then delete the `from` host row (data-sync F2/F5: the `local` → `mac`
+    /// rename left 249 worktree rows and 6 duplicate agent rows on a hidden
+    /// alias). Rules: a worktree, fingerprint, dismissal, layer or secret
+    /// that `into` already has keeps `into`'s; `usage_daily` sums per day; a
+    /// `from` session whose `claude_session_id` already exists under `into`
+    /// is dropped (the newer alias observed the same agent), a `from`
+    /// session whose `tmux_name` clashes is dropped too, the rest move.
+    pub fn merge_host_alias(
+        &self,
+        from: &str,
+        into: &str,
+    ) -> Result<MergeReport, crate::ipc_error::IpcError> {
+        use crate::ipc_error::{codes, IpcError};
+        if from == into {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "from and into are the same host",
+            ));
+        }
+        for alias in [from, into] {
+            if fetch_host(&self.conn, alias)?.is_none() {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("host {alias} not found"),
+                ));
+            }
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        // Worktrees: move the ones `into` lacks; point sessions at the twin
+        // for the ones it has, then drop the leftovers.
+        let worktrees_moved = tx.execute(
+            "UPDATE worktrees SET host_alias = ?2 WHERE host_alias = ?1 AND NOT EXISTS (
+               SELECT 1 FROM worktrees w2 WHERE w2.host_alias = ?2
+                  AND w2.project_id = worktrees.project_id AND w2.name = worktrees.name)",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET worktree_id = (
+               SELECT w2.id FROM worktrees w1 JOIN worktrees w2
+                 ON w2.host_alias = ?2 AND w2.project_id = w1.project_id AND w2.name = w1.name
+               WHERE w1.id = sessions.worktree_id)
+             WHERE worktree_id IN (SELECT id FROM worktrees WHERE host_alias = ?1)",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute("DELETE FROM worktrees WHERE host_alias = ?1", [from])?;
+        for (table, cols) in [
+            (
+                "worktree_parent_fingerprints",
+                "wt_path, parent_fp, recorded_at",
+            ),
+            ("dismissed_agents", "claude_session_id, dismissed_at"),
+            ("host_layers", "layer_name, axis, position, active"),
+            ("catalog_secrets_host", "name, value, updated_at"),
+        ] {
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {table} (host_alias, {cols}) \
+                     SELECT ?2, {cols} FROM {table} WHERE host_alias = ?1"
+                ),
+                rusqlite::params![from, into],
+            )?;
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE host_alias = ?1"),
+                [from],
+            )?;
+        }
+        // Keyed (day, host_alias, backfill) since plan D's migration 071: a
+        // collected day and a first-cursor backfill day sum separately.
+        let usage_days_merged = tx.execute(
+            "INSERT INTO usage_daily (day, host_alias, backfill, input_tokens, output_tokens, \
+               cache_write_tokens, cache_read_tokens, cost_micros)
+             SELECT day, ?2, backfill, input_tokens, output_tokens, cache_write_tokens, \
+               cache_read_tokens, cost_micros
+               FROM usage_daily WHERE host_alias = ?1
+             ON CONFLICT(day, host_alias, backfill) DO UPDATE SET
+               input_tokens = input_tokens + excluded.input_tokens,
+               output_tokens = output_tokens + excluded.output_tokens,
+               cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+               cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+               cost_micros = cost_micros + excluded.cost_micros",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute("DELETE FROM usage_daily WHERE host_alias = ?1", [from])?;
+        // Sessions: duplicates and name clashes go (events with them, the
+        // inbox tombstoned, as `delete_host` does); the rest move.
+        let dropped: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM sessions s WHERE s.host_alias = ?1 AND (
+                   (s.claude_session_id IS NOT NULL AND EXISTS (
+                      SELECT 1 FROM sessions t WHERE t.host_alias = ?2
+                        AND t.claude_session_id = s.claude_session_id))
+                   OR EXISTS (SELECT 1 FROM sessions t WHERE t.host_alias = ?2
+                        AND t.tmux_name = s.tmux_name))",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![from, into], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &dropped {
+            tx.execute("DELETE FROM session_events WHERE session_id = ?1", [id])?;
+            tx.execute(
+                "UPDATE participants SET retired_at = ?1, session_id = NULL, client_id = NULL \
+                 WHERE session_id = ?2 AND retired_at IS NULL",
+                rusqlite::params![now_unix(), id],
+            )?;
+            tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        }
+        let moved: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT id FROM sessions WHERE host_alias = ?1")?;
+            let ids = stmt
+                .query_map([from], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        tx.execute(
+            "UPDATE sessions SET host_alias = ?2 WHERE host_alias = ?1",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute("DELETE FROM host_tokens WHERE host_alias = ?1", [from])?;
+        tx.execute("DELETE FROM hosts WHERE alias = ?1", [from])?;
+        tx.commit()?;
+        for id in &dropped {
+            self.bus.session_killed(*id);
+        }
+        self.emit_sessions_updated(&moved);
+        self.bus.host_removed(from);
+        self.emit_host(into, |bus, row| bus.host_probed(row))?;
+        Ok(MergeReport {
+            from: from.to_string(),
+            into: into.to_string(),
+            worktrees_moved,
+            sessions_moved: moved.len(),
+            sessions_dropped: dropped.len(),
+            usage_days_merged,
+        })
     }
 
     pub fn delete_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
@@ -638,6 +854,211 @@ mod tests {
         assert_eq!(row.claude_version.as_deref(), Some("2.1.144"));
         assert_eq!(row.tmux_version.as_deref(), Some("3.6a"));
         assert_eq!(row.last_pinged_at, Some(1000));
+    }
+
+    #[test]
+    fn set_host_versions_at_stamps_the_row_and_lists_it() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let before = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(
+            before.claude_version_at, None,
+            "a fresh host has never been version-probed"
+        );
+        s.set_host_versions_at("h", 1_700_000_000).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.claude_version_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn set_host_health_writes_every_column_and_the_stamp() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let sample = crate::tmux::HostHealthSample {
+            disk_home_free_kb: Some(3_600_000),
+            disk_home_total_kb: Some(150_000_000),
+            disk_tmp_free_kb: Some(5_900_000),
+            load_1m: Some(5.25),
+            mem_avail_kb: Some(1_234_567),
+            uptime_secs: Some(144 * 86400),
+        };
+        s.set_host_health("h", &sample, 1_700_000_000).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.disk_home_free_kb, Some(3_600_000));
+        assert_eq!(row.disk_home_total_kb, Some(150_000_000));
+        assert_eq!(row.disk_tmp_free_kb, Some(5_900_000));
+        assert_eq!(row.load_1m, Some(5.25));
+        assert_eq!(row.mem_avail_kb, Some(1_234_567));
+        assert_eq!(row.uptime_secs, Some(144 * 86400));
+        assert_eq!(row.health_at, Some(1_700_000_000));
+        s.set_host_last_hook_at("h", 1_700_000_100).unwrap();
+        s.set_host_agent_version("h", "0.2.26").unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.last_hook_at, Some(1_700_000_100));
+        assert_eq!(row.agent_version.as_deref(), Some("0.2.26"));
+    }
+
+    /// hosts F1: `provisioned` was a boolean set once; now it carries which
+    /// content and when, so an older provisioning reads as stale.
+    #[test]
+    fn set_host_provisioned_records_the_fingerprint_and_a_changed_one_reads_stale() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let fresh = s.get_host_row("h").unwrap().unwrap();
+        assert!(
+            !fresh.provisioned && !fresh.provision_stale,
+            "unprovisioned is not stale"
+        );
+        s.set_host_provisioned("h", true).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert!(row.provisioned);
+        assert!(row.provisioned_at.is_some());
+        assert!(!row.provision_stale);
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h'",
+                [],
+            )
+            .unwrap();
+        assert!(s.get_host_row("h").unwrap().unwrap().provision_stale);
+        // A provisioning from before the fingerprint existed is stale too.
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET provision_fingerprint=NULL WHERE alias='h'",
+                [],
+            )
+            .unwrap();
+        assert!(s.get_host_row("h").unwrap().unwrap().provision_stale);
+        s.set_host_provisioned("h", false).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert!(!row.provisioned && !row.provision_stale && row.provisioned_at.is_none());
+    }
+
+    /// data-sync F2/F5: the `local` → `mac` rename left 249 worktree rows
+    /// and 6 duplicate agent rows on a hidden alias nothing merged.
+    #[test]
+    fn merge_host_alias_rehomes_rows_dedupes_sessions_and_sums_usage_in_one_go() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.insert_host("mac", Some("mac")).unwrap();
+        let pid = s.upsert_project("o", "r", "/Users/m/o/r").unwrap();
+        let wt = s
+            .upsert_worktree_on(
+                "local",
+                pid,
+                "feat",
+                "/Users/m/o/r/.claude/worktrees/feat",
+                Some("feat"),
+            )
+            .unwrap();
+        s.record_parent_fingerprint("local", "/Users/m/o/r/.claude/worktrees/feat", "1:2", 1)
+            .unwrap();
+        s.conn_for_test()
+            .execute_batch(
+                "INSERT INTO dismissed_agents (host_alias, claude_session_id, dismissed_at) VALUES ('local','sid-x',1);
+                 INSERT INTO usage_daily (day, host_alias, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_micros) VALUES (20000,'local',10,1,0,0,100),(20000,'mac',5,1,0,0,50),(20001,'local',7,0,0,0,70);",
+            )
+            .unwrap();
+        // `upsert_session`'s last argument is the account, not the Claude
+        // session id; the ids that make two rows "the same agent" are set
+        // directly.
+        let with_claude_id = |name: &str, host: &str, wt: Option<i64>, status: &str, sid: &str| {
+            let id = s
+                .upsert_session(name, host, Some(pid), wt, 1, 1, status, None)
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE sessions SET claude_session_id=?1 WHERE id=?2",
+                    rusqlite::params![sid, id],
+                )
+                .unwrap();
+            id
+        };
+        let dup_local = with_claude_id("bg:dup", "local", Some(wt), "ghost", "sid-dup");
+        let dup_mac = with_claude_id("bg:dup2", "mac", None, "running", "sid-dup");
+        let moved = with_claude_id("bg:only", "local", Some(wt), "ghost", "sid-only");
+        let clash = s
+            .upsert_session("dev-same", "local", None, None, 1, 1, "ghost", None)
+            .unwrap();
+        s.upsert_session("dev-same", "mac", None, None, 3, 3, "running", None)
+            .unwrap();
+
+        let rep = s.merge_host_alias("local", "mac").unwrap();
+        assert_eq!(
+            (
+                rep.worktrees_moved,
+                rep.sessions_moved,
+                rep.sessions_dropped,
+                rep.usage_days_merged
+            ),
+            (1, 1, 2, 2)
+        );
+        assert!(
+            s.get_host_row("local").unwrap().is_none(),
+            "the from row is gone"
+        );
+        assert_eq!(s.get_worktree_row(wt).unwrap().unwrap().host_alias, "mac");
+        assert_eq!(
+            s.parent_fingerprint("mac", "/Users/m/o/r/.claude/worktrees/feat")
+                .unwrap()
+                .as_deref(),
+            Some("1:2")
+        );
+        assert!(
+            s.get_session_by_id(dup_local).unwrap().is_none(),
+            "the duplicate claude_session_id under from is dropped"
+        );
+        assert!(s.get_session_by_id(dup_mac).unwrap().is_some());
+        assert_eq!(
+            s.get_session_by_id(moved).unwrap().unwrap().host_alias,
+            "mac"
+        );
+        assert!(
+            s.get_session_by_id(clash).unwrap().is_none(),
+            "a tmux_name the target already has keeps the target's row"
+        );
+        let (i, c): (i64, i64) = s
+            .conn_for_test()
+            .query_row(
+                "SELECT input_tokens, cost_micros FROM usage_daily WHERE day=20000 AND host_alias='mac'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((i, c), (15, 150));
+        let n: i64 = s
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily WHERE host_alias='local'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+        let d: i64 = s
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM dismissed_agents WHERE host_alias='mac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(d, 1);
+    }
+
+    #[test]
+    fn merge_host_alias_refuses_the_same_alias_and_an_unknown_target() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("a", None).unwrap();
+        assert_eq!(s.merge_host_alias("a", "a").unwrap_err().code, "E_INVALID");
+        assert_eq!(
+            s.merge_host_alias("a", "nope").unwrap_err().code,
+            "E_NOTFOUND"
+        );
+        assert_eq!(
+            s.merge_host_alias("nope", "a").unwrap_err().code,
+            "E_NOTFOUND"
+        );
     }
 
     #[test]
