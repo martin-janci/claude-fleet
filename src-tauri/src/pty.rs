@@ -1320,15 +1320,29 @@ mod tests {
 
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &self.0.to_string()])
-                .status();
+            if let Some(p) = process(self.0).process(sysinfo::Pid::from_u32(self.0)) {
+                p.kill();
+            }
         }
+    }
+
+    /// A process table refreshed for `pid` alone. Through sysinfo rather than
+    /// `kill -0` so the same check holds on Windows, where a pid is not a
+    /// POSIX pid and Git's `kill` cannot see it.
+    fn process(pid: u32) -> sysinfo::System {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys
     }
 
     /// `alive` with a deadline. Teardown signals the child while the caller
     /// waits, but reaping finishes on a detached thread once the inline budget
-    /// is spent (`PTY_REAP_INLINE`), and `kill -0` still succeeds for a zombie.
+    /// is spent (`PTY_REAP_INLINE`), and a zombie is still in the table.
     /// "Gone" is therefore eventually-true; how fast depends on the machine,
     /// which is what made this flaky on the macOS runner.
     fn died(pid: u32) -> bool {
@@ -1342,12 +1356,10 @@ mod tests {
         false
     }
 
+    /// Whether `pid` is still in the process table, a zombie included: only
+    /// a reaped child counts as gone, as with `kill -0`.
     fn alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        process(pid).process(sysinfo::Pid::from_u32(pid)).is_some()
     }
 
     #[test]
