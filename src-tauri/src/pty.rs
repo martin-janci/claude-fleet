@@ -1462,6 +1462,16 @@ mod tests {
             ["-c", "exit 0"]
         });
         let child = pair.slave.spawn_command(cmd).expect("spawn");
+        // Drain the output as the real reader thread does: ConPTY blocks the
+        // child (and conhost) while nobody reads the pseudo console's output,
+        // so an undrained test child would never get to exit. What this test
+        // needs is exactly the production shape — output read, EOF never
+        // coming — minus the reader's own `exited`.
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 4096];
+            while matches!(reader.read(&mut sink), Ok(n) if n > 0) {}
+        });
         let writer = pair.master.take_writer().expect("writer");
         let shared = Arc::new(PtyShared::new());
         let input_tx = spawn_writer(writer, Arc::clone(&shared));
