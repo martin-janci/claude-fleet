@@ -129,6 +129,7 @@ fn ssh_spawner() -> TunnelSpawner {
 
 /// Production process lister: `ps -A -o pid=,args=` (same flags on macOS and
 /// Linux).
+#[cfg(unix)]
 fn ps_lister() -> ProcessLister {
     Arc::new(|| {
         let out = crate::proc::std_command("ps")
@@ -148,8 +149,43 @@ fn ps_lister() -> ProcessLister {
     })
 }
 
+/// Production process lister on Windows, which has no `ps`: the process
+/// table through sysinfo, each command line with its program reduced to the
+/// file name. `C:\Program Files\Git\usr\bin\ssh.exe` would otherwise split
+/// into two tokens and never read as `ssh` in [`stale_tunnel_pids`].
+#[cfg(not(unix))]
+fn ps_lister() -> ProcessLister {
+    Arc::new(|| {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        sys.processes()
+            .iter()
+            .filter_map(|(pid, p)| {
+                let mut argv = p.cmd().iter().map(|a| a.to_string_lossy().into_owned());
+                let program = argv.next()?;
+                let program = std::path::Path::new(&program)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or(program);
+                let line = std::iter::once(program)
+                    .chain(argv)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Some((pid.as_u32(), line))
+            })
+            .collect()
+    })
+}
+
 /// Production killer: `SIGTERM`. An `ssh -R` exits cleanly on it and drops its
-/// forward, which is all we need before rebinding.
+/// forward, which is all we need before rebinding. Windows has no signal to
+/// send, so there it is `TerminateProcess`, which drops the forward just the
+/// same.
 fn signal_killer() -> ProcessKiller {
     Arc::new(|pid: u32| {
         #[cfg(unix)]
@@ -159,7 +195,19 @@ fn signal_killer() -> ProcessKiller {
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }
         #[cfg(not(unix))]
-        let _ = pid;
+        {
+            use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+            let pid = Pid::from_u32(pid);
+            let mut sys = System::new();
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            if let Some(p) = sys.process(pid) {
+                p.kill();
+            }
+        }
     })
 }
 
@@ -229,15 +277,25 @@ pub fn stale_tunnel_pids(
         .iter()
         .filter(|(_, cmd)| {
             let tokens: Vec<&str> = cmd.split_whitespace().collect();
-            let is_ssh = tokens
-                .first()
-                .map(|t| t.rsplit('/').next().unwrap_or(t) == "ssh")
-                .unwrap_or(false);
+            let is_ssh = tokens.first().is_some_and(|t| is_ssh_program(t));
             let forwards_ours = tokens.windows(2).any(|w| w[0] == "-R" && w[1] == spec);
             is_ssh && forwards_ours && tokens.contains(&"-N") && tokens.last() == Some(&host)
         })
         .map(|(pid, _)| *pid)
         .collect()
+}
+
+/// Whether `program` (a path or a bare name) is `ssh`: the file name after
+/// the last `/` or `\\`. A Windows `ssh.exe` counts in any case, as Windows
+/// file names do; a bare name is compared exactly, as Unix ones are.
+fn is_ssh_program(program: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    match name.len().checked_sub(4) {
+        Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => {
+            name[..i].eq_ignore_ascii_case("ssh")
+        }
+        _ => name == "ssh",
+    }
 }
 
 /// Whether ssh's stderr says the remote forward could not bind — the signature
@@ -752,6 +810,33 @@ mod tests {
             "/usr/bin/ssh -N -R 127.0.0.1:4180:127.0.0.1:4180 -- mefistos".to_string(),
         )];
         assert_eq!(stale_tunnel_pids(&procs, "mefistos", 4180, 4180), vec![7]);
+    }
+
+    /// Windows: the lister reduces the program to its file name, which keeps
+    /// `.exe`; a full Windows path is recognised too, either separator.
+    #[test]
+    fn stale_tunnel_pids_matches_windows_ssh_exe() {
+        let procs = vec![
+            (
+                3u32,
+                "ssh.exe -N -R 127.0.0.1:4180:127.0.0.1:4180 -- mefistos".to_string(),
+            ),
+            (
+                4u32,
+                r"C:\Windows\System32\OpenSSH\SSH.EXE -N -R 127.0.0.1:4180:127.0.0.1:4180 -- mefistos"
+                    .to_string(),
+            ),
+            (
+                5u32,
+                "sshd.exe -N -R 127.0.0.1:4180:127.0.0.1:4180 -- mefistos".to_string(),
+            ),
+        ];
+        assert_eq!(
+            stale_tunnel_pids(&procs, "mefistos", 4180, 4180),
+            vec![3, 4]
+        );
+        assert!(!is_ssh_program("ssh.exe.bak"));
+        assert!(!is_ssh_program(".exe"));
     }
 
     #[test]
