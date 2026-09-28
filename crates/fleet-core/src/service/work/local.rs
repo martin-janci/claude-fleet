@@ -23,7 +23,7 @@
 use super::{detect, WorkLinkArgs};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
-use crate::store::{LocalItemLink, SessionRow, Store, WorkItemRow};
+use crate::store::{Decider, LocalItemLink, SessionRow, Store, WorkItemRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -52,8 +52,20 @@ fn visible_links(
     scope: &OrgScope,
     links: Vec<LocalItemLink>,
 ) -> Result<Vec<LocalItemLink>, IpcError> {
-    let Some(h) = scope.host() else {
+    if scope.is_all() {
         return Ok(links);
+    }
+    let Some(h) = scope.host() else {
+        // A bound client (work graph M14): links inside its orgs whose
+        // session it may see; no host fence.
+        let mut out = Vec::with_capacity(links.len());
+        for mut l in links {
+            l.link.org_id = s.link_org(&l.link)?;
+            if scope.sees_link(&l.link) && orgs::link_session_visible(s, scope, &l.link)? {
+                out.push(l);
+            }
+        }
+        return Ok(out);
     };
     let mut out = Vec::with_capacity(links.len());
     for mut l in links {
@@ -106,15 +118,31 @@ pub fn local_items(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<LocalWo
 }
 
 /// `work_link { action: name, session_id, title, key? }`: a new local item,
-/// linked to the session (manual, confirmed; primary when the session has
-/// no primary work). Returns the session's updated row.
+/// linked to the session (confirmed, `manual` — `agent` for an agent;
+/// primary when the session has no primary work). Returns the session's
+/// updated row.
 ///
 /// A per-host token names work only on its own host's sessions inside its
 /// org; any other session id answers exactly as one that does not exist.
+///
+/// A PERSON's naming (the desktop's); an agent's goes through
+/// [`name_session_work_as`].
 pub fn name_session_work(
     args: &WorkLinkArgs,
     store: &Mutex<Store>,
     scope: &OrgScope,
+) -> Result<SessionRow, IpcError> {
+    name_session_work_as(args, store, scope, Decider::Person)
+}
+
+/// [`name_session_work`] by `decider`, which decides the link's source
+/// (D34): `manual` for a person, `agent` for an agent (a per-host token,
+/// the operator) — an agent naming its work is never a person's link.
+pub fn name_session_work_as(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    decider: Decider,
 ) -> Result<SessionRow, IpcError> {
     let sid = args
         .session_id
@@ -124,7 +152,7 @@ pub fn name_session_work(
     let visible = s
         .get_session_by_id(sid)?
         .is_some_and(|r| match scope.host() {
-            None => true,
+            None => scope.sees_row(&r) && scope.sees_org(r.org_id),
             Some(h) => r.host_alias == h && scope.sees_org(r.org_id),
         });
     if !visible {
@@ -162,7 +190,7 @@ pub fn name_session_work(
             return Err(err);
         }
     }
-    s.name_session_work(sid, key.as_deref(), &title)?;
+    s.name_session_work_by(sid, key.as_deref(), &title, decider)?;
     // A new primary can settle a pending suggestion (M4.3), as any decision.
     if let Err(e) = detect::resolve_session(&s, sid) {
         tracing::debug!(error = %e.message, "[work] resolve after naming work failed");

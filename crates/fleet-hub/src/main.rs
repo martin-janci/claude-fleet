@@ -1,6 +1,9 @@
 //! `fleet-hub` — claude-fleet without the desktop app. See `docs/hub.md`.
 
+mod bench;
+mod census;
 mod config;
+mod decide;
 mod demo;
 mod host;
 mod org;
@@ -91,6 +94,11 @@ enum Cmd {
         /// untrusted-content marker. Only for a keyboard that is yours.
         #[arg(long)]
         trusted: bool,
+        /// Bind the client to one org (its id): it reads only that org's work
+        /// and sessions, and unassigned ones while the org's
+        /// `bound_sees_unassigned` is on (the default).
+        #[arg(long)]
+        org: Option<i64>,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -123,6 +131,24 @@ enum Cmd {
     Work {
         #[command(subcommand)]
         cmd: work::WorkCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Local measurements for the Jev evaluation: counts only, read straight
+    /// from the database. No running hub needed; nothing is written or sent.
+    Census {
+        #[command(subcommand)]
+        cmd: census::CensusCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// The decision model (Jev evaluation, experimental, off by default):
+    /// set or clear its API key, and read what it was asked. `status` and
+    /// `runs` read the database only; the key is never printed or an
+    /// argument. See docs/decisions.md.
+    Decide {
+        #[command(subcommand)]
+        cmd: decide::DecideCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -230,6 +256,10 @@ enum ClientCmd {
     Trust { name: String },
     /// Take that back: its prompts are marked as untrusted input again.
     Untrust { name: String },
+    /// Bind a client to one org (its id): it reads only that org's work and sessions.
+    Bind { name: String, org: i64 },
+    /// Lift a client's org binding: it reads every org again.
+    Unbind { name: String },
 }
 
 #[derive(Subcommand)]
@@ -283,8 +313,9 @@ async fn main() -> ExitCode {
             mode,
             ttl,
             trusted,
+            org,
             opts,
-        } => pair::pair(&opts, &env, &name, mode.as_deref(), ttl, trusted).await,
+        } => pair::pair(&opts, &env, &name, mode.as_deref(), ttl, trusted, org).await,
         Cmd::Client { cmd, opts } => match cmd {
             ClientCmd::List { include_revoked } => {
                 pair::client_list(&opts, &env, include_revoked).await
@@ -292,6 +323,8 @@ async fn main() -> ExitCode {
             ClientCmd::Revoke { name } => pair::client_revoke(&opts, &env, &name).await,
             ClientCmd::Trust { name } => pair::client_trust(&opts, &env, &name, true).await,
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
+            ClientCmd::Bind { name, org } => pair::client_bind(&opts, &env, &name, Some(org)).await,
+            ClientCmd::Unbind { name } => pair::client_bind(&opts, &env, &name, None).await,
         },
         Cmd::Peer { cmd, opts } => match cmd {
             PeerCmd::Add {
@@ -311,6 +344,8 @@ async fn main() -> ExitCode {
             opts,
         } => provision::run(host, content_only, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
+        Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
+        Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,
@@ -550,6 +585,31 @@ mod tests {
             panic!("pair --trusted did not parse");
         };
         assert!(trusted);
+        // `--org` binds the pairing to an org (work graph M14).
+        let Cmd::Pair { org, .. } =
+            Cli::try_parse_from(["fleet-hub", "pair", "--name", "phone", "--org", "2"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("pair --org did not parse");
+        };
+        assert_eq!(org, Some(2));
+        let Cmd::Client { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "client", "bind", "phone", "2"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("client bind did not parse");
+        };
+        assert!(matches!(cmd, ClientCmd::Bind { name, org: 2 } if name == "phone"));
+        let Cmd::Client { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "client", "unbind", "phone"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("client unbind did not parse");
+        };
+        assert!(matches!(cmd, ClientCmd::Unbind { name } if name == "phone"));
         // `--name` is required.
         assert!(Cli::try_parse_from(["fleet-hub", "pair"]).is_err());
         for argv in [

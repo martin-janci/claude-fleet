@@ -30,6 +30,9 @@
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
+  import ReplyActions from './ReplyActions.svelte';
+  import ForkSheet from './ForkSheet.svelte';
+  import { finalizeBranchSlug } from './branch-slug';
   import {
     findMatches,
     turnIndex,
@@ -1677,6 +1680,25 @@
     else next.add(key);
     expanded = next;
   }
+
+  // The fork worktree sheet (Task 7): records the anchor and opens
+  // <ForkSheet>, which calls the backend itself. `anchor` is the fork's
+  // truncation anchor: `null` keeps the whole transcript.
+  let forkAnchor = $state<string | null>(null);
+  let forkOpen = $state(false);
+
+  function openForkSheet(anchor: string | null) {
+    forkAnchor = anchor;
+    forkOpen = true;
+  }
+
+  /** `fork-of-<branch>`, slugified for use as a new worktree's name — the
+   *  branch/worktree's name when this session has one, else its tmux name,
+   *  which is what a `main`-checkout session forks from. */
+  function suggestedForkName(s: SessionRow): string {
+    const base = s.friendly_name?.trim() || s.tmux_name;
+    return finalizeBranchSlug(`fork-of-${base}`) || 'fork';
+  }
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
@@ -1837,7 +1859,31 @@
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
                       <Markdown source={g.text} />
-                      <span class="copy-slot text-copy"><CopyButton text={g.text} label="Copy reply" /></span>
+                      <span class="copy-slot text-copy">
+                        <!-- Fork / Rewind / Retry always act on the session's
+                             CURRENT conversation, but `conv` here is the one
+                             being viewed (`viewing ?? session.claude_session_id`).
+                             While an earlier conversation is on screen the
+                             anchors are read off the wrong transcript — Fork
+                             would fork the current one in full, Rewind would
+                             either miss the anchor or find the same uuid in the
+                             current transcript and rewind it at a point read
+                             off another conversation. So the three backend
+                             actions are unsupported here, exactly as the
+                             composer is disabled; `replyActionsFor` leaves Copy
+                             and Quote, which are about the text on screen. -->
+                        <ReplyActions
+                          turns={conv.turns}
+                          index={i}
+                          truncated={conv.truncated}
+                          text={g.text}
+                          sessionId={session.id}
+                          hostAlias={session.host_alias}
+                          tmuxName={session.tmux_name}
+                          supported={viewing === null}
+                          onFork={(anchor) => openForkSheet(anchor)}
+                        />
+                      </span>
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a
@@ -2235,6 +2281,15 @@
     <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>
+
+{#if forkOpen}
+  <ForkSheet
+    sessionId={session.id}
+    anchor={forkAnchor}
+    suggestedName={suggestedForkName(session)}
+    onclose={() => (forkOpen = false)}
+  />
+{/if}
 
 <style>
   .composer-above {

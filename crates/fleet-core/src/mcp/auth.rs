@@ -68,6 +68,11 @@ pub struct ClientRef {
     pub id: i64,
     pub name: String,
     pub trusted: bool,
+    /// The org this client is bound to (work graph M14, `fleet-hub pair
+    /// --org`): its work and sessions are fenced to that org and unassigned
+    /// data ([`crate::service::orgs::OrgScope::Org`]). `None`: unbound, every
+    /// org (the org is a view, as for the master).
+    pub org_id: Option<i64>,
 }
 
 /// The authenticated identity behind a request, derived from the bearer
@@ -127,6 +132,19 @@ impl Caller {
                 .is_some_and(|c| c.name == crate::service::operator::OPERATOR_CLIENT_NAME)
     }
 
+    /// Who a work-link decision by this caller is (D34 label hygiene): a
+    /// per-host token is the host's own Claude and the operator is the UX
+    /// agent, so both are an AGENT, and their links and confirmations are
+    /// recorded as `agent` whatever `source` they pass. The master and a
+    /// paired person's client (a phone, a paired desktop) are a PERSON.
+    pub fn work_decider(&self) -> crate::store::Decider {
+        if self.host_alias.is_some() || self.is_operator() || self.mode == TokenMode::Peer {
+            crate::store::Decider::Agent
+        } else {
+            crate::store::Decider::Person
+        }
+    }
+
     /// True for a paired client the operator has vouched for
     /// (`client_tokens.trusted_at` set): its text is the operator's own, so
     /// the untrusted-content marker is left off. Never true for the master
@@ -136,18 +154,34 @@ impl Caller {
     }
 
     /// The work graph's org scope for this caller (M5) — the ONE place a
-    /// caller becomes a scope. The master and a paired client read every
-    /// org (the org is a view there); a per-host token is bounded by its
-    /// host's org, read from the store now, so a host moved by the master
-    /// is fenced from its next call on.
+    /// caller becomes a scope. The master and an unbound paired client read
+    /// every org (the org is a view there); a per-host token is bounded by
+    /// its host's org, read from the store now, so a host moved by the
+    /// master is fenced from its next call on; a client bound to an org
+    /// (M14) is bounded by that org. The binding travels in the cached
+    /// caller, and a re-bind bumps the auth epoch (migration 066), so a
+    /// re-bound client is fenced from its next request on.
     pub fn org_scope(
         &self,
         store: &crate::store::Store,
     ) -> Result<crate::service::orgs::OrgScope, crate::ipc_error::IpcError> {
-        match &self.host_alias {
-            None => Ok(crate::service::orgs::OrgScope::All),
-            Some(h) => crate::service::orgs::OrgScope::for_host(store, h),
+        match (&self.host_alias, &self.client) {
+            (Some(h), _) => crate::service::orgs::OrgScope::for_host(store, h),
+            (
+                None,
+                Some(ClientRef {
+                    org_id: Some(org), ..
+                }),
+            ) => crate::service::orgs::OrgScope::for_client(store, *org),
+            (None, _) => Ok(crate::service::orgs::OrgScope::All),
         }
+    }
+
+    /// True when this caller reads through an org boundary: a per-host
+    /// token, or a paired client bound to an org (work graph M14). The
+    /// result gate redacts every answer such a caller receives.
+    pub fn is_scoped(&self) -> bool {
+        self.host_alias.is_some() || self.client.as_ref().is_some_and(|c| c.org_id.is_some())
     }
 
     /// Short identity label for audit rows and rate-limit buckets.
@@ -233,6 +267,7 @@ pub fn resolve_token(
                     id: row.id,
                     name: row.name.clone(),
                     trusted: row.trusted_at.is_some(),
+                    org_id: row.org_id,
                 }),
                 mode: TokenMode::parse_client(&row.mode),
             });
@@ -419,6 +454,7 @@ mod tests {
             last_seen_at: None,
             revoked_at: None,
             trusted_at: None,
+            org_id: None,
         }
     }
 
@@ -432,6 +468,33 @@ mod tests {
         assert_eq!(c.mode, TokenMode::Full);
         assert_eq!(c.client.as_ref().unwrap().id, 7);
         assert!(c.host_alias.is_none());
+    }
+
+    /// D34: a per-host token (the host's Claude) and the operator (the UX
+    /// agent) decide work links as an agent; the master and a paired
+    /// person's client as a person.
+    #[test]
+    fn host_tokens_and_the_operator_decide_work_as_agents() {
+        use crate::store::Decider;
+        let clients = vec![
+            client_row(1, "phone", "tok-phone", "full"),
+            client_row(
+                2,
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                "tok-op",
+                "full",
+            ),
+        ];
+        let hosts = vec![host_row("mefistos", "tok-mef", "full")];
+        let who = |tok: &str| {
+            resolve_token(tok, "s3cret", &hosts, &clients)
+                .unwrap()
+                .work_decider()
+        };
+        assert_eq!(who("s3cret"), Decider::Person);
+        assert_eq!(who("tok-phone"), Decider::Person);
+        assert_eq!(who("tok-mef"), Decider::Agent);
+        assert_eq!(who("tok-op"), Decider::Agent);
     }
 
     #[test]
@@ -557,6 +620,7 @@ mod tests {
                     last_seen_at: None,
                     revoked_at: None,
                     trusted_at: None,
+                    org_id: None,
                 }]
             ),
             None

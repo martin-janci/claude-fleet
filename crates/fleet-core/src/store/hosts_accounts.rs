@@ -202,7 +202,7 @@ impl Store {
     }
 
     /// Stamp when the host's versions were last read from the host itself
-    /// (migration 066). Written by the reconcile pass only on a pass whose
+    /// (migration 071). Written by the reconcile pass only on a pass whose
     /// probe carried a `versions` section, and by `probe_host`; the
     /// versions themselves still travel through `update_host_probe`. No
     /// event: the same transaction's `update_host_probe_in_tx` announces
@@ -215,7 +215,7 @@ impl Store {
         Ok(())
     }
 
-    /// Write one health sample (migration 067). No event: the reconcile
+    /// Write one health sample (migration 072). No event: the reconcile
     /// transaction's `update_host_probe_in_tx` announces the row and puts
     /// this sample on the ping.
     pub fn set_host_health(
@@ -450,7 +450,7 @@ impl Store {
     }
 
     /// Mark a host provisioned (or not). With `true` the content fingerprint
-    /// this build ships and the time are recorded too (migration 068), so
+    /// this build ships and the time are recorded too (migration 073), so
     /// `HostRow::provision_stale` can compare on every later read; with
     /// `false` both are cleared.
     pub fn set_host_provisioned(

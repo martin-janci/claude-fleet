@@ -8,11 +8,14 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+mod bench_work_link;
 mod catalog;
 mod clients;
 mod conversations;
+mod decisions;
 mod hosts_accounts;
 mod layers;
+mod nl_census;
 mod orgs;
 mod participants;
 mod peer_links;
@@ -43,12 +46,25 @@ mod work_local;
 mod work_retention;
 mod work_tidy;
 mod work_usage;
+mod work_view;
 
+pub use bench_work_link::{
+    BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow, BENCH_PERSON_SOURCES,
+};
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
+pub use decisions::{
+    is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
+    NewDecisionRun, DECISION_CALL_FAILURES, DECISION_FALLBACKS, DECISION_FOLLOWUPS,
+    DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
+};
 pub use layers::HostLayerRow;
+pub use nl_census::{
+    CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
+    NL_CENSUS_MIN_SCHEMA,
+};
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,
     SessionOrgFacts, ORG_NAME_MAX_CHARS,
@@ -79,10 +95,13 @@ pub use trackers::{
     TRACKER_PROVIDERS, TRACKER_STATES,
 };
 pub use work::{
-    canonical_key, github_ref, normalize_work_ref, split_github_repo, WorkItemRow, WorkLinkRow,
-    WorkSummary, WorkTarget, WORK_LINK_SOURCES,
+    canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,
+    WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
 };
-pub use work_detect::DetectionState;
+pub use work_detect::{
+    DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
+    WORK_SUGGESTION_WITHDRAWN,
+};
 pub use work_journal::{
     JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };
@@ -90,6 +109,9 @@ pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
+pub use work_view::{
+    version_conflict, Placement, RuleConditions, ViewItem, ViewLink, WorkRule, WorkView,
+};
 
 /// One number per `Store` ever built in this process, never reused — see
 /// [`Store::instance_id`].

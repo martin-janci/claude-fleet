@@ -117,7 +117,7 @@ fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 066: `hosts` already has its
+/// `already_applied` guard of migration 071: `hosts` already has its
 /// `claude_version_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
 fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -129,7 +129,7 @@ fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 067: `hosts` already has its
+/// `already_applied` guard of migration 072: `hosts` already has its
 /// `health_at` column (and the eight beside it), and `ALTER TABLE ... ADD
 /// COLUMN` would fail again. See [`Migration`].
 fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -141,7 +141,7 @@ fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 068: `hosts` already has its
+/// `already_applied` guard of migration 073: `hosts` already has its
 /// `provision_fingerprint` column (and `provisioned_at` beside it), and
 /// `ALTER TABLE ... ADD COLUMN` would fail again. See [`Migration`].
 fn hosts_has_provision_fingerprint(conn: &Connection) -> rusqlite::Result<bool> {
@@ -263,6 +263,38 @@ fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
 fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'auto_tidy'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 068: `orgs` already has its
+/// `jev_allowed` column.
+fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'jev_allowed'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 066 (work graph M14.1b): its last
+/// ADD COLUMN (`client_tokens.org_id`) present means the whole migration is.
+fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'org_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 067 (work graph M14.1b, D31).
+fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'bound_sees_unassigned'",
         [],
         |r| r.get(0),
     )?;
@@ -664,26 +696,56 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/065_stale_working.sql"),
         already_applied: Some(sessions_has_stale_working_at),
     },
+    // Work graph M14.1b: the Work view's reads (link versions, placements,
+    // placement rules, saved views, a local item's org, a conflict's review
+    // ack, org-bound paired clients). `ALTER TABLE ... ADD COLUMN` fails if
+    // the column is already there.
+    Migration {
+        version: 66,
+        sql: include_str!("../../migrations/066_work_view.sql"),
+        already_applied: Some(client_tokens_has_org),
+    },
+    // D31: `orgs.bound_sees_unassigned` (and its auth-epoch trigger). An
+    // ADD COLUMN, guarded like 053's.
+    Migration {
+        version: 67,
+        sql: include_str!("../../migrations/067_org_bound_sees_unassigned.sql"),
+        already_applied: Some(orgs_has_bound_sees_unassigned),
+    },
+    // Jev evaluation (D31 / D36): `orgs.jev_allowed`, an org's consent to
+    // decision-model calls. One ADD COLUMN, its own guard.
+    Migration {
+        version: 68,
+        sql: include_str!("../../migrations/068_org_jev_allowed.sql"),
+        already_applied: Some(orgs_has_jev_allowed),
+    },
+    // Jev evaluation (D35 / D37): `decision_runs` and `decision_secrets`.
+    // New tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(69, include_str!("../../migrations/069_decision_runs.sql")),
+    // D34 label hygiene: `work_unlinks`, a person's "Clear work" held
+    // against the unchanged state signal (R9u). A new table, index and
+    // trigger, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(70, include_str!("../../migrations/070_work_unlinks.sql")),
     // Host identity & health, task 1: `hosts.claude_version_at`. Guarded:
     // ADD COLUMN. (Numbered at merge time — `migrations_are_contiguous_from_one`
     // allows no gap — so a sibling plan merged first shifts these.)
     Migration {
-        version: 66,
-        sql: include_str!("../../migrations/066_host_claude_version_at.sql"),
+        version: 71,
+        sql: include_str!("../../migrations/071_host_claude_version_at.sql"),
         already_applied: Some(hosts_has_claude_version_at),
     },
     // Host identity & health, task 2: the per-pass health sample, the last
     // accepted hook and the agent version on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 67,
-        sql: include_str!("../../migrations/067_host_health.sql"),
+        version: 72,
+        sql: include_str!("../../migrations/072_host_health.sql"),
         already_applied: Some(hosts_has_health_at),
     },
     // Host identity & health, task 6: the provisioning content fingerprint
     // and its stamp on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 68,
-        sql: include_str!("../../migrations/068_host_provision_fingerprint.sql"),
+        version: 73,
+        sql: include_str!("../../migrations/073_host_provision_fingerprint.sql"),
         already_applied: Some(hosts_has_provision_fingerprint),
     },
 ];
@@ -3018,11 +3080,47 @@ mod tests {
                 "created_at",
                 "last_seen_at",
                 "revoked_at",
-                "trusted_at"
+                "trusted_at",
+                // Work graph M14 (migration 066): its own trigger,
+                // `auth_epoch_client_tokens_org`.
+                "org_id"
             ],
             "client_tokens changed: add the column to auth_epoch_client_tokens_update \
              (migration 060) unless it is liveness-only like last_seen_at"
         );
+    }
+
+    /// Work graph M14: re-binding a paired client to another org (or
+    /// unbinding it) is a change of who it is — it must invalidate every
+    /// cached caller, or a re-bound phone would keep reading its old org
+    /// until the cache aged out.
+    #[test]
+    fn rebinding_a_client_bumps_the_auth_epoch() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.add_org("A", None, false).unwrap();
+        let b = s.add_org("B", None, false).unwrap();
+        s.insert_client_token("phone", &"0".repeat(64), "full")
+            .unwrap();
+        let at = |s: &Store| s.auth_epoch().unwrap();
+        let e0 = at(&s);
+        s.set_client_org("phone", Some(a.id)).unwrap();
+        let e1 = at(&s);
+        assert!(e1 > e0, "bound");
+        s.set_client_org("phone", Some(a.id)).unwrap();
+        assert_eq!(at(&s), e1, "the same binding again is no change");
+        s.set_client_org("phone", Some(b.id)).unwrap();
+        let e2 = at(&s);
+        assert!(e2 > e1, "re-bound");
+        s.set_client_org("phone", None).unwrap();
+        assert!(at(&s) > e2, "unbound");
+        assert_eq!(
+            s.set_client_org("phone", Some(9_999)).unwrap_err().code,
+            crate::ipc_error::codes::E_NOTFOUND
+        );
+        // A deleted org leaves the client bound to its id: fail closed.
+        s.set_client_org("phone", Some(b.id)).unwrap();
+        s.remove_org(b.id).unwrap();
+        assert_eq!(s.active_client_tokens().unwrap()[0].org_id, Some(b.id));
     }
 
     /// Migration 060 on a populated v59 database: the counter starts at 0,

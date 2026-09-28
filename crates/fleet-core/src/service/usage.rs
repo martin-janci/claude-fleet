@@ -817,9 +817,21 @@ pub fn daily_totals(
     since_day: i64,
     host: Option<&str>,
 ) -> Result<Vec<DayUsage>, IpcError> {
+    daily_totals_where(s, since_day, host, &|_| true)
+}
+
+/// [`daily_totals`] over only the hosts `keep` accepts.
+fn daily_totals_where(
+    s: &Store,
+    since_day: i64,
+    host: Option<&str>,
+    keep: &dyn Fn(&str) -> bool,
+) -> Result<Vec<DayUsage>, IpcError> {
     let mut by: BTreeMap<i64, UsageTotals> = BTreeMap::new();
-    for (day, _host, t) in s.usage_daily_since(since_day, host)? {
-        by.entry(day).or_default().add(&t);
+    for (day, h, t) in s.usage_daily_since(since_day, host)? {
+        if keep(&h) {
+            by.entry(day).or_default().add(&t);
+        }
     }
     Ok(by
         .into_iter()
@@ -835,6 +847,19 @@ pub fn daily_totals(
 pub fn recent_days(s: &Store, now: i64, days: i64, host: Option<&str>) -> Vec<DayUsage> {
     let today = now.div_euclid(SECS_PER_DAY);
     daily_totals(s, today - (days - 1).max(0), host).unwrap_or_default()
+}
+
+/// [`recent_days`] summed over only the hosts `keep` accepts: an org-bound
+/// client's `fleet_health` (work graph M14), whose daily totals must not
+/// count another org's hosts.
+pub fn recent_days_on(
+    s: &Store,
+    now: i64,
+    days: i64,
+    keep: &dyn Fn(&str) -> bool,
+) -> Vec<DayUsage> {
+    let today = now.div_euclid(SECS_PER_DAY);
+    daily_totals_where(s, today - (days - 1).max(0), None, keep).unwrap_or_default()
 }
 
 /// One session's usage in a [`UsageReport`].

@@ -12,8 +12,9 @@
 //!   ticket": resolve, refuse a duplicate (`E_EXISTS` with the live
 //!   session, so the UI jumps to it), pick the project and host, name the
 //!   worktree after the key and title, create the session, link it
-//!   `started`, and — with a brief — queue the ticket's context (third-party
-//!   text inside `mark_untrusted`) for the first hook.
+//!   `started` (`agent_started` when an agent starts it, D34), and — with a
+//!   brief — queue the ticket's context (third-party text inside
+//!   `mark_untrusted`) for the first hook.
 //!
 //! **The fence** (M3's decision 6, bounded by the org since M5). A host-bound
 //! caller (an in-session Claude's per-host token) sees only the tracker
@@ -29,7 +30,7 @@ use super::TrackerNet;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
 use crate::service::work::resume::InFlight;
-use crate::store::{SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
+use crate::store::{Decider, SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -68,6 +69,17 @@ pub struct Ticket {
 /// the host fence alone would let a host read another org's ticket that a
 /// person force-linked on it.
 pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>>, IpcError> {
+    if let OrgScope::Org { .. } = scope {
+        // A bound client (work graph M14): every item inside its orgs; no
+        // host fence (a phone is not a host).
+        return Ok(Some(
+            s.work_item_orgs()?
+                .into_iter()
+                .filter(|(_, org)| scope.sees_org(*org))
+                .map(|(id, _)| id)
+                .collect(),
+        ));
+    }
     let Some(h) = scope.host() else {
         return Ok(None);
     };
@@ -219,6 +231,13 @@ pub(crate) fn tickets_in(
 pub fn trackers(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<TrackerRow>, IpcError> {
     let s = lock(store)?;
     let all = s.list_trackers()?;
+    if let OrgScope::Org { .. } = scope {
+        // A bound client (work graph M14): the trackers of its orgs.
+        return Ok(all
+            .into_iter()
+            .filter(|t| scope.sees_org(t.org_id))
+            .collect());
+    }
     let Some(allowed) = allowed(scope, &s)? else {
         return Ok(all);
     };
@@ -306,9 +325,8 @@ pub async fn lookup(
             Ok(r) => r,
             // Which sites are connected is not a host token's to learn: an
             // unknown site answers as an invisible key does.
-            Err(e) if e.code == codes::E_NOTFOUND && scope.host().is_some() => {
-                let h = scope.host().unwrap_or_default();
-                return Err(orgs::not_visible_key(h, reference.trim()));
+            Err(e) if e.code == codes::E_NOTFOUND && !scope.is_all() => {
+                return Err(orgs::not_visible_to(scope, reference.trim()));
             }
             Err(e) => return Err(e),
         }
@@ -326,6 +344,11 @@ pub async fn lookup(
                 // Nothing cached is linked anywhere, let alone on this host;
                 // do not let a host token make the hub fetch arbitrary keys.
                 return Err(orgs::not_visible_key(h, &key));
+            }
+            // A bound client (M14) may make the hub fetch only from a tracker
+            // of its own orgs.
+            if !scope.is_all() && !tracker.as_ref().is_some_and(|t| scope.sees_org(t.org_id)) {
+                return Err(orgs::not_visible_to(scope, &key));
             }
             let t = tracker.ok_or_else(|| {
                 IpcError::new(
@@ -376,10 +399,7 @@ pub async fn lookup(
     let s = lock(store)?;
     if let Some(allowed) = allowed(scope, &s)? {
         if !allowed.contains(&item_id) {
-            return Err(orgs::not_visible_key(
-                scope.host().unwrap_or_default(),
-                &key,
-            ));
+            return Err(orgs::not_visible_to(scope, &key));
         }
     }
     let item = s
@@ -402,7 +422,8 @@ pub async fn lookup(
         OrgScope::Host { .. } => {
             crate::mcp::guard::fence_untrusted(&d, "a tracker ticket", super::DESCRIPTION_MAX_CHARS)
         }
-        OrgScope::All => d,
+        // A person reads it on a phone or the desktop (bound or not): as is.
+        OrgScope::All | OrgScope::Org { .. } => d,
     });
     Ok(Ticket {
         item,
@@ -438,6 +459,10 @@ pub struct StartArgs {
     /// A multi-repo start (work graph M9.6): the duplicate guard counts only
     /// live sessions on the key in THIS start's project.
     pub per_project: bool,
+    /// Who starts (D34): a person's start links `started`, an agent's
+    /// (a per-host token, the operator) `agent_started`. The desktop's is
+    /// always a person's (the default).
+    pub decider: Decider,
 }
 
 /// Where a start lands and what it is called.
@@ -460,6 +485,10 @@ pub struct StartPlan {
     /// sessions on the key in this plan's project.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_project: bool,
+    /// Who starts ([`StartArgs::decider`]): decides the link's source.
+    /// Never on the wire: a plan read back is a person's.
+    #[serde(skip)]
+    pub decider: Decider,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -738,6 +767,18 @@ pub fn plan_resolved(
     }
     // Data integrity, for every caller (M5): a ticket of one org is not
     // attached to a session of another by mistake.
+    // A client bound to an org (M14) starts work only where the session
+    // would be its org's: never a session it could not see once made.
+    // With D31 off, an unassigned session is not its to see either.
+    if scope.bound_org().is_some() {
+        let session_org = s.org_for_new_session(&host_alias, project_id)?;
+        if !scope.sees_org(session_org) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "a client bound to an org starts work only in its own org's projects and hosts",
+            ));
+        }
+    }
     if let Some(id) = item_id {
         let session_org = s.org_for_new_session(&host_alias, project_id)?;
         orgs::check_cross_org(s.item_org(id)?, session_org, &key, args.force_cross_org)?;
@@ -808,6 +849,7 @@ pub fn plan_resolved(
         branch,
         worktree_id,
         per_project: args.per_project,
+        decider: args.decider,
     })
 }
 
@@ -1055,7 +1097,8 @@ fn link_started(
         Some(id) => WorkTarget::Item(id),
         None => WorkTarget::Key(&plan.key),
     };
-    s.link_session_work(row.id, target, "started")?;
+    // `started` for a person, `agent_started` for an agent (D34).
+    s.link_session_work(row.id, target, plan.decider.start_source())?;
     let queued = match brief {
         Some(body) if !body.trim().is_empty() => {
             let body: String = body

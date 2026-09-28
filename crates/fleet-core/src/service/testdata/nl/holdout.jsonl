@@ -1,0 +1,43 @@
+{"text": "Faktura sa negeneruje, ked ma zakaznik nulovu sumu.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Uz zase padol nightly job, pozri co sa stalo s kontajnerom.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Zmen farbu tlacidla na zelenu a skontroluj kontrast.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Nemozem sa prihlasit cez Google, vraj neplatny redirect.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Daj mi zoznam vsetkych endpointov, ktore nemaju testy.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Vies mi povedat, preco je ta query taka pomala?", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Aplikacia pada pri otoceni obrazovky na tablete.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Pridaj logovanie do platobnej brany, nech vidime chyby.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Toto je naliehave, zakaznik caka od rana.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Kontajner ma malo pamate, zvys limit na dva giga.", "expect": "sk", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Faktura se negeneruje, kdyz ma zakaznik nulovou castku.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Uz zase spadl nightly job, podivej se co se stalo s kontejnerem.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Zmen barvu tlacitka na zelenou a zkontroluj kontrast.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Nemuzu se prihlasit pres Google, prej neplatny redirect.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Dej mi seznam vsech endpointu, ktere nemaji testy.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Muzes mi rict, proc je ta query tak pomala?", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Aplikace pada pri otoceni obrazovky na tabletu.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Pridej logovani do platebni brany, at vidime chyby.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Tohle je nalehave, zakaznik ceka od rana.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Kontejner ma malo pameti, zvys limit na dva giga.", "expect": "cs", "folded": true, "kind": "prompt", "note": "holdout"}
+{"text": "Faktúra sa negeneruje, keď má zákazník nulovú sumu.", "expect": "sk", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Už zase padol nightly job, pozri, čo sa stalo s kontajnerom.", "expect": "sk", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Aplikácia padá pri otočení obrazovky na tablete.", "expect": "sk", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Kontajner má málo pamäte, zvýš limit na dva gigabajty.", "expect": "sk", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Pridaj logovanie do platobnej brány, nech vidíme chyby.", "expect": "sk", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Nastav CI pipeline tak, aby sa deploy spúšťal len z tagov.", "expect": "sk", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Faktura se negeneruje, když má zákazník nulovou částku.", "expect": "cs", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Už zase spadl nightly job, podívej se, co se stalo s kontejnerem.", "expect": "cs", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Aplikace padá při otočení obrazovky na tabletu.", "expect": "cs", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Kontejner má málo paměti, zvyš limit na dva gigabajty.", "expect": "cs", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Přidej logování do platební brány, ať vidíme chyby.", "expect": "cs", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Nastav CI pipeline tak, aby se deploy spouštěl jen z tagů.", "expect": "cs", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Faktura sie nie generuje, gdy klient ma zerowa kwote.", "expect": "pl", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Znowu padl nocny job, sprawdz co sie stalo z kontenerem.", "expect": "pl", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Aplikacja pada przy obrocie ekranu na tablecie.", "expect": "pl", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Faktura się nie generuje, gdy klient ma zerową kwotę.", "expect": "pl", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "The invoice is not generated when the customer has a zero amount.", "expect": "en", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "The nightly job failed again, check what happened to the container.", "expect": "en", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Set up the CI pipeline so deploys only run from tags.", "expect": "en", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Die Rechnung wird nicht erzeugt, wenn der Kunde einen Betrag von null hat.", "expect": "de", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Der nächtliche Job ist wieder abgestürzt, sieh nach, was mit dem Container los ist.", "expect": "de", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "A számla nem készül el, ha az ügyfél összege nulla.", "expect": "hu", "folded": false, "kind": "prompt", "note": "holdout"}
+{"text": "Az éjszakai feladat megint elhasalt, nézd meg, mi történt a konténerrel.", "expect": "hu", "folded": false, "kind": "prompt", "note": "holdout"}

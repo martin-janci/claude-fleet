@@ -114,6 +114,7 @@
       "ended_at",
       "items",
       "prompt",
+      "prompt_uuid",
       "reminders"
     ],
     "Conversation": [

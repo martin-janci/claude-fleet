@@ -58,6 +58,8 @@
     AUTO_TIDY_REASONS,
     parseAutoTidyReasons,
     toggleAutoTidyReason,
+    DECIDE_MODES,
+    DECIDE_JEV_MODELS,
     type SettingKey,
     type ProjectsLayout,
   } from './fleet_settings';
@@ -363,6 +365,24 @@
       return;
     }
     void applyLimit(key, r.value);
+  }
+  // --- Decisions (Jev): experimental, off (docs/decisions.md) ---
+  let decideError: string | null = $state(null);
+  let decideBusy = $state(false);
+  async function applyDecide(key: SettingKey, value: string) {
+    decideBusy = true;
+    decideError = null;
+    const r = await setFleetSetting(key, value);
+    decideBusy = false;
+    if (!r.ok) decideError = r.error.message;
+  }
+  function onDecideIntChange(key: SettingKey, label: string, e: Event) {
+    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
+    if ('error' in r) {
+      decideError = `${label}: ${r.error}`;
+      return;
+    }
+    void applyDecide(key, r.value);
   }
   function onIdleUnlinkedDaysChange(e: Event) {
     const r = parseBoundedIntInput(
@@ -817,6 +837,13 @@
         <div class="section-header"><h4>Limits</h4></div>
         <p class="hook-desc" data-testid="limits-remote">
           {hubBlock('get_fleet_settings', $hubStatus)}
+        </p>
+      </section>
+      <section class="block" data-testid="decide-remote-section">
+        <div class="section-header"><h4>Decisions (Jev) — experimental, off</h4></div>
+        <p class="hook-desc" data-testid="decide-remote">
+          {hubBlock('get_fleet_settings', $hubStatus)} On the hub: <code>set_setting</code> with a
+          <code>decide.*</code> key, and <code>fleet-hub decide status</code>.
         </p>
       </section>
       <section class="block" data-testid="mcp-remote-section">
@@ -1275,7 +1302,7 @@
           aria-describedby="work-retention-timeline-days-desc"
           data-testid="work-retention-timeline-days"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTimelineWorkEventsDays, 'Retention: work timeline', e)} />
-        <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge and tidy events are kept; the newest of each per session stays (0 = forever)</span>
+        <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge, tidy and withdrawn-suggestion events are kept; the newest of each per session stays (0 = forever)</span>
       </div>
       <WorkRetention />
       <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
@@ -1376,6 +1403,132 @@
           onclick={() => void applySetting(SETTING_KEYS.workTrustedBranchProjects, '[]')}>Trust none</button>
       </div>
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
+    </section>
+
+    <section class="block" data-testid="decide-section">
+      <div class="section-header">
+        <h4>Decisions (Jev) — experimental, off</h4>
+      </div>
+      <p class="hook-desc" data-testid="decide-explainer">
+        Lets fleet ask TypeSafe's decision model (Jev) closed-set questions, like which ticket a
+        session is working on. Data is sent to TypeSafe only for organisations that opted in
+        (Organisations), redacted, and never raw text is recorded. A model answer never grants a
+        permission or runs a risky action: at most it pre-selects a suggestion you confirm.
+        The key is set on the machine with <code>fleet-hub decide set-key</code>.
+      </p>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.decideJevEnabled)}
+          disabled={decideBusy}
+          data-testid="decide-jev-enabled"
+          onchange={() =>
+            void applyDecide(
+              SETTING_KEYS.decideJevEnabled,
+              settingBool($fleetSettings, SETTING_KEYS.decideJevEnabled) ? 'false' : 'true',
+            )} />
+        <strong>Ask the decision model</strong> (off: nothing is ever sent, at once)
+      </label>
+      <div class="mcp-field">
+        <label class="lbl" for="decide-jev-work-link">work link</label>
+        <select
+          class="layout-select"
+          id="decide-jev-work-link"
+          value={$fleetSettings[SETTING_KEYS.decideJevWorkLink] ?? 'off'}
+          disabled={decideBusy}
+          aria-describedby="decide-jev-work-link-desc"
+          data-testid="decide-jev-work-link"
+          onchange={(e) => void applyDecide(SETTING_KEYS.decideJevWorkLink, (e.currentTarget as HTMLSelectElement).value)}>
+          {#each DECIDE_MODES as m (m)}<option value={m}>{m}</option>{/each}
+        </select>
+        <span class="hook-desc" id="decide-jev-work-link-desc">choosing a ticket for a session no rule could link (shadow: record only; assist: suggest)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="decide-jev-status-map">status map</label>
+        <select
+          class="layout-select"
+          id="decide-jev-status-map"
+          value={$fleetSettings[SETTING_KEYS.decideJevStatusMap] ?? 'off'}
+          disabled={decideBusy}
+          aria-describedby="decide-jev-status-map-desc"
+          data-testid="decide-jev-status-map"
+          onchange={(e) => void applyDecide(SETTING_KEYS.decideJevStatusMap, (e.currentTarget as HTMLSelectElement).value)}>
+          {#each DECIDE_MODES as m (m)}<option value={m}>{m}</option>{/each}
+        </select>
+        <span class="hook-desc" id="decide-jev-status-map-desc">proposing a status category for an Asana section</span>
+      </div>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.decideJevUnassigned)}
+          disabled={decideBusy}
+          data-testid="decide-jev-unassigned"
+          onchange={() =>
+            void applyDecide(
+              SETTING_KEYS.decideJevUnassigned,
+              settingBool($fleetSettings, SETTING_KEYS.decideJevUnassigned) ? 'false' : 'true',
+            )} />
+        Also send sessions and tickets that belong to no organisation
+      </label>
+      <div class="mcp-field">
+        <label class="lbl" for="decide-jev-model">model</label>
+        <select
+          class="layout-select"
+          id="decide-jev-model"
+          value={$fleetSettings[SETTING_KEYS.decideJevModel] ?? 'jev-1.13.0'}
+          disabled={decideBusy}
+          data-testid="decide-jev-model"
+          onchange={(e) => void applyDecide(SETTING_KEYS.decideJevModel, (e.currentTarget as HTMLSelectElement).value)}>
+          {#each DECIDE_JEV_MODELS as m (m)}<option value={m}>{m}</option>{/each}
+        </select>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="decide-jev-timeout-ms">timeout</label>
+        <input class="port" id="decide-jev-timeout-ms" type="number" min="100" max="30000" step="100"
+          value={settingInt($fleetSettings, SETTING_KEYS.decideJevTimeoutMs)}
+          disabled={decideBusy}
+          aria-describedby="decide-jev-timeout-ms-desc"
+          data-testid="decide-jev-timeout-ms"
+          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevTimeoutMs, 'Timeout', e)} />
+        <span class="hook-desc" id="decide-jev-timeout-ms-desc">milliseconds one call may take (never retried)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="decide-jev-daily-token-budget">daily tokens</label>
+        <input class="port" id="decide-jev-daily-token-budget" type="number" min="0" max="1000000000" step="100000"
+          value={settingInt($fleetSettings, SETTING_KEYS.decideJevDailyTokenBudget)}
+          disabled={decideBusy}
+          aria-describedby="decide-jev-daily-token-budget-desc"
+          data-testid="decide-jev-daily-token-budget"
+          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevDailyTokenBudget, 'Daily tokens', e)} />
+        <span class="hook-desc" id="decide-jev-daily-token-budget-desc">input tokens per UTC day ($0.042 per million; 0 = none)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="decide-jev-breaker-failures">breaker</label>
+        <input class="port" id="decide-jev-breaker-failures" type="number" min="1" max="100" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.decideJevBreakerFailures)}
+          disabled={decideBusy}
+          data-testid="decide-jev-breaker-failures"
+          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevBreakerFailures, 'Breaker failures', e)} />
+        <span class="hook-desc">failed calls in a row, then a pause of</span>
+        <input class="port" id="decide-jev-breaker-open-secs" type="number" min="10" max="86400" step="10"
+          aria-label="breaker pause in seconds"
+          value={settingInt($fleetSettings, SETTING_KEYS.decideJevBreakerOpenSecs)}
+          disabled={decideBusy}
+          data-testid="decide-jev-breaker-open-secs"
+          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevBreakerOpenSecs, 'Breaker pause', e)} />
+        <span class="hook-desc">seconds</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="decide-retention-days">keep runs</label>
+        <input class="port" id="decide-retention-days" type="number" min="0" max="3650" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.decideRetentionDays)}
+          disabled={decideBusy}
+          aria-describedby="decide-retention-days-desc"
+          data-testid="decide-retention-days"
+          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideRetentionDays, 'Keep runs', e)} />
+        <span class="hook-desc" id="decide-retention-days-desc">days a decision record (ids and numbers, never text) is kept (0 = forever)</span>
+      </div>
+      {#if decideError}<p class="err" role="alert" data-testid="decide-error">{decideError}</p>{/if}
     </section>
 
     <!-- Provisioning mints host tokens: refresh the shared token cache the

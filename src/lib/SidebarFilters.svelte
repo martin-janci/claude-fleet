@@ -20,6 +20,7 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { trackers } from './trackers';
+  import { sidebarView, type SidebarView } from './work_view';
   import {
     activeWorkFilterCount,
     effectiveWorkFilters,
@@ -58,6 +59,7 @@
   const bulkKillBlocked = $derived(hubActionBlocked('kill_session', $hubStatus, $hubConnection));
 
   let {
+    listView = 'sessions',
     search = $bindable(),
     recency = $bindable(),
     needsYouOnly = $bindable(),
@@ -77,6 +79,12 @@
     onBulkKill,
     clearSelected,
   }: {
+    /** Which list the sidebar shows under this chrome (work graph M14). In
+     *  the Work view the Sessions list's own filters (search, recency, ⚑
+     *  work chips, the focus bar) step aside — the Work view has its own —
+     *  while every entry point stays; Needs you and select switch back to
+     *  the Sessions list, where they act. */
+    listView?: SidebarView;
     search: string;
     recency: Recency;
     needsYouOnly: boolean;
@@ -96,6 +104,7 @@
     onBulkKill: () => void;
     clearSelected: () => void;
   } = $props();
+  const sessionsList = $derived(listView !== 'work');
 
   function accountLabel(host: { account_uuid: string | null }): string {
     if (!host.account_uuid) return '';
@@ -126,12 +135,16 @@
         <option value={UNASSIGNED}>Unassigned</option>
       </select>
     {/if}
-    <input
-      class="search"
-      placeholder="Search sessions, projects…"
-      bind:value={search}
-      data-testid="sidebar-search"
-    />
+    {#if sessionsList}
+      <input
+        class="search"
+        placeholder="Search sessions, projects…"
+        bind:value={search}
+        data-testid="sidebar-search"
+      />
+    {:else}
+      <span class="search-gap"></span>
+    {/if}
     <button class="icon-btn" onclick={onRefresh} disabled={loading} data-testid="sidebar-refresh" title="Refresh">
       {#if loading}…{:else}↻{/if}
     </button>
@@ -186,17 +199,19 @@
     >⚙</button>
   </nav>
 
-  <nav class="recency" aria-label="recency filter" use:hintAnchor={{ id: 'recency-filter', when: $sessions.length > 0 }}>
-    {#each RECENCY_VALUES as opt (opt)}
-      <button
-        class="pill"
-        class:active={recency === opt}
-        onclick={() => (recency = opt)}
-      >
-        {opt}
-      </button>
-    {/each}
-  </nav>
+  {#if sessionsList}
+    <nav class="recency" aria-label="recency filter" use:hintAnchor={{ id: 'recency-filter', when: $sessions.length > 0 }}>
+      {#each RECENCY_VALUES as opt (opt)}
+        <button
+          class="pill"
+          class:active={recency === opt}
+          onclick={() => (recency = opt)}
+        >
+          {opt}
+        </button>
+      {/each}
+    </nav>
+  {/if}
 
   <nav class="triage" aria-label="triage filter">
     <!-- One triage pill (P13/P27): the ranked queue replaces the old
@@ -209,7 +224,13 @@
       data-testid="needs-you-filter"
       aria-pressed={needsYouOnly}
       title="Counts what is waiting on you now: blocked, stuck, failed, lost, safe-remove pending/failed. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
-      onclick={() => (needsYouOnly = !needsYouOnly)}
+      onclick={() => {
+        if (sessionsList) needsYouOnly = !needsYouOnly;
+        else {
+          needsYouOnly = true;
+          sidebarView.set('sessions');
+        }
+      }}
     >
       <!-- At zero there is nothing to warn about: the ⚠ and the "(0)" were
            permanent chrome that read as an alert. The pill stays so the
@@ -222,11 +243,16 @@
       data-testid="select-mode"
       aria-pressed={selectMode}
       title="Select several sessions (or shift/cmd-click rows) for bulk actions"
-      onclick={toggleSelectMode}
+      onclick={() => {
+        if (!sessionsList) {
+          if (!selectMode) toggleSelectMode();
+          sidebarView.set('sessions');
+        } else toggleSelectMode();
+      }}
     >
       ☑ select
     </button>
-    {#if workChromeShown}
+    {#if workChromeShown && sessionsList}
       <button
         class="pill"
         class:active={workActive > 0}
@@ -239,7 +265,7 @@
       </button>
     {/if}
   </nav>
-  {#if workChromeShown && workFiltersOpen}
+  {#if workChromeShown && workFiltersOpen && sessionsList}
     <div class="work-filters" data-testid="work-filters" role="group" aria-label="work filters">
       {#if $trackers.length > 1}
         <nav class="chips" aria-label="tracker filter">
@@ -329,7 +355,7 @@
   <TrackerAttention />
   <LinkReview />
   <TidyReview />
-  {#if $sessionFocus}
+  {#if $sessionFocus && sessionsList}
     <!-- A clicked suggestion: the tree shows only this session. -->
     <div class="focus-bar" data-testid="session-focus-bar" role="status">
       <span class="focus-label">Showing only <strong>{$sessionFocus.label}</strong></span>
@@ -440,6 +466,7 @@
     border-radius: 5px;
   }
   .search::placeholder { color: var(--fg-muted); }
+  .search-gap { flex: 1; }
   .scope {
     flex: 0 0 auto;
     max-width: 7.5rem;

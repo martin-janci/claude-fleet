@@ -16,14 +16,16 @@ pub mod resume;
 pub mod retention;
 #[cfg(test)]
 mod scale_tests;
+pub mod structure;
 pub mod summary;
 pub mod tidy;
 pub mod today;
 pub mod usage;
+pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
-use crate::store::{SessionRow, Store, WorkLinkRow, WorkTarget};
+use crate::store::{Decider, SessionRow, Store, WorkLinkRow, WorkTarget};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -73,6 +75,26 @@ pub struct WorkArgs {
     /// Today: unix start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// item:<id> or ref:<KEY>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Tree filters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub filters: Option<view::WorkTreeFilters>,
+    /// Next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Sessions per task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_task: Option<usize>,
+    /// Draft rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub rule: Option<structure::RuleInput>,
+    /// Org id; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -141,6 +163,48 @@ pub struct WorkLinkArgs {
     /// Name: the work's title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// item:<id> or ref:<KEY>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Version seen (0 none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<i64>,
+    /// Primary link seen; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_primary: Option<i64>,
+    /// false: secondary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<bool>,
+    /// decide_batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub decisions: Option<Vec<structure::LinkDecision>>,
+    /// Group label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Placement note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// From org_impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact_token: Option<String>,
+    /// Org id; 0 none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    /// rule_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub rule: Option<structure::RuleInput>,
+    /// rule_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
+    /// view_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub view: Option<structure::ViewInput>,
+    /// view_delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<i64>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -229,6 +293,22 @@ pub enum WorkAction {
     Reopened,
     /// Local work items: named work with no ticket (work graph M11.1).
     LocalItems,
+    /// The Work view (work graph M14): a page of tasks with their sessions.
+    Tree,
+    /// One task with every session, its provenance and last outcome.
+    Task,
+    /// Every link of one session, with its task.
+    SessionTasks,
+    /// Suggestions and conflicts to decide.
+    Review,
+    /// Placement rules.
+    Rules,
+    /// What a drafted rule would move.
+    RulePreview,
+    /// Saved views.
+    Views,
+    /// What moving a local task to another org changes.
+    OrgImpact,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -250,6 +330,14 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
     ("local_items", WorkAction::LocalItems),
+    ("tree", WorkAction::Tree),
+    ("task", WorkAction::Task),
+    ("session_tasks", WorkAction::SessionTasks),
+    ("review", WorkAction::Review),
+    ("rules", WorkAction::Rules),
+    ("rule_preview", WorkAction::RulePreview),
+    ("views", WorkAction::Views),
+    ("org_impact", WorkAction::OrgImpact),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -272,6 +360,16 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "tidy_apply",
     "name",
     "summarize",
+    "set_primary",
+    "reconsider",
+    "ack",
+    "decide_batch",
+    "place",
+    "assign_org",
+    "rule_save",
+    "rule_delete",
+    "view_save",
+    "view_delete",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -310,6 +408,25 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
     ("summarize_past_work", "work_link", "summarize"),
+    // Work graph M14.1d: the Work view's desktop commands.
+    ("work_tree", "work", "tree"),
+    ("work_task", "work", "task"),
+    ("work_session_tasks", "work", "session_tasks"),
+    ("work_review", "work", "review"),
+    ("work_rules", "work", "rules"),
+    ("work_rule_preview", "work", "rule_preview"),
+    ("work_views", "work", "views"),
+    ("work_org_impact", "work", "org_impact"),
+    ("set_primary_work", "work_link", "set_primary"),
+    ("reconsider_work_link", "work_link", "reconsider"),
+    ("ack_work_link", "work_link", "ack"),
+    ("decide_work_batch", "work_link", "decide_batch"),
+    ("place_work", "work_link", "place"),
+    ("assign_work_org", "work_link", "assign_org"),
+    ("save_work_rule", "work_link", "rule_save"),
+    ("delete_work_rule", "work_link", "rule_delete"),
+    ("save_work_view", "work_link", "view_save"),
+    ("delete_work_view", "work_link", "view_delete"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
@@ -327,6 +444,19 @@ fn work_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars
 
 fn work_link_action_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
     action_schema(WORK_LINK_ACTIONS.iter().copied())
+}
+
+/// The Work view's nested parameters (work graph M14) are served as a bare
+/// `object` / `array`: their shape is in `docs/control-api.md` and the
+/// spec, and a typed schema per nested struct would cost the tool budget
+/// (C21) several kilobytes. The server still deserialises them strictly — a
+/// malformed one is refused, never ignored.
+fn object_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({ "type": "object" })
+}
+
+fn array_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({ "type": "array", "items": { "type": "object" } })
 }
 
 impl WorkArgs {
@@ -441,9 +571,20 @@ pub fn lookup_reference(args: &WorkArgs) -> Result<&str, IpcError> {
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "lookup needs key or url"))
 }
 
-/// The start half of [`WorkLinkArgs`] (work graph M3.4).
+/// The start half of [`WorkLinkArgs`] (work graph M3.4): a PERSON's start
+/// (the desktop's); an agent's goes through [`start_args_as`].
 pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::StartArgs {
+    start_args_as(args, Decider::Person)
+}
+
+/// [`start_args`] started by `decider`, which decides the link's source:
+/// `started` for a person, `agent_started` for an agent (D34).
+pub fn start_args_as(
+    args: &WorkLinkArgs,
+    decider: Decider,
+) -> crate::service::trackers::tickets::StartArgs {
     crate::service::trackers::tickets::StartArgs {
+        decider,
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
@@ -524,14 +665,44 @@ fn work_unscoped(args: &WorkArgs, s: &Store) -> Result<Vec<WorkLinkRow>, IpcErro
 /// a key as a key nothing is linked to. For every caller, linking or
 /// confirming work of one org on a session of another is refused unless
 /// `force_cross_org` ([`orgs::check_cross_org`]).
-pub fn work_link<'a>(
-    args: &'a WorkLinkArgs,
+///
+/// A PERSON's decision (the desktop's commands); an agent's goes through
+/// [`work_link_as`].
+pub fn work_link(
+    args: &WorkLinkArgs,
     store: &Mutex<Store>,
     scope: &OrgScope,
 ) -> Result<SessionRow, IpcError> {
+    work_link_as(args, store, scope, Decider::Person)
+}
+
+/// [`work_link`] decided by `decider`, which decides the source a link,
+/// confirm or reject records: an agent's is `agent` whatever `source` it
+/// passed (only `agent_inferred`, a suggestion, is kept), so it never reads
+/// as a person's decision; a person's `link` keeps its `source` (default
+/// `manual`). An agent cannot overturn a person's rejection (`E_FORBIDDEN`).
+pub fn work_link_as<'a>(
+    args: &'a WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    decider: Decider,
+) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
-        "resume" | "start" | "trust_project" | "handover" | "dismiss" | "tidy_apply" | "name"
+        "resume"
+            | "start"
+            | "trust_project"
+            | "handover"
+            | "dismiss"
+            | "tidy_apply"
+            | "name"
+            | "decide_batch"
+            | "place"
+            | "assign_org"
+            | "rule_save"
+            | "rule_delete"
+            | "view_save"
+            | "view_delete"
     ) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -545,6 +716,20 @@ pub fn work_link<'a>(
         )
     })?;
     let s = lock(store)?;
+    // A client bound to an org never reaches another org's session (the
+    // transport's session gate says so first; this keeps the service's own
+    // answer the same — the unknown session's — for every entry point, the
+    // batch's included).
+    if matches!(scope, OrgScope::Org { .. })
+        && !s
+            .get_session_by_id(session_id)?
+            .is_some_and(|row| scope.sees_row(&row))
+    {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {session_id} not found"),
+        ));
+    }
     let force = args.force_cross_org.unwrap_or(false);
     // The target's org, checked against the scope (visibility) before
     // anything is written.
@@ -652,6 +837,63 @@ pub fn work_link<'a>(
         }
         _ => {}
     }
+    // Work graph M14.1c: a decision on a link by id names the version the
+    // person saw; someone else's change meanwhile is `E_CONFLICT` with the
+    // link's current state. Checked only AFTER the link is known to be one
+    // the caller may name (this session's live link, in its scope): a
+    // version or state is never an oracle for a link out of scope. The
+    // store lock is held from here to the write, so the check and the
+    // write are one step.
+    let checked_link = |link_id: i64| -> Result<(), IpcError> {
+        visible_link(link_id)?;
+        s.check_link_version(link_id, args.expected_version)
+    };
+    let take_primary = args.primary.unwrap_or(true);
+    match args.action.as_str() {
+        // Move the primary (compare-and-set), keep a conflict, undo a
+        // decision.
+        "set_primary" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_primary needs link_id"))?;
+            checked_link(link_id)?;
+            // The compare-and-set is on the primary the CALLER can see: a
+            // scoped caller whose session's primary is another org's (a
+            // forced link) saw "none", and must neither be refused forever
+            // nor be told that link's id. The store's own check then runs
+            // on the actual primary, under this same lock.
+            let actual = s.current_primary_link(session_id)?;
+            let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
+            if let Some(expected) = args.expected_primary {
+                if seen.unwrap_or(0) != expected {
+                    return Err(crate::store::primary_conflict(session_id, seen));
+                }
+            }
+            s.set_primary_work_link(session_id, link_id, Some(actual.unwrap_or(0)))?;
+            return lifecycle_row(&s, session_id);
+        }
+        // D32: a person keeps a conflict (a forced cross-org link, a link
+        // to an unavailable ticket); the review inbox stops listing it.
+        "ack" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "ack needs link_id"))?;
+            checked_link(link_id)?;
+            s.ack_work_link(session_id, link_id)?;
+            return lifecycle_row(&s, session_id);
+        }
+        // Undo: a person's confirm / reject goes back to a suggestion. A
+        // reconsidered primary frees the primary: the resolver below picks
+        // the next one.
+        "reconsider" => {
+            let link_id = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "reconsider needs link_id"))?;
+            checked_link(link_id)?;
+            s.reconsider_work_link(session_id, link_id)?;
+        }
+        _ => {}
+    }
     let target = || -> Result<WorkTarget<'_>, IpcError> {
         match (args.item_id, args.key.as_deref()) {
             (Some(id), None) => Ok(WorkTarget::Item(id)),
@@ -664,7 +906,7 @@ pub fn work_link<'a>(
     };
     match args.action.as_str() {
         "link" => {
-            let source = args.source.as_deref().unwrap_or("manual");
+            let source = link_source(args.source.as_deref(), decider)?;
             let (t, org) = visible_target(target()?)?;
             orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
             if source == AGENT_INFERRED {
@@ -673,21 +915,21 @@ pub fn work_link<'a>(
                 let (key, tracker) = inferred_target(&s, t)?;
                 detect::on_agent_inference(&s, session_id, &key, tracker)?;
             } else {
-                s.link_session_work(session_id, t, source)?;
+                s.link_session_work_as(session_id, t, source, take_primary, args.expected_version)?;
             }
         }
         // `reject { link_id }` decides one suggestion (work graph M4.4);
         // `reject { key | item_id }` any target.
         "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
             let link_id = args.link_id.unwrap_or_default();
-            if !scope.is_all() {
-                visible_link(link_id)?;
+            if !scope.is_all() || args.expected_version.is_some() {
+                checked_link(link_id)?;
             }
-            detect::decide(&s, session_id, link_id, false)?;
+            detect::decide(&s, session_id, link_id, false, decider)?;
         }
         "reject" => {
             let (t, _) = visible_target(target()?)?;
-            s.reject_session_work(session_id, t)?;
+            s.reject_session_work_as(session_id, t, decider, args.expected_version)?;
         }
         "confirm" => {
             let link_id = args
@@ -705,22 +947,35 @@ pub fn work_link<'a>(
             } else if !scope.is_all() {
                 visible_link(link_id)?;
             }
-            detect::decide(&s, session_id, link_id, true)?;
+            if args.expected_version.is_some() {
+                checked_link(link_id)?;
+            }
+            detect::decide_as(&s, session_id, link_id, true, take_primary, decider)?;
         }
         "unlink" => {
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
-            if !scope.is_all() {
-                visible_link(link_id)?;
+            if !scope.is_all() || args.expected_version.is_some() {
+                checked_link(link_id)?;
             }
-            if !s.unlink_session_work(session_id, link_id)? {
+            // A person's "Clear work" holds against the unchanged branch /
+            // PR that named the target, or the re-resolve below would make
+            // the same link again (R9u). An agent's unlink stays a plain
+            // unlink: it never writes a hold a person did not ask for.
+            let holds = match decider {
+                Decider::Person => detect::unlink_holds(&s, session_id, link_id)?,
+                Decider::Agent => Vec::new(),
+            };
+            if !s.unlink_session_work_held(session_id, link_id, &holds)? {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
                     format!("session {session_id} has no live work link {link_id}"),
                 ));
             }
         }
+        // Applied above; the resolver below runs after it.
+        "reconsider" => {}
         other => {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -747,6 +1002,31 @@ fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
 /// `work_link { action: link, source }`'s value for the agent's answer to
 /// the classification nudge (work graph M4.6).
 pub const AGENT_INFERRED: &str = "agent_inferred";
+
+/// The source a `link` records. A person's `source` is kept (default
+/// `manual`); an agent's is `agent` whatever it claimed — `manual` or
+/// `started` would read as a person's decision (usage, write-back) —
+/// except `agent_inferred`, which is a suggestion, not a link. An unknown
+/// source is refused either way.
+fn link_source(requested: Option<&str>, decider: Decider) -> Result<&str, IpcError> {
+    let requested = requested.unwrap_or(decider.source());
+    if requested == AGENT_INFERRED {
+        return Ok(AGENT_INFERRED);
+    }
+    if !crate::store::WORK_LINK_SOURCES.contains(&requested) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "unknown work link source {requested:?}; one of {}, {AGENT_INFERRED}",
+                crate::store::WORK_LINK_SOURCES.join(", ")
+            ),
+        ));
+    }
+    Ok(match decider {
+        Decider::Person => requested,
+        Decider::Agent => Decider::Agent.source(),
+    })
+}
 
 /// The resolver target an agent inference names: the key (normalised) and,
 /// for an item, its tracker. A keyless item cannot be one — the resolver
@@ -884,6 +1164,135 @@ mod tests {
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
+    }
+
+    /// D34: the decider, not the `source` a caller passes, decides what a
+    /// link, confirm or reject records. An agent's is `agent` (its
+    /// `agent_inferred` stays a suggestion); a person's keeps its source.
+    #[test]
+    fn the_decider_decides_the_recorded_source() {
+        let (st, sid) = store();
+        let key = |k: &str, action: &str, source: Option<&str>| WorkLinkArgs {
+            key: Some(k.into()),
+            source: source.map(String::from),
+            ..link(sid, action)
+        };
+        let src = |row: SessionRow| row.work.map(|w| w.source).unwrap_or_default();
+        // An agent claiming a person's source is still an agent.
+        for claimed in [None, Some("manual"), Some("started"), Some("agent")] {
+            let row = work_link_as(
+                &key("ABC-1", "link", claimed),
+                &st,
+                &OrgScope::All,
+                Decider::Agent,
+            )
+            .unwrap();
+            assert_eq!(src(row), "agent", "{claimed:?}");
+        }
+        // An unknown source is refused for an agent too.
+        let err = work_link_as(
+            &key("ABC-1", "link", Some("branch")),
+            &st,
+            &OrgScope::All,
+            Decider::Agent,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        // A person's source is kept (default manual).
+        for (claimed, want) in [(None, "manual"), (Some("started"), "started")] {
+            let row = work_link(&key("DEF-2", "link", claimed), &st, &OrgScope::All).unwrap();
+            assert_eq!(src(row), want, "{claimed:?}");
+        }
+        // An agent's rejection by key is the agent's.
+        work_link_as(
+            &key("GHI-3", "reject", None),
+            &st,
+            &OrgScope::All,
+            Decider::Agent,
+        )
+        .unwrap();
+        let links = st.lock().unwrap().session_work_links(sid).unwrap();
+        let ghi = links
+            .iter()
+            .find(|l| l.ref_key.as_deref() == Some("GHI-3"))
+            .unwrap();
+        assert_eq!(
+            (ghi.state.as_str(), ghi.source.as_str()),
+            ("rejected", "agent")
+        );
+    }
+
+    /// D34: by link id, an agent's confirm is recorded as the agent's, it
+    /// cannot confirm what a person rejected, and deciding the way a person
+    /// already did keeps the person's decision.
+    #[test]
+    fn an_agent_decides_a_suggestion_as_an_agent_and_never_over_a_person() {
+        let (st, sid) = store();
+        let suggestion = |key: &str| -> i64 {
+            let s = st.lock().unwrap();
+            let l = s
+                .link_session_work(sid, WorkTarget::Key(key), "manual")
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE work_links SET state = 'suggested', source = 'prompt', \
+                       rule = 'R6', is_primary = 0, decided_at = NULL WHERE id = ?1",
+                    [l.id],
+                )
+                .unwrap();
+            l.id
+        };
+        let by_id = |id: i64, action: &str| WorkLinkArgs {
+            link_id: Some(id),
+            ..link(sid, action)
+        };
+        let get = |id: i64| st.lock().unwrap().get_work_link(id).unwrap().unwrap();
+
+        // An agent's confirm reads as the agent's.
+        let a = suggestion("ABC-1");
+        let row = work_link_as(&by_id(a, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        assert_eq!(row.work.map(|w| w.source).as_deref(), Some("agent"));
+        assert_eq!(get(a).rule.as_deref(), Some("R6"), "the why is kept");
+
+        // A person's "Not this" stands against an agent's confirm…
+        let b = suggestion("DEF-2");
+        work_link(&by_id(b, "reject"), &st, &OrgScope::All).unwrap();
+        let err =
+            work_link_as(&by_id(b, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+        // …and an agent rejecting it again leaves it the person's.
+        let before = get(b);
+        work_link_as(&by_id(b, "reject"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        assert_eq!(get(b), before);
+        // So does an agent's link by key.
+        let err = work_link_as(
+            &WorkLinkArgs {
+                key: Some("DEF-2".into()),
+                ..link(sid, "link")
+            },
+            &st,
+            &OrgScope::All,
+            Decider::Agent,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+
+        // A person confirmed it: an agent's confirm makes it primary again
+        // and leaves it the person's decision.
+        let c = suggestion("GHI-3");
+        work_link(&by_id(c, "confirm"), &st, &OrgScope::All).unwrap();
+        let person = get(c);
+        assert_eq!(person.source, "manual");
+        work_link_as(&by_id(a, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        assert!(!get(c).is_primary);
+        let row = work_link_as(&by_id(c, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        let w = row.work.expect("primary");
+        assert_eq!((w.link_id, w.source.as_str()), (c, "manual"));
+        assert_eq!(get(c).decided_at, person.decided_at);
+
+        // A person may still correct their own rejection.
+        work_link(&by_id(b, "confirm"), &st, &OrgScope::All).unwrap();
+        assert_eq!(get(b).state, "confirmed");
     }
 
     /// Work graph M4.6: an agent's answer to the classification nudge is a

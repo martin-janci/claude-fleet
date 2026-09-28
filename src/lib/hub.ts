@@ -177,6 +177,11 @@ const REASONS = {
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
   tracker_sync_metrics:
     'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
+  // Jev's Asana section proposals: applying one is `work_admin update`.
+  status_map_proposals:
+    'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
+  decide_status_map_proposal:
+    'applying a section proposal writes the tracker’s section map, and a client is never the fleet’s administrator — use `fleet-hub decide proposals apply|reject`',
   // Work graph M13.2: `work_admin { usage }` is master-only on the hub.
   work_usage:
     'the work graph’s usage counts are the hub’s administration, and a client is never the fleet’s administrator — use `fleet-hub work usage`',
@@ -330,6 +335,18 @@ export const ROUTED_ACTIONS = [
   'dismiss_reopened',
   'name_session_work',
   'rename_work_item',
+  // The Work view (work graph M14): every write is `work_link { … }` on the
+  // hub, so a paired desktop sends them while the link is up.
+  'set_primary_work',
+  'reconsider_work_link',
+  'ack_work_link',
+  'decide_work_batch',
+  'place_work',
+  'assign_work_org',
+  'save_work_rule',
+  'delete_work_rule',
+  'save_work_view',
+  'delete_work_view',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

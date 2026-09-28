@@ -733,15 +733,18 @@ fleet-hub client list --include-revoked
 fleet-hub client revoke phone
 fleet-hub client trust mac-desktop
 fleet-hub client untrust mac-desktop
+fleet-hub client bind contractor-phone 2
+fleet-hub client unbind contractor-phone
 ```
 
 `client list` prints one line per client, newest first:
 
 ```
-NAME         MODE      TRUSTED            CREATED            LAST SEEN          REVOKED
-mac-desktop  full      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
-phone        full      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
-kiosk        readonly  -                  2026-09-17 09:12Z  -                  -
+NAME              MODE      ORG    TRUSTED            CREATED            LAST SEEN          REVOKED
+mac-desktop       full      -      2026-09-21 10:02Z  2026-09-21 10:01Z  2026-09-21 10:05Z  -
+contractor-phone  full      org 2  -                  2026-09-27 08:00Z  2026-09-27 09:12Z  -
+phone             full      -      -                  2026-09-17 09:20Z  2026-09-18 07:41Z  -
+kiosk             readonly  -      -                  2026-09-17 09:12Z  -                  -
 ```
 
 The token itself is never shown again: only its SHA-256 is stored, and the
@@ -785,6 +788,37 @@ What a client may do:
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
   this option keeps marking everything, which is the safe direction.
+- **Bound to an org** (work graph M14.1b). `fleet-hub pair --name <name>
+  --org <org id>`, or `fleet-hub client bind <name> <org id>` later
+  (`work_admin { action: "assign_client", name, org_id }`; no `org_id` and
+  `fleet-hub client unbind <name>` unbind), restricts a client to one
+  organisation: it reads that org's work **and sessions** only — the Work
+  view (`work { tree | task | session_tasks | review | rules | rule_preview
+  | views }`), tickets, Today, conversations, `list_sessions`, every
+  session-addressed tool, `fleet_health`'s trackers, spend and counts, and
+  every `/events` frame. Whether it also sees *unassigned* work and sessions
+  (no org) is the org's switch `bound_sees_unassigned` (decision D31): on by
+  default, as a host sees them; the master turns it off with `fleet-hub org
+  set <id> --bound-sees-unassigned off` (`work_admin { action: "update_org",
+  org_id, bound_sees_unassigned: false }`; on a standalone desktop, Settings →
+  Work → Organisations → *bound devices see unassigned*), and `org list`
+  marks such an org *bound devices: own org only*. The org's bound clients then see
+  only rows assigned to it. Another org's session or task answers exactly as
+  one that does not exist, whatever `isolate_sessions` says (a bound client
+  asked to be restricted, so the session fence is always on for it), and
+  `work` frames are not sent to it at all (it re-reads through `work { … }`).
+  It cannot start or resume a session in another org's project or host, read
+  what moving a task between orgs would change (`org_impact`) or move one
+  (`assign_org`), write placement rules (`rule_save` / `rule_delete`), or
+  change trust or reopened work; it may decide links and place tasks it
+  sees, and keep its own org's saved views (M14.1c). The binding and the switch take effect from its
+  next request (re-binding invalidates the token cache; an open event
+  stream re-reads its scope and ends at its next beat when re-bound).
+  Deleting the org leaves the client bound to an org that no longer
+  exists — it then reads nothing of any org and no unassigned data either,
+  never every org (fail closed). A peer hub link is never bound. Use it for
+  a device that belongs to one company's work, such as a contractor's
+  second phone.
 
 **Work on a phone** (the work graph, M8). A client token is served `work`
 and — `full` only — `work_link`, and never `work_admin`, so tracker
@@ -948,6 +982,7 @@ fleet-hub tracker list
 fleet-hub tracker status          # each tracker's last sync pass, and retention
 fleet-hub work usage --days 30    # how the work graph is used, counts only
 fleet-hub tracker remove 1        # its items stay, marked unavailable
+fleet-hub tracker section-map 2 --set 'ideas=todo'   # Asana: set sections' categories and confirm the map
 ```
 
 A token is read from **stdin**, from an environment variable of that command
@@ -992,7 +1027,11 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   Which **sections** mean *in progress* is inferred on the first test from
   their names (progress / doing / review → in progress, done / shipped →
   done) and shown in Settings → Work with a Confirm button; once confirmed,
-  your map wins (`work_admin update` with `settings.section_map`).
+  your map wins (`work_admin update` with `settings.section_map`, or
+  `fleet-hub tracker section-map <id> --set 'name=category'`). The names the
+  rule cannot classify stay *to do*; with the `status_map` decision feature
+  on (off by default, [`decisions.md`](decisions.md#status_map--asana-section-proposals-j3))
+  the hub can propose a category for them, which you apply the same way.
 - **Linear vs Jira keys:** `ENG-123` belongs to the tracker whose probed
   prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
   trackers claim is never bound automatically.
@@ -1107,7 +1146,8 @@ tracker, or to make it a **boundary** for the hosts you put in it.
 
 An org is two things at once:
 
-- **A view** for people. The master and every paired client read every org;
+- **A view** for people. The master and every unbound paired client read
+  every org (a client bound to an org reads that org only — *Clients* above);
   the sidebar's selector (⌘⇧O / Ctrl+Shift+O) only narrows what is shown,
   and a session waiting on you in another scope still says so ("2 need you
   in Personal →").
@@ -1135,6 +1175,7 @@ fleet-hub org rule add 1 --path /home/me/work/acme     # by where the worktree l
 fleet-hub org assign-host hetzner-a 1                  # the boundary for that host's token
 fleet-hub org assign-tracker 2 1                       # its tickets are Company A's
 fleet-hub org set 1 --isolate-sessions on              # see below
+fleet-hub org set 1 --bound-sees-unassigned off        # its bound phones: its own only (D31)
 fleet-hub org list
 ```
 
@@ -1215,6 +1256,144 @@ sessions: `fleet-hub org set 1 --auto-tidy on|off|inherit` (or `work_admin
 { update_org, org_id, auto_tidy }`); `inherit` (the default) follows the
 fleet-wide setting. The allowed reasons and thresholds stay fleet-wide. A
 per-host token sees and applies only its own host's candidates of its org.
+
+## Language census (Jev evaluation)
+
+Before any decision model is tried in fleet (the Jev evaluation,
+`docs/superpowers/specs/2026-09-27-jev-language-census-design.md`), the
+census measures which languages the texts such a model would see are
+written in, per organisation. It is local and read-only: it opens
+`state.db` directly (no running hub needed), never writes it, sends
+nothing anywhere, and prints counts only — a count from 1 to 4 shows as
+`<5`.
+
+```bash
+fleet-hub census languages                      # last 90 days, every org
+fleet-hub census languages --days 30 --org 2 --json
+fleet-hub census languages --db ~/path/to/desktop/state.db   # a desktop's store
+```
+
+What it reads, per org:
+
+| Source | What | Stands for |
+|---|---|---|
+| `prompt` | each conversation's first prompt (the 200 characters the hook keeps) | the input of a work-link decision |
+| `title:<provider>`, `description:<provider>` | work items' titles and cached descriptions | the candidates of that decision |
+| `journal:<kind>` | journal notes, summaries and handovers written by a person or Claude, never fleet's own rows | the language of Claude's replies |
+| pairs | confirmed links: the prompt that opened the conversation × the item's title | how often the match is across languages |
+
+Prompts fleet typed itself — a ticket start or resume, a handover or
+safe-kill request, a quick-reply chip, anything `[claude-fleet`-marked —
+are counted as `fleet-typed` and left out. Each text is read as one of `en
+sk cs de pl hu other mixed unknown`, with Slovak and Czech written without
+diacritics flagged, and how much of it is code (`none`, `low`, `high`).
+The output lists what it cannot count (later prompts, Claude's replies as
+such, commit subjects) instead of guessing.
+
+**Checking the detector on your own texts.** `--export-sample N --out
+FILE` writes N distinct first prompts, spread over the window, with the
+detector's guess, to a new file created `0600` — the one path that writes
+text, so keep the file on the hub machine. Correct each `expect`, set
+`checked` to `true`, then `--labels FILE` prints how often the detector was
+right and which languages it confused. The same `--labels` runs the
+fixtures in `crates/fleet-core/src/service/testdata/nl/`.
+
+The detector's language models add about 45 MB to `fleet-hub` (cargo
+feature `nl-detect` of `fleet-core`, which only the hub turns on; the
+desktop app is built without it).
+
+## Decisions (Jev) — experimental, off
+
+The hub is the one place a decision model may be called from (a desktop
+paired to it, a phone and an agent host never call out). Everything is
+**off by default**: the kill switch `decide.jev.enabled`, each feature's
+mode (`decide.jev.status_map`, `decide.jev.work_link`: `off | shadow |
+assist`), each org's consent, and the global `decide.jev.unassigned` for
+rows with no org. With the defaults no request can leave the hub. The
+first use case is `status_map` (J3): after a clean sync, at most daily, an
+Asana tracker's section names the keyword rule could not classify are put
+to the model; in `assist` its answers are **proposals** a person applies
+(`fleet-hub tracker section-map`), never written by themselves. The full
+guide — what is sent, what is recorded (never raw text), the fallbacks,
+retention, how to turn it off — is [`decisions.md`](decisions.md).
+
+```bash
+fleet-hub decide set-key < jev-key.txt          # or --from-env NAME / --ref file:/run/secrets/jev
+fleet-hub org set 2 --jev on                    # this org consents
+fleet-hub decide status                         # read-only: flag, modes, consent, breaker, spend
+fleet-hub decide runs --feature work_link --limit 20
+fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]   # status_map: section → category (confidence)
+fleet-hub tracker section-map 3 --set 'ideas=todo' --set 'parked=done'   # a person applies them
+fleet-hub decide proposals apply 812 [--as in_progress]   # or one at a time, by its run
+fleet-hub decide proposals reject 814                    # "not this": stays unmapped
+```
+
+The `decide.*` settings are set like the `work.*` ones, with `set_setting`
+(master token). `set-key` and `clear-key` write `state.db` directly, like
+`fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
+read-only and print ids, words and numbers — never the key; the section
+names `proposals` shows come from the trackers' stored config, never from
+the record. `tracker section-map` is a `work_admin update` over loopback
+(master token) that confirms the section map with your entries on top;
+`proposals apply <run>` is the same call for one proposal (`not_planned`
+applies as done; `--as` corrects it) and marks its run confirmed or
+corrected. `proposals reject <run>` writes only the run's follow-up
+(`rejected`) in `state.db`, like `set-key`: the section stays unmapped and
+the answer is not proposed again until a new one exists (another input,
+question version or model). A paired desktop refuses both (tracker
+administration); a standalone desktop decides them in Settings → Work.
+
+The offline `work_link` benchmark (test map card J1, phase 0) measures a
+provider against the links people confirmed, before anything is turned on:
+
+```bash
+fleet-hub decide bench work-link                       # test split, none + bm25, read-only, offline
+fleet-hub decide bench work-link --split all --json
+fleet-hub decide bench work-link --export-unlinked 150 --out h.jsonl   # D39: a person labels it
+fleet-hub decide bench work-link --labels h.jsonl      # adds the labels as dataset H
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev --max-calls 200
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev --shape choice+noul
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev \
+    --provider haiku --haiku-host gpu1 [--haiku-model haiku] [--haiku-timeout 120]   # D33 baseline
+```
+
+Both reports end in the card's acceptance lines (PASS / FAIL / NOT JUDGED
+against the thresholds the test map registered) and carry Jev's
+calibration (ECE, Brier). The `status_map` benchmark (card J3) reads
+labeled Asana sections — the owner's file, or the built-in synthetic set
+(LLM-written, not yet spot-checked) — and opens no database unless
+`--provider jev`:
+
+```bash
+fleet-hub decide bench status-map --fixture                      # todo + rule, offline
+fleet-hub decide bench status-map --labels sections.jsonl --provider rule --provider jev
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1
+```
+
+Without `--provider jev` or `--provider haiku` neither sends anything
+(`work-link` opens the database read-only). `--provider haiku` (decision
+D33) asks the same question — the same redacted state and options — of
+`claude -p --model haiku` (no tools, no MCP, no hooks, no transcript) on
+the host `--haiku-host` names, which is required: each case leaves the hub
+over SSH for that host — the prompt on stdin, never in argv — and reaches
+Anthropic through its Claude account, a note on stderr says so before the
+first call, and nothing is recorded in `decision_runs`. It never crosses
+the org boundary: the host's org is read from the database, and a case of
+any other org (a case with no org counts as one, unless the host has none
+either) is skipped as `other_org` — so `--fixture`, which has no org,
+needs a host with no org. One call at a time, `--haiku-timeout` each, `--max-calls`
+at most; with it the haiku lines of the acceptance are judged. With it, each case goes through the envelope's gate
+(so only orgs that consented — or, for a row with no org,
+`decide.jev.unassigned` — with the flag on and `decide.jev.work_link` /
+`decide.jev.status_map` at `shadow` or `assist`) and every call is recorded
+in `decision_runs` (subject `bench`), which is why that run opens the
+database for writing. They print counts, rates, thresholds, latency and
+cost — never a prompt, a title or a section name; `--export-unlinked`
+writes the one file that holds text (`0600`,
+never over an existing file). What it measures and approximates:
+[`decisions.md`](decisions.md) → *Benchmarking work_link* and
+*Benchmarking status_map*; the order to run it all in is *How to run
+phase 0* there.
 
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
@@ -1635,7 +1814,7 @@ it is ended or done, older than its window, and nothing live points at it.
   keeps forever and an old window longer than 365 still stands.
 - `tracker_items_days`: cached tickets in `done`. Kept while any link, live
   or ended, names one, and while it is the parent of a kept ticket.
-- `timeline_work_events_days`: handover, nudge and tidy events. The newest
+- `timeline_work_events_days`: handover, nudge, tidy and withdrawn-suggestion events. The newest
   of each kind per session stays.
 
 At most 2,000 rows per table per tick, 200 per store lock.
@@ -1939,7 +2118,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 184 commands, 78 route to a hub tool, 1 routes except for one argument shape, 84 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 205 commands, 97 route to a hub tool, 1 routes except for one argument shape, 86 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -1982,6 +2161,7 @@ Of the 184 commands, 78 route to a hub tool, 1 routes except for one argument sh
 | `catalog_update_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_write_layer` | writing a layer edits a file in the catalog's git checkout, which only the machine that owns the fleet has, and the hub exposes no layer-authoring tool; author on that machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
+| `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
@@ -2020,6 +2200,7 @@ Of the 184 commands, 78 route to a hub tool, 1 routes except for one argument sh
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub with set_setting (master token) |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |

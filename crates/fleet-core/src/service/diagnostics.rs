@@ -113,6 +113,7 @@ pub fn collect(
         tokens,
         sessions,
         tracker_secrets,
+        decision_secrets,
     ) = {
         let s = lock(store)?;
         let cfg = crate::mcp::settings::McpSettings::read(&s)?;
@@ -127,6 +128,7 @@ pub fn collect(
             s.list_host_tokens()?,
             s.list_all_sessions()?,
             s.tracker_secret_literals()?,
+            s.decision_secret_literals()?,
         )
     };
 
@@ -138,6 +140,8 @@ pub fn collect(
     // Tracker credentials (work graph M3): the token and its Basic-auth
     // encoding, whichever an error string or log line might carry.
     secrets.extend(tracker_secrets);
+    // The decision model's API key (Jev evaluation), masked the same way.
+    secrets.extend(decision_secrets);
     let token_modes: BTreeMap<&str, &str> = tokens
         .iter()
         .map(|t| (t.host_alias.as_str(), t.mode.as_str()))

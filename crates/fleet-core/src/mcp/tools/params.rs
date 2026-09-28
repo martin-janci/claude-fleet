@@ -244,6 +244,26 @@ pub struct RestartSessionParams {
     pub confirm_nonce: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RewindConversationParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Keep the transcript strictly before this turn's prompt_uuid (from
+    /// session_conversation). Omit to keep all of it.
+    #[serde(default)]
+    pub anchor_uuid: Option<String>,
+    /// "rewind" restarts this session on the truncated copy; "fork" leaves
+    /// it alone and starts a new session on the copy.
+    pub mode: String,
+    /// fork only: name a new worktree for the new session; omit to reuse
+    /// this session's.
+    #[serde(default)]
+    pub new_worktree: Option<String>,
+    /// Approved confirmation; required for "rewind".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
 // `recreate_session`'s arguments plus the operator's confirmation (M9.7).
 // Plain comments: a doc comment would be served as the schema's description.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -862,6 +882,9 @@ pub struct PairClientParams {
     /// A device you vouch for: its prompts reach agents unmarked.
     #[serde(default)]
     pub trusted: bool,
+    /// Bind to this org: it reads only that org's and unassigned work.
+    #[serde(default)]
+    pub org_id: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

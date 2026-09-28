@@ -166,6 +166,48 @@ fn nothing_is_queued_without_the_setting_for_a_guess_or_for_a_non_pr_url() {
     assert!(outbox(&off.s).is_empty() && outbox(&f.s).is_empty());
 }
 
+/// D34: a suggestion an AGENT confirmed (a per-host token, the operator) is
+/// recorded as `agent`, so it never writes to the tracker; the same
+/// suggestion confirmed by a person does. Through the one decision entry
+/// the MCP tool and the desktop share, with the caller's decider.
+#[test]
+fn a_suggestion_an_agent_confirmed_never_queues_a_write() {
+    use crate::service::orgs::OrgScope;
+    use crate::service::work::{work_link_as, WorkLinkArgs};
+    use crate::store::Decider;
+    for (decider, source, queued) in [(Decider::Agent, "agent", 0), (Decider::Person, "manual", 1)]
+    {
+        let f = fx("manual", true);
+        f.s.conn_ref()
+            .execute(
+                "UPDATE work_links SET source = 'branch', state = 'suggested', \
+                   is_primary = 0, rule = 'R3b'",
+                [],
+            )
+            .unwrap();
+        let link_id = f.s.session_work_links(f.session).unwrap()[0].id;
+        let session = f.session;
+        let store = std::sync::Mutex::new(f.s);
+        let args = WorkLinkArgs {
+            session_id: Some(session),
+            action: "confirm".into(),
+            link_id: Some(link_id),
+            // What a caller claims does not matter.
+            source: Some("manual".into()),
+            ..Default::default()
+        };
+        work_link_as(&args, &store, &OrgScope::All, decider).unwrap();
+        let s = store.into_inner().unwrap();
+        let l = s.get_work_link(link_id).unwrap().unwrap();
+        assert_eq!(
+            (l.state.as_str(), l.source.as_str()),
+            ("confirmed", source),
+            "{decider:?}"
+        );
+        assert_eq!(on_pr(&s, session, PR).unwrap(), queued, "{decider:?}");
+    }
+}
+
 #[test]
 fn a_session_of_another_org_never_queues_a_write() {
     let f = fx("manual", true);

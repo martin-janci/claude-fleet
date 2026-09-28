@@ -271,6 +271,7 @@ mod tests {
                 id: 1,
                 name: "phone".into(),
                 trusted: false,
+                org_id: None,
             }),
             mode: TokenMode::Full,
         };
@@ -629,6 +630,7 @@ mod tests {
                 id: 1,
                 name: "phone".into(),
                 trusted: false,
+                org_id: None,
             }),
             mode: TokenMode::Full,
         };

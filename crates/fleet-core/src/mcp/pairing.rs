@@ -60,6 +60,9 @@ pub struct PairingRequest {
     /// Whether the client is paired as one the operator vouches for
     /// (`client_tokens.trusted_at`): its prompts are delivered unmarked.
     pub trusted: bool,
+    /// The org the client is bound to once paired (work graph M14,
+    /// `fleet-hub pair --org`); `None`: unbound.
+    pub org_id: Option<i64>,
     pub expires_at: Instant,
 }
 
@@ -162,6 +165,7 @@ struct Pending {
     name: String,
     mode: String,
     trusted: bool,
+    org_id: Option<i64>,
     expires_at: Instant,
 }
 
@@ -188,6 +192,20 @@ impl PendingPairings {
     /// cannot grow without bound on a hub where codes are minted and never
     /// redeemed.
     pub fn mint(&self, name: &str, mode: &str, trusted: bool, ttl: Duration) -> PairingRequest {
+        self.mint_bound(name, mode, trusted, None, ttl)
+    }
+
+    /// [`Self::mint`] for a client that is bound to `org_id` the moment it
+    /// pairs (work graph M14): the binding rides on the code, like `trusted`,
+    /// so there is no window in which the new client reads every org.
+    pub fn mint_bound(
+        &self,
+        name: &str,
+        mode: &str,
+        trusted: bool,
+        org_id: Option<i64>,
+        ttl: Duration,
+    ) -> PairingRequest {
         let now = Instant::now();
         self.sweep(now);
         let expires_at = now + ttl;
@@ -206,6 +224,7 @@ impl PendingPairings {
                 name: name.to_string(),
                 mode: mode.to_string(),
                 trusted,
+                org_id,
                 expires_at,
             },
         );
@@ -214,6 +233,7 @@ impl PendingPairings {
             name: name.to_string(),
             mode: mode.to_string(),
             trusted,
+            org_id,
             expires_at,
         }
     }
@@ -245,6 +265,7 @@ impl PendingPairings {
             name: entry.name,
             mode: entry.mode,
             trusted: entry.trusted,
+            org_id: entry.org_id,
             expires_at: entry.expires_at,
         })
     }
@@ -445,6 +466,11 @@ pub async fn handle_pair(
                     Ok(row)
                 }
             })
+            .and_then(|row| match req.org_id {
+                // The org binding rides on the code too (work graph M14).
+                Some(org) => s.set_client_org(&row.name, Some(org)),
+                None => Ok(row),
+            })
     };
     match inserted {
         Ok(row) => {
@@ -463,6 +489,7 @@ pub async fn handle_pair(
                     "name": row.name,
                     "mode": row.mode,
                     "trusted": row.trusted_at.is_some(),
+                    "org_id": row.org_id,
                     "hub": state.base_url.as_str(),
                 })),
             )

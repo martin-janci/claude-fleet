@@ -42,8 +42,23 @@ pub fn org_generation() -> u64 {
 /// Who is asking, for every work read and write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrgScope {
-    /// Master, a paired client, the desktop: everything.
+    /// Master, an unbound paired client, the desktop: everything.
     All,
+    /// A paired client bound to one org (work graph M14): that org's work,
+    /// and — strictly, whatever `isolate_sessions` says — only that org's
+    /// sessions; unassigned work and sessions too while the org's
+    /// `bound_sees_unassigned` is on (D31, the default). The client asked
+    /// to be restricted, so nothing of another org reaches it. There is no
+    /// host fence: a phone is not a host.
+    Org {
+        /// The bound org. An org that was deleted since still binds: the
+        /// client then reads nothing of any org, and no unassigned data
+        /// either (fail closed, never widened to `All`).
+        org: i64,
+        /// D31: `orgs.bound_sees_unassigned`, read with the scope. `false`
+        /// for an org that no longer exists.
+        sees_unassigned: bool,
+    },
     /// A per-host token.
     Host {
         alias: String,
@@ -64,6 +79,16 @@ impl OrgScope {
         })
     }
 
+    /// The scope of a paired client bound to `org` (work graph M14), with
+    /// D31's switch read now, so a change applies from the client's next
+    /// call on.
+    pub(crate) fn for_client(s: &Store, org: i64) -> Result<Self, IpcError> {
+        Ok(OrgScope::Org {
+            org,
+            sees_unassigned: s.get_org(org)?.is_some_and(|o| o.bound_sees_unassigned),
+        })
+    }
+
     pub fn is_all(&self) -> bool {
         matches!(self, OrgScope::All)
     }
@@ -71,17 +96,33 @@ impl OrgScope {
     /// The host a per-host token is bound to.
     pub fn host(&self) -> Option<&str> {
         match self {
-            OrgScope::All => None,
+            OrgScope::All | OrgScope::Org { .. } => None,
             OrgScope::Host { alias, .. } => Some(alias),
         }
     }
 
+    /// The org a bound client is fenced to (work graph M14).
+    pub fn bound_org(&self) -> Option<i64> {
+        match self {
+            OrgScope::Org { org, .. } => Some(*org),
+            _ => None,
+        }
+    }
+
     /// Work data of `org` is visible: always for `All`; for a host, its own
-    /// org's and unassigned data.
+    /// org's and unassigned data; for a bound client, its own org's, and
+    /// unassigned data while its org's `bound_sees_unassigned` is on (D31).
     pub fn sees_org(&self, org: Option<i64>) -> bool {
         match self {
             OrgScope::All => true,
             OrgScope::Host { org: mine, .. } => org.is_none() || org == *mine,
+            OrgScope::Org {
+                org: mine,
+                sees_unassigned,
+            } => match org {
+                None => *sees_unassigned,
+                Some(o) => o == *mine,
+            },
         }
     }
 
@@ -96,6 +137,9 @@ impl OrgScope {
     pub fn sees_session(&self, row_host: &str, row_org: Option<i64>) -> bool {
         match self {
             OrgScope::All => true,
+            // Strict for a bound client: another org's session never reaches
+            // it, isolated or not (M14); an unassigned one only under D31.
+            OrgScope::Org { .. } => self.sees_org(row_org),
             OrgScope::Host {
                 alias,
                 org,
@@ -217,6 +261,19 @@ pub fn not_visible_key(host: &str, key: &str) -> IpcError {
     )
 }
 
+/// What a key or URL outside `scope` answers: a host's sentence for a
+/// per-host token ([`not_visible_key`]); for a bound client (work graph M14)
+/// exactly what a key no connected tracker has answers.
+pub fn not_visible_to(scope: &OrgScope, key: &str) -> IpcError {
+    match scope.host() {
+        Some(h) => not_visible_key(h, key),
+        None => IpcError::new(
+            codes::E_NOTFOUND,
+            format!("{key} is not a ticket of any connected tracker"),
+        ),
+    }
+}
+
 /// The data-integrity rule (plan §M5.3, for every caller, master too): a
 /// link between a session of one org and work of another is refused unless
 /// `force_cross_org` — it stops Company B's ticket from being attached to a
@@ -246,19 +303,55 @@ pub fn check_cross_org(
 
 /// Resolve the links' orgs and keep what the scope may read: for a per-host
 /// token, links inside its orgs, and ended (past) links only of its own
-/// host's sessions (M2's fence, kept: the org alone is wider).
+/// host's sessions (M2's fence, kept: the org alone is wider). For a bound
+/// client (M14), links inside its orgs whose session it may see too — a
+/// forced cross-org link of its org's task on another org's session names
+/// that session, which a bound client never sees.
 pub fn scope_links(
     s: &Store,
     scope: &OrgScope,
     links: &mut Vec<WorkLinkRow>,
 ) -> Result<(), IpcError> {
     s.fill_link_orgs(links)?;
-    if let Some(h) = scope.host() {
-        links.retain(|l| {
-            scope.sees_link(l) && (l.ended_at.is_none() || l.snap_host.as_deref() == Some(h))
-        });
+    match scope {
+        OrgScope::All => {}
+        OrgScope::Host { alias, .. } => links.retain(|l| {
+            scope.sees_link(l) && (l.ended_at.is_none() || l.snap_host.as_deref() == Some(alias))
+        }),
+        OrgScope::Org { .. } => {
+            let mut keep = Vec::with_capacity(links.len());
+            for l in links.drain(..) {
+                if scope.sees_link(&l) && link_session_visible(s, scope, &l)? {
+                    keep.push(l);
+                }
+            }
+            *links = keep;
+        }
     }
     Ok(())
+}
+
+/// May `scope` see the session behind link `l`: the live session's row, or
+/// for an ended link the snapshot's host and org. A link with no session
+/// left to name (a swept participant, no snapshot) names nothing.
+pub fn link_session_visible(
+    s: &Store,
+    scope: &OrgScope,
+    l: &WorkLinkRow,
+) -> Result<bool, IpcError> {
+    if scope.is_all() {
+        return Ok(true);
+    }
+    // A live participant decides, also for a link that ended on a live
+    // session (no snapshot yet).
+    if let Some(sid) = s.link_session_id(l)? {
+        return Ok(match s.get_session_by_id(sid)? {
+            Some(row) => scope.sees_row(&row),
+            None => false,
+        });
+    }
+    let (host, org) = s.link_snapshot_place(l.id)?;
+    Ok(scope.sees_session(host.as_deref().unwrap_or_default(), org))
 }
 
 /// May a per-host token read work `key` (its context, resume plan, or
@@ -266,6 +359,9 @@ pub fn scope_links(
 /// work — a live link on a session of its host, or a past one whose session
 /// ran there — is visible to it. One refusal whether the key exists or not.
 pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcError> {
+    if let OrgScope::Org { .. } = scope {
+        return require_key_bound(s, scope, key);
+    }
     let Some(h) = scope.host() else {
         return Ok(());
     };
@@ -289,6 +385,46 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
     let mut ended = s.ended_work_links_for_key(&key)?;
     scope_links(s, scope, &mut ended)?;
     if ended.is_empty() {
+        refuse()
+    } else {
+        Ok(())
+    }
+}
+
+/// [`require_key`] for a bound client (work graph M14): the key's item must
+/// be inside its orgs, and a key with no org of its own (a bare key, an
+/// unassigned local item) must have some work the client may see — a live
+/// or past link whose session is visible to it — or no work at all yet.
+/// Refused as a key nothing is linked to, whether it exists or not.
+fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcError> {
+    let key = crate::store::normalize_work_ref(key)?;
+    let refuse = || {
+        Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("nothing is linked to {key}"),
+        ))
+    };
+    let item = s.work_item_by_key(&key)?;
+    if let Some(item) = &item {
+        let org = s.item_org(item.id)?;
+        if !scope.sees_org(org) {
+            return refuse();
+        }
+        if org.is_some() {
+            return Ok(());
+        }
+    }
+    let mut links: Vec<WorkLinkRow> = s
+        .live_work_sessions_for_key(&key)?
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+    links.extend(s.ended_work_links_for_key(&key)?);
+    if links.is_empty() {
+        return if item.is_some() { Ok(()) } else { refuse() };
+    }
+    scope_links(s, scope, &mut links)?;
+    if links.is_empty() {
         refuse()
     } else {
         Ok(())
@@ -425,6 +561,8 @@ pub enum OrgAction {
     AssignHost,
     UnassignHost,
     AssignTracker,
+    /// Bind a paired client to an org, or unbind it (work graph M14).
+    AssignClient,
 }
 
 impl OrgAction {
@@ -439,6 +577,7 @@ impl OrgAction {
             "assign_host" => OrgAction::AssignHost,
             "unassign_host" => OrgAction::UnassignHost,
             "assign_tracker" => OrgAction::AssignTracker,
+            "assign_client" => OrgAction::AssignClient,
             _ => return None,
         })
     }
@@ -456,6 +595,22 @@ fn parse_auto_tidy(v: Option<&str>) -> Result<Option<Option<bool>>, IpcError> {
         Some(other) => Err(IpcError::new(
             codes::E_INVALID,
             format!("auto_tidy is on, off or inherit, not {other:?}"),
+        )),
+    }
+}
+
+/// `jev` of `add_org` / `update_org` (Jev evaluation, D31 / D36): `on`
+/// lets this org's redacted texts go to the decision model when the global
+/// flag and a feature's mode allow it; `off` (the default) never. `None`
+/// (absent) leaves it as it is.
+fn parse_jev(v: Option<&str>) -> Result<Option<bool>, IpcError> {
+    match v.map(str::trim) {
+        None => Ok(None),
+        Some("on") => Ok(Some(true)),
+        Some("off") => Ok(Some(false)),
+        Some(other) => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("jev is on or off, not {other:?}"),
         )),
     }
 }
@@ -485,29 +640,46 @@ pub fn admin(
         }
         OrgAction::AddOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
-            let org = s.add_org(
+            let jev = parse_jev(args.jev.as_deref())?;
+            let mut org = s.add_org(
                 &need(&args.name, name, "name")?,
                 args.color.as_deref(),
                 args.isolate_sessions.unwrap_or(false),
             )?;
-            to_json(&match auto {
-                Some(a) => s.set_org_auto_tidy(org.id, a)?,
-                None => org,
-            })?
+            if let Some(a) = auto {
+                org = s.set_org_auto_tidy(org.id, a)?;
+            }
+            if let Some(j) = jev {
+                org = s.set_org_jev_allowed(org.id, j)?;
+            }
+            if let Some(on) = args.bound_sees_unassigned {
+                org = s.set_org_bound_sees_unassigned(org.id, on)?;
+            }
+            to_json(&org)?
         }
         OrgAction::UpdateOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
+            let jev = parse_jev(args.jev.as_deref())?;
             let id = need(&args.org_id, name, "org_id")?;
-            let org = s.update_org(
+            let mut org = s.update_org(
                 id,
                 args.name.as_deref(),
                 args.color.as_deref(),
                 args.isolate_sessions,
             )?;
-            to_json(&match auto {
-                Some(a) => s.set_org_auto_tidy(id, a)?,
-                None => org,
-            })?
+            if let Some(a) = auto {
+                org = s.set_org_auto_tidy(id, a)?;
+            }
+            if let Some(j) = jev {
+                org = s.set_org_jev_allowed(id, j)?;
+                tracing::info!(org_id = id, jev = j, "[decide] org consent changed");
+            }
+            // D31 (work graph M14.1b): what the org's bound clients see of
+            // unassigned work and sessions.
+            if let Some(on) = args.bound_sees_unassigned {
+                org = s.set_org_bound_sees_unassigned(id, on)?;
+            }
+            to_json(&org)?
         }
         OrgAction::RemoveOrg => {
             let id = need(&args.org_id, name, "org_id")?;
@@ -564,6 +736,12 @@ pub fn admin(
             s.set_tracker_org(id, args.org_id)?;
             s.emit_tracker(id)?;
             to_json(&s.require_tracker(id)?)?
+        }
+        // `org_id` absent unbinds. The row never carries the token digest.
+        OrgAction::AssignClient => {
+            let client = need(&args.name, name, "name")?;
+            let row = s.set_client_org(&client, args.org_id)?;
+            serde_json::json!({ "name": row.name, "mode": row.mode, "org_id": row.org_id })
         }
     };
     // Before the announcement: a stream that reads the moved rows must

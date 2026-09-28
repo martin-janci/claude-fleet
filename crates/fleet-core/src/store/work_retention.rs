@@ -42,8 +42,9 @@ use super::Store;
 use crate::ipc_error::IpcError;
 
 /// Timeline kinds the work graph writes: agent handover (M9.3), the
-/// start-prompt handover of a resume (M2), the classification nudge (M4.6)
-/// and tidy (M7). Detection writes no timeline event.
+/// start-prompt handover of a resume (M2), the classification nudge (M4.6),
+/// tidy (M7), and the one detection event: a suggestion withdrawn, decayed
+/// or settled by a carry (D34).
 pub const WORK_EVENT_KINDS: &[&str] = &[
     "handover_requested",
     "handover_written",
@@ -55,6 +56,8 @@ pub const WORK_EVENT_KINDS: &[&str] = &[
     "gc_tidied",
     // A per-session keep (M11.3): its detail is the second it holds until.
     "tidy_kept",
+    // `work_detect::WORK_SUGGESTION_WITHDRAWN`.
+    "work_suggestion_withdrawn",
 ];
 
 /// One retention-swept table.
