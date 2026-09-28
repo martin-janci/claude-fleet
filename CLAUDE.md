@@ -340,6 +340,18 @@ Conversation event tracking is landed end to end (migration 037
 `session_conversations` API; the Conversations UI panel), per
 `docs/superpowers/specs/2026-09-18-conversation-events-design.md`.
 
+Reply actions are landed (PR #338, spec
+`docs/superpowers/specs/2026-09-26-reply-actions-design.md`): Copy, Quote,
+Retry, Fork here and Rewind here under each reply, over ONE tool,
+`rewind_conversation { mode: rewind | fork }` (`service/rewind.rs`), which
+writes a truncated copy of the transcript under a new conversation id and
+never mutates the original. Retry is the client's rewind + `send_prompt`,
+offered only when `ConvTurn.prompt_partial` is false. A rewind is refused
+unless the session is quiet (live pane probe first) and without an anchor;
+a failed restart reverts the binding (`Store::revert_rebind`) and removes
+the copy. Fork into a NEW worktree is open: refused `E_UNSUPPORTED`, shown
+disabled in the fork sheet.
+
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor
 and a `peer_exchange` listener carry messages both ways by fleet address,
