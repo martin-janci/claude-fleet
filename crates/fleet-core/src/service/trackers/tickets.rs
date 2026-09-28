@@ -40,6 +40,18 @@ pub const TICKETS_MAX_LIMIT: usize = 200;
 /// The `recent` view's window.
 pub const RECENT_DAYS: i64 = 14;
 
+/// Whether this item's tracker can serve a full description, and under which
+/// key. A tracker fleet cannot identify, or one whose provider does not
+/// implement `describe`, points at the ticket instead.
+#[allow(unused_variables)]
+fn describe_offer<'a>(
+    tracker: Option<&crate::store::TrackerRow>,
+    key: Option<&'a str>,
+) -> crate::mcp::guard::DescribeOffer<'a> {
+    // Task 4 wires the cap
+    crate::mcp::guard::DescribeOffer::None
+}
+
 /// One ticket as `tickets` and `lookup` return it: the item, and the live
 /// sessions already working on it (Enter jumps instead of starting).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,11 +428,24 @@ pub async fn lookup(
         crate::service::catalog::now_secs(),
     );
     let live = live_ids(&s, scope, &item)?;
-    // An agent reads it: fenced on both sides, markers defused (M3 review).
+    // The key may end up in DescribeOffer::Key, which fence_ticket puts in
+    // fleet's own notice line: flatten it like every other tracker line does
+    // (defuse alone does not fold a newline).
+    let flat_key = item
+        .key
+        .as_deref()
+        .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
+    // An agent reads it: fenced on both sides, markers defused (M3 review),
+    // with a trailing notice when the cache kept less than the tracker holds
+    // (Task 1's 2k cap).
     let description = meta.description.map(|d| match scope {
-        OrgScope::Host { .. } => {
-            crate::mcp::guard::fence_untrusted(&d, "a tracker ticket", super::DESCRIPTION_MAX_CHARS)
-        }
+        OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
+            &d,
+            "a tracker ticket",
+            super::DESCRIPTION_MAX_CHARS,
+            meta.description_chars,
+            describe_offer(t.as_ref(), flat_key.as_deref()),
+        ),
         // A person reads it on a phone or the desktop (bound or not): as is.
         OrgScope::All | OrgScope::Org { .. } => d,
     });
@@ -907,16 +932,54 @@ pub fn ticket_brief_with(
         out.push_str(extra.trim_end());
         out.push('\n');
     }
-    if let Some(d) = meta.and_then(|m| m.description) {
-        let overhead = out.chars().count()
-            + crate::mcp::guard::fence_untrusted("", FROM, 0)
-                .chars()
-                .count()
-            + 2;
-        let budget = crate::service::work::handover::BRIEF_MAX_CHARS.saturating_sub(overhead);
-        if budget > 0 {
+    // The tracker that might serve a full description, mirroring `lookup`'s
+    // resolution: this function has no `t` of its own, only the item.
+    let tracker = s
+        .list_trackers()?
+        .into_iter()
+        .find(|t| Some(t.id) == item.as_ref().and_then(|i| i.tracker_id));
+    // The key may end up in DescribeOffer::Key, which fence_ticket puts in
+    // fleet's own notice line: flatten it like every other tracker line does
+    // (defuse alone does not fold a newline).
+    let flat_key = item
+        .as_ref()
+        .and_then(|i| i.key.as_deref())
+        .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
+    if let Some(m) = meta {
+        if let Some(d) = m.description.clone() {
+            let overhead = out.chars().count()
+                + crate::mcp::guard::fence_untrusted("", FROM, 0)
+                    .chars()
+                    .count()
+                + 2;
+            let max_total = crate::service::work::handover::BRIEF_MAX_CHARS;
+            let mut budget = max_total.saturating_sub(overhead);
+            // budget 0 no longer means silence: fence_ticket says it did not
+            // fit. The notice it may append sits outside `budget`, so a cut
+            // that fills the whole budget can push the total past
+            // `max_total` by the notice's own length; when it does, shrink
+            // the fence by exactly that much and let fence_ticket re-report
+            // a smaller `shown` (the doc comment's "always fits" promise).
+            let mut fenced = crate::mcp::guard::fence_ticket(
+                &d,
+                FROM,
+                budget,
+                m.description_chars,
+                describe_offer(tracker.as_ref(), flat_key.as_deref()),
+            );
+            let over = (overhead + fenced.chars().count()).saturating_sub(max_total);
+            if over > 0 {
+                budget = budget.saturating_sub(over);
+                fenced = crate::mcp::guard::fence_ticket(
+                    &d,
+                    FROM,
+                    budget,
+                    m.description_chars,
+                    describe_offer(tracker.as_ref(), flat_key.as_deref()),
+                );
+            }
             out.push('\n');
-            out.push_str(&crate::mcp::guard::fence_untrusted(&d, FROM, budget));
+            out.push_str(&fenced);
             out.push('\n');
         }
     }

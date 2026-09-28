@@ -112,6 +112,103 @@ impl Fx {
     fn net(&self) -> crate::service::trackers::TrackerNet {
         crate::service::trackers::TrackerNet::fake(Arc::new(self.fake.clone()))
     }
+
+    /// `lookup` as a per-host token on `hosta` would see it (M3's fence).
+    fn lookup_as_host(&self, key: &str) -> Ticket {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(lookup(&self.store, key, &host_scope("hosta"), &self.net()))
+            .unwrap()
+    }
+
+    /// The queued brief for starting work on `key`, on host A in the
+    /// fixture's own project.
+    fn start_brief(&self, key: &str) -> String {
+        let args = StartArgs {
+            reference: Some(key.into()),
+            project_id: Some(self.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        };
+        let plan = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(plan_start(&self.store, &args, &OrgScope::All, &self.net()))
+            .unwrap();
+        ticket_brief(&self.store, &plan).unwrap()
+    }
+}
+
+/// `Fx::new()` with ABC-1's description overridden to `description` (as the
+/// sync would already have narrowed it) and `description_chars` (the
+/// tracker's true length before that narrowing), linked to a session on
+/// `hosta` so `lookup_as_host` sees it as a per-host token would.
+fn seeded_with_description(description: &str, description_chars: Option<i64>) -> Fx {
+    let fx = Fx::new();
+    let t = fx_tracker(&fx);
+    let mut w = item(
+        "1",
+        "ABC-1",
+        ("In Progress", "in_progress"),
+        true,
+        crate::service::catalog::now_secs(),
+    );
+    w.description = Some(description.to_string());
+    w.description_chars = description_chars;
+    fx.store.lock().unwrap().upsert_tracker_item(t, &w).unwrap();
+    let sid = fx.session_on("hosta", "dev");
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    // Past work, not a live session: hosta's fence still sees ABC-1 (as
+    // `a_host_token_sees_only_its_own_hosts_tickets` shows for an ended
+    // link), but `start_brief` on the same key must not trip start's
+    // duplicate check.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "UPDATE participants SET retired_at = 9 WHERE session_id = ?1",
+            [sid],
+        )
+        .unwrap();
+    fx
+}
+
+/// Work graph M3.5: `lookup`, as an agent sees it, and the start brief both
+/// say when the cache kept less of the description than the tracker holds.
+#[test]
+fn every_path_that_carries_a_description_says_it_cut() {
+    let w = seeded_with_description(&"x".repeat(2000), Some(6812));
+    // lookup, as an agent sees it
+    let t = w.lookup_as_host("ABC-1");
+    assert!(t.description.unwrap().contains("shown 2000 of 6812 chars"));
+    // the start brief
+    let brief = w.start_brief("ABC-1");
+    assert!(brief.contains("shown ") && brief.contains(" of 6812 chars"));
+}
+
+/// A row synced before this branch has no `description_chars` (Task 1: it is
+/// `None` for every existing row). `lookup` must not invent a notice for it —
+/// the excerpt it already cached is served exactly as it always was.
+#[test]
+fn a_pre_upgrade_row_with_no_known_length_gets_no_notice() {
+    let cached = "x".repeat(2000);
+    let w = seeded_with_description(&cached, None);
+    let t = w.lookup_as_host("ABC-1");
+    let d = t.description.unwrap();
+    assert!(!d.contains("shown"));
+    assert!(!d.contains("open the ticket"));
+    assert_eq!(
+        d,
+        crate::mcp::guard::fence_untrusted(
+            &cached,
+            "a tracker ticket",
+            crate::service::trackers::DESCRIPTION_MAX_CHARS
+        )
+    );
 }
 
 #[test]
@@ -1050,8 +1147,17 @@ async fn a_long_description_still_ends_the_fence() {
         "{}",
         brief.chars().count()
     );
+    // The fence still ends properly; the cut notice (outside it) is what the
+    // brief now ends with.
     assert!(
-        brief.trim_end().ends_with(UNTRUSTED_END),
+        brief.contains(&format!("{UNTRUSTED_END}\n[shown")),
+        "{}",
+        &brief[brief.len() - 200..]
+    );
+    assert!(
+        brief
+            .trim_end()
+            .ends_with("of the description — open the ticket for the rest]"),
         "{}",
         &brief[brief.len() - 80..]
     );
