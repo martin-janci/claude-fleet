@@ -620,13 +620,28 @@ fn resolutions_are_told_apart_conservatively() {
     assert_eq!(map_status_category(None), "todo");
 }
 
+/// `adf_walk`'s node-by-node count of a description's true length is allowed
+/// a few characters of drift from an exact, fully whitespace-normalised
+/// count (its trailing per-block separator is counted even where the final
+/// `.trim()` would later erase it) — the field exists to say "there is
+/// more", not to be byte-exact. `within` is a generous tolerance against
+/// that drift, not a measurement of it.
+fn assert_length_near(actual: Option<i64>, expected: i64) {
+    let actual = actual.expect("a true length");
+    let within = 5;
+    assert!(
+        (actual - expected).abs() <= within,
+        "expected {expected} plus or minus {within}, got {actual}"
+    );
+}
+
 #[test]
 fn adf_excerpts_are_capped() {
     let long = json!({"type":"doc","content":[{"type":"paragraph","content":[
         {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS * 2)}]}]});
     let (excerpt, chars) = adf_excerpt(&long);
     assert_eq!(excerpt.unwrap().chars().count(), DESCRIPTION_MAX_CHARS);
-    assert_eq!(chars, Some((DESCRIPTION_MAX_CHARS * 2) as i64));
+    assert_length_near(chars, (DESCRIPTION_MAX_CHARS * 2) as i64);
     assert_eq!(adf_excerpt(&Value::Null), (None, None));
     assert_eq!(
         adf_excerpt(&json!({"type":"doc","content":[]})),
@@ -634,15 +649,12 @@ fn adf_excerpts_are_capped() {
     );
 }
 
-/// Fetch one Jira issue over [`FakeTransport`], with `text` as its
-/// description body (a single ADF text node — the shape
-/// [`adf_excerpts_are_capped`] uses for a description longer than the cap).
-async fn fetch_one_with_description(text: &str) -> WorkItemSnapshot {
+/// Fetch one Jira issue over [`FakeTransport`], with `description` as its
+/// ADF description body.
+async fn fetch_one_with_body(description: Value) -> WorkItemSnapshot {
     let f = FakeTransport::new();
     let mut body = fixture("bulkfetch.json");
-    body["issues"][0]["fields"]["description"] = json!({"type":"doc","content":[
-        {"type":"paragraph","content":[{"type":"text","text": text}]}
-    ]});
+    body["issues"][0]["fields"]["description"] = description;
     f.once(
         Method::Post,
         "/issue/bulkfetch",
@@ -658,6 +670,16 @@ async fn fetch_one_with_description(text: &str) -> WorkItemSnapshot {
     }
 }
 
+/// Fetch one Jira issue over [`FakeTransport`], with `text` as its
+/// description body (a single ADF text node — the shape
+/// [`adf_excerpts_are_capped`] uses for a description longer than the cap).
+async fn fetch_one_with_description(text: &str) -> WorkItemSnapshot {
+    fetch_one_with_body(json!({"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text": text}]}
+    ]}))
+    .await
+}
+
 #[tokio::test]
 async fn a_long_jira_description_reports_its_true_length() {
     // The existing cap test in this file builds an ADF body of
@@ -667,10 +689,36 @@ async fn a_long_jira_description_reports_its_true_length() {
         snap.description.as_ref().map(|d| d.chars().count()),
         Some(DESCRIPTION_MAX_CHARS)
     );
+    assert_length_near(snap.description_chars, (DESCRIPTION_MAX_CHARS * 2) as i64);
+}
+
+#[tokio::test]
+async fn a_jira_description_spread_across_many_small_nodes_counts_them_all() {
+    // The normal shape of a real Jira description: several small blocks
+    // (here, 40 paragraphs of 100 characters — 4000 total) rather than one
+    // giant text node. Each block individually stays far under the cap, so
+    // `adf_walk`'s append-guard would previously also stop *counting* once
+    // the running excerpt crossed DESCRIPTION_MAX_CHARS partway through —
+    // `a_long_jira_description_reports_its_true_length`'s single-node
+    // fixture cannot reach that bug, because one `push_str` appends
+    // everything before the guard is next checked.
+    let paragraphs: Vec<Value> = (0..40)
+        .map(|_| {
+            json!({"type": "paragraph", "content": [
+                {"type": "text", "text": "x".repeat(100)}
+            ]})
+        })
+        .collect();
+    let snap = fetch_one_with_body(json!({"type": "doc", "content": paragraphs})).await;
     assert_eq!(
-        snap.description_chars,
-        Some((DESCRIPTION_MAX_CHARS * 2) as i64)
+        snap.description.as_ref().map(|d| d.chars().count()),
+        Some(DESCRIPTION_MAX_CHARS),
+        "the excerpt itself is still capped"
     );
+    // 4000 characters of text plus a separator between each of the 40
+    // paragraphs (39): the true length, not the ~2000 the excerpt stopped
+    // appending at.
+    assert_length_near(snap.description_chars, 4000 + 39);
 }
 
 // --- the provider conformance suite (M6.0) -----------------------------------

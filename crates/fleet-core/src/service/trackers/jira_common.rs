@@ -3,10 +3,7 @@
 //! ADF → text, and key recognition. Everything else — the API version,
 //! paging, bulk fetch, the epic — is each adapter's own.
 
-use super::{
-    description_and_len, CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS,
-    MAX_RETRY_AFTER_SECS,
-};
+use super::{CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS, MAX_RETRY_AFTER_SECS};
 use crate::net::https::Response;
 use serde_json::Value;
 
@@ -167,11 +164,23 @@ fn legacy_field(t: &str, key: &str) -> Option<String> {
 /// Plain text out of an Atlassian Document Format value, at most
 /// [`DESCRIPTION_MAX_CHARS`] characters, with its true length before that
 /// cap. A plain string (API v2, or a renderer) is taken as is.
+///
+/// `adf_walk` stops *appending* to the excerpt once it reaches the cap (so
+/// this stays cheap on a huge document), but keeps *counting* every node's
+/// text regardless: the response is already downloaded and deserialised, so
+/// walking the rest of an in-memory [`Value`] is not the expensive part, and
+/// refusing to count would make the true length wrong for the common case of
+/// a description spread across several blocks (a heading, paragraphs, a
+/// list) that individually stay small but add up past the cap.
 pub fn adf_excerpt(v: &Value) -> (Option<String>, Option<i64>) {
     let mut out = String::new();
+    let mut total: i64 = 0;
     match v {
-        Value::String(s) => out.push_str(s),
-        Value::Object(_) => adf_walk(v, &mut out),
+        Value::String(s) => {
+            out.push_str(s);
+            total = s.chars().count() as i64;
+        }
+        Value::Object(_) => adf_walk(v, &mut out, &mut total),
         _ => return (None, None),
     }
     let text = out
@@ -181,35 +190,49 @@ pub fn adf_excerpt(v: &Value) -> (Option<String>, Option<i64>) {
         .join("\n")
         .trim()
         .to_string();
-    description_and_len(&text)
+    if text.is_empty() {
+        return (None, None);
+    }
+    (
+        Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+        Some(total),
+    )
 }
 
-fn adf_walk(node: &Value, out: &mut String) {
-    if out.chars().count() > DESCRIPTION_MAX_CHARS {
-        return;
-    }
+/// `total` accumulates every node's contributed text unconditionally (a few
+/// characters of drift from `out`'s whitespace normalisation is fine — the
+/// number exists to say "there is more", not to be byte-exact); `out` is
+/// only ever appended to while it is still at or under the cap, so its final
+/// content is exactly what it was before `total` existed.
+fn adf_walk(node: &Value, out: &mut String, total: &mut i64) {
     let attrs = &node["attrs"];
-    match node["type"].as_str().unwrap_or_default() {
-        "text" => out.push_str(node["text"].as_str().unwrap_or_default()),
-        "hardBreak" => out.push('\n'),
-        "mention" => out.push_str(attrs["text"].as_str().unwrap_or("@someone")),
-        "emoji" => out.push_str(attrs["shortName"].as_str().unwrap_or_default()),
-        "inlineCard" | "blockCard" => out.push_str(attrs["url"].as_str().unwrap_or_default()),
-        "status" => out.push_str(attrs["text"].as_str().unwrap_or_default()),
-        "listItem" => out.push_str("- "),
-        _ => {}
+    let contribution: &str = match node["type"].as_str().unwrap_or_default() {
+        "text" => node["text"].as_str().unwrap_or_default(),
+        "hardBreak" => "\n",
+        "mention" => attrs["text"].as_str().unwrap_or("@someone"),
+        "emoji" => attrs["shortName"].as_str().unwrap_or_default(),
+        "inlineCard" | "blockCard" => attrs["url"].as_str().unwrap_or_default(),
+        "status" => attrs["text"].as_str().unwrap_or_default(),
+        "listItem" => "- ",
+        _ => "",
+    };
+    *total += contribution.chars().count() as i64;
+    if out.chars().count() <= DESCRIPTION_MAX_CHARS {
+        out.push_str(contribution);
     }
     if let Some(children) = node["content"].as_array() {
         for c in children {
-            adf_walk(c, out);
+            adf_walk(c, out, total);
         }
     }
     if matches!(
         node["type"].as_str(),
         Some("paragraph" | "heading" | "codeBlock" | "blockquote" | "rule" | "listItem")
-    ) && !out.ends_with('\n')
-    {
-        out.push('\n');
+    ) {
+        *total += 1;
+        if out.chars().count() <= DESCRIPTION_MAX_CHARS && !out.ends_with('\n') {
+            out.push('\n');
+        }
     }
 }
 
