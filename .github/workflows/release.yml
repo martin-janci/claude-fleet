@@ -467,7 +467,12 @@ jobs:
           key: agent-hub-binaries-${{ matrix.target }}
       # Both crates build with no Tauri system libraries and no fleet-core
       # (see ci.yml's hub-headless job) — nothing to install first.
+      # FLEET_GIT_SHA / FLEET_BUILD_ID: the build identity fleet-hub's
+      # build.rs compiles in (`healthcheck --ready`, update design U11).
       - run: cargo build -p fleet-agent -p fleet-hub --release --locked --target ${{ matrix.target }}
+        env:
+          FLEET_GIT_SHA: ${{ github.sha }}
+          FLEET_BUILD_ID: gh-run-${{ github.run_id }}-${{ github.run_attempt }}
       # A checked-in script rather than an inline heredoc: no ${{ }}
       # expression carrying tag/ref text is interpolated inside a `run:`
       # body — tag, target and repository all arrive through `env:` instead,

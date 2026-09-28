@@ -561,6 +561,17 @@ pub async fn healthcheck(
     tls: Option<String>,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
+    let status = healthcheck_probe(port, tls, env).await?;
+    out::line(&format!("healthy: {status}"));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The `/healthz` probe `healthcheck` and `healthcheck --ready` share.
+async fn healthcheck_probe(
+    port: Option<u16>,
+    tls: Option<String>,
+    env: &HashMap<String, String>,
+) -> Result<String, String> {
     let port = match (port, env.get("FLEET_HUB_PORT")) {
         (Some(p), _) => p,
         (None, Some(v)) => v
@@ -575,11 +586,131 @@ pub async fn healthcheck(
         (None, None) => crate::config::TlsMode::default(),
     };
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let status = probe(addr, HEALTHCHECK_TIMEOUT, mode.terminates_tls())
+    probe(addr, HEALTHCHECK_TIMEOUT, mode.terminates_tls())
         .await
-        .map_err(|e| format!("unhealthy: {e}"))?;
-    out::line(&format!("healthy: {status}"));
+        .map_err(|e| format!("unhealthy: {e}"))
+}
+
+/// `healthcheck --ready`: the `/healthz` probe, plus the readiness file the
+/// running `serve` keeps (see `ready.rs`). Exit 0 only when live, fresh and
+/// ready. With `json`, the verdict is printed whatever it is, so
+/// `fleet-updater` reads the build identity from the same call.
+pub async fn healthcheck_ready(
+    port: Option<u16>,
+    tls: Option<String>,
+    data_dir: Option<std::path::PathBuf>,
+    json: bool,
+    env: &HashMap<String, String>,
+) -> Result<ExitCode, String> {
+    let live = healthcheck_probe(port, tls, env).await.map(|_| ());
+    let data_dir = data_dir
+        .or_else(|| env.get("FLEET_HUB_DATA_DIR").map(std::path::PathBuf::from))
+        .unwrap_or_else(crate::config::default_data_dir);
+    let report = crate::ready::judge(
+        live,
+        crate::ready::read(&data_dir),
+        crate::ready::unix_now(),
+        crate::ready::pid_alive,
+    );
+    if json {
+        out::line(&serde_json::to_string(&report).map_err(|e| e.to_string())?);
+    } else if report.ready {
+        let h = report.hub.as_ref().expect("ready implies a readiness file");
+        out::line(&format!(
+            "ready: fleet-hub {} (commit {}, build {}, schema {})",
+            h.version,
+            h.commit,
+            h.build_id,
+            h.schema
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "none".into())
+        ));
+    } else {
+        out::error(&format!(
+            "not ready: {}",
+            report.error.as_deref().unwrap_or("unknown")
+        ));
+    }
+    Ok(if report.ready {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// `backup`: an online copy of `state.db` (`fleet_core::store::backup`).
+pub fn backup(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    to: Option<std::path::PathBuf>,
+    prefix: &str,
+    json: bool,
+) -> Result<ExitCode, String> {
+    if prefix.is_empty()
+        || !prefix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err(format!("--prefix must be [A-Za-z0-9._-]+, got '{prefix}'"));
+    }
+    let data_dir = resolve_data_dir(opts, env);
+    let db = existing_db(&data_dir)?;
+    let dest = match to {
+        Some(p) => p,
+        None => {
+            let dir = data_dir.join("backups");
+            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+            default_backup_path(&dir, prefix, crate::ready::unix_now())
+        }
+    };
+    let info = fleet_core::store::backup::backup_to(&db, &dest)?;
+    if json {
+        out::line(&serde_json::to_string(&info).map_err(|e| e.to_string())?);
+    } else {
+        out::line(&format!(
+            "backup: ok {} ({} bytes, schema {})",
+            info.path.display(),
+            info.bytes,
+            info.schema
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "none".into())
+        ));
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `<dir>/<prefix>-YYYYmmdd-HHMMSS.db` in UTC, as `deploy/hub/backup.sh`
+/// names them, with `-<n>` when two land in the same second.
+fn default_backup_path(dir: &std::path::Path, prefix: &str, now: i64) -> std::path::PathBuf {
+    let stamp = utc_stamp(now);
+    let first = dir.join(format!("{prefix}-{stamp}.db"));
+    if !first.exists() {
+        return first;
+    }
+    (1..)
+        .map(|n| dir.join(format!("{prefix}-{stamp}-{n}.db")))
+        .find(|p| !p.exists())
+        .expect("an unbounded range always finds a free name")
+}
+
+/// `YYYYmmdd-HHMMSS` for a unix time (Howard Hinnant's civil_from_days).
+fn utc_stamp(t: i64) -> String {
+    let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
 }
 
 pub fn ssh_key() -> Result<ExitCode, String> {
@@ -826,6 +957,8 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     });
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
+        commit = crate::ready::COMMIT,
+        build = crate::ready::BUILD_ID,
         public = ?r.public_url,
         bind = %r.bind,
         port = r.port,
@@ -845,6 +978,19 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     let reconcile_handle = fleet_core::service::tick::spawn_reconcile_tick(
         Arc::clone(&store),
         Arc::clone(&ssh),
+        ticks_cancel.clone(),
+    );
+    // Readiness for `healthcheck --ready` (fleet-updater's gate): written only
+    // from here on, after the store migrated and the listener bound, and
+    // removed when the ticks stop.
+    let schema = store.lock().ok().and_then(|s| s.schema_version().ok());
+    let ready_handle = crate::ready::spawn_writer(
+        r.data_dir.clone(),
+        crate::ready::Facts {
+            schema,
+            started_at: fleet_core::service::tick::tick_stats().started_at(),
+            reconcile_enabled: reconcile_handle.is_some(),
+        },
         ticks_cancel.clone(),
     );
     let usage_cache = Arc::new(Mutex::new(
@@ -922,6 +1068,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     }
     tick_handles.push(usage_handle);
     tick_handles.push(peer_handle);
+    tick_handles.push(ready_handle);
     if let Some(h) = tracker_handle {
         tick_handles.push(h);
     }
@@ -1000,6 +1147,34 @@ async fn wait_for_signal() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_names_match_backup_sh() {
+        // 2026-09-30T10:12:00Z
+        assert_eq!(utc_stamp(1_790_763_120), "20260930-101200");
+        assert_eq!(utc_stamp(0), "19700101-000000");
+        assert_eq!(utc_stamp(1_709_164_799), "20240228-235959");
+        let dir = tempfile::tempdir().unwrap();
+        let first = default_backup_path(dir.path(), "pre-0.3.4", 1_790_763_120);
+        assert_eq!(first, dir.path().join("pre-0.3.4-20260930-101200.db"));
+        std::fs::write(&first, b"x").unwrap();
+        assert_eq!(
+            default_backup_path(dir.path(), "pre-0.3.4", 1_790_763_120),
+            dir.path().join("pre-0.3.4-20260930-101200-1.db")
+        );
+    }
+
+    #[test]
+    fn backup_refuses_a_bad_prefix_before_touching_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let err = backup(&opts, &HashMap::new(), None, "../evil", false).unwrap_err();
+        assert!(err.contains("--prefix"), "{err}");
+        assert!(!dir.path().join("backups").exists());
+    }
 
     fn resolved(local_host: bool) -> Resolved {
         Resolved {

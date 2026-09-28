@@ -407,3 +407,28 @@ Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 and a `peer_exchange` listener carry messages both ways by fleet address,
 and `fleet_health.peer_links_down` reports a link in trouble, per
 `docs/superpowers/specs/2026-09-24-hub-federation-design.md`.
+
+Application updates: design
+`docs/superpowers/specs/2026-09-28-update-channel-design.md` (with
+fleet-mobile's `docs/superpowers/specs/2026-09-28-mobile-update-adapter.md`).
+The Hub is the policy authority and the release key (minisign) the content
+authority. The manifest is two signed documents, a per-release manifest plus
+a per-track channel doc on the `update-channels` branch. The `/update` wire is
+frozen and exempt from `E_HUB_CONTRACT`. `fleet-updater` rolls the hub
+container back, including the DB restore. **S1 is landed:**
+`crates/fleet-update` (Tauri-free, no fleet-core dependency; version-exempt
+like fleet-core) holds the manifest / channel types, `verify` (`verify_target`
+is the one check before any install), the pure `decide()` over the shared
+fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
+`GitUpdateChannel` / `HubUpdateChannel`. **S5 is landed too:**
+- `fleet-hub backup [--prefix|--to] --json` (`store::backup`, a
+  read-only `VACUUM INTO`, never migrates);
+- `fleet-hub healthcheck --ready --json`, which reads the readiness file
+  `serve` rewrites every 5 s (`fleet-hub/src/ready.rs`, `<data
+  dir>/run/ready.json`), so `/healthz` stays unversioned;
+- the build identity from `crates/fleet-hub/build.rs` (`FLEET_GIT_SHA` /
+  `FLEET_BUILD_ID`, passed by `release.yml` and the `hub-image.yml` build
+  args).
+
+S2–S4 and S6–S9 are not built. The §13 questions wait on the owner (S2 needs
+the release signing key).
