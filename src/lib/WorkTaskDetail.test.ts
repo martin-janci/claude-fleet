@@ -284,7 +284,7 @@ describe('WorkTaskDetail', () => {
 
   it('Place in group: sends the placement version; a conflict reloads and says so', async () => {
     handlers.place_work = () => {
-      throw { code: 'E_CONFLICT', message: 'placement changed', details: { version: 2 } };
+      throw { code: 'E_CONFLICT', message: 'placement changed', details: { task_id: 'item:12', version: 2, group: 'Infra' } };
     };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
@@ -296,7 +296,12 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(calls('place_work')[0]).toEqual({ task_id: 'item:12', group: 'Payments', expected_version: 0 });
     expect(screen.getByTestId('work-place-error').textContent).toContain('placed elsewhere');
+    // The current value, with Reload.
+    expect(screen.getByTestId('work-conflict-current').textContent).toBe('Now: placed in “Infra” · version 2');
     expect(calls('work_task').length).toBe(2);
+    await fireEvent.click(screen.getByTestId('work-conflict-reload'));
+    await flush();
+    expect(calls('work_task').length).toBe(3);
   });
 
   it('Place in group, then a rule for similar tasks — saved only after its preview', async () => {
@@ -352,6 +357,58 @@ describe('WorkTaskDetail', () => {
       },
     });
     expect(calls('work_rule_preview')).toHaveLength(2);
+  });
+
+  it('Continue refused because the work is live already offers to open that session', async () => {
+    handlers.resume_work = () => {
+      throw { code: 'E_EXISTS', message: 'ABC-12 is live in api on mefistos — jump to it' };
+    };
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await flush();
+    expect(screen.getByTestId('work-task-action-error').textContent).toContain('is live in api');
+    await fireEvent.click(screen.getByTestId('work-task-open-existing'));
+    expect(get(selectedSession)?.id).toBe(7);
+  });
+
+  it('Continue: an E_EXISTS naming its session opens that one', async () => {
+    handlers.resume_work = () => {
+      throw { code: 'E_EXISTS', message: 'being resumed already', details: { session_id: 9 } };
+    };
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-open-existing'));
+    expect(get(selectedSession)?.id).toBe(9);
+  });
+
+  it('a failed refresh keeps the task shown, with a line to retry', async () => {
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.getByTestId('work-task-status').textContent).toBe('In Review');
+    handlers.work_task = () => {
+      throw { code: 'E_HUB_DOWN', message: 'hub unreachable' };
+    };
+    await fireEvent.click(screen.getByTestId('work-task-refresh'));
+    await flush();
+    expect(screen.getByTestId('work-task-status').textContent).toBe('In Review');
+    expect(screen.queryByTestId('work-task-error')).toBeNull();
+    expect(screen.getByTestId('work-task-refresh-error').textContent).toContain('hub unreachable');
+    handlers.work_task = () => trackerTask;
+    await fireEvent.click(screen.getByTestId('work-task-refresh-retry'));
+    await flush();
+    expect(screen.queryByTestId('work-task-refresh-error')).toBeNull();
+  });
+
+  it('a first load that fails shows the error', async () => {
+    handlers.work_task = () => {
+      throw { code: 'E_HUB_DOWN', message: 'hub unreachable' };
+    };
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.getByTestId('work-task-error').textContent).toContain('hub unreachable');
   });
 
   it('a task that is gone (or not visible) says so', async () => {

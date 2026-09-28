@@ -1,13 +1,22 @@
 # Reply actions: Copy, Quote, Retry, Fork here, Rewind here
 
 Date: 2026-09-26
-Status: implemented on the desktop and hub (#338); fleet-mobile follows
-As built, where it differs from the design below: a fork writes its
-transcript beside the source's and reuses the source's worktree — "New
-worktree" (§5.2) ships disabled and the tool parameter, `new_worktree`
-(§6 calls it `worktree`), answers `E_UNSUPPORTED`; Retry resends the
-prompt's text only, not its images; a fork carries the source's confirmed
-work links (source `forked`), as `move_session { keep_source }` does.
+Status: implemented on the desktop and hub (#338 and follow-up fixes);
+fleet-mobile follows separately.
+As built, where it differs from the design below: the tool parameter is
+`new_worktree` (§6 calls it `worktree`). "New worktree" (§5.2) shipped
+disabled in #338 — a new worktree's physical path existed only after
+`new_session` created it, too late for the transcript rewrite — and is now
+built by reordering: the fork creates the worktree first (a fresh branch at
+the source's HEAD, never an existing name — `E_CONFLICT`; uncommitted
+changes are not carried, and the sheet says so), writes the copy under its
+`pwd -P` with `cwd` rewritten, records the worktree row, then starts the
+session in that existing worktree; a failure after the worktree exists
+removes the copy, the tree and branch (no `--force`), and the row. A hub
+older than this answers `E_UNSUPPORTED`, which the sheet shows as "update
+the hub". Retry resends the prompt's text only, not its images; a fork
+carries the source's confirmed work links (source `forked`), as
+`move_session { keep_source }` does.
 Repos: `claude-fleet` (fleet first), `fleet-mobile` (follows)
 
 ## 1. What this adds
@@ -162,9 +171,10 @@ pub async fn rewind_conversation(
 
 | Condition | Code | Says |
 | --- | --- | --- |
-| anchor not in the transcript (compacted away, rotated) | `E_NOTFOUND` | that reply is no longer in the transcript |
+| anchor not in the transcript (rewound past, compacted away, rotated) | `E_NOTFOUND` | the conversation was rewound (or compacted) past this turn; reload it |
+| `rewind` with no anchor (would copy the whole file: a no-op) | `E_INVALID` | rewind needs `anchor_uuid` |
 | no transcript at all | existing `read_script` sentinel path | unchanged |
-| `claude_status == "working"` and mode is `rewind` | `E_INVALID` | interrupt the session first |
+| mode is `rewind` and the session is not quiet (`working`, `blocked`, or unknown — the live pane probe first, the stored status as fallback) | `E_INVALID` | interrupt the session first |
 | session is the fleet controller | `guard_not_controller` | as `restart_session` already does |
 | `rewind` on the **first** turn | `E_INVALID` | nothing before this turn to rewind to; use `/clear` |
 
@@ -207,6 +217,12 @@ Two gating details an implementer will otherwise get wrong:
   A missing anchor legitimately means "keep the whole file" for Fork on the
   last turn, so absence cannot double as "unsupported". Use the
   `HubContract.kt:87` version pattern, as `send_prompt { keys }` does.
+
+- **Retry needs the whole prompt.** `ConvTurn.prompt_partial` (serde
+  default `false`) is set when the prompt was cut to fit the read budget or
+  carried an image / document block the text drops; Retry is then shown
+  disabled with the reason, since re-sending `prompt` would send something
+  else. Rewind stays.
 
 Desktop: a new `ReplyActions.svelte` beside `CopyButton.svelte`, dropped into
 the `.text` block at `ConversationPanel.svelte:1832`. Quote goes through the

@@ -206,7 +206,8 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "has": "active",     // any (default) | active | past_only | none (no session at all) | suggested
   "review": true,      // only tasks with something to review
   "query": "login",    // case-insensitive substring of key or title
-  "group": "tracker:1:ABC"   // one group only (a section being expanded)
+  "group": "tracker:1:ABC",  // one group only (a section being expanded)
+  "archived": true     // include archived tasks (absent/false hides them; `status: done` shows done ones)
 }
 
 // GroupRef
@@ -250,7 +251,8 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "repos": ["acme/api"],
   "placement_version": 0,                 // 0 = no placement
   "sessions": [ WorkTaskLink … ],         // active (primary first), suggested, ended newest first
-  "sessions_more": 0
+  "sessions_more": 0,
+  "archived": false                       // no active session, and done or every link (one past) archived
 }
 ```
 
@@ -258,7 +260,7 @@ changes shape. `CONTRACT_REVISION` stays 4.
 
 | Action | Parameters | Answer |
 |---|---|---|
-| `tree` | `filters?`, `cursor?`, `limit?` (1–200, default 50), `per_task?` (0–50, default 8) | `{ tasks: [WorkTask], groups: [{org_id, org_name, group: GroupRef, count}], orgs: [{id, name, color}], trackers: [{id, name, provider, state, org_id}], total, next_cursor, generated_at }` |
+| `tree` | `filters?`, `cursor?`, `limit?` (1–200, default 50), `per_task?` (0–50, default 8) | `{ tasks: [WorkTask], groups: [{org_id, org_name, group: GroupRef, count}], orgs: [{id, name, color}], trackers: [{id, name, provider, state, org_id}], total, archived_hidden, next_cursor, generated_at }` (`archived_hidden`: tasks every other filter passed but hidden as archived, over the whole result) |
 | `task` | `task_id` | `{ task: WorkTask (all sessions, with evidence), aliases: [task_id], description: string? (tracker text, fenced for an agent, ≤ 600 chars), last_outcome: {at, name, host, branch, pr_url, summary?}?, placement: {group, note, version, updated_at, updated_by}?, rules: [rule ids that match] }` |
 | `session_tasks` | `session_id` | `{ session_id, org_id, primary_link_id, links: [WorkTaskLink + task: {task_id, key, title, kind, status_category, status_name, url, unavailable, org_id, tracker_name}] }` — live, suggested, rejected and ended links of the session's participant |
 | `review` | `cursor?`, `limit?` | `{ items: [ReviewItem], total, next_cursor }` |
@@ -453,8 +455,15 @@ this design's.
   resync ends with a desktop-only `work:changed { what: "resync" }` —
   emitted only when the hub answered the re-list — which the Work view
   reads as "reload whole"; a hub never sends it. `SessionRow.work_rev`
-  (*Events* above) is not built: neither #342 nor #345 has it, and it is
-  service logic, which M14.1d does not add.
+  (*Events* above) was lost in the #343 merge and restored (cc07d36):
+  computed in SQL with the row (`SESSION_COLUMNS` in `store/rows.rs`) as
+  the sum of `version * 1000003 + id` over the session's live links (`0`,
+  omitted on the wire, when there is none), so a
+  link added, ended, removed, confirmed, rejected, made primary or archived
+  moves it (066's trigger bumps `version` on each); every link write
+  already re-reads and emits the row. `OrgScope::redact_row` /
+  `redact_json` clear it for a scoped caller. Additive and optional: no
+  contract bump.
 - 2026-09-27 (M14.1c, the writes): no migration (066's columns carry every
   version). `E_CONFLICT` is a new `IpcError` code. A link's version is
   compared only after the link is known to be the caller's to name (this

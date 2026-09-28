@@ -166,6 +166,7 @@ pub async fn add_project_with(
     // caller-supplied-alias service applies first (e.g.
     // `service::transcript::fetch_transcript`, `service::hosts::add_host`).
     crate::validate::host_alias(&args.host_alias)?;
+    require_fleet_host(store, &args.host_alias)?;
     match &args.source {
         AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh, &token).await,
         AddProjectSource::Folder { path } => folder_source(&args, path, store).await,
@@ -324,10 +325,13 @@ struct ConfirmEntry {
 /// token is the same caller `mint` handed it to — appropriate for a Tauri
 /// command reachable only from the app's own webview, where there is no
 /// separate untrusted party to convince. **`add_project`/`new_source` must
-/// never be exposed as an MCP tool (or any other externally-reachable
-/// surface) without ALSO going through `mcp::guard::PendingConfirms`'s
-/// desktop-approval `confirm_gate` — a token from this registry alone is not
-/// suffient authorization from a caller outside the app's own webview.**
+/// never be exposed on an externally-reachable surface without ALSO going
+/// through `mcp::guard::PendingConfirms`'s desktop-approval `confirm_gate`
+/// where the caller is an agent — a token from this registry alone is not
+/// sufficient authorization from a caller outside the app's own webview.**
+/// The `add_project` MCP tool does so for the operator (it is in
+/// `guard::OPERATOR_CONFIRMS`, gated at the call site once this token is
+/// presented).
 #[derive(Default)]
 struct ConfirmTokens {
     entries: Mutex<HashMap<String, ConfirmEntry>>,
@@ -1259,15 +1263,15 @@ pub async fn list_github_repos(
 }
 
 /// The repositories `gh` can see on `host_alias` — read-only, nothing is
-/// registered or written. `store` is threaded through for symmetry with
-/// every other `_with` function in this module (and in case a future host
-/// lookup needs it); today only `host_alias` itself is consulted.
+/// registered or written. `host_alias` must be a registered fleet host (see
+/// [`require_fleet_host`]).
 pub async fn list_github_repos_with(
     host_alias: &str,
-    _store: &Mutex<Store>,
+    store: &Mutex<Store>,
     ssh: &dyn SshExec,
 ) -> Result<Vec<GithubRepo>, IpcError> {
     crate::validate::host_alias(host_alias)?;
+    require_fleet_host(store, host_alias)?;
     const CMD: &str =
         "gh repo list --limit 200 --json nameWithOwner,description,isPrivate,updatedAt";
     let out = if host_alias == crate::service::projects::LOCAL_HOST {
@@ -1622,6 +1626,26 @@ fn refuse_existing_base_path(store: &Mutex<Store>, base_path: &str) -> Result<()
 /// that host's `$HOME` by the caller); `local_root` is the absolute LOCAL
 /// projects root — the registered `base_path` always derives from it, even
 /// when the clone lands on a remote host.
+/// `host_alias` names a host fleet has registered — `E_NOTFOUND` for any
+/// other, before anything runs. A syntactically valid alias is otherwise
+/// handed straight to `ssh`, which resolves it through `~/.ssh/config` (or
+/// DNS): `gh` / `git clone` would run on a machine fleet never added, with
+/// that machine's credentials. `local` is the process's own host — it has no
+/// row until the first reconcile — and is answered by
+/// `hub::ensure_local_allowed` instead (a hub with `hub.local_host` off).
+fn require_fleet_host(store: &Mutex<Store>, host_alias: &str) -> Result<(), IpcError> {
+    if host_alias == crate::service::projects::LOCAL_HOST {
+        return crate::service::hub::ensure_local_allowed(host_alias);
+    }
+    match lock(store)?.get_host_row(host_alias)? {
+        Some(_) => Ok(()),
+        None => Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("host {host_alias} not found"),
+        )),
+    }
+}
+
 fn roots(store: &Mutex<Store>, host: &str) -> Result<(String, String, Layout), IpcError> {
     let s = lock(store)?;
     Ok((
@@ -1962,8 +1986,12 @@ mod tests {
     use crate::ssh_fake::{FakeSsh, Match, Reply};
     use std::path::Path;
 
+    /// No projects, and `vps` registered: the remote-host tests run there,
+    /// and an unregistered alias is refused before any ssh.
     fn store_with_no_projects() -> Mutex<Store> {
-        Mutex::new(Store::open_in_memory().unwrap())
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        Mutex::new(s)
     }
 
     // ── local-script PATH/HOME stubbing (for a stubbed `gh`, never a real
@@ -5135,6 +5163,36 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
         assert!(err.message.contains("not json at all"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_host_is_refused_before_any_ssh() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u")
+            .on(Match::script_contains("gh repo list"), Reply::ok("[]"));
+        let err = list_github_repos_with("elsewhere", &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(err.message.contains("elsewhere"), "{}", err.message);
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "elsewhere".into(),
+                source: AddProjectSource::Clone {
+                    url: "https://github.com/acme/widget".into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
     }
 
     #[tokio::test]

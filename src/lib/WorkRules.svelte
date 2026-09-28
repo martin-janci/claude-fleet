@@ -9,15 +9,17 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import {
-    conflictOf,
+    conflictNotice,
     deleteWorkRule,
     readErrorText,
     saveWorkRule,
     workRules,
     workTreeMeta,
+    type ConflictNotice,
     type WorkRule,
     type WorkRuleDraft,
   } from './work_view';
+  import WorkConflictNotice from './WorkConflictNotice.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -27,7 +29,7 @@
   let rules = $state<WorkRule[]>([]);
   let loaded = $state(false);
   let error = $state<string | null>(null);
-  let notice = $state<string | null>(null);
+  let notice = $state<string | ConflictNotice | null>(null);
   let query = $state('');
   let editing = $state<WorkRuleDraft | null>(null);
   let confirmDelete = $state<number | null>(null);
@@ -82,7 +84,7 @@
   }
 
   async function onConflict(e: { code: string; message: string; details?: unknown }, what: string) {
-    notice = conflictOf(e) ? `${what} changed elsewhere; reloaded — check it and try again.` : e.message;
+    notice = conflictNotice(e, what) ?? e.message;
     await load();
   }
 
@@ -134,7 +136,11 @@
         onclick={() => (editing = { name: '', enabled: true, conditions: {}, group: '', expected_version: 0 })}>New rule…</button
       >
     </div>
-    {#if notice}<p class="notice" role="status" data-testid="rules-notice">{notice}</p>{/if}
+    {#if notice}
+      <p class="notice" role="status" data-testid="rules-notice">
+        {#if typeof notice === 'string'}{notice}{:else}<WorkConflictNotice notice={notice} onreload={() => void load()} />{/if}
+      </p>
+    {/if}
     {#if error}
       <p class="err" role="alert" data-testid="rules-error">{error}</p>
     {:else if !loaded}

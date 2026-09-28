@@ -153,7 +153,15 @@ peers configured".
 `usage_by_day` books each token to the UTC day of the transcript line that
 produced it. The first time a transcript is read (a new host, a hub takeover)
 its history before that day lands in `backfill_cost_micros`, apart from the
-day's live `cost_micros`, so a takeover never reads as an $850 day.
+day's live `cost_micros`, so a takeover never reads as an $850 day — however
+many passes a large transcript takes, and likewise when a transcript is
+rewritten. Yesterday's lines stay live for two collection intervals after
+midnight UTC, so a session that started just before midnight is not history.
+The split applies from the upgrade that introduced it on: rows booked before
+it (migration 071) all became live rows, so a takeover spike that is already
+in the roll-up stays one. `usage_daily` is kept for as long as its host is
+configured (removing the host deletes its rows) and has no retention window:
+it is at most two rows (live and backfill) per host per day, a few KB a year.
 `usage_report` says what each figure counts: `by_host_population: live_rows`
 (session rows that still exist, over their lifetime — ghosts included) and
 `by_day_population: durable` (the daily roll-up, killed sessions included);
@@ -883,7 +891,9 @@ What a client may do:
   classified as a write: a `full` client may call it and a `readonly` one is
   not shown it (a readonly device draws no chip row to begin with). The list
   itself is fleet state in the hub's database, not a device preference, so a
-  chip written on the laptop is on the phone and the other way round.
+  chip written on the laptop is on the phone and the other way round — its
+  order and each chip's `auto_send` (a tap sends at once instead of only
+  filling the box) included.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
@@ -1401,7 +1411,11 @@ What it reads, per org:
 
 Prompts fleet typed itself — a ticket start or resume, a handover or
 safe-kill request, a quick-reply chip, anything `[claude-fleet`-marked —
-are counted as `fleet-typed` and left out. Each text is read as one of `en
+and prompts Claude Code submitted itself (a `<task-notification>`, a
+slash command's echo) are counted as `fleet-typed` and left out; a
+person's words after a `<system-reminder>` head are read without it.
+fleet no longer stores such a prompt as a conversation's first, so the
+person's next prompt is. Each text is read as one of `en
 sk cs de pl hu other mixed unknown`, with Slovak and Czech written without
 diacritics flagged, and how much of it is code (`none`, `low`, `high`).
 The output lists what it cannot count (later prompts, Claude's replies as
@@ -2182,7 +2196,8 @@ standalone exactly as before.
   creates the repository on the host you pick, with that host's `git` and
   `gh`; the new row arrives like any other change. Cancel stops the desktop
   waiting, not the run on the host. The *Existing folder* source is absent
-  here, because it would mean a folder on the hub's machine.
+  here, because it would mean a folder on the hub's machine, and so is the
+  "into …" destination preview: the project roots are the hub's settings.
 - **Its errors reach the hub.** Error-level events and frontend crashes are
   queued and posted to the hub's `/report` every few seconds — see *Error
   reports*; `CLAUDE_FLEET_HUB_REPORTS=0` turns it off.

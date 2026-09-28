@@ -289,6 +289,14 @@ jobs:
           workspaces: .
           key: ${{ matrix.os }}-${{ matrix.target || 'native' }}
       - run: pnpm install --frozen-lockfile
+      # The Windows leg bundles Microsoft's ConPTY (the leg's args carry
+      # --config src-tauri/tauri.conpty.conf.json; scripts/fetch-conpty.sh
+      # says why). Pinned by version and SHA-256, so a changed package stops
+      # the release instead of shipping.
+      - name: Fetch ConPTY for the Windows bundle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/fetch-conpty.sh
       # A macOS bundle must come out signed with the Team ID (see the header);
       # without these tauri silently falls back to ad-hoc, which is exactly
       # the per-update keychain prompt this signing exists to stop. Names
@@ -336,6 +344,37 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+      - name: Verify ConPTY is in the Windows build
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          # tauri-action has uploaded the installer to the draft already, and
+          # verify-release runs even when a build leg fails. So a failure here
+          # also takes the installer off the draft: verify-release then finds
+          # the release incomplete, and it is never published without ConPTY.
+          fail() {
+            echo "::error::$1"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+              --jq '.[] | select(.name | endswith("-setup.exe")) | .id' \
+              | while read -r id; do
+                  gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+                done || true
+            exit 1
+          }
+          for f in conpty.dll OpenConsole.exe licenses/ConPTY-LICENSE.txt; do
+            test -s "target/release/$f" || fail "target/release/$f missing: the installer would ship without ConPTY"
+          done
+          # The installer itself, which is what users get: files in target/
+          # prove the copy, not the NSIS payload. 7-Zip reads NSIS.
+          setup=$(ls target/release/bundle/nsis/*-setup.exe)
+          listing=$(7z l "$setup") || fail "7z could not read $setup"
+          for f in conpty.dll OpenConsole.exe ConPTY-LICENSE.txt; do
+            grep -q "$f" <<<"$listing" || fail "$f missing from $setup: the installer ships without ConPTY"
+          done
       # The signing config can fail to apply without failing the build (tauri
       # falls back to ad-hoc). This turns that into a red leg: the bundle must
       # name the expected identity and carry a Team ID.

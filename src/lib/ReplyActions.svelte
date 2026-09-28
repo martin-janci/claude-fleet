@@ -133,6 +133,17 @@
       disabled={busy || !!retryBlocked}
       onclick={() => (confirming = 'retry')}>↻</button
     >
+  {:else if view.retryUnavailable}
+    <!-- Shown, not dropped: the prompt on screen is not what a re-send would
+         send (cut to fit, or it held an image), and the tooltip says so. -->
+    <button
+      type="button"
+      class="btn btn--icon btn--quiet"
+      data-testid="reply-retry"
+      aria-label="Retry this turn (unavailable)"
+      title={view.retryUnavailable}
+      disabled>↻</button
+    >
   {/if}
   {#if view.canFork}
     <button

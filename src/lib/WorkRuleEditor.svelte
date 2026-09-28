@@ -111,7 +111,7 @@
         expectedVersion = now ? now.version : start.id != null ? undefined : 0;
         previewedSig = null;
         failure = now
-          ? 'This rule changed elsewhere. Preview again to see what saving now would do.'
+          ? `This rule changed elsewhere — now “${now.name}”, ${now.enabled ? 'on' : 'off'}, placing in “${now.group}” (version ${now.version}). Preview again to see what saving now would do.`
           : start.id != null
             ? 'This rule was deleted elsewhere.'
             : 'A rule like this was saved elsewhere at the same time. Preview again.';

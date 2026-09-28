@@ -164,7 +164,8 @@ impl OrgScope {
     /// of it for a session outside the scope's orgs, else a link (primary or
     /// suggestion) whose own org is outside. `work_rejected` — bare keys
     /// with no org of their own, which only the sidebar's fallback
-    /// recognition reads — never reaches a per-host token.
+    /// recognition reads — and `work_rev` (a digest over every link) never
+    /// reach a scoped caller.
     pub fn redact_row(&self, row: &mut SessionRow) {
         if self.is_all() {
             return;
@@ -245,7 +246,7 @@ impl OrgScope {
 }
 
 /// The `SessionRow` fields that are work data.
-pub const WORK_FIELDS: &[&str] = &["work", "work_suggested", "work_rejected"];
+pub const WORK_FIELDS: &[&str] = &["work", "work_suggested", "work_rejected", "work_rev"];
 
 /// What an id outside the scope answers: the words an unknown id gets.
 pub fn not_found(what: &str, id: i64) -> IpcError {

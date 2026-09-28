@@ -341,7 +341,16 @@ are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
 `rewind_conversation` (`service/rewind.rs`), which copies the transcript up
-to the anchor into a new conversation and never changes the original. Spec
+to the anchor into a new conversation and never changes the original.
+Retry (the client's rewind + `send_prompt`) is offered only when
+`ConvTurn.prompt_partial` is false. A rewind is refused unless the session
+is quiet (live pane probe first) and without an anchor; a failed restart
+reverts the binding (`Store::revert_rebind`) and removes the copy. Fork into
+a NEW worktree (`new_worktree`, the Fork sheet's default) creates the
+worktree first — a fresh branch at the source's HEAD, uncommitted changes
+not carried — then writes the copy under its `pwd -P`, then starts in it;
+a failure after the worktree removes the copy, the tree, the branch and
+the row. Spec
 `docs/superpowers/specs/2026-09-26-reply-actions-design.md`.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
@@ -380,7 +389,11 @@ On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
 `wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
 `wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`
 program is `ssh::default_ssh_binary()` everywhere (probes, PTY, tunnels):
-`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH.
+`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH. The Windows
+bundle ships Microsoft's ConPTY (`conpty.dll`/`OpenConsole.exe`, which
+portable-pty prefers to the built-in one) via `scripts/fetch-conpty.sh`
+(pinned version + SHA-256) and `--config src-tauri/tauri.conpty.conf.json`
+in release.yml and ci.yml; plain dev builds use the system ConPTY.
 
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor

@@ -8,8 +8,9 @@
 //! By default the database is opened **read-only** and nothing is sent:
 //! the providers `none` and `bm25` run in this process. `--provider jev` is
 //! the one network path. It goes through the envelope, so a case is asked
-//! only when `decide.jev.enabled` is on, `decide.jev.work_link` is `shadow`
-//! or `assist`, the case's org consented and a key is set; every call is
+//! only when `decide.jev.enabled` is on, the case's org consented, a key is
+//! set and the breaker and budget allow it — the feature's live mode
+//! (`decide.jev.<feature>`) may stay `off`; every call is
 //! recorded in `decision_runs` (which is why that run opens the database
 //! for writing). `--export-unlinked` writes the D39 hand-label file: new
 //! only, `0600`, and it holds prompt and title text.
@@ -469,12 +470,10 @@ async fn status_map(
             )
         }
     };
-    let rows = sm::parse_labels(&raw).map_err(|e| match labels {
+    let mut rows = sm::parse_labels(&raw).map_err(|e| match labels {
         Some(f) => format!("{}: {e}", f.display()),
         None => format!("the built-in set: {e}"),
     })?;
-    let (cases, dropped) = sm::cases(&rows);
-    let (cases, split_sizes) = sm::split_cases(cases, split);
     let providers = parse_sm_providers(providers)?;
     let question = read_question(question, &providers)?;
     let max_calls = max_calls.unwrap_or(sm::DEFAULT_MAX_CALLS);
@@ -487,6 +486,20 @@ async fn status_map(
         }
         None => None,
     };
+    // Before anything is sent, each row's org comes from the database (the
+    // gate's consent and the haiku org fence rest on it), never from the
+    // file alone.
+    if providers.iter().any(|p| p.is_model()) {
+        let path = db_path(db, opts, env)?;
+        let s = Store::open_read_only(&path)
+            .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+        sm::resolve_label_orgs(&s, &mut rows).map_err(|e| match labels {
+            Some(f) => format!("{}: {e}", f.display()),
+            None => format!("the built-in set: {e}"),
+        })?;
+    }
+    let (cases, dropped) = sm::cases(&rows);
+    let (cases, split_sizes) = sm::split_cases(cases, split);
     let note = haiku.as_ref().map(Haiku::consent_note);
     let outs = if providers.contains(&sm::Provider::Jev) {
         let path = db_path(db, opts, env)?;
@@ -878,6 +891,32 @@ mod tests {
         .await
         .unwrap_err();
         assert!(e.contains("stranger"), "{e}");
+        assert!(fake.hosts().is_empty());
+        // A row whose org the database does not bear out: refused before
+        // anything is sent (the file alone never sets a case's org).
+        let bad = dir.path().join("bad.jsonl");
+        std::fs::write(
+            &bad,
+            "{\"section\":\"Hotovo\",\"expect\":\"done\",\"lang\":\"sk\",\"org_id\":4242}\n",
+        )
+        .unwrap();
+        let fake = canned();
+        let e = super::status_map(
+            Some(&bad),
+            false,
+            &providers,
+            &on("acme-box"),
+            &fake,
+            None,
+            Some(&db),
+            Split::All,
+            None,
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("row 1") && e.contains("no org 4242"), "{e}");
         assert!(fake.hosts().is_empty());
         // Without the host nothing is sent.
         let fake = Canned::default();

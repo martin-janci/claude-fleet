@@ -96,16 +96,20 @@ describe('SessionTasks', () => {
     expect(calls('work_session_tasks').length).toBe(2);
   });
 
-  it('a conflict says so and reloads', async () => {
+  it('a conflict says so, names the current primary by its task, and reloads', async () => {
     handlers.set_primary_work = () => {
-      throw { code: 'E_CONFLICT', message: 'primary changed', details: { primary: 44 } };
+      throw { code: 'E_CONFLICT', message: 'primary changed', details: { session_id: 7, primary_link_id: 44 } };
     };
     render(SessionTasks, { session: row });
     await flush();
     await fireEvent.click(within(screen.getAllByTestId('session-task')[1]).getByTestId('session-task-make-primary'));
     await flush();
     expect(screen.getByTestId('session-tasks-notice').textContent).toContain('changed elsewhere');
+    expect(screen.getByTestId('work-conflict-current').textContent).toBe('Now: primary is ABC-14 Refund');
     expect(calls('work_session_tasks').length).toBe(2);
+    await fireEvent.click(screen.getByTestId('work-conflict-reload'));
+    await flush();
+    expect(calls('work_session_tasks').length).toBe(3);
   });
 
   it('Remove sends the link’s version', async () => {

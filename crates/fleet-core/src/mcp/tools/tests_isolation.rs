@@ -216,6 +216,14 @@ fn fixture(isolate_b: bool) -> Fx {
     let item_b2 = item(&s, tb.id, "2", "BB-2", "Bravo two", "SECRET-B two");
     let item_b3 = item(&s, tb.id, "3", "BB-3", "Bravo three", "SECRET-B three");
     let _ = item_b2;
+    // Task 5: a warm describe cache for each org's own ticket, so the
+    // `describe` isolation row needs no fake tracker transport — it only
+    // proves the fence, not the fetch (already covered in
+    // `service::work::describe`'s own tests).
+    s.put_description(item_a, "SECRET-A full description", 26)
+        .unwrap();
+    s.put_description(item_b, "SECRET-B full description", 26)
+        .unwrap();
 
     let sess = |name: &str, host: &str, pid: Option<i64>, conv: &str| {
         let id = s
@@ -844,6 +852,54 @@ async fn run_matrix(isolate: bool) {
         Who::HostA,
         "work",
         json!({ "action": "card", "key": "ZZ-404" }),
+    )
+    .await;
+    same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
+    // `describe` (Task 5 of the visible-truncation-and-describe plan):
+    // exactly card's fence, served from the warm cache the fixture seeded
+    // above — a per-host token reads only its own org's ticket, a bound
+    // client the same by org, and everyone else sees both.
+    for key in ["BB-1", "AA-1"] {
+        m.row(
+            "work",
+            "describe",
+            move |_, _| json!({ "action": "describe", "key": key }),
+            move |_, who, a| {
+                let mine = matches!(
+                    (who, key),
+                    (Who::HostA | Who::BoundA, "AA-1") | (Who::HostB | Who::BoundB, "BB-1")
+                );
+                if who.is_host() && !mine {
+                    return is_code(who, a, "E_FORBIDDEN", "another org's ticket");
+                }
+                if who.is_bound() && !mine {
+                    return is_code(who, a, "E_NOTFOUND", "another org's ticket");
+                }
+                is_ok(who, a, "describe");
+                let secret = if key == "BB-1" {
+                    "SECRET-B"
+                } else {
+                    "SECRET-A"
+                };
+                let v: Value = serde_json::from_str(text(a)).unwrap();
+                assert_eq!(v["from_cache"], true, "{v}");
+                assert!(v["body"].as_str().unwrap().contains(secret), "{who:?}: {v}");
+            },
+        )
+        .await;
+    }
+    let hidden = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "describe", "key": "BB-1" }),
+    )
+    .await;
+    let unknown = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "describe", "key": "ZZ-404" }),
     )
     .await;
     same_as_unknown(&hidden, &unknown, "BB-1", "ZZ-404");
@@ -2403,11 +2459,12 @@ async fn run_matrix(isolate: bool) {
     }
     // The tree: each caller its own orgs' tasks; the forced cross-org link
     // (s_x, an A session, on B's BB-1) never names s_x to an org-B reader
-    // nor BB-1 to an org-A one.
+    // nor BB-1 to an org-A one. Archived tasks included (BB-3 is done with
+    // only a past session), so the fence is checked over every task.
     m.row(
         "work",
         "tree",
-        |_, _| json!({ "action": "tree", "limit": 200 }),
+        |_, _| json!({ "action": "tree", "limit": 200, "filters": { "archived": true } }),
         move |_, who, a| {
             is_ok(who, a, "tree");
             let v: Value = serde_json::from_str(text(a)).unwrap();
@@ -3718,6 +3775,7 @@ fn seed_usage(fx: &Fx) {
                     last_msg_usage: None,
                     now,
                     by_day: Vec::new(),
+                    backfill_until: None,
                 },
             )
             .unwrap();

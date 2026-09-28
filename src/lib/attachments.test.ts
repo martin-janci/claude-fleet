@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, NEEDS_REATTACH, MAX_FILES, MAX_BYTES, MAX_TOTAL } from './attachments';
+import { addFiles, pastedName, fmtBytes, markNeedsReattach, clearSent, NEEDS_REATTACH, MAX_FILES, MAX_BYTES, MAX_TOTAL, samePath } from './attachments';
 
 const file = (o: Partial<{ path: string; name: string; size: number; kind: 'image' | 'text' | 'binary' }> = {}) => ({
   path: '/tmp/a.png', name: 'a.png', size: 1024, kind: 'image' as const, ...o,
@@ -229,5 +229,16 @@ describe('clearSent', () => {
   it('is a no-op — same array reference — for an empty id set', () => {
     const list = mixed();
     expect(clearSent(list, new Set())).toBe(list);
+  });
+});
+
+describe('samePath', () => {
+  it('folds case and separators for Windows paths only', () => {
+    expect(samePath('C:\\Users\\Me\\A.png', 'c:\\users\\me\\a.png')).toBe(true);
+    expect(samePath('C:\\x\\a.png', 'C:/x/a.png')).toBe(true);
+    expect(samePath('\\\\srv\\share\\F.txt', '\\\\SRV\\share\\f.txt')).toBe(true);
+    expect(samePath('/home/me/A.png', '/home/me/a.png')).toBe(false);
+    expect(samePath('/home/me/a.png', '/home/me/a.png')).toBe(true);
+    expect(samePath('C:\\x\\a.png', 'C:\\x\\b.png')).toBe(false);
   });
 });

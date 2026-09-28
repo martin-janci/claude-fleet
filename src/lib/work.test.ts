@@ -15,6 +15,8 @@ import {
   describeEvidence,
   isAutoLink,
   workWhy,
+  bumpWorkChanged,
+  onWorkChangedDebounced,
   type WorkLink,
 } from './work';
 
@@ -103,5 +105,53 @@ describe('agent_inferred', () => {
   it('is a detection source, so a guess is never shown as a person\'s link', () => {
     expect(isAutoLink({ source: 'agent_inferred', state: 'suggested' })).toBe(false);
     expect(isAutoLink({ source: 'agent_inferred', state: 'confirmed' })).toBe(true);
+  });
+});
+
+describe('onWorkChangedDebounced', () => {
+  it('runs once after a quiet burst, never for the initial call', () => {
+    vi.useFakeTimers();
+    try {
+      const fn = vi.fn();
+      const off = onWorkChangedDebounced(fn, () => 100);
+      vi.advanceTimersByTime(500);
+      expect(fn).not.toHaveBeenCalled();
+      bumpWorkChanged();
+      vi.advanceTimersByTime(60);
+      bumpWorkChanged();
+      vi.advanceTimersByTime(60);
+      expect(fn).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(50);
+      expect(fn).toHaveBeenCalledTimes(1);
+      bumpWorkChanged();
+      off();
+      vi.advanceTimersByTime(500);
+      expect(fn).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('with a max wait, a steady stream of bumps cannot hold the run back', () => {
+    vi.useFakeTimers();
+    try {
+      const fn = vi.fn();
+      const off = onWorkChangedDebounced(fn, () => 100, () => 250);
+      // A bump every 50 ms: the plain debounce would never fire.
+      for (let i = 0; i < 5; i++) {
+        bumpWorkChanged();
+        vi.advanceTimersByTime(50);
+      }
+      expect(fn).toHaveBeenCalledTimes(1);
+      // The window restarts after a run.
+      bumpWorkChanged();
+      vi.advanceTimersByTime(99);
+      expect(fn).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1);
+      expect(fn).toHaveBeenCalledTimes(2);
+      off();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
