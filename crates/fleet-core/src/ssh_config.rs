@@ -22,6 +22,10 @@ pub struct SshHost {
 pub fn parse(input: &str) -> Vec<SshHost> {
     let mut hosts: Vec<SshHost> = Vec::new();
     let mut current: Option<SshHost> = None;
+    // A byte-order mark is not part of the first keyword: Windows editors
+    // (older Notepad) save `.ssh\config` with one, and the first `Host` line
+    // would otherwise be lost.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     for raw_line in input.lines() {
         let line = strip_comment(raw_line).trim();
         if line.is_empty() {
@@ -139,6 +143,18 @@ Host alpha
 Host beta
     Hostname beta.lan
 ";
+
+    /// A Windows-edited config: a byte-order mark and CRLF line ends.
+    #[test]
+    fn a_bom_and_crlf_config_keeps_its_first_host() {
+        let windows = format!("\u{feff}{}", SIMPLE.replace('\n', "\r\n"));
+        let hosts = parse(&windows);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].alias, "alpha");
+        assert_eq!(hosts[0].hostname.as_deref(), Some("10.0.0.5"));
+        assert_eq!(hosts[0].port, Some(2222));
+        assert_eq!(hosts[1].hostname.as_deref(), Some("beta.lan"));
+    }
 
     #[test]
     fn parses_two_simple_hosts() {
