@@ -22,6 +22,7 @@
 use crate::ipc_error::{lock, IpcError};
 use crate::mcp::guard::{defuse, fence_ticket, DescribeOffer};
 use crate::service::orgs::{self, OrgScope};
+use crate::service::trackers::tickets::describe_offer;
 use crate::store::{ItemMeta, Store};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -266,6 +267,11 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
     let s = lock(store)?;
     orgs::require_key(&s, scope, &key)?;
     let Some(item) = s.work_item_by_key(&key)? else {
+        // No cached item, so no tracker to ask either way: `describe_offer`
+        // always answers `None` here, but it still names the key the way
+        // the other two call sites do (ruling 2's flattening applies
+        // uniformly, not only where it currently matters).
+        let flat_key = key.split_whitespace().collect::<Vec<_>>().join(" ");
         return Ok(TicketCard {
             composer_text: composer_text(
                 &key,
@@ -274,7 +280,7 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
                 &[],
                 None,
                 &ItemMeta::default(),
-                DescribeOffer::None,
+                describe_offer(None, Some(&flat_key)),
             ),
             key,
             ..Default::default()
@@ -300,6 +306,19 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
         .filter(|_| acceptance.is_empty())
         .map(|d| cap(d.trim(), EXCERPT_MAX_CHARS))
         .filter(|d| !d.is_empty());
+    // The tracker that might serve a full description, mirroring `lookup`'s
+    // resolution (this function has no tracker row of its own).
+    let tracker = s
+        .list_trackers()?
+        .into_iter()
+        .find(|t| Some(t.id) == item.tracker_id);
+    // The key may end up in DescribeOffer::Key, which fence_ticket puts in
+    // fleet's own notice line: flatten it like every other tracker line does
+    // (defuse alone does not fold a newline).
+    let flat_key = item
+        .key
+        .as_deref()
+        .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
     let composer = composer_text(
         &key,
         &item.title,
@@ -307,8 +326,7 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
         &acceptance,
         excerpt.as_deref(),
         &meta,
-        // Task 4 wires the cap; conservative until then (Ruling 1).
-        DescribeOffer::None,
+        describe_offer(tracker.as_ref(), flat_key.as_deref()),
     );
     // An agent's card is fenced; a person's (a bound phone too) is not.
     let for_agent = matches!(scope, OrgScope::Host { .. });

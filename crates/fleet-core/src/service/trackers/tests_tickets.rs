@@ -1106,6 +1106,53 @@ async fn a_hostile_key_is_flattened_wherever_fleet_writes_it() {
     assert!(start_prompt(&"K".repeat(200)).len() < 200 + 100);
 }
 
+/// Fix round 1, A-1 (continued): when the retry's shrink saturates `budget`
+/// all the way to 0, `fence_ticket`'s zero-budget branch (notice only, no
+/// fence) must still land the whole brief under `BRIEF_MAX_CHARS` — the
+/// `saturating_sub` must not let an over-large shrink silently do nothing.
+/// A big `extra` (this function's multi-repo siblings line, artificially
+/// stretched here) leaves only a sliver of budget for the description —
+/// small enough that the retry's shrink saturates to 0.
+#[tokio::test]
+async fn the_retry_still_fits_when_it_shrinks_the_budget_to_zero() {
+    let fx = Fx::new();
+    let mut w = item("69", "ABC-69", ("To Do", "todo"), true, 1);
+    w.description = Some("x".repeat(10_000));
+    let tracker = fx_tracker(&fx);
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_tracker_item(tracker, &w)
+        .unwrap();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-69".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let extra = "E".repeat(3700);
+    let brief = ticket_brief_with(&fx.store, &plan, &extra).unwrap();
+    assert!(
+        brief.chars().count() <= crate::service::work::handover::BRIEF_MAX_CHARS,
+        "{}",
+        brief.chars().count()
+    );
+    assert!(
+        brief
+            .trim_end()
+            .ends_with("[the description did not fit — open the ticket]"),
+        "{}",
+        &brief[brief.len().saturating_sub(80)..]
+    );
+}
+
 #[tokio::test]
 async fn a_long_description_still_ends_the_fence() {
     use crate::mcp::guard::UNTRUSTED_END;
@@ -1161,6 +1208,54 @@ async fn a_long_description_still_ends_the_fence() {
         "{}",
         &brief[brief.len() - 80..]
     );
+}
+
+/// Fix round 1, A-1: the retry must not over-cut. Its arithmetic once
+/// double-counted the fence's own fixed overhead (~130 chars, an empty
+/// `fence_untrusted`'s marker + end-marker), which shrank `budget` far more
+/// than the real overflow demanded. A correct retry lands close to
+/// `BRIEF_MAX_CHARS` — the exact figure moves with the digit width of
+/// `shown`/`full`, so this asserts a range, not an equality.
+#[tokio::test]
+async fn a_long_descriptions_retry_lands_close_to_the_budget_not_far_under_it() {
+    let fx = Fx::new();
+    let mut w = item("68", "ABC-68", ("To Do", "todo"), true, 1);
+    w.description = Some("x".repeat(10_000));
+    let tracker = fx_tracker(&fx);
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_tracker_item(tracker, &w)
+        .unwrap();
+    // The store keeps what the provider gave; set a long one by hand too.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "UPDATE work_items SET meta = json_set(meta, '$.description', ?1) WHERE key = 'ABC-68'",
+            ["y".repeat(10_000)],
+        )
+        .unwrap();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-68".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let brief = ticket_brief(&fx.store, &plan).unwrap();
+    let len = brief.chars().count();
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    // A buggy double-counted retry undershoots by roughly the fence's own
+    // fixed overhead (~130 chars) — far outside this range.
+    assert!((max - 40..=max).contains(&len), "{len} vs budget {max}");
 }
 
 fn fx_tracker(fx: &Fx) -> i64 {

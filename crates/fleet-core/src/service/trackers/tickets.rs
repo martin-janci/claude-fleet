@@ -43,8 +43,13 @@ pub const RECENT_DAYS: i64 = 14;
 /// Whether this item's tracker can serve a full description, and under which
 /// key. A tracker fleet cannot identify, or one whose provider does not
 /// implement `describe`, points at the ticket instead.
+///
+/// `pub(crate)`: all three callers that fence a description share this one
+/// decision — `lookup` and `ticket_brief_with` here, and
+/// `service::work::card::card` — so Task 4 changes exactly this function
+/// body (wiring `super::provider_caps`) and every caller picks it up.
 #[allow(unused_variables)]
-fn describe_offer<'a>(
+pub(crate) fn describe_offer<'a>(
     tracker: Option<&crate::store::TrackerRow>,
     key: Option<&'a str>,
 ) -> crate::mcp::guard::DescribeOffer<'a> {
@@ -960,6 +965,18 @@ pub fn ticket_brief_with(
             // `max_total` by the notice's own length; when it does, shrink
             // the fence by exactly that much and let fence_ticket re-report
             // a smaller `shown` (the doc comment's "always fits" promise).
+            //
+            // Computing the notice's length up front instead, to size
+            // `budget` correctly the first time, would be circular: the
+            // notice names `shown`, and `shown` *is* the budget once the
+            // text is actually being truncated — so the budget would depend
+            // on the notice's own length, which depends on the budget. One
+            // fixpoint iteration (build once, measure the real overflow,
+            // shrink, build once more) is the correct shape here: shrinking
+            // `budget` only ever shortens `shown`, which only ever
+            // shortens-or-holds the notice's digit count, so the second
+            // build can only ever fit. Do not "simplify" this back into a
+            // circle.
             let mut fenced = crate::mcp::guard::fence_ticket(
                 &d,
                 FROM,
@@ -967,7 +984,14 @@ pub fn ticket_brief_with(
                 m.description_chars,
                 describe_offer(tracker.as_ref(), flat_key.as_deref()),
             );
-            let over = (overhead + fenced.chars().count()).saturating_sub(max_total);
+            // The real total once pushed below is `out` as it stands now,
+            // plus the two newlines, plus `fenced` (which already carries
+            // its own fence overhead) — NOT `overhead + fenced.len()`:
+            // `overhead` already counts an (empty) fence's overhead once, so
+            // adding `fenced.len()` on top would count it twice and over-cut
+            // by the fence's own fixed overhead (~130 chars).
+            let total = out.chars().count() + 2 + fenced.chars().count();
+            let over = total.saturating_sub(max_total);
             if over > 0 {
                 budget = budget.saturating_sub(over);
                 fenced = crate::mcp::guard::fence_ticket(
