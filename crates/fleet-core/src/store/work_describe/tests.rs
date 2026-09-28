@@ -90,7 +90,9 @@ fn sweep_descriptions_drops_only_what_is_older_than_the_cutoff() {
             rusqlite::params![now - 1000, old_id],
         )
         .unwrap();
-    let n = s.sweep_descriptions(now - 500).unwrap();
+    assert_eq!(s.describe_cache_rows().unwrap(), 2);
+    assert_eq!(s.describe_cache_eligible(now - 500).unwrap(), 1);
+    let n = s.sweep_descriptions(now - 500, 200).unwrap();
     assert_eq!(n, 1);
     assert_eq!(s.cached_description(old_id, 10_000, now).unwrap(), None);
     assert_eq!(
@@ -99,4 +101,60 @@ fn sweep_descriptions_drops_only_what_is_older_than_the_cutoff() {
             .as_deref(),
         Some("fresh")
     );
+    assert_eq!(s.describe_cache_rows().unwrap(), 1);
+}
+
+/// The batch discipline `service::work::retention::sweep_capped` relies on:
+/// `limit` bounds one call, `0` deletes nothing, and repeated calls drain
+/// the backlog oldest-`item_id`-first.
+#[test]
+fn sweep_descriptions_batches_oldest_item_id_first() {
+    let s = store();
+    let t = s
+        .add_tracker("jira", "J", "https://acme.atlassian.net")
+        .unwrap()
+        .id;
+    let now = now_unix();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let id = s
+            .upsert_tracker_item(
+                t,
+                &TrackerItemWrite {
+                    external_id: i.to_string(),
+                    key: Some(format!("ABC-{i}")),
+                    title: "T".into(),
+                    status_name: "Done".into(),
+                    status_category: "done".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+        s.put_description(id, "old", 3).unwrap();
+        ids.push(id);
+    }
+    s.conn_for_test()
+        .execute(
+            "UPDATE work_item_descriptions SET fetched_at = ?1",
+            rusqlite::params![now - 1000],
+        )
+        .unwrap();
+    assert_eq!(
+        s.sweep_descriptions(now - 500, 0).unwrap(),
+        0,
+        "0 deletes nothing"
+    );
+    assert_eq!(s.describe_cache_eligible(now - 500).unwrap(), 5);
+    assert_eq!(s.sweep_descriptions(now - 500, 2).unwrap(), 2, "one batch");
+    assert_eq!(s.describe_cache_rows().unwrap(), 3);
+    // The two oldest ids (lowest item_id) went first.
+    for id in &ids[..2] {
+        assert_eq!(s.cached_description(*id, 10_000, now).unwrap(), None);
+    }
+    for id in &ids[2..] {
+        assert!(s.cached_description(*id, 10_000, now).unwrap().is_some());
+    }
+    assert_eq!(s.sweep_descriptions(now - 500, 200).unwrap(), 3, "the rest");
+    assert_eq!(s.describe_cache_rows().unwrap(), 0);
 }

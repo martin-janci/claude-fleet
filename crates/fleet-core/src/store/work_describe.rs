@@ -15,8 +15,10 @@ use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 
 impl Store {
-    /// The cached description, when there is one younger than `ttl_secs`.
-    /// `ttl_secs == 0` turns the cache off without clearing it.
+    /// The cached description, when there is one at most `ttl_secs` old.
+    /// Inclusive: an entry fetched exactly `ttl_secs` ago (`now - fetched_at
+    /// == ttl_secs`) is still served, not treated as expired. `ttl_secs == 0`
+    /// turns the cache off without clearing it.
     pub fn cached_description(
         &self,
         item_id: i64,
@@ -48,12 +50,45 @@ impl Store {
         Ok(())
     }
 
-    /// Drop everything fetched before `older_than`. Called by the work
-    /// retention pass.
-    pub fn sweep_descriptions(&self, older_than: i64) -> Result<usize, IpcError> {
+    /// Delete at most `limit` rows fetched before `older_than`, oldest
+    /// `item_id` first — one statement, so the caller holds the lock for one
+    /// batch only, exactly like `sweep_tracker_writes` (this cache is not a
+    /// [`crate::store::RetentionTable`]: its own single column,
+    /// `fetched_at`, needs no CTE). Called in a loop by
+    /// `service::work::retention::sweep_capped`, batched and capped the same
+    /// as every other table that pass sweeps.
+    pub fn sweep_descriptions(&self, older_than: i64, limit: usize) -> Result<usize, IpcError> {
+        if limit == 0 {
+            return Ok(0);
+        }
         Ok(self.conn.execute(
-            "DELETE FROM work_item_descriptions WHERE fetched_at < ?1",
+            "DELETE FROM work_item_descriptions WHERE item_id IN (\
+               SELECT item_id FROM work_item_descriptions \
+               WHERE fetched_at < ?1 ORDER BY item_id LIMIT ?2)",
+            rusqlite::params![older_than, limit as i64],
+        )?)
+    }
+
+    /// Rows currently in the describe cache — `work_admin { action: status }`'s
+    /// dry-run count for it (it holds third-party full text, so it earns a
+    /// row count like the other retention-swept tables, even though it is
+    /// not one of them).
+    pub fn describe_cache_rows(&self) -> Result<i64, IpcError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM work_item_descriptions", [], |r| {
+                r.get(0)
+            })?)
+    }
+
+    /// How many describe-cache rows are older than `older_than` — the
+    /// dry-run count `sweep_descriptions(older_than, usize::MAX)` would
+    /// remove.
+    pub fn describe_cache_eligible(&self, older_than: i64) -> Result<i64, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM work_item_descriptions WHERE fetched_at < ?1",
             rusqlite::params![older_than],
+            |r| r.get(0),
         )?)
     }
 }

@@ -165,6 +165,25 @@ pub fn status(store: &Mutex<Store>, now: i64) -> Result<RetentionStatus, IpcErro
             would_delete,
         });
     }
+    // The describe cache (Task 5): not a `RetentionTable` (its own single-
+    // column rule needs no CTE), but it holds third-party full text like
+    // every table above, so it earns the same dry-run visibility.
+    //
+    // Two separate `let` statements, not two `lock(store)?` calls as sibling
+    // field initializers of one struct literal: within a single statement,
+    // both temporaries' drop is deferred to the statement's end, so the
+    // second `lock` would block forever on the first, still-held guard —
+    // this deadlocked the whole test binary before it was caught here.
+    let describe_cutoff = describe_cutoff(days.tracker_items, now);
+    let describe_rows = lock(store)?.describe_cache_rows()?;
+    let describe_would_delete = lock(store)?.describe_cache_eligible(describe_cutoff)?;
+    tables.push(RetentionTableStatus {
+        table: "work_item_descriptions".into(),
+        setting: settings::WORK_RETENTION_TRACKER_ITEMS_DAYS.into(),
+        days: days.tracker_items,
+        rows: describe_rows,
+        would_delete: describe_would_delete,
+    });
     let last_sweep = lock(store)?
         .get_setting(LAST_SWEEP_KEY)?
         .and_then(|v| serde_json::from_str(&v).ok());
@@ -242,14 +261,28 @@ pub fn sweep_capped(store: &Mutex<Store>, now: i64, batch: usize, cap: usize) ->
     }
     // Task 5: the describe cache, by the tracker items' window (with the
     // 30-day floor `describe_cutoff` applies when that window is "forever").
-    // Unbounded like `Store::sweep_descriptions` itself: the cache holds at
-    // most one row per tracker item that was ever described, far fewer than
-    // the tables above.
+    // Batched and capped exactly like every table above and the outbox
+    // below: it holds third-party full text, up to DESCRIBE_MAX_CHARS
+    // (32,000 chars) per row, so it gets no exemption from the per-lock /
+    // per-tick discipline just because it usually holds fewer rows.
     let cutoff = describe_cutoff(days.tracker_items, now);
-    if let Ok(s) = store.lock() {
-        match s.sweep_descriptions(cutoff) {
-            Ok(n) => out.describe_cache = n,
-            Err(e) => tracing::warn!(error = %e, "[gc] describe cache sweep failed"),
+    while out.describe_cache < cap {
+        let want = batch.min(cap - out.describe_cache);
+        let n = match store.lock() {
+            Ok(s) => s.sweep_descriptions(cutoff, want),
+            Err(_) => break,
+        };
+        match n {
+            Ok(n) => {
+                out.describe_cache += n;
+                if n < want {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "[gc] describe cache sweep failed");
+                break;
+            }
         }
     }
     if let Ok(s) = store.lock() {
@@ -421,7 +454,12 @@ mod tests {
                 .iter()
                 .map(|t| t.table.as_str())
                 .collect::<Vec<_>>(),
-            ["work_journal", "work_items", "session_events"]
+            [
+                "work_journal",
+                "work_items",
+                "session_events",
+                "work_item_descriptions"
+            ]
         );
         assert_eq!(s.tick_cap, RETENTION_TICK_CAP);
         // The record is not a setting anyone can write.
