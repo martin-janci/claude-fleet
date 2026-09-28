@@ -834,11 +834,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty keys nothing else would notice losing. Its list is a literal here,
+/// sixty-one keys nothing else would notice losing. Its list is a literal here,
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty() {
+fn a_session_rows_wire_names_are_these_exact_sixty_one() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -897,12 +897,13 @@ fn a_session_rows_wire_names_are_these_exact_sixty() {
         "usage_updated_at",
         "work",
         "work_rejected",
+        "work_rev",
         "work_suggested",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 60, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 61, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 
