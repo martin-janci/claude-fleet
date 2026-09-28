@@ -1162,7 +1162,7 @@
           aria-describedby="work-describe-cache-desc"
           data-testid="work-describe-cache"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workDescribeCacheSecs, 'Describe cache', e)} />
-        <span class="hook-desc" id="work-describe-cache-desc">seconds a full ticket description ("Read the full description") is reused before fleet asks the tracker again (0 = off)</span>
+        <span class="hook-desc" id="work-describe-cache-desc">seconds a ticket's full description, once fetched, is reused before fleet asks the tracker again (0 = off)</span>
       </div>
       <label class="toggle">
         <input
