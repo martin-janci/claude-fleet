@@ -166,8 +166,8 @@ pub async fn provision_one_with(
     Ok(())
 }
 
-/// 0. + 1. Refuse to write into somebody else's git checkout unless told
-/// to (`provision.force_git_tree`, decision B-2), then both skills and
+/// Steps 0 and 1: refuse to write into somebody else's git checkout unless
+/// told to (`provision.force_git_tree`, decision B-2), then both skills and
 /// their `.fleet-managed` markers (hosts F2).
 async fn provision_skills(
     ssh: &dyn SshExec,

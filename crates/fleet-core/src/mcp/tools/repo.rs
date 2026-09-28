@@ -58,6 +58,17 @@ impl FleetTools {
         )
     }
 
+    #[tool(description = "Drop a project row and its worktrees (ghost \
+        sessions go with it); E_INVALID_STATE while a live session \
+        references it. Master only.")]
+    pub(super) async fn forget_project(
+        &self,
+        Parameters(p): Parameters<ForgetProjectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("forget_project", &format!("project_id={}", p.project_id));
+        ok_json(&projects::forget_project(&self.store, p.project_id).map_err(to_mcp_err)?)
+    }
+
     // ---- sessions ----
 
     #[tool(description = "Git worktrees fleet knows about, with their \

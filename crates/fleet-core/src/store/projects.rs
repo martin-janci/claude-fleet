@@ -713,6 +713,105 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Two rows naming one checkout on one host (data-sync F7: 12 such
+    /// pairs, linked worktrees scanned as repos). Keep the row whose
+    /// project's `base_path` is a prefix of the path (the owner), else the
+    /// lowest id; re-point sessions at it; delete the rest. Returns rows
+    /// deleted. Emits `worktree:removed` per deleted row and
+    /// `session:updated` per re-pointed session.
+    pub fn dedupe_worktree_paths(&self) -> Result<usize, rusqlite::Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let groups: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT host_alias, path FROM worktrees GROUP BY host_alias, path HAVING COUNT(*) > 1",
+            )?;
+            let g = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            g
+        };
+        let mut removed: Vec<i64> = Vec::new();
+        let mut touched: Vec<i64> = Vec::new();
+        for (host, path) in groups {
+            let rows: Vec<(i64, i64, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT w.id, w.project_id, p.base_path FROM worktrees w
+                       JOIN projects p ON p.id = w.project_id
+                      WHERE w.host_alias = ?1 AND w.path = ?2 ORDER BY w.id",
+                )?;
+                let v = stmt
+                    .query_map(rusqlite::params![host, path], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                v
+            };
+            let Some(keep) = rows
+                .iter()
+                .find(|(_, _, base)| path.starts_with(&format!("{}/", base.trim_end_matches('/'))))
+                .or(rows.first())
+                .map(|(id, pid, _)| (*id, *pid))
+            else {
+                continue;
+            };
+            for (id, _, _) in rows.iter().filter(|(id, _, _)| *id != keep.0) {
+                let ids: Vec<i64> = {
+                    let mut stmt = tx.prepare("SELECT id FROM sessions WHERE worktree_id = ?1")?;
+                    let v = stmt
+                        .query_map([id], |r| r.get::<_, i64>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    v
+                };
+                touched.extend(ids);
+                tx.execute(
+                    "UPDATE sessions SET worktree_id = ?2, project_id = ?3 WHERE worktree_id = ?1",
+                    rusqlite::params![id, keep.0, keep.1],
+                )?;
+                tx.execute("DELETE FROM worktrees WHERE id = ?1", [id])?;
+                removed.push(*id);
+            }
+        }
+        tx.commit()?;
+        for id in &removed {
+            self.bus.worktree_removed(*id);
+        }
+        self.emit_sessions_updated(&touched);
+        Ok(removed.len())
+    }
+
+    /// Live (non-ghost) session rows on the project or its worktrees.
+    pub fn project_live_session_count(&self, project_id: i64) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE status != 'ghost' AND (project_id = ?1
+               OR worktree_id IN (SELECT id FROM worktrees WHERE project_id = ?1))",
+            [project_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Delete the project's ghost rows (events with them, inbox tombstoned,
+    /// as `delete_session` does) so `delete_project_if_unused` can proceed.
+    /// Returns the ids.
+    pub fn delete_project_ghost_sessions(
+        &self,
+        project_id: i64,
+    ) -> Result<Vec<i64>, rusqlite::Error> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM sessions WHERE status = 'ghost' AND (project_id = ?1
+                   OR worktree_id IN (SELECT id FROM worktrees WHERE project_id = ?1))",
+            )?;
+            let v = stmt
+                .query_map([project_id], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            v
+        };
+        for id in &ids {
+            self.delete_session(*id)?;
+        }
+        Ok(ids)
+    }
+
     /// After a scan of `host_alias`'s checkout of `project_id`: drop that
     /// host's rows the scan did not report, except rows a session still
     /// points at (any status — the FK must stay valid). Local rows are never
@@ -834,6 +933,67 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// data-sync F7: 12 duplicate worktree paths, linked worktrees scanned
+    /// as repos, that a hub without a local host could never heal.
+    #[test]
+    fn dedupe_worktree_paths_keeps_the_owning_project_and_repoints_sessions() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let owner = s
+            .upsert_project("o", "sales-twins-app", "/p/sales-twins-app")
+            .unwrap();
+        let dup = s
+            .upsert_project(
+                "o",
+                "sal-696",
+                "/p/sales-twins-app/.claude/worktrees/SAL-696",
+            )
+            .unwrap();
+        let kept = s
+            .upsert_worktree(
+                owner,
+                "SAL-696",
+                "/p/sales-twins-app/.claude/worktrees/SAL-696",
+                Some("SAL-696"),
+            )
+            .unwrap();
+        let gone = s
+            .upsert_worktree(
+                dup,
+                "main",
+                "/p/sales-twins-app/.claude/worktrees/SAL-696",
+                Some("SAL-696"),
+            )
+            .unwrap();
+        let sid = s
+            .upsert_session("dev", "local", Some(dup), Some(gone), 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(s.dedupe_worktree_paths().unwrap(), 1);
+        assert!(s.get_worktree_row(gone).unwrap().is_none());
+        assert!(s.get_worktree_row(kept).unwrap().is_some());
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row.worktree_id, Some(kept));
+        assert_eq!(row.project_id, Some(owner));
+        assert_eq!(s.dedupe_worktree_paths().unwrap(), 0, "idempotent");
+    }
+
+    #[test]
+    fn a_projects_ghost_rows_go_and_only_live_rows_count() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let live = s
+            .upsert_session("a", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let ghost = s
+            .upsert_session("b", "local", Some(pid), None, 1, 1, "ghost", None)
+            .unwrap();
+        assert_eq!(s.project_live_session_count(pid).unwrap(), 1);
+        assert_eq!(s.delete_project_ghost_sessions(pid).unwrap(), vec![ghost]);
+        assert!(s.get_session_by_id(ghost).unwrap().is_none());
+        assert!(s.get_session_by_id(live).unwrap().is_some());
+    }
 
     /// Callers holding only the mutex get the keys with the lock released
     /// before any path is resolved; a remote path is never resolved here.

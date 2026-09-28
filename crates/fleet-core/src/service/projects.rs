@@ -198,7 +198,17 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     // There is nothing to rescan then, so the stored tree is the answer — not
     // a refusal every Refresh click, Settings save and onboarding card hits.
     if !crate::service::hub::local_host_enabled() {
-        return lock(store)?.list_projects_joined();
+        // Task 7 (data-sync F7): the one heal a local-less hub can still
+        // do — fold worktree rows that name the same checkout.
+        let s = lock(store)?;
+        let n = s.dedupe_worktree_paths()?;
+        if n > 0 {
+            tracing::info!(
+                removed = n,
+                "[projects] deduped worktree rows naming one checkout"
+            );
+        }
+        return s.list_projects_joined();
     }
     // 1. Resolve the scan root + layout and snapshot the current project list
     //    under a brief lock.
@@ -372,9 +382,60 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
         }
     }
 
-    // 5. Return the fresh list under one final brief lock.
+    // 5. Fold worktree rows naming one checkout (task 7), then return the
+    //    fresh list under one final brief lock.
     let s = lock(store)?;
+    let n = s.dedupe_worktree_paths()?;
+    if n > 0 {
+        tracing::info!(
+            removed = n,
+            "[projects] deduped worktree rows naming one checkout"
+        );
+    }
     s.list_projects_joined()
+}
+
+/// Drop one project row and its worktrees from a store nothing rescans
+/// (data-sync F6: a hub without a local host can never shrink its list).
+/// Refused while a live session references it; its ghost rows go with it.
+pub fn forget_project(store: &Mutex<Store>, project_id: i64) -> Result<ProjectRow, IpcError> {
+    // Resolved off-lock, as `fingerprint_keys_of_project` takes the lock.
+    let fp_keys = Store::fingerprint_keys_of_project(store, project_id);
+    let s = lock(store)?;
+    let row = s.get_project(project_id)?.ok_or_else(|| {
+        IpcError::new(codes::E_NOTFOUND, format!("project {project_id} not found"))
+    })?;
+    if row.system {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a system project cannot be forgotten",
+        ));
+    }
+    let live = s.project_live_session_count(project_id)?;
+    if live > 0 {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "{}/{} has {live} live session(s); kill or move them first",
+                row.owner, row.repo
+            ),
+        ));
+    }
+    let ghosts = s.delete_project_ghost_sessions(project_id)?;
+    if !s.delete_project_if_unused(project_id, &fp_keys)? {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "the project is still referenced",
+        ));
+    }
+    tracing::info!(
+        project_id,
+        owner = %row.owner,
+        repo = %row.repo,
+        ghosts = ghosts.len(),
+        "[projects] forgotten"
+    );
+    Ok(row)
 }
 
 #[cfg(test)]
@@ -525,6 +586,42 @@ mod tests {
             "a project with sessions is never dropped"
         );
         assert!(ids.contains(&inside), "rows under the root are left alone");
+    }
+
+    /// data-sync F6: `forget_project` drops a row nothing can rescan away,
+    /// refuses while a live session holds it, and takes its ghosts along.
+    #[test]
+    fn forget_project_refuses_a_live_project_and_drops_one_with_only_ghosts() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (pid, sid) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let pid = s
+                .upsert_project("o", "ppt-epic-145", "/p/o/ppt-epic-145")
+                .unwrap();
+            let sid = s
+                .upsert_session("dev", "local", Some(pid), None, 1, 1, "running", None)
+                .unwrap();
+            (pid, sid)
+        };
+        let err = forget_project(&store, pid).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        store
+            .lock()
+            .unwrap()
+            .conn_for_test()
+            .execute("UPDATE sessions SET status='ghost' WHERE id=?1", [sid])
+            .unwrap();
+        let row = forget_project(&store, pid).unwrap();
+        assert_eq!(row.id, pid);
+        let s = store.lock().unwrap();
+        assert!(s.get_project(pid).unwrap().is_none());
+        assert!(s.get_session_by_id(sid).unwrap().is_none());
+        drop(s);
+        assert_eq!(
+            forget_project(&store, pid).unwrap_err().code,
+            codes::E_NOTFOUND
+        );
     }
 
     /// `service::add_project`'s `clone` and `new` sources on a REMOTE host
