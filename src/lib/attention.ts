@@ -228,13 +228,18 @@ function isIdleStatus(status: ClaudeStatus | null): boolean {
   return status === 'idle' || status === 'completed' || status === 'stopped';
 }
 
-/** When the row entered the state its bucket describes, best effort. */
+/** When the row entered `bucket`, best effort — the same field per reason as the hub's
+ *  `attention::since_for`. */
 function bucketSince(s: SessionRow, bucket: TriageBucket): number {
   switch (bucket) {
     case 'stuck':
       return s.stuck_since ?? s.last_activity_at;
     case 'stop_failed':
       return s.last_stop_at ?? s.last_activity_at;
+    case 'failed':
+      return s.last_activity_at;
+    case 'context_full':
+      return s.context_at ?? s.last_activity_at;
     case 'stale_working':
       return s.stale_working_at ?? s.last_activity_at;
     case 'ci_failing':

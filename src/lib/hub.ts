@@ -308,6 +308,7 @@ export const ROUTED_ACTIONS = [
   'rename_session',
   'set_friendly_name',
   'restart_session',
+  'rewind_conversation',
   'spawn_review',
   'recreate_session',
   'dismiss_ghost_session',

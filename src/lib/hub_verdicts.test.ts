@@ -88,7 +88,7 @@ describe('REASONS against the generated local_only commands', () => {
     }
   });
 
-  it('the five non-command REASONS keys really are not command names', () => {
+  it('the non-command REASONS keys really are not command names', () => {
     for (const key of REASONS_KEYS_THAT_ARE_NOT_COMMANDS) {
       expect(allCommands.has(key), key).toBe(false);
     }

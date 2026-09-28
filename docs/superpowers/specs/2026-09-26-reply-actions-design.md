@@ -1,7 +1,7 @@
 # Reply actions: Copy, Quote, Retry, Fork here, Rewind here
 
 Date: 2026-09-26
-Status: approved design, not yet implemented
+Status: implemented on the desktop and hub (#338); fleet-mobile follows
 Repos: `claude-fleet` (fleet first), `fleet-mobile` (follows)
 
 ## 1. What this adds

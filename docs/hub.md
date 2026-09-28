@@ -1555,7 +1555,11 @@ same reason: it carries the dialog a blocked session is waiting on and its
 options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
 is there for the mirror of that reason: projected away, the view would hand a
-phone the columns to re-derive the answer instead of the answer. `tags`
+phone the columns to re-derive the answer instead of the answer. Its reasons,
+most urgent first (`service/attention.rs`): `waiting`, `stuck`, `stop_failed`,
+`failed`, `context_full` (at or past `health.context_red_pct`),
+`stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
+with no activity), `ci_failing` and `lifecycle`. `tags`
 is there because the phone's tag editor starts from them and
 `set_session_tags` replaces the whole list: without them a phone that added
 one tag deleted the rest. `work` (the primary work link: key, title) is the

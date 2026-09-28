@@ -87,6 +87,28 @@ export function bumpWorkChanged(): void {
   workChanged.update((n) => n + 1);
 }
 
+/** Run `fn` once `workChanged` has been quiet for `ms()` after a bump — one
+ *  re-read for a burst (a write's own bump, then its `session:updated`),
+ *  never for the subscription's initial call. `ms` is read per bump, so a
+ *  component can pass its prop. The returned unsubscriber also cancels a
+ *  pending run. */
+export function onWorkChangedDebounced(fn: () => void, ms: () => number): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let first = true;
+  const off = workChanged.subscribe(() => {
+    if (first) {
+      first = false;
+      return;
+    }
+    clearTimeout(timer);
+    timer = setTimeout(fn, ms());
+  });
+  return () => {
+    off();
+    clearTimeout(timer);
+  };
+}
+
 async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>(cmd, { args });
   if (r.ok) {
