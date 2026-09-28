@@ -1248,6 +1248,7 @@ mod tests {
         line_with(id, model, "2026-01-01T00:00:00.000Z", i, o, w, 0, r, block)
     }
 
+    #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     fn assistant_at(
         id: &str,
@@ -2253,6 +2254,7 @@ mod tests {
 
     /// perf-logs §6a: the reader summed a chunk into one bucket, so a first
     /// read booked a transcript's whole history on the collection day.
+    #[cfg(unix)]
     #[test]
     fn awk_splits_usage_by_the_lines_utc_day() {
         let fx = fixture();
