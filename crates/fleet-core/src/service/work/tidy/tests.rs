@@ -60,9 +60,13 @@ impl FakeExec {
     }
 }
 
-/// A reachable `local` host and an idle work session with its own
-/// worktree, linked to a work item done long ago (`done`) or still todo.
-fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
+/// The common shape every `seed*` helper needs: a reachable `local` host, an
+/// idle `running` work session with its own worktree, and a fresh local item
+/// linked to it as the primary confirmed work. Status is left exactly as
+/// `create_local_work_item` leaves it — `'todo'`, `status_set_by` `NULL` —
+/// so a caller that wants no person status (the merged-PR path) need not
+/// reach around anything to get it. Returns `(session_id, item_id)`.
+fn seed_session_and_item(store: &Mutex<Store>, name: &str) -> (i64, i64) {
     let s = store.lock().unwrap();
     s.upsert_host("local").unwrap();
     s.update_host_probe("local", true, None, None, 1).unwrap();
@@ -80,6 +84,20 @@ fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
     let item = s.create_local_work_item(Some(&key), name).unwrap();
     s.link_session_work(id, crate::store::WorkTarget::Item(item.id), "manual")
         .unwrap();
+    s.conn_ref()
+        .execute(
+            &format!("UPDATE sessions SET idle_since = 0, worktree_key = '{name}' WHERE id = {id}"),
+            [],
+        )
+        .unwrap();
+    (id, item.id)
+}
+
+/// A reachable `local` host and an idle work session with its own
+/// worktree, linked to a work item a person set to `status` long ago.
+fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
+    let (id, item_id) = seed_session_and_item(store, name);
+    let s = store.lock().unwrap();
     // Through the real API, not a raw UPDATE to `status_category`: the only
     // writers of a local item's status are creation ('todo'), this
     // (`set_item_status`, 'person') and the merged-PR stamp ('derived'). A
@@ -88,16 +106,17 @@ fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
     // manufactured an unreachable "in_progress, unowned" fixture and masked
     // a real classification bug (task 3 fix round 2). Keep this going
     // through the API even if it looks like it could be simplified back.
-    s.set_item_status(item.id, status).unwrap();
+    s.set_item_status(item_id, status).unwrap();
+    // `set_item_status` now also stamps `status_changed_at` (task 3 fix
+    // round 3) — but to the real wall clock (`now_unix()`), not this file's
+    // small synthetic `NOW`. Push it into that synthetic frame so the
+    // `done_idle` / `pr_merged_idle` age thresholds are met without waiting
+    // real time; this is a clock fixture, not a second status write.
     s.conn_ref()
-        .execute_batch(&format!(
-            // `status_changed_at` has no local-item setter at all — only
-            // tracker sync writes it — so it stays a direct UPDATE, forced
-            // old enough for the `done_idle` / `pr_merged_idle` thresholds.
-            "UPDATE sessions SET idle_since = 0, worktree_key = '{name}' WHERE id = {id}; \
-             UPDATE work_items SET status_changed_at = 0 WHERE id = {};",
-            item.id
-        ))
+        .execute(
+            "UPDATE work_items SET status_changed_at = 0 WHERE id = ?1",
+            [item_id],
+        )
         .unwrap();
     id
 }
@@ -437,6 +456,71 @@ async fn auto_tidy_acts_only_on_the_allowed_reasons() {
     assert!(!r.candidates.iter().any(|c| c.session_id == wip));
     assert!(r.auto_tidy);
     assert_eq!(r.auto_reasons, vec![TidyReason::DoneIdle]);
+}
+
+/// End to end, through the real read path — no hand-stamping and no
+/// hand-built `TidyLink`: a merged PR reaches `Store::stamp_derived_done`
+/// via `tidy_sessions()` (inside `work_tidy`), and the planner classifies
+/// the result as `pr_merged_idle`. Proves the two halves — the stamp write
+/// and the reason classification — actually meet (task 3 fix round 3).
+#[test]
+fn a_merged_prs_stamp_is_offered_as_pr_merged_idle_end_to_end() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "just-merged");
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET pr_signals = '{\"state\":\"MERGED\"}' WHERE id = ?1",
+            [sid],
+        )
+        .unwrap();
+    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.session_id == sid)
+        .expect("the merged session is a candidate");
+    assert_eq!(c.reason, TidyReason::PrMergedIdle);
+    let row = store
+        .lock()
+        .unwrap()
+        .get_work_item(item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status_category, "done");
+    assert_eq!(row.status_set_by.as_deref(), Some("derived"));
+}
+
+/// Once `status_changed_at` is old enough, a person's `done` on a local item
+/// is offered as `done_idle` — the reason that, before `set_item_status`
+/// stamped `status_changed_at` (task 3 fix round 3), could never fire for
+/// native work at all: the column stayed `NULL` forever, so `done_long`
+/// (`service/gc/tidy.rs`) was always false for a local item, whoever set it.
+#[test]
+fn a_persons_done_ages_into_done_idle() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "shipped-by-hand");
+    {
+        let s = store.lock().unwrap();
+        s.set_item_status(item_id, "done").unwrap();
+        // Push the real wall-clock stamp `set_item_status` just wrote into
+        // this file's synthetic `NOW` frame (see `seed`'s own comment).
+        s.conn_ref()
+            .execute(
+                "UPDATE work_items SET status_changed_at = 0 WHERE id = ?1",
+                [item_id],
+            )
+            .unwrap();
+    }
+    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.session_id == sid)
+        .expect("a candidate");
+    assert_eq!(c.reason, TidyReason::DoneIdle);
 }
 
 /// Orgs (work graph M5 merged into M7): `local` in Company A, sessions of

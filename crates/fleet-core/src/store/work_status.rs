@@ -1,6 +1,10 @@
 //! Who decided an item's status (design 2026-09-28 §2). The only writers of
 //! `work_items.status_set_by` live here: a person's explicit setting, and the
-//! derived stamp `work_tidy` makes when it sees a merged PR.
+//! derived stamp `work_tidy` makes when it sees a merged PR. Both are also
+//! the only local-item writers of `status_changed_at` (a tracker item's is
+//! written by `store::tracker_items` on every sync) — without it, the tidy
+//! planner's `done_long` (`service/gc/tidy.rs`) can never see a local item
+//! as long done, whoever set it.
 
 use super::{now_unix, Store, WorkItemRow};
 use crate::ipc_error::{codes, IpcError};
@@ -16,6 +20,11 @@ impl Store {
     /// Refused for a tracker item: `store::tracker_items` writes
     /// `status_category` on every sync, so the setting would be reverted on the
     /// next pass — worse than saying no.
+    ///
+    /// Also stamps `status_changed_at`: it is the only local-item writer of
+    /// that column (only tracker sync wrote it before), and without it a
+    /// person's own `done` could never age into `done_idle` — the tidy
+    /// planner's `done_long` reads `status_changed_at`, not `status_set_at`.
     pub fn set_item_status(
         &self,
         item_id: i64,
@@ -46,7 +55,7 @@ impl Store {
         let now = now_unix();
         self.conn.execute(
             "UPDATE work_items SET status_category = ?1, status_set_by = 'person', \
-             status_set_at = ?2, updated_at = ?2 WHERE id = ?3",
+             status_set_at = ?2, status_changed_at = ?2, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![status, now, item_id],
         )?;
         self.emit_work_item(
@@ -70,10 +79,20 @@ impl Store {
     /// Returns whether it wrote. It never overrides a person (`status_set_by =
     /// 'person'`), never touches a tracker item, and never writes twice — so a
     /// tidy pass may call it every tick without emitting an event per tick.
+    /// Also stamps `status_changed_at`, for the same reason `set_item_status`
+    /// does: it is what the tidy planner's `done_long` reads.
+    ///
+    /// Called from `Store::tidy_sessions` — a read-shaped path: the Tauri
+    /// `work_tidy` command and the MCP tool both reach it just by listing
+    /// candidates. That is intentional (moving the stamp to the GC sweep
+    /// alone would mean a person listing candidates does not see delivered
+    /// work as `done` until the next sweep) and safe, because this method is
+    /// idempotent and writes at most once per item regardless of how many
+    /// times a read calls it.
     pub fn stamp_derived_done(&self, item_id: i64) -> Result<bool, IpcError> {
         let wrote = self.conn.execute(
             "UPDATE work_items SET status_category = 'done', status_set_by = 'derived', \
-             status_set_at = ?1, updated_at = ?1 \
+             status_set_at = ?1, status_changed_at = ?1, updated_at = ?1 \
              WHERE id = ?2 AND source = 'local' \
                AND COALESCE(status_set_by, '') <> 'person' \
                AND NOT (status_category = 'done' AND status_set_by = 'derived')",
