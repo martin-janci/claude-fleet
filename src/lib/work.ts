@@ -87,10 +87,18 @@ export function bumpWorkChanged(): void {
   workChanged.update((n) => n + 1);
 }
 
-async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>(cmd, { args });
+/** A link decision's answer: the session's row and, for a confirm / reject
+ *  of one link by id, that link's version after the write
+ *  (`link_version`, read under the write's own lock; absent from a hub
+ *  built before it). The row the store keeps never carries it. */
+export type DecidedRow = SessionRow & { link_version?: number };
+
+async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<DecidedRow>> {
+  const r = await invokeCmd<DecidedRow>(cmd, { args });
   if (r.ok) {
-    acceptCommandRow(r.value);
+    const row: DecidedRow = { ...r.value };
+    delete row.link_version;
+    acceptCommandRow(row);
     bumpWorkChanged();
   }
   return r;
@@ -164,7 +172,7 @@ export function confirmSessionWork(
   sessionId: number,
   linkId: number,
   opts: { forceCrossOrg?: boolean } & WorkDecisionGuards = {},
-): Promise<Result<SessionRow>> {
+): Promise<Result<DecidedRow>> {
   return decide('confirm_session_work', {
     session_id: sessionId,
     link_id: linkId,
@@ -179,7 +187,7 @@ export function rejectWorkLink(
   sessionId: number,
   linkId: number,
   opts: Pick<WorkDecisionGuards, 'expectedVersion'> = {},
-): Promise<Result<SessionRow>> {
+): Promise<Result<DecidedRow>> {
   return decide('reject_session_work', { session_id: sessionId, link_id: linkId, ...guards(opts) });
 }
 

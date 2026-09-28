@@ -403,21 +403,25 @@ pub async fn link_session_work(
     routed::link_session_work(&backend, args, &store).await
 }
 
+/// Answers the row plus, for a reject by `link_id`, the link's new
+/// version (`DecidedRow.link_version`).
 #[tauri::command]
 pub async fn reject_session_work(
     args: RejectSessionWorkArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
+) -> Result<work::DecidedRow, IpcError> {
     routed::reject_session_work(&backend, args, &store).await
 }
 
+/// Answers the row plus the confirmed link's new version
+/// (`DecidedRow.link_version`).
 #[tauri::command]
 pub async fn confirm_session_work(
     args: ConfirmSessionWorkArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
+) -> Result<work::DecidedRow, IpcError> {
     routed::confirm_session_work(&backend, args, &store).await
 }
 
@@ -678,7 +682,7 @@ pub(crate) mod routed {
         backend: &FleetBackend,
         args: RejectSessionWorkArgs,
         store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
+    ) -> Result<work::DecidedRow, IpcError> {
         let args = WorkLinkArgs {
             session_id: Some(args.session_id),
             action: "reject".into(),
@@ -691,7 +695,12 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("reject_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
+            None => work::work_link_decided(
+                &args,
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+                fleet_core::store::Decider::Person,
+            ),
         }
     }
 
@@ -699,7 +708,7 @@ pub(crate) mod routed {
         backend: &FleetBackend,
         args: ConfirmSessionWorkArgs,
         store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
+    ) -> Result<work::DecidedRow, IpcError> {
         let args = WorkLinkArgs {
             session_id: Some(args.session_id),
             action: "confirm".into(),
@@ -711,7 +720,12 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("confirm_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
+            None => work::work_link_decided(
+                &args,
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+                fleet_core::store::Decider::Person,
+            ),
         }
     }
 

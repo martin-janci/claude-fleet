@@ -9,6 +9,7 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkReview from './WorkReview.svelte';
+import { get } from 'svelte/store';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
 import type { ReviewItem, SessionTaskLink } from './work_view';
@@ -125,6 +126,25 @@ describe('WorkReview', () => {
     // A compare-and-set: the version the confirm left, read back.
     expect(calls('reconsider_work_link')[0]).toEqual({ session_id: 8, link_id: 50, expected_version: 2 });
     expect(screen.getByTestId('work-review-summary').textContent).toContain('Undone');
+  });
+
+  it('Undo names the version the decision answered, without re-reading the session', async () => {
+    handlers.reject_session_work = (a) => {
+      pending = pending.filter((x) => x.link_id !== a.link_id);
+      return { ...session('mefistos', 'api', { id: 7, row_version: 50, friendly_name: 'answered' }), link_version: 9 };
+    };
+    render(WorkReview);
+    await flush();
+    await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-reject'));
+    await flush();
+    expect(calls('work_session_tasks')).toHaveLength(0);
+    // The stored row never carries the decision's version.
+    const stored = get(sessions).find((s) => s.id === 7);
+    expect(stored?.friendly_name).toBe('answered');
+    expect(stored).not.toHaveProperty('link_version');
+    await fireEvent.click(screen.getByTestId('work-review-undo'));
+    await flush();
+    expect(calls('reconsider_work_link')[0]).toEqual({ session_id: 7, link_id: 42, expected_version: 9 });
   });
 
   it('no Undo when the link has moved on since (or its version cannot be read)', async () => {

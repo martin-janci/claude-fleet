@@ -516,6 +516,15 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     };
     put("SessionRow", wire_keys(&sample_session()));
     put("WorkLinkRow", wire_keys(&sample_work_link()));
+    // `confirm_session_work` / `reject_session_work`: the row plus the
+    // decided link's version.
+    put(
+        "DecidedRow",
+        wire_keys(&fleet_core::service::work::DecidedRow {
+            row: sample_session(),
+            link_version: Some(4),
+        }),
+    );
     let plan = sample_resume_plan();
     put("ResumePlan", wire_keys(&plan));
     put("ResumePlan.live", wire_keys(&plan.live[0]));

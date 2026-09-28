@@ -143,17 +143,21 @@
     undo = null;
     if (undoable) {
       // The Undo is a compare-and-set too (M14.3): it names the version the
-      // decision left, read back from the session's links. A link someone
-      // moved on meanwhile (not in the state this decision left) offers no
-      // Undo rather than one that would overwrite them.
-      const d = undoOf({ session_id: it.session_id, link_id: it.link_id, decision: undoable }, await versionAfter(it, undoable));
+      // decision left — answered with the write (`link_version`), else read
+      // back from the session's links, where a link someone moved on
+      // meanwhile (not in the state this decision left) offers no Undo
+      // rather than one that would overwrite them.
+      const answered = (r.value as { link_version?: unknown } | null)?.link_version;
+      const version = typeof answered === 'number' ? answered : await versionAfter(it, undoable);
+      const d = undoOf({ session_id: it.session_id, link_id: it.link_id, decision: undoable }, version);
       if (d?.expected_version != null) undo = { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d] };
     }
     await reload();
   }
 
   /** Link `it`'s version now, if it is in the state `decision` left it in
-   *  (null otherwise, or when it cannot be read). */
+   *  (null otherwise, or when it cannot be read). The fallback for a hub
+   *  that does not answer the version with the decision. */
   async function versionAfter(it: ReviewItem, decision: Decision): Promise<number | null> {
     const r = await workSessionTasks(it.session_id);
     if (!r.ok) return null;

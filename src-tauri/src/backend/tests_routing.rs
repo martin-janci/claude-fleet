@@ -2787,7 +2787,8 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 ..Default::default()
             },
             &st,
-        )),
+        ))
+        .map(|d| d.row),
         block_on(commands::work::routed::unlink_session_work(
             &local,
             commands::work::UnlinkSessionWorkArgs {
