@@ -875,7 +875,7 @@ pub fn parse_locate(stdout: &str) -> Result<Located, IpcError> {
 /// status (the `wait_for_session` idle set, plus `failed`) is accepted.
 pub fn require_source_idle(status: Option<&str>) -> Result<(), IpcError> {
     match status {
-        Some(s) if crate::store::IDLE_STATUSES.contains(&s) || s == "failed" => Ok(()),
+        s if crate::store::turn_over(s) => Ok(()),
         other => Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!(
@@ -1032,13 +1032,16 @@ fn stderr_of(out: &std::process::Output) -> String {
 /// and per call: the pid, a process-wide counter and the clock. The counter
 /// alone keeps concurrent calls apart. The clock is only microsecond-granular
 /// on macOS, so two calls in the same tick used to collide on `create_new`
-/// with `File exists (os error 17)`.
+/// with `File exists (os error 17)`. On Windows the mode is not set: the
+/// file lives in the per-user `%LOCALAPPDATA%\Temp`, whose ACL already keeps
+/// other users out.
 struct TempFile(std::path::PathBuf);
 
 impl TempFile {
     /// An empty private file plus its open handle, for a payload written in
     /// pieces (see [`download`]).
     fn create(ext: &str) -> Result<(Self, std::fs::File), IpcError> {
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1051,11 +1054,11 @@ impl TempFile {
             "claude-fleet-move-{}-{seq}-{nanos}.{ext}",
             std::process::id()
         ));
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let f = opts.open(&path)?;
         Ok((TempFile(path), f))
     }
 
@@ -1077,11 +1080,12 @@ impl Drop for TempFile {
 #[cfg(test)]
 mod temp_file_tests {
     use super::TempFile;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// Writes started at once never collide on the name (the macOS clock is
     /// only microsecond-granular): each gets its own path, holds its own
-    /// bytes, is private (0600), and is removed on drop.
+    /// bytes, is private (0600 on Unix), and is removed on drop.
     #[test]
     fn concurrent_writes_get_unique_private_files_removed_on_drop() {
         const N: usize = 32;
@@ -1101,8 +1105,11 @@ mod temp_file_tests {
         // Joined in spawn order, so `files[i]` is the file thread `i` wrote:
         // asserting the exact body catches content crossing between them.
         for (i, f) in files.iter().enumerate() {
-            let mode = std::fs::metadata(&f.0).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "{}", f.0.display());
+            #[cfg(unix)]
+            {
+                let mode = std::fs::metadata(&f.0).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{}", f.0.display());
+            }
             let body = std::fs::read_to_string(&f.0).unwrap();
             assert_eq!(body, format!("transcript {i}"), "{}", f.0.display());
         }
@@ -6506,6 +6513,7 @@ mod tests {
     /// The same verdict through the real `target_prep_script`: behind and
     /// dirty is `TARGET_DIRTY`, a genuine divergence is still `DIVERGED`,
     /// and a clean target that is merely behind still fast-forwards.
+    #[cfg(unix)]
     #[test]
     fn target_prep_script_separates_a_dirty_target_from_a_diverged_one() {
         if !carry::tests::require(&["git", "bash"]) {
@@ -6942,6 +6950,7 @@ mod tests {
     /// temp repo that is genuinely mid-merge (two branches editing the same
     /// line, `git merge` left conflicted), then again after `git merge
     /// --abort`. Nobody had run the probe against real git before this test.
+    #[cfg(unix)]
     #[test]
     fn inspect_script_probe_detects_a_real_mid_merge() {
         if !carry::tests::require(&["git", "bash"]) {
@@ -7024,6 +7033,7 @@ mod tests {
     /// FETCH_HEAD, no moved tracking ref — and must not rewrite the index's
     /// stat cache through `git status` either. The count it cannot make is
     /// reported as unknown (`ahead == -1`), never guessed.
+    #[cfg(unix)]
     #[test]
     fn a_dry_run_inspection_writes_nothing_when_origin_has_moved_on() {
         use carry::tests::{bash, git};
@@ -7152,6 +7162,7 @@ mod tests {
         assert!(size_script(evil).contains("f='x'\\''; rm -rf / #'"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn locate_script_prefers_the_stored_path_then_finds_by_id() {
         let tmp = tempfile::tempdir().unwrap();

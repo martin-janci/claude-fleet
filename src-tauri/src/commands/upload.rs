@@ -828,6 +828,9 @@ mod tests {
         );
     }
 
+    /// Unix only: Windows forbids a newline in a filename, so there the file
+    /// this test needs cannot exist and the case cannot arise.
+    #[cfg(unix)]
     #[test]
     fn record_picked_skips_a_bad_name_but_keeps_the_rest_of_the_batch() {
         let allow = UploadAllowList::new();

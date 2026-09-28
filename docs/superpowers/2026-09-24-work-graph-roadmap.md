@@ -719,7 +719,7 @@ has a name; resume says before it runs that a transcript is gone.
 - **M11.5** (#286): 71,590 B → 54,646 B (16,944 B paid back); no tool,
   action or parameter renamed.
 - **M11.6**: never ran as its own pass; M13.0 did it. D17 decided against,
-  D18 accept, D19 never, D20 waits on the user (after M10.3).
+  D18 accept, D19 never, D20 decided yes and built (M13.4a, fleet-mobile#51).
 
 ### M12: ship and operate
 
@@ -824,8 +824,8 @@ built on `claude/fleet-dynamic-work-view-kwc3r9`, cut into reviewable PRs
 and rebased on `main`; it does not redesign it.
 
 - **M14.0** the plan, the spec on `main`, the M13 truth pass (docs).
-- **M14.1a–d** the backend: the `start` race fix; migration `0NN_work_view`
-  (numbered at merge time) + reads + org-bound clients (D31); mutations with
+- **M14.1a–d** the backend: the `start` race fix; migrations `066_work_view`
+  and `067_org_bound_sees_unassigned` + reads + org-bound clients (D31); mutations with
   compare-and-set; the desktop commands and `work:changed`.
 - **M14.2 / M14.3** the desktop Work view, read, then edits and Review.
 - **M14.4** the phone's *My work* tab (fleet-mobile), read, then edits.
@@ -909,7 +909,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | **Moot**: D13 is no, and M13.4f was removed |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
 | D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
-| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · by setting | **Answered 2026-09-27: by setting.** A per-org flag `orgs.bound_sees_unassigned` (M14.1b's migration; `work_admin` org edit; Settings → Work → Organisations), **default on**. Off: the org's bound clients see only rows assigned to their org. An isolation row covers both values |
+| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · by setting | **Answered 2026-09-27: by setting; built (migration 067, #342; switch #350).** A per-org flag `orgs.bound_sees_unassigned` (M14.1b's migration; `work_admin` org edit; Settings → Work → Organisations), **default on**. Off: the org's bound clients see only rows assigned to their org. An isolation row covers both values |
 | D32 | Does a forced cross-org link raise a review item until it is acknowledged? (M14) | yes · no | **Answered 2026-09-27: the default, yes** (`cross_org` review kind, cleared by `ack`) |
 | D33 | May a full, unbound phone change a local task's org? (M14) | yes, with the impact preview · no | **Answered 2026-09-27: the default, yes**, with the impact preview. Bound clients and hosts may not |
 | D34 | Placement rules only, or also link rules? (M14) | placement only · also link rules | **Answered 2026-09-27: the default, placement only.** Link rules would bypass detection's evidence and R9 |

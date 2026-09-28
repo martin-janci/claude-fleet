@@ -1565,6 +1565,7 @@ mod tests {
         assert_eq!(repo_status(&store).unwrap().dirty, 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn resources_add_and_remove_commit_and_prune() {
         let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

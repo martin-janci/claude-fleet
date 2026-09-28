@@ -13,6 +13,7 @@ pub mod claude_cli;
 pub mod events;
 #[cfg(test)]
 mod fleet_e2e_tests;
+pub mod home;
 pub mod http_client;
 pub mod humanize;
 pub mod ipc_error;
@@ -22,6 +23,7 @@ pub mod mcp;
 pub mod net;
 #[cfg(test)]
 mod no_eprintln_tests;
+pub mod proc;
 pub mod projects;
 pub mod repo_url;
 pub mod rt;
@@ -36,3 +38,4 @@ pub mod store;
 pub mod tmux;
 pub mod validate;
 pub mod wire_contract;
+pub mod wsl;

@@ -1153,11 +1153,13 @@ pub struct StatusMapTrigger {
     running: Arc<AtomicBool>,
 }
 
-/// PURE: a digest of what a run reads from a tracker's row.
-fn sections_digest(row: &TrackerRow) -> u64 {
+/// PURE: a digest of what a run reads from a tracker's row, and its org's
+/// consent (D36): a run the gate refused is due again once the org says yes.
+fn sections_digest(row: &TrackerRow, org_consents: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     row.org_id.hash(&mut h);
+    org_consents.hash(&mut h);
     row.config.unmapped_sections.hash(&mut h);
     row.config.project_sections.hash(&mut h);
     row.config.section_map.hash(&mut h);
@@ -1190,14 +1192,20 @@ impl StatusMapTrigger {
         passes: &[TrackerPass],
     ) -> Option<tokio::task::JoinHandle<()>> {
         let now = self.ctx.now();
-        let due_now: Vec<(i64, u64)> = {
+        // Single-flight FIRST: a pass that finds a run going marks nothing,
+        // so the trackers it found due are still due on the next pass
+        // instead of recorded as asked for a day.
+        if self.running.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let due_ids: Vec<i64> = (|| {
             let s = lock(&self.ctx.store).ok()?;
             if !settings::get_bool(&s, settings::DECIDE_JEV_ENABLED)
                 || FeatureMode::of(&s, Feature::StatusMap) == FeatureMode::Off
             {
                 return None;
             }
-            let last = self.last.lock().ok()?;
+            let mut last = self.last.lock().ok()?;
             let mut ids = Vec::new();
             for p in passes.iter().filter(|p| !p.skipped && p.error.is_none()) {
                 let Ok(Some(row)) = s.get_tracker(p.tracker_id) else {
@@ -1206,25 +1214,23 @@ impl StatusMapTrigger {
                 if row.provider != PROVIDER {
                     continue;
                 }
-                let digest = sections_digest(&row);
+                let consents = row
+                    .org_id
+                    .and_then(|o| s.get_org(o).ok().flatten())
+                    .is_some_and(|o| o.jev_allowed);
+                let digest = sections_digest(&row, consents);
                 if due(last.get(&row.id).copied(), now, digest) {
-                    ids.push((row.id, digest));
+                    ids.push(row.id);
+                    last.insert(row.id, (now, digest));
                 }
             }
-            ids
-        };
-        if due_now.is_empty() || self.running.swap(true, Ordering::AcqRel) {
-            // A run is still going: the trackers due now stay due, and the
-            // next pass after it ends picks them up.
+            Some(ids)
+        })()
+        .unwrap_or_default();
+        if due_ids.is_empty() {
+            self.running.store(false, Ordering::Release);
             return None;
         }
-        // Only now is a run theirs: record it.
-        if let Ok(mut last) = self.last.lock() {
-            for (id, digest) in &due_now {
-                last.insert(*id, (now, *digest));
-            }
-        }
-        let due_ids: Vec<i64> = due_now.into_iter().map(|(id, _)| id).collect();
         let ctx = self.ctx.clone();
         let running = Arc::clone(&self.running);
         /// Clears the single-flight flag however the task ends.
@@ -1234,8 +1240,11 @@ impl StatusMapTrigger {
                 self.0.store(false, Ordering::Release);
             }
         }
+        // Built before the spawn: a task dropped before its first poll (a
+        // runtime shutting down) still releases the flag.
+        let reset = Reset(running);
         Some(crate::rt::spawn(async move {
-            let _reset = Reset(running);
+            let _reset = reset;
             for id in due_ids {
                 match propose_for_tracker(&ctx, id).await {
                     Ok(r) => tracing::debug!(

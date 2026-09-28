@@ -352,6 +352,10 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
                 .await
         }
         "fleet_health" => fx.t.fleet_health(ext).await,
+        "usage_report" => {
+            fx.t.usage_report(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
         other => panic!("no harness arm for {other}"),
     };
     match r {
@@ -3683,14 +3687,9 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
     }
 }
 
-/// Work graph M14: every roll-up in `fleet_health` that sums across hosts
-/// (spend by host and by day, host and session counts) is taken over the
-/// hosts an org-bound client sees — its org's, and unassigned ones only
-/// while D31 is on — so B's spend never reaches A's client, not even as a
-/// fleet-wide total. Everyone else reads as before.
-#[tokio::test]
-async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
-    let fx = fixture(false);
+/// Spend on A's, B's and the unassigned host's sessions: 100, 20 000 and
+/// 3 000 micro-USD, all today.
+fn seed_usage(fx: &Fx) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -3725,6 +3724,17 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
             .unwrap();
         }
     }
+}
+
+/// Work graph M14: every roll-up in `fleet_health` that sums across hosts
+/// (spend by host and by day, host and session counts) is taken over the
+/// hosts an org-bound client sees — its org's, and unassigned ones only
+/// while D31 is on — so B's spend never reaches A's client, not even as a
+/// fleet-wide total. Everyone else reads as before.
+#[tokio::test]
+async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
+    let fx = fixture(false);
+    seed_usage(&fx);
     // (daily cost, usage_by_host keys, hosts_total, sessions_total)
     let read = |a: &Answer| -> (i64, Vec<String>, i64, i64) {
         let v: Value = serde_json::from_str(text(a)).unwrap();
@@ -3783,6 +3793,56 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
         let a = call(&fx, who, "fleet_health", json!({})).await;
         assert_eq!(read(&a), want, "{who:?} with D31 off");
     }
+}
+
+/// `usage_report` is fenced like `fleet_health`: a client bound to an org
+/// sees its org's sessions and hosts (and, D31 on, the unassigned host's),
+/// never another org's spend; a host outside that answers as unknown.
+#[tokio::test]
+async fn usage_report_is_fenced_for_an_org_bound_client() {
+    let fx = fixture(false);
+    seed_usage(&fx);
+    // (total cost, by_host keys, session ids)
+    let read = |a: &Answer| -> (i64, Vec<String>, Vec<i64>) {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        let hosts = v["by_host"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut ids: Vec<i64> = v["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["session_id"].as_i64().unwrap())
+            .collect();
+        ids.sort_unstable();
+        (v["total"]["cost_micros"].as_i64().unwrap(), hosts, ids)
+    };
+    let names = |hs: &[&str]| hs.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+    let mut all = vec![fx.s_a, fx.s_b, fx.s_n];
+    all.sort_unstable();
+    let a = call(&fx, Who::Master, "usage_report", json!({})).await;
+    assert_eq!(read(&a), (23_100, names(&["h-a", "h-b", "h-n"]), all));
+    let a = call(&fx, Who::BoundA, "usage_report", json!({})).await;
+    let mut seen = vec![fx.s_a, fx.s_n];
+    seen.sort_unstable();
+    assert_eq!(read(&a), (3_100, names(&["h-a", "h-n"]), seen));
+    let a = call(
+        &fx,
+        Who::BoundA,
+        "usage_report",
+        json!({ "host_alias": "h-b" }),
+    )
+    .await;
+    assert_eq!(code(&a), "E_NOTFOUND", "{a:?}");
+    let a = call(
+        &fx,
+        Who::BoundB,
+        "usage_report",
+        json!({ "host_alias": "h-b" }),
+    )
+    .await;
+    assert_eq!(read(&a), (20_000, names(&["h-b"]), vec![fx.s_b]));
 }
 
 /// Work graph M13.1: a tracker skipping items reads through the same org

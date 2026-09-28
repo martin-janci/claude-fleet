@@ -891,6 +891,7 @@ mod tests {
     use crate::service::catalog::repo::load_dir;
     use std::fs;
 
+    #[cfg(unix)]
     fn fixture(tag: &str) -> (ImportSources, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!("fleet-import-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
@@ -955,6 +956,7 @@ mod tests {
         assert_eq!(body, "no frontmatter\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn dry_run_reports_without_writing() {
         let (src, repo) = fixture("dry");
@@ -968,6 +970,7 @@ mod tests {
             .any(|p| p.path.ends_with("skills/broken")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn import_converts_every_kind_losslessly() {
         let (src, repo) = fixture("full");
@@ -1120,6 +1123,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn import_then_render_reproduces_skill_and_agent() {
         let (src, repo) = fixture("rt");
@@ -1353,6 +1357,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn import_skill_skips_symlinked_resources_and_terminates() {
         let base = std::env::temp_dir().join(format!("fleet-import-symres-{}", std::process::id()));
@@ -1591,6 +1596,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn kebab_originals_get_no_install_as_and_no_warning() {
         let (src, repo) = fixture("kebab-install-as");
@@ -1605,6 +1611,7 @@ mod tests {
         assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
     }
 
+    #[cfg(unix)]
     #[test]
     fn hooks_and_plugin_refs_never_get_install_as() {
         let (src, repo) = fixture("hooks-plugins-install-as");

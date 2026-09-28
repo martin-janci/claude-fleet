@@ -1,12 +1,16 @@
 # Reply actions: Copy, Quote, Retry, Fork here, Rewind here
 
 Date: 2026-09-26
-Status: built in `claude-fleet` (PR #338 and follow-up fixes): Copy, Quote,
-Retry, Fork here into the SAME worktree, and Rewind here, over one
-`rewind_conversation` tool. **Open:** Fork into a NEW worktree (§5.2) — the
-engine refuses it `E_UNSUPPORTED` (a new worktree's physical path exists
-only after `new_session` creates it, too late for the transcript rewrite),
-and the fork sheet shows it disabled. `fleet-mobile` follows separately.
+Status: implemented on the desktop and hub (#338 and follow-up fixes);
+fleet-mobile follows separately.
+As built, where it differs from the design below: a fork writes its
+transcript beside the source's and reuses the source's worktree — "New
+worktree" (§5.2) ships disabled and the tool parameter, `new_worktree`
+(§6 calls it `worktree`), answers `E_UNSUPPORTED` (a new worktree's physical
+path exists only after `new_session` creates it, too late for the transcript
+rewrite); Retry resends the prompt's text only, not its images; a fork
+carries the source's confirmed work links (source `forked`), as
+`move_session { keep_source }` does.
 Repos: `claude-fleet` (fleet first), `fleet-mobile` (follows)
 
 ## 1. What this adds

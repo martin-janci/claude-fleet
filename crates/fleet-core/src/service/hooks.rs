@@ -846,6 +846,16 @@ fn apply_session_start_hook(
             }
             return Ok(());
         }
+        // A genuine start (a restart, a rewind, a recreate, `/clear`) ends
+        // whatever the last turn left: a StopFailure's `failed` and the
+        // tick's stale-working stamp would otherwise outlive the process
+        // that earned them, until someone prompts it. (A SessionStart that
+        // loses the race to its own first prompt finds `working` and a
+        // cleared stamp: nothing to undo.)
+        // A stale id is the row's own earlier conversation, not a new start.
+        if binding != Binding::Stale {
+            s.clear_ended_turn_state(row.id)?;
+        }
         if binding == Binding::Current {
             // A turn already began on this conversation (its
             // UserPromptSubmit won the race and rebound the row): turns and
@@ -2005,6 +2015,7 @@ mod tests {
         assert_eq!(err.code, "E_VALIDATE");
     }
 
+    #[cfg(unix)]
     #[test]
     fn worktree_hook_upserts_row_under_known_project() {
         let store = make_store();
@@ -2699,6 +2710,35 @@ mod tests {
         );
         apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1"), &c).unwrap();
         assert_eq!(status_of(&store, id).claude_status.as_deref(), Some("idle"));
+    }
+
+    /// A restart, a rewind or a recreate starts a new Claude process: its
+    /// SessionStart ends the failed turn and the stale stamp the old process
+    /// left, instead of the row reading `stop_failed` until someone prompts.
+    #[test]
+    fn a_session_start_ends_the_last_processes_failed_turn() {
+        let store = make_store();
+        let id = hooked(&store);
+        let master = Caller::master();
+        let c = ctx(&master, None);
+        let mut p = make_payload("StopFailure", "uuid-1");
+        p.error = Some("rate_limit".into());
+        apply_hook(&store, &make_ssh(), &p, &c).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE sessions SET stale_working_at = 1 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let mut start = make_payload("SessionStart", "uuid-1");
+        start.source = Some("resume".into());
+        apply_hook(&store, &make_ssh(), &start, &c).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        assert_eq!(row.stale_working_at, None);
     }
 
     /// F10 (the two-writer gap): the hooks set status without recording

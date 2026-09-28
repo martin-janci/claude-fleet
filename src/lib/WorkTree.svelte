@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
   // task (primary ★, secondary, suggested, past). A session under several
@@ -43,7 +44,6 @@
     taskStatus,
     trackerDown,
     trackerDownLabel,
-    workChanged,
     workExpanded,
     workReview,
     workTask,
@@ -271,26 +271,14 @@
   // `work:changed` / session events: one debounced re-read — at most
   // `maxWaitMs` after the first change it waits for, so a steady stream of
   // changes (a busy fleet) cannot hold the view back forever.
-  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-  let pendingSince: number | null = null;
-  let firstTick = true;
-  const offChanged = workChanged.subscribe(() => {
-    if (firstTick) {
-      firstTick = false;
-      return;
-    }
-    const now = Date.now();
-    pendingSince ??= now;
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(
-      () => {
-        pendingSince = null;
-        void load();
-        void loadReviewCount();
-      },
-      Math.max(0, Math.min(debounceMs, pendingSince + maxWaitMs - now)),
-    );
-  });
+  const offChanged = onWorkChangedDebounced(
+    () => {
+      void load();
+      void loadReviewCount();
+    },
+    () => debounceMs,
+    () => maxWaitMs,
+  );
 
   onMount(() => {
     void load();
@@ -300,7 +288,6 @@
     offFilters();
     offChanged();
     offReveal();
-    clearTimeout(refreshTimer);
     workTreeSessionIds.set(new Set());
   });
 

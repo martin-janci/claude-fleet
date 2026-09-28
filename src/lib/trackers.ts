@@ -5,7 +5,7 @@
  * "not ok".
  */
 
-import { get, writable } from 'svelte/store';
+import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
 import { bumpWorkChanged } from './work';
@@ -885,9 +885,4 @@ export function sessionsMentioning(
     }
   }
   return { count, prefixes: [...hit].sort() };
-}
-
-/** Re-exported for callers that only import this module. */
-export function currentTrackers(): TrackerRow[] {
-  return get(trackers);
 }

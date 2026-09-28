@@ -1,1 +1,7 @@
+# Check out LF everywhere, Windows included: generated files
+# (docs/control-api-reference.md, src/lib/hub_verdicts.generated.json) and
+# shared fixtures are compared byte for byte, so a CRLF checkout would fail
+# them for reasons unrelated to the code.
+* text=auto eol=lf
+
 src/lib/__fixtures__/*.raw.txt -text -diff

@@ -1,5 +1,7 @@
 # Reply Actions (claude-fleet) Implementation Plan
 
+**Status:** landed (#338); see the spec's "As built" note for where it differs.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Put Copy, Quote, Retry, Fork here and Rewind here under every reply in the desktop Conversation view, on one backend engine that truncates a transcript into a new conversation id.

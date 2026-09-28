@@ -8,7 +8,9 @@
 # older than its -wal), and a `cp` of the triple can be torn mid-write.
 #
 # Run as root from a DSM Task Scheduler entry (nightly) and from upgrade.sh
-# (PREFIX=pre-<version> KEEP=3). Retention is per PREFIX, by count.
+# (PREFIX=pre-<version> KEEP=3). Retention is per PREFIX, by count: a run
+# prunes only files of its own PREFIX, so pre-<older version> backups are
+# never pruned by a later upgrade — delete those by hand.
 # Exit codes: 0 backed up and verified; 1 the copy failed (removed); 2 bad input.
 set -euo pipefail
 
@@ -38,6 +40,12 @@ while [ -e "$OUT" ]; do
   OUT="$OUT_DIR/$PREFIX-$STAMP-$n.db"
 done
 PART="$OUT.part"
+# A run killed mid-copy (SIGINT/SIGTERM/HUP) must not leave its `.part`
+# behind either; after the `mv` below the name no longer exists. Only a
+# SIGKILL can still strand one.
+trap 'rm -f -- "$PART"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 if ! "$SQLITE" "$DB" ".backup '$PART'"; then
   echo "backup: .backup of $DB failed; removing $PART" >&2
   rm -f -- "$PART"

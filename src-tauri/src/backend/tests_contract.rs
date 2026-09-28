@@ -79,6 +79,7 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_seq: 7,
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
+        work_rev: 17,
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -124,7 +125,6 @@ pub(crate) fn sample_session() -> SessionRow {
             ..Default::default()
         }),
         org_id: Some(2),
-        work_rev: Some(5_000_021),
     }
 }
 
@@ -844,11 +844,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty keys nothing else would notice losing. Its list is a literal here,
+/// sixty-one keys nothing else would notice losing. Its list is a literal here,
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty() {
+fn a_session_rows_wire_names_are_these_exact_sixty_one() {
     let expected = [
         "account_uuid",
         "ci_status",

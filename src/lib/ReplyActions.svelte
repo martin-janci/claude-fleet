@@ -12,6 +12,8 @@
   import { insertIntoComposer, type ConvTurn } from './conversation';
   import { replyActionsFor, quoteText, waitForReplQuiet } from './reply_actions';
   import { pushError } from './toasts';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let {
     turns,
@@ -39,6 +41,15 @@
 
   const view = $derived(replyActionsFor(turns, index, truncated, supported));
   const prompt = $derived(turns[index]?.prompt ?? null);
+
+  // Both route to the hub: with its link down they would fail with a raw
+  // error, so they say why instead (as the composer does for send_prompt).
+  const rewindBlocked = $derived(
+    hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection),
+  );
+  const retryBlocked = $derived(
+    rewindBlocked ?? hubActionBlocked('send_prompt', $hubStatus, $hubConnection),
+  );
 
   let confirming = $state<'rewind' | 'retry' | null>(null);
   let busy = $state(false);
@@ -118,8 +129,8 @@
       class="btn btn--icon btn--quiet"
       data-testid="reply-retry"
       aria-label="Retry this turn"
-      title="Retry — rewind and send the same prompt again"
-      disabled={busy}
+      title={retryBlocked ?? 'Retry — rewind and send the same prompt again'}
+      disabled={busy || !!retryBlocked}
       onclick={() => (confirming = 'retry')}>↻</button
     >
   {:else if view.retryUnavailable}
@@ -140,7 +151,8 @@
       class="btn btn--icon btn--quiet"
       data-testid="reply-fork"
       aria-label="Fork a new session from this reply"
-      title="Fork here"
+      title={rewindBlocked ?? 'Fork here'}
+      disabled={!!rewindBlocked}
       onclick={() => onFork(view.forkAnchor)}>⑂</button
     >
   {/if}
@@ -150,8 +162,8 @@
       class="btn btn--icon btn--quiet"
       data-testid="reply-rewind"
       aria-label="Rewind this session to before this turn"
-      title="Rewind here"
-      disabled={busy}
+      title={rewindBlocked ?? 'Rewind here'}
+      disabled={busy || !!rewindBlocked}
       onclick={() => (confirming = 'rewind')}>⏪</button
     >
   {/if}

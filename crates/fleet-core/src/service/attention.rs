@@ -115,10 +115,13 @@ pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<At
         return None;
     }
     let failed = row.claude_status.as_deref() == Some("failed");
-    let idle = matches!(
-        row.claude_status.as_deref(),
-        Some("idle") | Some("completed") | Some("stopped")
-    );
+    // A dead row keeps its last context reading; only a live one can act on
+    // it (or on a stale stamp) — a lost one reads `Lifecycle`.
+    let live = row.status != "ghost" && row.lost_at.is_none();
+    let idle = row
+        .claude_status
+        .as_deref()
+        .is_some_and(|s| crate::store::IDLE_STATUSES.contains(&s));
     let reason = if row.claude_status.as_deref() == Some("blocked") {
         Reason::Waiting
     } else if row.stuck_kind.is_some() {
@@ -127,9 +130,9 @@ pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<At
         Reason::StopFailed
     } else if failed {
         Reason::Failed
-    } else if row.context_pct.is_some_and(|p| p >= context_red_pct) {
+    } else if live && row.context_pct.is_some_and(|p| p >= context_red_pct) {
         Reason::ContextFull
-    } else if row.stale_working_at.is_some() {
+    } else if live && row.stale_working_at.is_some() {
         Reason::StaleWorking
     } else if idle && row.ci_status.as_deref() == Some("failing") {
         Reason::CiFailing
@@ -213,6 +216,7 @@ mod tests {
             turn_seq: 0,
             last_stop_at: None,
             stale_working_at: None,
+            work_rev: 0,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -222,7 +226,6 @@ mod tests {
             work_rejected: vec![],
             work_suggested: None,
             org_id: None,
-            work_rev: None,
         }
     }
 
@@ -380,6 +383,22 @@ mod tests {
             set(&mut r);
             r.safe_kill_state = Some("failed".into());
             assert_ne!(needs_attention(&r).unwrap().reason, Reason::Lifecycle);
+        }
+    }
+
+    /// A lost row keeps its last context reading and may keep a stale stamp;
+    /// neither is anything a person can act on, so it reads `Lifecycle`.
+    #[test]
+    fn a_dead_rows_context_or_stale_stamp_reads_lifecycle() {
+        for dead in [
+            (|r: &mut SessionRow| r.status = "ghost".into()) as fn(&mut SessionRow),
+            |r: &mut SessionRow| r.lost_at = Some(1),
+        ] {
+            let mut r = row();
+            r.context_pct = Some(99.0);
+            r.stale_working_at = Some(1);
+            dead(&mut r);
+            assert_eq!(needs_attention(&r).unwrap().reason, Reason::Lifecycle);
         }
     }
 

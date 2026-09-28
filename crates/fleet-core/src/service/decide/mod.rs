@@ -626,6 +626,22 @@ pub async fn decide(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
         cost_microusd: 0,
     };
 
+    // 0. A run that cannot be recorded is never sent: the budget and the
+    //    breaker read `decision_runs`, so an unrecorded call escapes both.
+    if let Err(e) = run.validate() {
+        tracing::warn!(
+            feature = req.feature.as_str(),
+            "[decide] request not sent, its run would not record: {}",
+            e.message
+        );
+        return DecisionOutcome {
+            run_id: None,
+            mode: None,
+            answer: None,
+            fallback: Some(Fallback::HttpError),
+        };
+    }
+
     // 1. The gate, the fingerprint and the configured mode: one short lock.
     let gated = match lock(&ctx.store) {
         Ok(s) => {

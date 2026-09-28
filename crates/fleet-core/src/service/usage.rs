@@ -30,6 +30,7 @@
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::service::orgs::OrgScope;
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -697,7 +698,7 @@ async fn run_script(
 ) -> Result<std::process::Output, IpcError> {
     if host == "local" {
         crate::service::hub::ensure_local_allowed(host)?;
-        let child = tokio::process::Command::new("bash")
+        let child = crate::proc::command("bash")
             .arg("-c")
             .arg(script)
             .kill_on_drop(true)
@@ -1070,11 +1071,34 @@ pub fn report(
     since_secs: Option<u64>,
     now: i64,
 ) -> Result<UsageReport, IpcError> {
+    report_on(s, host, since_secs, now, &OrgScope::All)
+}
+
+/// [`report`] over only what `scope` sees: the sessions it may list and the
+/// daily roll-up of the hosts in its orgs (an org-bound client, work graph
+/// M14 — the same fence as `fleet_health`'s [`health::scope_to_org`]).
+///
+/// [`health::scope_to_org`]: crate::service::health::scope_to_org
+pub fn report_on(
+    s: &Store,
+    host: Option<&str>,
+    since_secs: Option<u64>,
+    now: i64,
+    scope: &OrgScope,
+) -> Result<UsageReport, IpcError> {
+    let visible: Option<std::collections::BTreeSet<String>> = (!scope.is_all()).then(|| {
+        crate::service::health::hosts_in_scope(s, scope)
+            .into_iter()
+            .map(|h| h.alias)
+            .collect()
+    });
+    let sees_host = |h: &str| visible.as_ref().is_none_or(|v| v.contains(h));
     let since = since_secs.map(|n| now - n.min(settings::MAX_SECS) as i64);
     let rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
         .filter(|r| host.is_none_or(|h| r.host_alias == h))
+        .filter(|r| scope.sees_row(r))
         .filter(|r| !r.usage.totals().is_zero())
         .filter(|r| since.is_none_or(|t| r.usage.usage_updated_at.is_some_and(|u| u >= t)))
         .collect();
@@ -1114,7 +1138,7 @@ pub fn report(
         since,
         total,
         by_host,
-        by_day: daily_totals(s, since_day, host)?,
+        by_day: daily_totals_where(s, since_day, host, &sees_host)?,
         sessions,
         sessions_truncated,
     })
@@ -1124,7 +1148,9 @@ pub fn report(
 mod tests {
     use super::*;
     use crate::ssh_fake::{FakeSsh, Match, Reply};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
@@ -1273,6 +1299,7 @@ mod tests {
     /// One assistant block line shaped like a live transcript, with `w5` of
     /// the `w` cache writes on the 5-minute TTL (and a decoy
     /// `ephemeral_5m_input_tokens` inside `iterations`).
+    #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     fn line_with(
         id: &str,
@@ -1291,10 +1318,12 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn assistant(id: &str, model: &str, i: i64, o: i64, w: i64, r: i64, block: &str) -> String {
         line_with(id, model, "2026-01-01T00:00:00.000Z", i, o, w, 0, r, block)
     }
 
+    #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     fn assistant_at(
         id: &str,
@@ -1309,6 +1338,7 @@ mod tests {
         line_with(id, model, ts, i, o, w, 0, r, block)
     }
 
+    #[cfg(unix)]
     fn user_line() -> String {
         // A tool result quoting a transcript: the escaped `\"usage\":{` inside
         // a JSON string must not be counted.
@@ -1316,12 +1346,14 @@ mod tests {
             .to_string()
     }
 
+    #[cfg(unix)]
     struct Fixture {
         _tmp: tempfile::TempDir,
         home: PathBuf,
         file: PathBuf,
     }
 
+    #[cfg(unix)]
     fn fixture() -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1335,6 +1367,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn append(path: &Path, text: &str) {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
@@ -1363,6 +1396,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn run_batch(
         home: &Path,
         cursors: &[UsageCursor],
@@ -1383,12 +1417,14 @@ mod tests {
         parse_batch_output(&String::from_utf8_lossy(&out.stdout))
     }
 
+    #[cfg(unix)]
     fn run(home: &Path, c: &UsageCursor, cap: i64) -> FileOutcome {
         run_batch(home, std::slice::from_ref(c), cap, HOST_BUDGET_BYTES)
             .remove(&c.session_id)
             .expect("a result for the session")
     }
 
+    #[cfg(unix)]
     fn read(o: FileOutcome) -> FileRead {
         match o {
             FileOutcome::Read(r) => r,
@@ -1396,6 +1432,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn model_totals(r: &FileRead, model: &str) -> UsageTotals {
         r.by_model
             .iter()
@@ -1405,6 +1442,7 @@ mod tests {
     }
 
     /// The cursor the store would hold after applying `r`.
+    #[cfg(unix)]
     fn advance(c: &UsageCursor, r: &FileRead, cap: i64) -> UsageCursor {
         let d = plan_delta(r, &BTreeMap::new(), cap, 0, BackfillRule::default());
         UsageCursor {
@@ -1417,6 +1455,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn awk_sums_usage_dedupes_blocks_and_leaves_a_truncated_last_line() {
         let fx = fixture();
@@ -1509,6 +1548,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn growing_usage_across_block_lines_adds_only_the_growth() {
         let fx = fixture();
@@ -1546,6 +1586,7 @@ mod tests {
         assert_eq!(r.last_msg_usage.as_deref(), Some("3,32,100,50,0"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn five_minute_cache_writes_are_split_out_and_priced_at_their_rate() {
         let fx = fixture();
@@ -1586,6 +1627,7 @@ mod tests {
         assert_eq!(d.totals.cost_micros, 600 * 10 + 400 * 25 / 4);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shrunk_file_restarts_from_zero_and_a_new_file_from_zero_too() {
         let fx = fixture();
@@ -1631,6 +1673,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_file_is_found_by_session_id_when_no_path_is_stored() {
         let fx = fixture();
@@ -1661,6 +1704,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_capped_chunk_reads_in_steps_and_a_giant_line_is_skipped() {
         let fx = fixture();
@@ -1683,6 +1727,7 @@ mod tests {
         assert_eq!(advance(&c0, &giant, 16).offset_bytes, 16);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_backlog_larger_than_the_host_budget_converges_over_passes() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2157,6 +2202,7 @@ mod tests {
 
     /// One real pass over `local`: the store hands out the cursors and the
     /// real script reads the real files.
+    #[cfg(unix)]
     async fn collect_local(store: &Mutex<Store>, now: i64) -> usize {
         let fake = FakeSsh::new();
         collect_host(store, &fake, "local", &BTreeMap::new(), now)
@@ -2164,6 +2210,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn usage_of(store: &Mutex<Store>, id: i64) -> crate::store::SessionUsage {
         store
             .lock()
@@ -2174,6 +2221,7 @@ mod tests {
             .usage
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_inherited_cursor_counts_only_lines_appended_after_a_move() {
         // move_session keeps the Claude id and copies a whole-line prefix of
@@ -2323,6 +2371,7 @@ mod tests {
 
     /// perf-logs §6a: the reader summed a chunk into one bucket, so a first
     /// read booked a transcript's whole history on the collection day.
+    #[cfg(unix)]
     #[test]
     fn awk_splits_usage_by_the_lines_utc_day() {
         let fx = fixture();

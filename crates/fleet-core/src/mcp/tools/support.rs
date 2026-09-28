@@ -474,10 +474,13 @@ pub(super) fn broadcast_summary(
 
 /// `run_prompt` precondition (S5): the session must be between turns.
 /// `turn_seq_before` is read before delivery, so mid-turn the PREVIOUS
-/// turn's Stop would satisfy the wait and hand back the old reply.
+/// turn's Stop would satisfy the wait and hand back the old reply. A
+/// `failed` turn (a StopFailure) has ended too, and re-prompting is what its
+/// attention reason asks for — the same set `wait_for_session { until:
+/// "idle" }` accepts, so following this error's advice cannot loop.
 pub(super) fn run_prompt_ready(row: &crate::store::SessionRow) -> Result<(), McpError> {
     match row.claude_status.as_deref() {
-        Some("idle") | Some("completed") | Some("stopped") => Ok(()),
+        s if crate::store::turn_over(s) => Ok(()),
         other => Err(mcp_err(
             "E_INVALID_STATE",
             format!(

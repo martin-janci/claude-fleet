@@ -693,17 +693,7 @@ impl Store {
     /// The local HMAC key of `decision_runs.input_fp`: generated (32 random
     /// bytes, hex) on first use and kept; never sent anywhere.
     pub fn decision_fp_key(&self) -> Result<Secret, IpcError> {
-        let read = |s: &Store| -> Result<Option<String>, IpcError> {
-            Ok(s.conn
-                .query_row(
-                    "SELECT value FROM decision_secrets WHERE name = 'fp_key'",
-                    [],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten())
-        };
-        if let Some(k) = read(self)? {
+        if let Some(k) = self.stored_fp_key()? {
             return Ok(Secret::new(k));
         }
         let mut bytes = [0u8; 32];
@@ -717,7 +707,7 @@ impl Store {
             rusqlite::params![hex::encode(bytes), now_unix()],
         )?;
         // Another writer may have won the insert: read what is stored.
-        read(self)?
+        self.stored_fp_key()?
             .map(Secret::new)
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "fingerprint key vanished"))
     }
@@ -729,17 +719,22 @@ impl Store {
         if let Some(k) = self.resolve_decision_credential()? {
             out.push(k.expose().to_string());
         }
-        let fp: Option<String> = self
+        out.extend(self.stored_fp_key()?);
+        Ok(out)
+    }
+
+    /// The fingerprint key as stored, if one was generated: the one read of
+    /// it ([`Self::decision_fp_key`] generates, this never does).
+    fn stored_fp_key(&self) -> Result<Option<String>, IpcError> {
+        Ok(self
             .conn
             .query_row(
                 "SELECT value FROM decision_secrets WHERE name = 'fp_key'",
                 [],
-                |r| r.get(0),
+                |r| r.get::<_, Option<String>>(0),
             )
             .optional()?
-            .flatten();
-        out.extend(fp);
-        Ok(out)
+            .flatten())
     }
 }
 
@@ -1124,6 +1119,8 @@ mod tests {
             1,
             "the API key is read by resolve_decision_credential only"
         );
-        assert_eq!(src.matches("FROM decision_secrets").count(), 5);
+        // The API key's reader, its writers' delete / lookup, and the
+        // fingerprint key's one reader (`stored_fp_key`).
+        assert_eq!(src.matches("FROM decision_secrets").count(), 4);
     }
 }

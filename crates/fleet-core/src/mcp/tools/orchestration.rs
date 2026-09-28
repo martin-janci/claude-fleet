@@ -1030,8 +1030,14 @@ impl FleetTools {
                             .map_err(ipc_of_mcp)
                     };
                     return ok_json(
-                        &st::decide_batch(&self.store, &scope, decisions, &gate)
-                            .map_err(to_mcp_err)?,
+                        &st::decide_batch(
+                            &self.store,
+                            &scope,
+                            caller.work_decider(),
+                            decisions,
+                            &gate,
+                        )
+                        .map_err(to_mcp_err)?,
                     );
                 }
                 _ => {}

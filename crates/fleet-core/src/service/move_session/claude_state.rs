@@ -783,13 +783,17 @@ pub fn parse_merge(stdout: &str) -> Option<MergeResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::service::move_session::carry::tests::{bash, require};
     use crate::service::move_session::carry::{LeftReason, OUT_MARKER};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     /// A source project dir whose NAME begins with `-`, like every real one.
+    #[cfg(unix)]
     fn source_project(root: &std::path::Path) -> std::path::PathBuf {
         let p = root.join("-Users-me-r--claude-worktrees-feat");
         for (rel, body) in [
@@ -810,6 +814,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     const SESSION_RELS: [&str; 6] = [
         "subagents/agent-aa.jsonl",
         "subagents/agent-aa.meta.json",
@@ -820,6 +825,7 @@ mod tests {
     ];
 
     /// `(rel path, real size on disk)` for every fixture file under `<root>/<id>/`.
+    #[cfg(unix)]
     fn real_sizes(root: &std::path::Path, id: &str, rels: &[&str]) -> Vec<(String, u64)> {
         let mut v: Vec<(String, u64)> = rels
             .iter()
@@ -832,24 +838,12 @@ mod tests {
         v
     }
 
+    #[cfg(unix)]
     fn mode(p: &std::path::Path) -> u32 {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
     }
 
-    /// `true` when this test process is root — permission-denial tests are
-    /// meaningless there (uid 0 reads/writes anything regardless of mode
-    /// bits), so those assertions are skipped, loudly, rather than silently
-    /// passing for the wrong reason.
-    fn is_root() -> bool {
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim() == "0")
-            .unwrap_or(false)
-    }
-
+    #[cfg(unix)]
     #[test]
     fn session_state_is_listed_packed_staged_and_merged() {
         if !require(&["bash", "tar"]) {
@@ -949,6 +943,7 @@ mod tests {
         assert_eq!(top, vec![std::ffi::OsString::from(ID)], "{top:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn merge_keeps_an_equal_or_larger_target_copy_and_replaces_a_smaller_one() {
         if !require(&["bash", "tar"]) {
@@ -1036,13 +1031,15 @@ mod tests {
     /// (mode 000, an ACL, an fs quirk) must never be treated as if it were
     /// absent — that would let a smaller staged file silently replace
     /// something the merge could not even measure.
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_destination_is_kept_not_replaced() {
         if !require(&["bash", "tar"]) {
             return;
         }
-        if is_root() {
-            eprintln!("skipping: uid 0 can read anything regardless of mode 000");
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "uid 0 can read anything regardless of mode 000",
+        ) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1107,6 +1104,7 @@ mod tests {
     /// `fail()` used to exit immediately, leaving the staging dir (a partial
     /// copy of the user's conversation history) behind on every failure
     /// path. It must clean up first.
+    #[cfg(unix)]
     #[test]
     fn the_staging_dir_does_not_survive_a_corrupt_archive() {
         if !require(&["bash", "tar"]) {
@@ -1142,6 +1140,7 @@ mod tests {
     /// step a rename. A leftover `*.cf-part` (from an earlier crash, or one
     /// already sitting in the source) must never be listed, packed, or
     /// merged as if it were real content.
+    #[cfg(unix)]
     #[test]
     fn a_replacement_goes_through_a_same_directory_temp_name_and_leaves_none_behind() {
         if !require(&["bash", "tar"]) {
@@ -1212,6 +1211,7 @@ mod tests {
     /// coverage: a pre-existing DIRECTORY and a pre-existing SYMLINK on the
     /// target must both be reported `kept`, left exactly as they were, and
     /// nothing may be written inside/through them.
+    #[cfg(unix)]
     #[test]
     fn a_non_regular_destination_is_kept_and_left_untouched() {
         if !require(&["bash", "tar"]) {
@@ -1292,6 +1292,7 @@ mod tests {
     /// its children are written, so extracting this archive lands the file
     /// inside `locked` and THEN locks the directory down — exactly the
     /// shape of a directory that becomes unreadable only once staged.
+    #[cfg(unix)]
     fn build_archive_with_a_locked_directory(
         dir: &std::path::Path,
         id: &str,
@@ -1350,13 +1351,15 @@ with tarfile.open(out, "w:gz") as tar:
     /// pipeline's exit status is checked immediately after it, and a single
     /// `failed\t(listing the staged files)` line warns the flow — without
     /// losing the report lines for files already moved.
+    #[cfg(unix)]
     #[test]
     fn a_find_failure_mid_merge_is_reported_without_losing_files_already_moved() {
         if !require(&["bash", "tar", "python3"]) {
             return;
         }
-        if is_root() {
-            eprintln!("skipping: uid 0 can traverse a mode-000 directory anyway");
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "uid 0 can traverse a mode-000 directory anyway",
+        ) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1401,6 +1404,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// an exact `carried\t…` report line. Only python3's `tarfile` can put
     /// such names in an archive; `tar` from a real directory cannot be made
     /// to produce the newline one reliably.
+    #[cfg(unix)]
     fn build_archive_with_hostile_names(dir: &std::path::Path, id: &str) -> std::path::PathBuf {
         let builder = dir.join("build_hostile.py");
         std::fs::write(
@@ -1444,6 +1448,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// itself: such a file is never moved, its raw name is never echoed (a
     /// newline in it would otherwise FORGE a `carried\t…` line that
     /// `parse_merge` believes), and it is reported `failed` anonymously.
+    #[cfg(unix)]
     #[test]
     fn a_hostile_member_name_is_never_moved_and_cannot_forge_a_report_line() {
         if !require(&["bash", "tar", "python3"]) {
@@ -1521,6 +1526,7 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn excluded_files_do_not_travel_on_either_tar() {
         if !require(&["bash", "tar"]) {
@@ -1579,6 +1585,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// file can silently reach into an unrelated file across a directory
     /// boundary. `exclude_pattern` must use a token that matches exactly one
     /// NON-slash character.
+    #[cfg(unix)]
     #[test]
     fn exclude_pattern_never_reaches_across_a_directory_boundary() {
         if !require(&["bash", "tar"]) {
@@ -1621,6 +1628,7 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_source_without_a_session_directory_lists_nothing_and_succeeds() {
         if !require(&["bash"]) {
@@ -1646,6 +1654,7 @@ with tarfile.open(out, "w:gz") as tar:
         assert!(parse_file_list(&out.stdout).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_scripts_refuse_a_bad_id_fail_cleanly_and_quote_everything() {
         if !require(&["bash", "tar"]) {
@@ -1764,13 +1773,15 @@ with tarfile.open(out, "w:gz") as tar:
     /// no trustworthy payload. `chmod 000` on `<id>/` makes `cd` fail
     /// deterministically (no race required) while `[ -d ]` still reports it
     /// as a directory.
+    #[cfg(unix)]
     #[test]
     fn session_list_script_confirms_the_directory_before_printing_the_marker() {
         if !require(&["bash"]) {
             return;
         }
-        if is_root() {
-            eprintln!("skipping: chmod 000 has no effect on root");
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "chmod 000 has no effect on root",
+        ) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -2176,6 +2187,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// The physical path of `p` (symlinks resolved, e.g. macOS `/var` →
     /// `/private/var`), encoded exactly as `memory_list_script`'s own `enc()`
     /// does: every char outside `[A-Za-z0-9]` becomes `-`.
+    #[cfg(unix)]
     fn enc(p: &std::path::Path) -> String {
         let real = std::fs::canonicalize(p).unwrap();
         real.to_string_lossy()
@@ -2184,10 +2196,12 @@ with tarfile.open(out, "w:gz") as tar:
             .collect()
     }
 
+    #[cfg(unix)]
     fn memory_dir_for(home: &std::path::Path, enc_name: &str) -> std::path::PathBuf {
         home.join(".claude/projects").join(enc_name).join("memory")
     }
 
+    #[cfg(unix)]
     #[test]
     fn memory_is_found_by_the_repo_root_not_the_worktree() {
         if !require(&["bash", "git"]) {
@@ -2296,6 +2310,7 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn memory_files_are_added_and_never_replaced() {
         if !require(&["bash", "tar"]) {
@@ -2417,6 +2432,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// but `tar` from a real directory cannot be talked into producing
     /// safely: a symlink member, a subdirectory member, a `..` member, the
     /// index under two spellings, and a bare directory member.
+    #[cfg(unix)]
     fn build_memory_archive(dir: &std::path::Path, shape: &str) -> std::path::PathBuf {
         let builder = dir.join("build_memory.py");
         std::fs::write(
@@ -2478,6 +2494,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// user's own notes, so it must not trust the archive: every member is
     /// checked before a single byte is extracted. One bad member refuses the
     /// whole archive and leaves the memory directory byte-identical.
+    #[cfg(unix)]
     #[test]
     fn the_memory_extract_refuses_every_member_it_did_not_ask_for() {
         if !require(&["bash", "tar", "python3"]) {
@@ -2555,6 +2572,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// what the target already has, and still creates a missing memory dir
     /// `0700` with `0600` files — the same semantics the generic
     /// keep-existing extract has, since it runs the very same two lines.
+    #[cfg(unix)]
     #[test]
     fn the_memory_extract_still_adds_only_what_the_target_lacks() {
         if !require(&["bash", "tar", "python3"]) {
@@ -2639,6 +2657,7 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_index_is_only_ever_appended_to() {
         if !require(&["bash"]) {
@@ -2824,6 +2843,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// test's `touch`, if it ran, would leave `pwned.txt` in the memory dir.
     /// The builder must refuse such text (and over-long text) itself, doing
     /// NOTHING to the file, before ever emitting the heredoc.
+    #[cfg(unix)]
     #[test]
     fn memory_append_index_script_refuses_a_delimiter_line_or_over_long_text() {
         if !require(&["bash"]) {
@@ -2905,6 +2925,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// the route that proves this is bash reading the script from a FILE;
     /// that is what this test does. The builder must refuse a NUL exactly
     /// like a bare delimiter line.
+    #[cfg(unix)]
     #[test]
     fn memory_append_index_script_refuses_a_nul_byte_like_a_delimiter_line() {
         if !require(&["bash"]) {
@@ -2957,6 +2978,7 @@ with tarfile.open(out, "w:gz") as tar:
     /// repo's memory. A nonexistent fallback (a normal, expected condition —
     /// not an anomaly, unlike an empty `top`) must never be used as `m`; the
     /// primary is reported instead, exactly as when no fallback applies.
+    #[cfg(unix)]
     #[test]
     fn a_nonexistent_fallback_never_yields_a_double_slash_memory_dir() {
         if !require(&["bash", "git"]) {
@@ -3007,6 +3029,7 @@ with tarfile.open(out, "w:gz") as tar:
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn memory_scripts_fail_cleanly_and_quote_everything() {
         if !require(&["bash", "git"]) {

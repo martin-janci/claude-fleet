@@ -103,8 +103,12 @@ if [ -z "$destdir" ]; then destdir=$(dirname -- "$f"); fi
 mkdir -p -- "$destdir" || exit 1
 dest="$destdir/$newid.jsonl"
 tmp="$dest.part.$$"
+# Whole lines only: a Claude still appending (a fork mid-turn) leaves an
+# unterminated last line, which copied would be broken JSON.
+n=$(wc -l < "$f") || exit 1
 LC_ALL=C awk -v anchor="$anchor" -v oldid={id_q} -v newid="$newid" \
-    -v oldcwd="$oldcwd" -v newcwd="$newcwd" '
+    -v oldcwd="$oldcwd" -v newcwd="$newcwd" -v n="$n" '
+NR > n + 0 {{ exit }}
 function rep(s, from, to,    out, p) {{
   if (from == "") return s
   out = ""
@@ -429,6 +433,14 @@ async fn rewind_conversation_with(
         (sess, claude_id, stored_transcript_path, fallback_cwd)
     };
 
+    // A shell row has no Claude: its restart respawns a bare shell, which
+    // would kill whatever it runs and bind a conversation nothing resumes.
+    if sess.kind == "shell" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "a shell session has no Claude conversation to rewind or fork",
+        ));
+    }
     // Rewind respawns the pane, so doing it mid-turn throws the turn away —
     // and "mid-turn" is not only `working`: a `blocked` session is waiting
     // on a permission prompt or a question INSIDE its turn. So the rule is
@@ -609,6 +621,16 @@ async fn rewind_conversation_with(
             // script actually wrote. Best-effort: the spawn has succeeded and
             // its row is what the caller asked for; a label is not worth
             // failing it.
+            // A fork does the same work, as `move_session { keep_source }`'s
+            // does: the source's confirmed links come along (source
+            // `forked`). Best-effort, like the label below.
+            if let Err(e) = lock(store).and_then(|s| s.copy_work_links(sess.id, row.id)) {
+                tracing::warn!(
+                    session_id = row.id,
+                    error = %e.message,
+                    "[rewind] copying the work links to the fork failed"
+                );
+            }
             match lock(store).and_then(|s| {
                 s.relabel_conversation(row.id, &new_id, StartSource::Fork, Some(&new_path))
             }) {
@@ -633,6 +655,7 @@ mod tests {
 
     /// Run a generated script against a real file in a temp dir. `bash` in a
     /// test is established here (`crate::shell::tests`, `crate::tmux::tests`).
+    #[cfg(unix)]
     fn run(script: &str) -> std::process::Output {
         std::process::Command::new("bash")
             .arg("-c")
@@ -646,6 +669,7 @@ mod tests {
     const A1: &str = "aaaaaaaa-0000-0000-0000-000000000001";
     const A2: &str = "aaaaaaaa-0000-0000-0000-000000000002";
 
+    #[cfg(unix)]
     fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
         // Leading metadata lines carry no uuid and MUST survive: they are the
         // transcript's header (`custom-title`, `mode`, …).
@@ -671,6 +695,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     fn tmp() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("cf-rewind-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
@@ -682,6 +707,7 @@ mod tests {
     /// matches `/src/appXold`, because `.` means "any character". A buggy
     /// `gsub` implementation would clobber both lines; `rep()` must touch
     /// only the one that is an exact literal match.
+    #[cfg(unix)]
     fn fixture_with_gsub_trap(dir: &std::path::Path) -> std::path::PathBuf {
         let body = format!(
             concat!(
@@ -705,6 +731,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     #[test]
     fn keeps_everything_strictly_before_the_anchor() {
         let d = tmp();
@@ -742,6 +769,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn rewrites_the_session_id_on_every_copied_line() {
         let d = tmp();
@@ -766,6 +794,38 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// A fork mid-turn: Claude is still appending, so the last line has no
+    /// newline yet. It is left out rather than copied as broken JSON.
+    #[cfg(unix)]
+    #[test]
+    fn an_unterminated_last_line_is_not_copied() {
+        let d = tmp();
+        let src = fixture(&d);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        std::io::Write::write_all(&mut f, br#"{"type":"assistant","uuid":"dddd","mess"#).unwrap();
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            None,
+            None,
+            None,
+        ));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let written = std::fs::read_to_string(d.join(format!("{NEW}.jsonl"))).unwrap();
+        assert!(!written.contains("dddd"), "the partial line stays behind");
+        assert!(written.contains("cccc"), "every whole line is copied");
+        assert!(written.ends_with('\n'));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn no_anchor_copies_the_whole_file() {
         // Fork on the LAST turn: there is no later prompt, so "keep
@@ -788,6 +848,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_anchor_that_is_not_in_the_file_fails_with_the_sentinel() {
         let d = tmp();
@@ -811,6 +872,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_cross_worktree_fork_rewrites_cwd_literally() {
         // `/src/app.old` read as a REGEX also matches `/src/appXold` (`.`
@@ -859,6 +921,7 @@ mod tests {
     /// which is `/clear` under a misleading label. The engine is the only
     /// layer that can know, so the refusal is a script sentinel, not a
     /// client-side gate.
+    #[cfg(unix)]
     #[test]
     fn a_prefix_with_no_conversation_entry_fails_with_its_own_sentinel() {
         let d = tmp();
@@ -889,6 +952,7 @@ mod tests {
 
     /// The counterpart: a prefix that DOES hold a turn is written, so the
     /// sentinel above cannot be firing on the ordinary case.
+    #[cfg(unix)]
     #[test]
     fn a_prefix_with_one_turn_is_written() {
         let d = tmp();

@@ -201,8 +201,8 @@ impl FleetTools {
 
     #[tool(description = "Truncate a session's transcript into a new \
         conversation: \"fork\" starts a new session there, \"rewind\" \
-        restarts this one. The original is unchanged. Returns the updated \
-        row.")]
+        restarts this one. The original is unchanged. Returns the row (a \
+        fork's is the new session).")]
     pub(super) async fn rewind_conversation(
         &self,
         Extension(caller): Extension<Caller>,

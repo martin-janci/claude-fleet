@@ -903,6 +903,7 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
     /// output back through `parse_scan`. Regression test for the `-exec ...
     /// +` vs `xargs` fix: an empty scanned directory must not produce a
     /// bogus `~/-` entry (or hang), and only the one real file is reported.
+    #[cfg(unix)]
     #[test]
     fn scan_script_runs_under_bash_and_parses_cleanly() {
         let tmp = tempfile::TempDir::new().unwrap();

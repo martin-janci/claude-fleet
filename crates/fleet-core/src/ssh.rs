@@ -70,6 +70,56 @@ struct SshClientInner {
     /// result. A positive result is kept for the process lifetime; a `None`
     /// (both shells failed) is retried after [`TOOLCHAIN_RETRY_AFTER`].
     toolchains: DashMap<String, (std::time::Instant, Option<HostToolchain>)>,
+    /// Whether ssh calls share a per-host ControlMaster. [`mux_supported`]
+    /// by default: on, except on Windows, whose OpenSSH has no ControlMaster.
+    /// Off, every call is its own connection and nothing below touches a
+    /// control socket (no `-O check`, no `-O exit`, no mux retry).
+    mux: bool,
+}
+
+/// Environment variable naming the `ssh` program to run, overriding the
+/// default below: a Cygwin or MSYS2 `ssh.exe`, or any other build.
+pub const SSH_BINARY_ENV: &str = "CLAUDE_FLEET_SSH";
+
+/// The `ssh` program fleet runs, for every probe, the attached terminal and
+/// the tunnels alike: `$CLAUDE_FLEET_SSH` when set, else, on Windows,
+/// `%SystemRoot%\System32\OpenSSH\ssh.exe` when it is there, else `ssh`
+/// from PATH.
+///
+/// Why Windows does not simply take the first `ssh` on PATH: a machine with
+/// Git for Windows, MSYS2 or Cygwin often has theirs ahead of the system one,
+/// and each of those reads a different home (`~/.ssh`), talks to a different
+/// agent, and knows nothing of the Windows `ssh-agent` service the user
+/// loaded their key into. Under `BatchMode=yes` that surfaces only as
+/// "Permission denied (publickey)" on some calls and not others — whichever
+/// resolved which binary. One deterministic choice, overridable, instead.
+pub fn default_ssh_binary() -> PathBuf {
+    if let Some(p) = std::env::var_os(SSH_BINARY_ENV).filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    if cfg!(windows) {
+        if let Some(p) = windows_openssh() {
+            return p;
+        }
+    }
+    PathBuf::from("ssh")
+}
+
+/// `%SystemRoot%\System32\OpenSSH\ssh.exe`, when it exists.
+pub fn windows_openssh() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var_os("SystemRoot")?)
+        .join("System32")
+        .join("OpenSSH")
+        .join("ssh.exe");
+    p.is_file().then_some(p)
+}
+
+/// Whether this platform's `ssh` can multiplex (ControlMaster over a Unix
+/// socket). Win32-OpenSSH cannot, so a Windows desktop runs every call as a
+/// fresh connection — see docs/windows.md for what that costs and why
+/// hub-client mode is the recommended setup there.
+pub const fn mux_supported() -> bool {
+    cfg!(unix)
 }
 
 /// RAII decrement for `SshClientInner::in_flight`.
@@ -110,6 +160,17 @@ impl SshClient {
         Self::build(None)
     }
 
+    /// [`SshClient::new`] with multiplexing forced on or off rather than
+    /// left to [`mux_supported`]: how a test pins either platform's flags.
+    pub fn new_with_mux(mux: bool) -> Self {
+        Self::build_with(None, default_ssh_binary(), mux)
+    }
+
+    /// Whether this client shares a ControlMaster per host.
+    pub fn multiplexes(&self) -> bool {
+        self.inner.mux
+    }
+
     /// A client that routes each host to its own transport: a host row whose
     /// `transport` is `'agent'` is reached through the agent connected in
     /// `agents` under that host's fleet alias, and every other host is
@@ -127,10 +188,14 @@ impl SshClient {
     }
 
     fn build(route: Option<Arc<crate::agent::HostRouter>>) -> Self {
-        Self::build_with(route, PathBuf::from("ssh"))
+        Self::build_with(route, default_ssh_binary(), mux_supported())
     }
 
-    fn build_with(route: Option<Arc<crate::agent::HostRouter>>, ssh_bin: PathBuf) -> Self {
+    fn build_with(
+        route: Option<Arc<crate::agent::HostRouter>>,
+        ssh_bin: PathBuf,
+        mux: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(SshClientInner {
                 seen: DashMap::new(),
@@ -140,6 +205,7 @@ impl SshClient {
                 route,
                 ssh_bin,
                 toolchains: DashMap::new(),
+                mux,
             }),
         }
     }
@@ -149,14 +215,53 @@ impl SshClient {
     /// mux-failure detection and the one-retry-after-reset path without a
     /// real host.
     pub fn with_ssh_binary(path: impl Into<PathBuf>) -> Self {
-        Self::build_with(None, path.into())
+        Self::build_with(None, path.into(), mux_supported())
+    }
+
+    /// [`SshClient::with_ssh_binary`] with multiplexing forced on or off.
+    #[cfg(all(test, unix))]
+    fn with_ssh_binary_and_mux(path: impl Into<PathBuf>, mux: bool) -> Self {
+        Self::build_with(None, path.into(), mux)
     }
 
     /// A fresh `Command` for the configured ssh binary (`"ssh"` in
     /// production, a fake script under test — see
     /// [`SshClient::with_ssh_binary`]).
+    ///
+    /// stdin is null unless a caller pipes it (`run_child_io` does, for an
+    /// upload): what `ssh -n` would do. The Windows release app has no stdin
+    /// to inherit, and Win32-OpenSSH duplicates its stdin handle when the
+    /// session opens.
     fn ssh_command(&self) -> tokio::process::Command {
-        tokio::process::Command::new(&self.inner.ssh_bin)
+        let mut cmd = crate::proc::command(&self.inner.ssh_bin);
+        cmd.stdin(std::process::Stdio::null());
+        cmd
+    }
+
+    /// The command that runs `args` on `host`: `ssh <opts> -- <host> <args>`,
+    /// or, for a WSL distribution found on this machine
+    /// ([`crate::wsl::distro_for`]), `wsl.exe` running the same words under
+    /// `sh -c`, where `opts` (ssh's own) do not apply.
+    fn remote_command(
+        &self,
+        host: &str,
+        opts: &[String],
+        args: &[&str],
+    ) -> tokio::process::Command {
+        if let Some(distro) = crate::wsl::distro_for(host) {
+            return crate::wsl::command(&distro, args);
+        }
+        let mut cmd = self.ssh_command();
+        cmd.args(opts);
+        // `--` ends option parsing — the host can never be read as an ssh
+        // option even if validation upstream were bypassed.
+        cmd.arg("--").arg(host).args(args);
+        cmd
+    }
+
+    /// The `ssh` program this client runs (see [`default_ssh_binary`]).
+    pub fn ssh_binary(&self) -> &Path {
+        &self.inner.ssh_bin
     }
 
     /// The registry this client routes agent hosts through, if it has one.
@@ -226,15 +331,24 @@ impl SshClient {
     /// The `-o` flags shared by every multiplexed ssh invocation. With
     /// `ControlMaster=auto` + `ControlPersist`, ssh creates the master on the
     /// first call and reuses/recreates it as needed — no app-side bookkeeping.
+    ///
+    /// Without multiplexing (Windows) the three `Control*` pairs are left out
+    /// and the rest is the same: every call then connects on its own, so
+    /// `ConnectTimeout` bounds each one.
     pub fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
-        let path = self.control_path(host);
-        vec![
-            "-o".into(),
-            "ControlMaster=auto".into(),
-            "-o".into(),
-            format!("ControlPath={}", path.display()),
-            "-o".into(),
-            "ControlPersist=10m".into(),
+        let mut opts: Vec<String> = Vec::new();
+        if self.inner.mux {
+            let path = self.control_path(host);
+            opts.extend([
+                "-o".into(),
+                "ControlMaster=auto".into(),
+                "-o".into(),
+                format!("ControlPath={}", path.display()),
+                "-o".into(),
+                "ControlPersist=10m".into(),
+            ]);
+        }
+        opts.extend([
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
@@ -251,7 +365,8 @@ impl SshClient {
             "ServerAliveInterval=5".into(),
             "-o".into(),
             "ServerAliveCountMax=2".into(),
-        ]
+        ]);
+        opts
     }
 
     /// The attached terminal's own ControlPath: a probe's master reset must
@@ -341,16 +456,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, connect_timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            // `--` ends option parsing — the host can never be read as an
-            // ssh option even if validation upstream were bypassed.
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", None)
             .await
     }
@@ -376,14 +482,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, connect_timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", Some(max_output))
             .await
     }
@@ -417,11 +516,7 @@ impl SshClient {
             ));
         }
         self.inner.seen.insert(host.to_string(), ());
-        let mut cmd = self.ssh_command();
-        for opt in self.mux_opts(host, connect_timeout) {
-            cmd.arg(opt);
-        }
-        cmd.arg("--").arg(host).args(args);
+        let cmd = self.remote_command(host, &self.mux_opts(host, connect_timeout), args);
         self.run_child_io(
             host,
             cmd,
@@ -458,14 +553,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, connect_timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, Some(token), "E_SSH", None)
             .await
     }
@@ -495,14 +583,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(
             host,
             build,
@@ -539,14 +620,10 @@ impl SshClient {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        let mut cmd = self.ssh_command();
-        for opt in self.mux_opts(host, timeout) {
-            cmd.arg(opt);
-        }
         // Single remote word: the remote login shell runs `cat > 'path'`,
         // reading the piped file from stdin. Path is single-quoted.
         let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
-        cmd.arg("--").arg(host).arg(&remote_cmd);
+        let mut cmd = self.remote_command(host, &self.mux_opts(host, timeout), &[&remote_cmd]);
         cmd.stdin(std::process::Stdio::from(file));
         let out = self
             .run_child(host, cmd, UPLOAD_WALL_CLOCK, None, "E_UPLOAD")
@@ -636,7 +713,7 @@ impl SshClient {
             // still want the OS to clean up the child eventually.
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| IpcError::new(spawn_code, format!("ssh spawn {host}: {e}")))?;
+            .map_err(|e| IpcError::new(spawn_code, spawn_error_message(host, &e)))?;
 
         // Take stdout/stderr handles BEFORE moving `child` into the wait —
         // reader tasks keep the pipes drained so the child can't block on a
@@ -727,7 +804,9 @@ impl SshClient {
                 max_output,
             )
             .await?;
-        if !is_mux_failure(&first) {
+        // Without a master an exit 255 is a failed connection, not a dead
+        // mux: nothing to check, reset or retry.
+        if !self.inner.mux || !is_mux_failure(&first) {
             return Ok(first);
         }
         if self.master_alive(host).await {
@@ -785,6 +864,9 @@ impl SshClient {
     /// deliberately outside this `-O check` and this reset — a probe's
     /// master dying must never take the attached terminal down with it.
     async fn maybe_reset_master(&self, host: &str) -> bool {
+        if !self.inner.mux {
+            return false;
+        }
         if self.others_in_flight(host) > 0 {
             // warn: a timeout is a failure path, and this is its only log line
             // (the caller just gets E_SSH_TIMEOUT).
@@ -849,6 +931,9 @@ impl SshClient {
     /// Also removes the socket file so `ControlMaster=auto` cannot attach to
     /// a dead master that never answered the exit request.
     pub(crate) async fn reset_master(&self, host: &str) {
+        if !self.inner.mux {
+            return;
+        }
         let path = self.control_path(host);
         let mut cmd = self.ssh_command();
         cmd.args([
@@ -882,10 +967,13 @@ impl SshClient {
     /// `spawn()` not `status()` so quit isn't serialised on N round-trips,
     /// and ControlPersist would reap an un-exited master anyway.
     pub fn shutdown_all(&self) {
+        if !self.inner.mux {
+            return;
+        }
         let hosts: Vec<String> = self.inner.seen.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
             for path in [self.control_path(&host), self.control_path_for_pty(&host)] {
-                let _ = std::process::Command::new(&self.inner.ssh_bin)
+                let _ = crate::proc::std_command(&self.inner.ssh_bin)
                     .args([
                         "-o",
                         &format!("ControlPath={}", path.display()),
@@ -940,7 +1028,7 @@ impl SshClient {
         resolved
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn forget_toolchain_for_tests(&self, host: &str) {
         self.inner.toolchains.remove(host);
     }
@@ -1098,7 +1186,7 @@ pub async fn run_shell_bounded(
 }
 
 async fn run_local_shell(script: &str, wall_clock: Duration) -> Result<Output, IpcError> {
-    let child = tokio::process::Command::new("bash")
+    let child = crate::proc::command("bash")
         .args(["-lc", script])
         .kill_on_drop(true)
         .output();
@@ -1124,7 +1212,7 @@ async fn run_local_with_stdin(
     max_output: usize,
 ) -> Result<Output, IpcError> {
     let host = crate::service::projects::LOCAL_HOST;
-    let mut child = tokio::process::Command::new("bash")
+    let mut child = crate::proc::command("bash")
         .arg("-c")
         .arg(args.join(" "))
         .stdin(std::process::Stdio::piped())
@@ -1536,7 +1624,7 @@ impl LocalExec {
     }
 
     fn command(&self, args: &[&str]) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("bash");
+        let mut cmd = crate::proc::command("bash");
         cmd.arg("-c").arg(args.join(" "));
         for k in &self.env_remove {
             cmd.env_remove(k);
@@ -1719,11 +1807,23 @@ pub(crate) fn is_mux_failure(out: &Output) -> bool {
         && crate::ssh_diag::classify::mentions_mux_failure(&String::from_utf8_lossy(&out.stderr))
 }
 
-fn cache_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".cache").join("claude-fleet");
+/// The text of a failed `ssh` spawn. A missing binary gets the fix in the
+/// message itself, because on Windows that is the likely cause and the
+/// remedy is a Settings switch rather than a package manager.
+fn spawn_error_message(host: &str, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        let fix = if cfg!(windows) {
+            "install the OpenSSH Client (Settings → System → Optional features)"
+        } else {
+            "install OpenSSH and make sure `ssh` is on PATH"
+        };
+        return format!("ssh spawn {host}: `ssh` was not found — {fix}");
     }
-    std::env::temp_dir().join("claude-fleet")
+    format!("ssh spawn {host}: {e}")
+}
+
+fn cache_dir() -> PathBuf {
+    crate::home::cache_dir()
 }
 
 #[cfg(test)]
@@ -1750,7 +1850,7 @@ mod tests {
 
     #[test]
     fn pty_mux_opts_use_their_own_socket_and_a_gentler_keepalive() {
-        let c = SshClient::new();
+        let c = SshClient::new_with_mux(true);
         let opts = c.mux_opts_for_pty("h", Duration::from_secs(5)).join(" ");
         assert!(
             opts.contains("ControlPath=") && opts.contains("cm-h-tty.sock"),
@@ -1775,7 +1875,7 @@ mod tests {
 
     #[test]
     fn mux_opts_carry_controlmaster_auto_and_persist() {
-        let c = SshClient::new();
+        let c = SshClient::new_with_mux(true);
         let opts = c.mux_opts("h", Duration::from_secs(5));
         assert!(opts.iter().any(|o| o == "ControlMaster=auto"));
         assert!(opts.iter().any(|o| o == "ControlPersist=10m"));
@@ -1785,6 +1885,124 @@ mod tests {
         // attach onto an existing one.
         assert!(opts.iter().any(|o| o == "ServerAliveInterval=5"));
         assert!(opts.iter().any(|o| o == "ServerAliveCountMax=2"));
+    }
+
+    #[test]
+    fn a_missing_ssh_binary_says_how_to_install_it() {
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+        let m = spawn_error_message("h", &missing);
+        assert!(m.starts_with("ssh spawn h: `ssh` was not found"), "{m}");
+        assert!(
+            m.contains(if cfg!(windows) {
+                "OpenSSH Client"
+            } else {
+                "on PATH"
+            }),
+            "{m}"
+        );
+        let other = std::io::Error::other("boom");
+        assert_eq!(spawn_error_message("h", &other), "ssh spawn h: boom");
+    }
+
+    /// A WSL host runs through wsl.exe with the same words under `sh -c`;
+    /// anything else is `ssh <opts> -- <host> <args>` with this client's
+    /// binary.
+    #[test]
+    fn remote_command_routes_a_wsl_host_through_wsl_exe() {
+        let _table = crate::wsl::TEST_TABLE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::wsl::set_for_tests(vec![("wsl-ubuntu".into(), "Ubuntu".into())]);
+        let c = SshClient::new_with_mux(false);
+        let opts = vec!["-o".to_string(), "BatchMode=yes".to_string()];
+        let argv = |cmd: &tokio::process::Command| -> (String, Vec<String>) {
+            let std = cmd.as_std();
+            (
+                std.get_program().to_string_lossy().into_owned(),
+                std.get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            )
+        };
+
+        let (prog, args) = argv(&c.remote_command("wsl-ubuntu", &opts, &["printenv", "HOME"]));
+        assert!(prog.ends_with("wsl.exe"), "{prog}");
+        assert_eq!(
+            args,
+            [
+                "--distribution",
+                "Ubuntu",
+                "--exec",
+                "sh",
+                "-c",
+                "printenv HOME"
+            ]
+        );
+
+        let (prog, args) = argv(&c.remote_command("mefistos", &opts, &["printenv", "HOME"]));
+        assert_eq!(prog, c.ssh_binary().to_string_lossy());
+        assert_eq!(
+            args,
+            ["-o", "BatchMode=yes", "--", "mefistos", "printenv", "HOME"]
+        );
+        crate::wsl::set_for_tests(Vec::new());
+    }
+
+    #[test]
+    fn the_ssh_binary_can_be_overridden_and_defaults_sensibly() {
+        // Read-only on the environment: the override itself is exercised by
+        // the doc'd env var, which a parallel test must not flip.
+        let d = default_ssh_binary();
+        if std::env::var_os(SSH_BINARY_ENV).is_none() {
+            if cfg!(windows) {
+                assert!(
+                    d == Path::new("ssh") || windows_openssh().as_deref() == Some(d.as_path()),
+                    "{}",
+                    d.display()
+                );
+            } else {
+                assert_eq!(d, PathBuf::from("ssh"));
+            }
+        }
+        assert_eq!(SshClient::new().ssh_binary(), d.as_path());
+    }
+
+    #[test]
+    fn the_default_client_multiplexes_only_where_ssh_can() {
+        assert_eq!(SshClient::new().multiplexes(), cfg!(unix));
+        assert!(SshClient::new_with_mux(true).multiplexes());
+        assert!(!SshClient::new_with_mux(false).multiplexes());
+    }
+
+    /// Windows: no `Control*` option at all (Win32-OpenSSH has no
+    /// ControlMaster), and every other option exactly as with a master.
+    #[test]
+    fn without_mux_the_opts_drop_only_the_control_pairs() {
+        let with = SshClient::new_with_mux(true).mux_opts("h", Duration::from_secs(5));
+        let without = SshClient::new_with_mux(false).mux_opts("h", Duration::from_secs(5));
+        assert!(
+            without.iter().all(|o| !o.starts_with("Control")),
+            "{without:?}"
+        );
+        let rest: Vec<&String> = with
+            .chunks(2)
+            .filter(|p| !p[1].starts_with("Control"))
+            .flatten()
+            .collect();
+        assert_eq!(without.iter().collect::<Vec<_>>(), rest);
+        assert!(without.chunks(2).all(|p| p[0] == "-o"), "{without:?}");
+
+        let pty = SshClient::new_with_mux(false)
+            .mux_opts_for_pty("h", Duration::from_secs(5))
+            .join(" ");
+        assert!(!pty.contains("Control"), "{pty}");
+        assert!(
+            pty.contains("ServerAliveInterval=15")
+                && pty.contains("ServerAliveCountMax=3")
+                && pty.contains("BatchMode=yes")
+                && pty.contains("ConnectTimeout=5"),
+            "{pty}"
+        );
     }
 
     #[test]
@@ -1937,7 +2155,7 @@ mod tests {
             eprintln!("skipping: no sh on this box");
             return;
         }
-        let c = SshClient::new();
+        let c = SshClient::new_with_mux(true);
         let host = "fleet-test-nonexistent-host-2";
         let mut cmd = tokio::process::Command::new("sh");
         cmd.args(["-c", "sleep 30"]);
@@ -2130,6 +2348,7 @@ mod tests {
     /// the fix and explains why a rename alone is not one; the probe guard it
     /// prepends runs before `body`, so a fake that counts its invocations
     /// still counts only the real ones.
+    #[cfg(unix)]
     fn fake_ssh(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
         write_exec(dir, "ssh", &format!("#!/bin/sh\n{PROBE_GUARD}{body}\n"))
@@ -2138,11 +2357,10 @@ mod tests {
     #[test]
     fn mux_failures_are_exit_255_with_a_master_message() {
         let out = |code: i32, stderr: &str| Output {
-            status: std::process::ExitStatus::from_raw(code << 8),
+            status: crate::agent::transport::exit_status(code),
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         };
-        use std::os::unix::process::ExitStatusExt;
         assert!(is_mux_failure(&out(
             255,
             "mux_client_request_session: read from master failed"
@@ -2175,6 +2393,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_resets_the_master_and_retries_once() {
         // `-O check` answers 1 (dead) so the master is actually reset.
@@ -2203,6 +2422,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_on_a_live_master_retries_without_resetting() {
         // `-O check` answers 0 (alive): a mux failure on this command does
@@ -2232,6 +2452,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mux_failure_is_retried_only_once() {
         // Always fails, and the master never answers `-O check` (dead), so
@@ -2252,6 +2473,7 @@ mod tests {
         assert_eq!(c.master_reset_counts().get("h-twice"), Some(&1));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_dead_host_is_not_retried() {
         let dir = tempfile::tempdir().unwrap();
@@ -2275,6 +2497,35 @@ mod tests {
             "exactly one attempt"
         );
         assert!(!c.master_reset_counts().contains_key("h-dead"));
+    }
+
+    /// Without a master, an exit 255 that reads like a dead mux is just a
+    /// failed connection: one attempt, and no `-O check` / `-O exit` is ever
+    /// spawned against a control socket that does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn without_mux_a_mux_looking_failure_is_neither_checked_nor_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls");
+        let bin = fake_ssh(
+            dir.path(),
+            &format!(
+                "echo \"$*\" >> '{l}'; echo 'mux_client_request_session: read from master failed' >&2; exit 255",
+                l = log.display()
+            ),
+        );
+        let c = SshClient::with_ssh_binary_and_mux(bin, false);
+        let out = c
+            .run("h-nomux", &["true"], Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(out.status.code(), Some(255));
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 1, "exactly one attempt: {calls}");
+        assert!(!calls.contains("-O"), "no control request: {calls}");
+        assert!(!calls.contains("Control"), "no Control option: {calls}");
+        assert!(!c.master_reset_counts().contains_key("h-nomux"));
+        c.shutdown_all(); // a no-op without mux
     }
 
     #[test]
@@ -2303,6 +2554,7 @@ mod tests {
         assert!(parse_toolchain("").is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn toolchain_is_resolved_once_and_a_failure_is_retried_after_the_backoff() {
         let dir = tempfile::tempdir().unwrap();
@@ -2345,6 +2597,7 @@ mod tests {
     /// `via_cli:local` / `via_host:local` on a desktop: the stdin-fed
     /// script runs here, the way `run_shell` treats `local`, and `ssh` is
     /// never spawned for a host that resolves to nothing.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_with_stdin_on_local_spawns_locally_and_never_ssh() {
         let dir = tempfile::tempdir().unwrap();

@@ -174,6 +174,7 @@ fn the_run_has_no_tools_no_mcp_no_hooks_and_no_transcript() {
     assert!(haiku_script("haiku'; id; '", 110).is_err());
 }
 
+#[cfg(unix)]
 const NASTY: &str = "it's \"quoted\" $(touch pwned) `id` $HOME \\ back\nslash ; && | > x '\\'' end";
 
 /// The whole script, run by a real bash through the same two layers ssh
@@ -564,9 +565,8 @@ async fn calls_to_one_host_run_one_at_a_time() {
             self.most.fetch_max(n, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(20)).await;
             self.now.fetch_sub(1, Ordering::SeqCst);
-            use std::os::unix::process::ExitStatusExt;
             Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(0),
+                status: crate::agent::transport::exit_status(0),
                 stdout: format!("{HAIKU_TAG}run\n{}\n", envelope(r#"{"choice":"todo"}"#))
                     .into_bytes(),
                 stderr: Vec::new(),

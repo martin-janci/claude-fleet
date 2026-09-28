@@ -7,7 +7,7 @@ use fleet_core::service::hub::{disable_local_host, local_host_enabled};
 use fleet_core::ssh::SshClient;
 use std::time::Duration;
 
-const MESSAGE: &str = "host local is disabled on this hub (hub.local_host=false)";
+const MESSAGE: &str = fleet_core::service::hub::LOCAL_DISABLED_MESSAGE;
 
 #[tokio::test]
 async fn a_disabled_local_host_refuses_explicit_local_targets() {

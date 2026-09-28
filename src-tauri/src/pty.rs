@@ -65,7 +65,17 @@ pub struct PtyState {
     input_tx: Option<SyncSender<Vec<u8>>>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     shared: Arc<PtyShared>,
+    /// When [`PtyState::poll_child_exit`] first saw the child gone. Only the
+    /// Windows drain path sets it; see there.
+    child_gone_at: Option<Instant>,
 }
+
+/// How long a child that has exited gets for its last output to be read
+/// before the drain reports EOF on its behalf (Windows, see
+/// [`PtyState::poll_child_exit`]). The bytes are already in the pipe when the
+/// process ends; the reader thread only has to pick them up.
+#[cfg_attr(not(windows), allow(dead_code))]
+const CHILD_EXIT_GRACE: Duration = Duration::from_millis(300);
 
 /// Everything one open shares with its reader thread. A FRESH one per open:
 /// a reader that is still winding down owns the previous `Arc` and can
@@ -120,6 +130,7 @@ impl PtyState {
             input_tx: None,
             child: None,
             shared: Arc::new(PtyShared::new()),
+            child_gone_at: None,
         }
     }
 
@@ -142,6 +153,7 @@ impl PtyState {
         shared: Arc<PtyShared>,
     ) -> PtyParts {
         let previous = self.take_parts();
+        self.child_gone_at = None;
         self.master = Some(master);
         self.input_tx = Some(input_tx);
         self.child = Some(child);
@@ -153,6 +165,7 @@ impl PtyState {
     /// non-blocking: the returned parts do the blocking work.
     #[must_use = "the attachment must be torn down off-lock"]
     fn take_parts(&mut self) -> PtyParts {
+        self.child_gone_at = None;
         PtyParts {
             master: self.master.take(),
             input_tx: self.input_tx.take(),
@@ -160,6 +173,39 @@ impl PtyState {
             // Leave the state genuinely closed: after a detach, a drain must
             // not see the dead attachment's buffer or its `exited` flag.
             shared: std::mem::replace(&mut self.shared, Arc::new(PtyShared::new())),
+        }
+    }
+}
+
+impl PtyState {
+    /// Report the attachment over once its child has been gone for `grace`,
+    /// even though the reader has not seen EOF.
+    ///
+    /// Under ConPTY the output pipe belongs to the pseudo console, not to
+    /// `ssh.exe`, so it stays open after ssh exits (network drop, remote
+    /// detach, the tmux session killed) until the master is dropped — which
+    /// only teardown does. The reader then never reads 0 bytes, `exited` is
+    /// never set, and the pane would freeze instead of re-attaching. On Unix
+    /// the slave closes with the child and the reader's EOF is the signal.
+    ///
+    /// `try_wait` does not block (a zero-timeout wait), so it may run under
+    /// the state lock.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn poll_child_exit(&mut self, grace: Duration) {
+        if self.shared.exited.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let gone_at = *self.child_gone_at.get_or_insert_with(Instant::now);
+        if gone_at.elapsed() >= grace {
+            self.shared
+                .note("\r\n\x1b[33m[cf] ssh exited (the pseudo console stays open)\x1b[0m\r\n");
+            self.shared.exited.store(true, Ordering::Release);
         }
     }
 }
@@ -177,37 +223,10 @@ impl PtyParts {
     /// Kill the child, reap it, then drop the fds. Blocking by nature — it
     /// must never run under `Mutex<PtyState>` or on the main thread.
     fn teardown(self) {
-        // Terminate the child with SIGKILL BEFORE tearing down the pty fds.
-        //
-        // The child is the local `tmux attach`, or — for a remote host — the
-        // `ssh -tt … tmux attach` that runs it. portable-pty's Child::kill()
-        // sends SIGHUP, not SIGKILL. At this point our reader thread still holds
-        // a cloned master fd, so the pty is still LIVE when that SIGHUP lands —
-        // which lets `ssh -tt` do a *graceful* shutdown and relay a trailing
-        // newline down its pty to the remote tmux pane. That stray `\n` is
-        // delivered into the attached app's (claude's) input on every detach /
-        // session-switch / deselect — the long-standing "new line on switch"
-        // bug. SIGKILL gives the child no chance to relay anything; the ssh
-        // channel and remote tty then tear down on their own and tmux detaches
-        // our client cleanly.
+        // Terminate the child hard BEFORE tearing down the pty fds — see
+        // [`kill_hard`] for why a polite signal is not enough.
         if let Some(mut child) = self.child {
-            match child.process_id() {
-                // Signal directly: spawning `/bin/kill` is a fork+exec+wait
-                // we would otherwise do on the caller's thread.
-                //
-                // SAFETY: `kill` takes no pointers and cannot trap. The pid is
-                // our own child, not yet reaped, so the OS cannot have recycled
-                // it. `pid > 1` keeps a bogus 0 (our whole process group) or 1
-                // (init) out of the call, as `add_project.rs` does.
-                Some(pid) if pid > 1 => unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                },
-                // No pid (already exited / unsupported), or an implausible one:
-                // fall back to SIGHUP.
-                _ => {
-                    let _ = child.kill();
-                }
-            }
+            kill_hard(&mut *child);
             reap(child);
         }
         // Now the child is gone, drop our fds and let the reader thread observe
@@ -221,6 +240,48 @@ impl PtyParts {
             *b = PtyBuffer::default();
         }
     }
+}
+
+/// Kill the child with SIGKILL, never portable-pty's SIGHUP.
+///
+/// The child is the local `tmux attach`, or — for a remote host — the
+/// `ssh -tt … tmux attach` that runs it. portable-pty's Child::kill()
+/// sends SIGHUP, not SIGKILL. At this point our reader thread still holds
+/// a cloned master fd, so the pty is still LIVE when that SIGHUP lands —
+/// which lets `ssh -tt` do a *graceful* shutdown and relay a trailing
+/// newline down its pty to the remote tmux pane. That stray `\n` is
+/// delivered into the attached app's (claude's) input on every detach /
+/// session-switch / deselect — the long-standing "new line on switch"
+/// bug. SIGKILL gives the child no chance to relay anything; the ssh
+/// channel and remote tty then tear down on their own and tmux detaches
+/// our client cleanly.
+#[cfg(unix)]
+fn kill_hard(child: &mut dyn portable_pty::Child) {
+    match child.process_id() {
+        // Signal directly: spawning `/bin/kill` is a fork+exec+wait
+        // we would otherwise do on the caller's thread.
+        //
+        // SAFETY: `kill` takes no pointers and cannot trap. The pid is
+        // our own child, not yet reaped, so the OS cannot have recycled
+        // it. `pid > 1` keeps a bogus 0 (our whole process group) or 1
+        // (init) out of the call, as `add_project.rs` does.
+        Some(pid) if pid > 1 => unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        },
+        // No pid (already exited / unsupported), or an implausible one:
+        // fall back to SIGHUP.
+        _ => {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// On Windows portable-pty's `Child::kill()` is `TerminateProcess`: already a
+/// hard kill that gives `ssh.exe` no chance to relay anything down the pty,
+/// which is exactly what the Unix branch buys with SIGKILL.
+#[cfg(windows)]
+fn kill_hard(child: &mut dyn portable_pty::Child) {
+    let _ = child.kill();
 }
 
 /// Reap a killed child. Teardown runs from Tauri's async runtime, so the
@@ -335,10 +396,16 @@ pub(crate) fn remote_attach_script(session_name: &str) -> String {
 /// word; otherwise the remote bash receives `LANG=...` as its -c argument and
 /// never runs tmux attach. (Same fix shape as RemoteTmux::remote_bash.)
 pub(crate) fn attach_argv(
+    ssh_bin: &str,
     host_alias: &str,
     session_name: &str,
     mux_opts: &[String],
 ) -> Vec<String> {
+    // A WSL distribution on this machine: the same attach script, run by
+    // `wsl.exe` instead of carried by `ssh -tt` (see `fleet_core::wsl`).
+    if let Some(distro) = fleet_core::wsl::distro_for(host_alias) {
+        return fleet_core::wsl::attach_argv(&distro, &remote_attach_script(session_name));
+    }
     if host_alias == "local" {
         return vec![
             "tmux".into(),
@@ -348,7 +415,10 @@ pub(crate) fn attach_argv(
         ];
     }
     let mut argv: Vec<String> = vec![
-        "ssh".into(),
+        // The same program every probe runs (`SshClient::ssh_binary`): on
+        // Windows the system OpenSSH, not whichever of Git's, MSYS2's or
+        // Cygwin's comes first on PATH.
+        ssh_bin.into(),
         "-tt".into(),
         // `-tt` allocates a tty, which turns ON ssh's own `~` escape
         // character. A `~` typed as the first character of a line (or in a
@@ -384,7 +454,9 @@ pub(crate) fn attach_argv(
 /// otherwise [`SshClient::mux_opts_for_pty`] — the terminal's own
 /// ControlPath and a gentler keepalive, so a probe's master reset (a
 /// DIFFERENT ssh call, on the DIFFERENT `cm-<host>.sock`) never takes the
-/// user's attached terminal down with it.
+/// user's attached terminal down with it. Where ssh cannot multiplex
+/// (Windows) there is no ControlPath at all: the attach is its own
+/// connection.
 pub(crate) fn attach_mux_opts(ssh: &SshClient, host: &str) -> Vec<String> {
     if host == "local" {
         Vec::new()
@@ -524,7 +596,12 @@ pub fn pty_open(
         .map_err(|e| IpcError::new(codes::E_PTY, format!("openpty: {e}")))?;
 
     let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
-    let argv = attach_argv(&args.host_alias, &args.session_name, &mux_opts);
+    let argv = attach_argv(
+        &ssh.ssh_binary().to_string_lossy(),
+        &args.host_alias,
+        &args.session_name,
+        &mux_opts,
+    );
     let mut cmd = CommandBuilder::new(&argv[0]);
     cmd.args(&argv[1..]);
     for (k, v) in attach_env(|k| std::env::var(k).ok()) {
@@ -631,9 +708,12 @@ pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, Ip
 /// session's bytes land in front of the new session's first output".
 fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
     let (raw, overflowed, eof) = {
-        let s = state
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut s = state
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
+        #[cfg(windows)]
+        s.poll_child_exit(CHILD_EXIT_GRACE);
         let exited = s.shared.exited.load(Ordering::Acquire);
         let mut buf = s
             .shared
@@ -797,14 +877,24 @@ mod tests {
         // `=` disables tmux's prefix / fnmatch lookup: attaching to a dead
         // `dev-foo` must fail, not land in `dev-foo--feat-x`.
         assert_eq!(
-            attach_argv("local", "dev-foo", &mux()),
+            attach_argv("ssh", "local", "dev-foo", &mux()),
             vec!["tmux", "attach", "-t", "=dev-foo"]
         );
     }
 
+    /// The attach runs the program every probe runs, not a bare `ssh` a
+    /// Windows PATH may resolve to Git's or Cygwin's.
+    #[test]
+    fn remote_attach_runs_the_configured_ssh_binary() {
+        let bin = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        let argv = attach_argv(bin, "hetzner", "dev-foo", &[]);
+        assert_eq!(argv[0], bin);
+        assert_eq!(argv[1], "-tt");
+    }
+
     #[test]
     fn remote_attach_reuses_mux_opts_and_ends_option_parsing_before_the_host() {
-        let argv = attach_argv("hetzner", "dev-foo", &mux());
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &mux());
         assert_eq!(
             &argv[..6],
             [
@@ -827,7 +917,7 @@ mod tests {
         // (~75s) with a blank pane before the UI can explain itself. It
         // bounds only the INITIAL connect, never the attached session, and a
         // reused ControlMaster connection skips it entirely.
-        let argv = attach_argv("hetzner", "dev-foo", &[]);
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &[]);
         let at = argv
             .iter()
             .position(|a| a == "ConnectTimeout=10")
@@ -835,7 +925,7 @@ mod tests {
         assert_eq!(argv[at - 1], "-o");
         assert!(at < argv.iter().position(|a| a == "--").unwrap());
         // A local attach runs tmux directly — no ssh, nothing to bound.
-        assert!(!attach_argv("local", "dev-foo", &[])
+        assert!(!attach_argv("ssh", "local", "dev-foo", &[])
             .iter()
             .any(|a| a.contains("ConnectTimeout")));
     }
@@ -845,12 +935,12 @@ mod tests {
         // With a tty (`-tt`) ssh enables its `~` escape: a `~` typed first on
         // a line is eaten by the LOCAL ssh client, and `~.` tears the attach
         // down. The pane must see both characters instead.
-        let argv = attach_argv("hetzner", "dev-foo", &[]);
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &[]);
         let esc = argv.iter().position(|a| a == "EscapeChar=none").unwrap();
         assert_eq!(argv[esc - 1], "-o");
         assert!(esc < argv.iter().position(|a| a == "--").unwrap());
         // Local attaches run tmux directly — no ssh, nothing to disable.
-        assert!(!attach_argv("local", "dev-foo", &[])
+        assert!(!attach_argv("ssh", "local", "dev-foo", &[])
             .iter()
             .any(|a| a.contains("EscapeChar")));
     }
@@ -864,7 +954,7 @@ mod tests {
             eprintln!("SKIP remote_script_is_one_quoted_word_that_unquotes_to_the_attach_command: bash not on PATH");
             return;
         }
-        let argv = attach_argv("hetzner", "dev-foo", &mux());
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &mux());
         let script = argv.last().unwrap();
         let out = std::process::Command::new("bash")
             .args(["-c", &format!("printf %s {script}")])
@@ -895,7 +985,7 @@ mod tests {
             eprintln!("SKIP remote_script_neutralises_a_hostile_session_name: bash not on PATH");
             return;
         }
-        let argv = attach_argv("h", "x'; rm -rf / #", &[]);
+        let argv = attach_argv("ssh", "h", "x'; rm -rf / #", &[]);
         let out = std::process::Command::new("bash")
             .args(["-c", &format!("printf %s {}", argv.last().unwrap())])
             .output()
@@ -905,12 +995,22 @@ mod tests {
 
     #[test]
     fn attach_mux_opts_gives_local_nothing_and_remote_the_pty_socket() {
-        assert!(attach_mux_opts(&SshClient::new(), "local").is_empty());
-        let opts = attach_mux_opts(&SshClient::new(), "h").join(" ");
+        let ssh = SshClient::new_with_mux(true);
+        assert!(attach_mux_opts(&ssh, "local").is_empty());
+        let opts = attach_mux_opts(&ssh, "h").join(" ");
         assert!(
             opts.contains("cm-h-tty.sock"),
             "attach must use its own ControlPath, not the probe's: {opts}"
         );
+    }
+
+    /// Windows: `ssh.exe` has no ControlMaster, so the attach is its own
+    /// connection with no control socket, and keeps the gentler keepalive.
+    #[test]
+    fn attach_without_mux_has_no_control_socket() {
+        let opts = attach_mux_opts(&SshClient::new_with_mux(false), "h").join(" ");
+        assert!(!opts.contains("Control"), "{opts}");
+        assert!(opts.contains("ServerAliveInterval=15"), "{opts}");
     }
 
     // ---- environment ----
@@ -1293,15 +1393,29 @@ mod tests {
 
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &self.0.to_string()])
-                .status();
+            if let Some(p) = process(self.0).process(sysinfo::Pid::from_u32(self.0)) {
+                p.kill();
+            }
         }
+    }
+
+    /// A process table refreshed for `pid` alone. Through sysinfo rather than
+    /// `kill -0` so the same check holds on Windows, where a pid is not a
+    /// POSIX pid and Git's `kill` cannot see it.
+    fn process(pid: u32) -> sysinfo::System {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys
     }
 
     /// `alive` with a deadline. Teardown signals the child while the caller
     /// waits, but reaping finishes on a detached thread once the inline budget
-    /// is spent (`PTY_REAP_INLINE`), and `kill -0` still succeeds for a zombie.
+    /// is spent (`PTY_REAP_INLINE`), and a zombie is still in the table.
     /// "Gone" is therefore eventually-true; how fast depends on the machine,
     /// which is what made this flaky on the macOS runner.
     fn died(pid: u32) -> bool {
@@ -1315,12 +1429,10 @@ mod tests {
         false
     }
 
+    /// Whether `pid` is still in the process table, a zombie included: only
+    /// a reaped child counts as gone, as with `kill -0`.
     fn alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        process(pid).process(sysinfo::Pid::from_u32(pid)).is_some()
     }
 
     #[test]
@@ -1353,6 +1465,88 @@ mod tests {
         assert!(died(pid2));
         assert!(!state.lock().unwrap().is_open());
         assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
+    }
+
+    /// The Windows EOF path, driven directly: a child that has exited is
+    /// reported only after the grace, once, with the reader never involved.
+    #[test]
+    fn a_child_gone_past_the_grace_is_reported_as_exited() {
+        let pair = match native_pty_system().openpty(clamp_size(80, 24)) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("SKIP: openpty unavailable here: {e}");
+                return;
+            }
+        };
+        let program = if cfg!(windows) { "cmd" } else { "sh" };
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(if cfg!(windows) {
+            ["/C", "exit 0"]
+        } else {
+            ["-c", "exit 0"]
+        });
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        let writer = pair.master.take_writer().expect("writer");
+        let shared = Arc::new(PtyShared::new());
+        let input_tx = spawn_writer(writer, Arc::clone(&shared));
+        // Play the terminal the way production does, minus the reader's own
+        // `exited`: read the output, and answer a cursor-position query.
+        // ConPTY (portable-pty opens it with PSEUDOCONSOLE_INHERIT_CURSOR)
+        // asks `ESC[6n` as it starts and holds the child until it gets an
+        // answer — in the app, `ansi.ts` gives it through `pty_write`; an
+        // unread pseudo console blocks the child as well.
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let reply = input_tx.clone();
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 4096];
+            while let Ok(n @ 1..) = reader.read(&mut sink) {
+                if sink[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                    let _ = reply.try_send(b"\x1b[1;1R".to_vec());
+                }
+            }
+        });
+        let state = Mutex::new(PtyState::new());
+        let previous =
+            state
+                .lock()
+                .unwrap()
+                .install(pair.master, input_tx, child, Arc::clone(&shared));
+        previous.teardown();
+
+        // Not yet: a long grace keeps it open however soon the child ends.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            state
+                .lock()
+                .unwrap()
+                .poll_child_exit(Duration::from_secs(3600));
+            if state.lock().unwrap().child_gone_at.is_some() || Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            state.lock().unwrap().child_gone_at.is_some(),
+            "the child ended"
+        );
+        assert!(
+            !shared.exited.load(Ordering::Acquire),
+            "still inside the grace"
+        );
+
+        state.lock().unwrap().poll_child_exit(Duration::ZERO);
+        assert!(shared.exited.load(Ordering::Acquire));
+        let text = String::from_utf8_lossy(&shared.buffer.lock().unwrap().bytes).into_owned();
+        assert_eq!(text.matches("[cf] ssh exited").count(), 1, "{text}");
+        state.lock().unwrap().poll_child_exit(Duration::ZERO);
+        let text = String::from_utf8_lossy(&shared.buffer.lock().unwrap().bytes).into_owned();
+        assert_eq!(
+            text.matches("[cf] ssh exited").count(),
+            1,
+            "noted once: {text}"
+        );
+
+        close_pty(&state);
     }
 
     #[test]

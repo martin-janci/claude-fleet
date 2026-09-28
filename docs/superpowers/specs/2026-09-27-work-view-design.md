@@ -453,9 +453,10 @@ this design's.
   resync ends with a desktop-only `work:changed { what: "resync" }` —
   emitted only when the hub answered the re-list — which the Work view
   reads as "reload whole"; a hub never sends it. `SessionRow.work_rev`
-  (*Events* above) was not built by #342 or #345; it is now (2026-09-28):
+  (*Events* above) was lost in the #343 merge and restored (cc07d36):
   computed in SQL with the row (`SESSION_COLUMNS` in `store/rows.rs`) as
-  the sum of `id * 1000003 + version` over the session's live links, so a
+  the sum of `version * 1000003 + id` over the session's live links (`0`,
+  omitted on the wire, when there is none), so a
   link added, ended, removed, confirmed, rejected, made primary or archived
   moves it (066's trigger bumps `version` on each); every link write
   already re-reads and emits the row. `OrgScope::redact_row` /
