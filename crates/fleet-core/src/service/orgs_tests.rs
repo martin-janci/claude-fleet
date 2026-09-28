@@ -57,6 +57,7 @@ fn summary(org: Option<i64>) -> WorkSummary {
         key: Some("ABC-1".into()),
         title: "Secret title".into(),
         source: "manual".into(),
+        kind: String::new(),
         status_category: None,
         status_name: None,
         url: None,

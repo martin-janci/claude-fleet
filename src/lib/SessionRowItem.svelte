@@ -276,15 +276,22 @@
   }
 
   // ── "Name this work…" (work graph M11.1): work with a title and no
-  // ticket. A local item's title can be renamed from here too: an item with
-  // no tracker status is local (the backend refuses a ticket anyway).
+  // ticket. A local item's title can be renamed from here too (the backend
+  // refuses a ticket anyway). `kind` is the reliable signal (native item
+  // status task 4): a local item now carries a real `status_category` too,
+  // so "is it absent?" no longer means "not a ticket". A hub older than
+  // `kind` sends none — fall back to the old heuristic for it, since such a
+  // hub still hides a local item's status the old way.
   let nameDialog = $state<
     | { mode: 'name'; sessions: { id: number; label: string }[] }
     | { mode: 'rename'; itemId: number; title: string; key?: string | null }
     | null
   >(null);
   const localItem = $derived(
-    sess.work?.item_id != null && sess.work.status_category == null && !sess.work.url
+    sess.work?.item_id != null &&
+      (sess.work.kind
+        ? sess.work.kind === 'local'
+        : sess.work.status_category == null && !sess.work.url)
       ? { itemId: sess.work.item_id, title: sess.work.title, key: sess.work.key ?? null }
       : null,
   );

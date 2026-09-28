@@ -338,8 +338,11 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
                          'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
                          'source', l.source, \
-                         'status_category', \
-                           CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'kind', \
+                           CASE WHEN i.id IS NULL THEN 'ref' \
+                                WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                                ELSE 'local' END, \
+                         'status_category', i.status_category, \
                          'status_name', i.status_name, 'url', i.url, \
                          'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
                                                   THEN 'true' ELSE 'false' END), \
@@ -364,8 +367,11 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                          'rule', l.rule, \
                          'preselected', json(CASE WHEN l.preselected = 1 \
                                                   THEN 'true' ELSE 'false' END), \
-                         'status_category', \
-                           CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'kind', \
+                           CASE WHEN i.id IS NULL THEN 'ref' \
+                                WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                                ELSE 'local' END, \
+                         'status_category', i.status_category, \
                          'status_name', i.status_name, 'url', i.url, \
                          'suggestions', (SELECT COUNT(*) FROM work_links s2 \
                                           WHERE s2.participant_id = p.id \

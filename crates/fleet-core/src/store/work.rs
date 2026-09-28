@@ -287,8 +287,17 @@ pub struct WorkSummary {
     #[serde(default)]
     pub title: String,
     pub source: String,
-    // --- the tracker item's status (work graph M3), absent for a bare key,
-    // a local item, or a hub older than M3.
+    /// `tracker` | `local` | `ref` (native item status, task 4): which kind
+    /// of task this is, the same vocabulary as `WorkTask.kind`. Empty for a
+    /// hub older than this column — a client must not read that as `ref`;
+    /// see `status_category` below for what changed here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    // --- the item's status (work graph M3; native item status task 4 lifts
+    // the old restriction to tracker items only — a local item's real
+    // status shows too, so `kind`, not "is `status_category` absent?", is
+    // now how a client tells a local item from a tracker item). Absent for
+    // a bare key (no item at all), or a hub older than M3.
     /// todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_category: Option<String>,
@@ -2056,6 +2065,11 @@ mod tests {
                 key: Some("ABC-9".into()),
                 title: "Login".into(),
                 source: "manual".into(),
+                kind: "local".into(),
+                // A local item's own status now shows too (native item
+                // status task 4): `create_local_work_item` leaves it
+                // `todo`, `status_set_by` NULL.
+                status_category: Some("todo".into()),
                 state: "confirmed".into(),
                 strength: Some("explicit".into()),
                 ..Default::default()

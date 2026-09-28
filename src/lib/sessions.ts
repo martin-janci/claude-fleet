@@ -159,8 +159,14 @@ export interface SessionWork {
   title: string;
   /** `manual` | `started` | `agent` | `agent_started` … — tolerant: a newer hub may add more. */
   source: string;
-  /** The tracker item's status (work graph M3); absent for a bare key, a
-   *  local item, or a hub older than M3. `todo` | `in_progress` | `done`. */
+  /** `tracker` | `local` | `ref` (native item status): which kind of task
+   *  this is. Empty for a hub older than this field — do not read that as
+   *  `ref`. Use this, not "is `status_category` absent?", to tell a local
+   *  item from a tracker item: a local item now carries a real status too. */
+  kind?: string;
+  /** The item's status (work graph M3; a local item's own status shows
+   *  too as of native item status task 4). Absent for a bare key (no item
+   *  at all), or a hub older than M3. `todo` | `in_progress` | `done`. */
   status_category?: string | null;
   /** The tracker's own status name ("In Review"). */
   status_name?: string | null;
