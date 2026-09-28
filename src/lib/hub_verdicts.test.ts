@@ -74,6 +74,7 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 //   set_secret  -> catalog_set_secret — same as apply_sync
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
   'repo_write',
+  'fleet_settings',
   'host_tokens',
   'apply_sync',
   'set_secret',
@@ -166,14 +167,9 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // paired desktop's resource read-only, with no Add, so no flow starts.
   gatedByReadonlyResourcePage: ['flow_start', 'flow_submit', 'flow_back', 'flow_cancel'],
   gatedBySettingsDialog: [
-    'set_fleet_setting',
-    // Declarative pages P5: proposals and history are read only when the
-    // app owns the fleet (SettingsDialog's own gate); a paired desktop's
-    // pages show the hub reason and render no suggestion or History.
-    'setting_proposals',
-    'decide_setting_proposals',
-    'setting_history',
-    'describe_fleet_settings',
+    // (The settings themselves, their proposals and history route to the
+    // hub since declarative pages P6.) A page's data sources read this
+    // app's store: a paired desktop's pages show no data item.
     'fetch_page_source',
     // No view calls it since P5 (the page reads `work.retention` instead);
     // it stays a command for work_admin's status on a standalone desktop.

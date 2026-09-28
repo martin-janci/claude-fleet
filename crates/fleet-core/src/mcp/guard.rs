@@ -52,6 +52,33 @@ pub enum Access {
     /// (send / kill / new_session across hosts stay allowed by design), not
     /// fleet admin.
     Client,
+    /// Reachable by the master and by a PERSON's own paired device: a paired
+    /// client bound to no org (the desktop paired with `fleet-hub pair`, a
+    /// phone). Never a per-host token — its Claude is fenced to its host's
+    /// org, and these tools are fleet-wide — nor a client bound to an org
+    /// (M14). The fleet's settings (declarative pages P6): what the hub's
+    /// GC, playbooks and limits do to the sessions that device shows. A
+    /// write needs more than this row; see `set_setting`.
+    Person,
+    /// [`Access::Person`], but not served to the master: the operator has
+    /// `fleet-hub settings` on the hub machine, and every byte of the
+    /// master's tool surface is budgeted
+    /// (`the_served_definition_budget_stays_bounded`). The desktop's own
+    /// commands, under their own names (`setting_proposals`, …).
+    PersonDevice,
+}
+
+/// Whether `caller` may call `tool` by its row's [`Access`] — the one
+/// predicate the call gate (`enforce_admin`) and the served list
+/// (`visible_to`) share. A tool with no row is the master's alone (fail
+/// closed).
+pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
+    match policy(tool).map(|p| p.access) {
+        Some(Access::Client) => true,
+        Some(Access::Person) => caller.is_master() || caller.is_person_device(),
+        Some(Access::PersonDevice) => caller.is_person_device(),
+        Some(Access::Master) | None => caller.is_master(),
+    }
 }
 
 /// Wall-clock class a tool call is bounded to. The caps themselves
@@ -224,20 +251,57 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     // Operator settings: the values name hosts and their projects roots, and
-    // a write retunes the GC sweeper and auto-tidy for the whole fleet, so
-    // both are fleet admin. The read is `readonly: true` for the reason
-    // `list_clients` is: WHO may call it is a separate question.
+    // a write retunes the GC sweeper and auto-tidy for the whole fleet. Since
+    // declarative pages P6 a person's own paired device reads them too (they
+    // decide what the hub does to the sessions it shows), and writes them
+    // when the operator trusts it (`fleet-hub client trust`); a per-host
+    // token and an org-bound client never reach them.
     ToolPolicy {
         name: "get_settings",
-        access: Access::Master,
+        access: Access::Person,
         readonly: true,
         confirm: false,
         deadline: Deadline::Quick,
     },
     ToolPolicy {
         name: "set_setting",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Declarative pages P6: a paired desktop's settings review, under the
+    // desktop commands' own names. Not served to the master (it has
+    // `fleet-hub settings`); the decision is a write, so a readonly device
+    // may list and read history but not decide, and deciding also needs a
+    // trusted client (checked in the tool, like `set_setting`'s write).
+    ToolPolicy {
+        name: "setting_proposals",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "setting_history",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "decide_setting_proposals",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // The page specs, for a phone that renders them (P6). Compiled into the
+    // hub like the desktop: the same answer for everyone who may see pages.
+    ToolPolicy {
+        name: "list_pages",
+        access: Access::PersonDevice,
+        readonly: true,
         confirm: false,
         deadline: Deadline::Quick,
     },

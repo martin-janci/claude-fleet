@@ -215,8 +215,10 @@ const REASONS = {
   mcp_status: 'this app runs no embedded control API while a hub owns the fleet',
   catalog_config:
     'the asset catalog is a git checkout on the machine that owns the fleet; the hub serves its asset list to any paired client (list_assets), but not the configuration and checkout this panel is built on',
-  get_fleet_settings:
-    'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; the hub’s master token reads and changes them (get_settings, set_setting)',
+  // Not a command: the fleet's settings route to the hub (declarative pages
+  // P6); this is what a paired desktop says when the hub serves them none.
+  fleet_settings:
+    'the hub did not serve its settings to this device — a hub older than this app, or a device bound to one organisation, reads none; the hub’s operator changes them with fleet-hub settings or set_setting',
   list_account_usage:
     'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:

@@ -11,7 +11,7 @@
     settingValues,
   } from './pages/pages';
   import { subscribeToRowEvents } from './events';
-  import { loadProposals, settingProposals } from './pages/review';
+  import { loadProposals, settingProposals, settingsWritable } from './pages/review';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
@@ -162,6 +162,13 @@
   let view = $state('general');
   let focusKey = $state<string | null>(null);
   let settingsLoadError: string | null = $state(null);
+  // Declarative pages P6: on a paired desktop the pages are the hub's
+  // settings, read (and, when the hub's operator trusts this device,
+  // written) through it. `off` until they load; a refusal keeps the reason.
+  let hubPages = $state<'off' | 'loading' | 'ok'>('off');
+  let hubPagesError = $state<string | null>(null);
+  /** The generated pages have the fleet's settings to show here. */
+  const pagesHere = $derived(ownsFleet || hubPages === 'ok');
   const currentPage = $derived($pagesBundle.pages.find((p) => p.id === view));
 
   function select(next: string, key?: string) {
@@ -195,15 +202,45 @@
     });
   });
 
+  async function subscribeSettings() {
+    // A write, a proposal or a review: re-read the values and what waits.
+    const off = await subscribeToRowEvents({
+      onSettingsChanged: () => {
+        void loadFleetSettings();
+        void loadProposals();
+      },
+    });
+    if (destroyed) off();
+    else unlistenSettings = off;
+  }
+
+  /** A paired desktop: the hub's settings, proposals and whether this
+   *  device may change them. A hub that refuses (older, or this device is
+   *  bound to one org) leaves the pages on its reason. */
+  async function loadHubPages() {
+    hubPages = 'loading';
+    const [fs, ds] = await Promise.all([loadFleetSettings(), loadDescriptors(), loadProposals()]);
+    const failed = !ds.ok ? ds : !fs.ok ? fs : null;
+    if (failed && !failed.ok) {
+      hubPages = 'off';
+      hubPagesError = failed.error.message;
+      return;
+    }
+    hubPages = 'ok';
+    resetProjectDrafts();
+    await subscribeSettings();
+  }
+
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
     // The page specs are compiled in: the same list whether or not a hub
     // owns the fleet, so the nav shows it either way.
     void loadPages();
     if (!ownsTheFleet($hubStatus)) {
-      // Neither of these applies to a hub client, and both are guarded on
-      // the backend. Asking anyway would put two error toasts on the screen
-      // every time Settings is opened.
+      // The control API and the stranded-token check do not apply to a hub
+      // client, and both are guarded on the backend. The settings do: a
+      // connected hub serves them (P6).
+      if ($hubStatus.remote) await loadHubPages();
       return;
     }
     const r = await mcpStatus();
@@ -215,15 +252,7 @@
     if (!fs.ok) settingsLoadError = fs.error.message;
     else if (!ds.ok) settingsLoadError = ds.error.message;
     resetProjectDrafts();
-    // A write, a proposal or a review: re-read the values and what waits.
-    const off = await subscribeToRowEvents({
-      onSettingsChanged: () => {
-        void loadFleetSettings();
-        void loadProposals();
-      },
-    });
-    if (destroyed) off();
-    else unlistenSettings = off;
+    await subscribeSettings();
     // Last, and only standalone: on macOS this reads the keychain, which is
     // the one call here that can block on a locked one. Nothing else on this
     // screen waits for it, and with a hub configured there is nothing to ask
@@ -357,8 +386,8 @@
       descs={$descriptors}
       values={$settingValues}
       selected={view}
-      counts={ownsFleet ? { 'settings.review': $settingProposals.length } : {}}
-      canWrite={ownsFleet}
+      counts={pagesHere ? { 'settings.review': $settingProposals.length } : {}}
+      canWrite={pagesHere && $settingsWritable}
       onselect={select} />
     <div class="settings-content">
     {#if view === 'general'}
@@ -554,9 +583,17 @@
     {#if !ownsFleet}
       <section class="block" data-testid="projects-remote-section">
         <div class="section-header"><h4>Projects</h4></div>
-        <p class="hook-desc" data-testid="projects-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)}
-        </p>
+        {#if pagesHere}
+          <p class="hook-desc" data-testid="projects-remote">
+            The hub’s projects roots and layout are on the
+            <button type="button" class="link-btn" data-testid="projects-remote-open" onclick={() => select('settings.projects')}>Projects page</button>;
+            a rescan runs on the hub.
+          </p>
+        {:else}
+          <p class="hook-desc" data-testid="projects-remote">
+            {hubBlock('fleet_settings', $hubStatus)}
+          </p>
+        {/if}
       </section>
     {:else}
     <section class="block" data-testid="projects-section">
@@ -805,15 +842,32 @@
             reason={res?.update ? hubBlock(res.update.command as HubAction, $hubStatus) : null}
             onnavigate={(id) => select(id)} />
         {/key}
-      {:else if !ownsFleet}
+      {:else if !pagesHere}
         <section class="block" data-testid="pages-remote">
           <div class="section-header"><h4>{currentPage.title}</h4></div>
-          <p class="hook-desc">{hubBlock('get_fleet_settings', $hubStatus)}</p>
+          {#if hubPages === 'loading'}
+            <p class="hook-desc">Reading the hub’s settings…</p>
+          {:else}
+            <p class="hook-desc">{hubBlock('fleet_settings', $hubStatus)}</p>
+            {#if hubPagesError}<p class="hook-desc" data-testid="pages-remote-error">The hub answered: {hubPagesError}</p>{/if}
+          {/if}
         </section>
       {:else}
         {#if settingsLoadError}<p class="err" role="alert" data-testid="settings-load-error">{settingsLoadError}</p>{/if}
+        {#if !ownsFleet}
+          <!-- P6: one line, not a refusal per section. -->
+          <p class="hook-desc hub-scope" data-testid="hub-scope-note">
+            The fleet’s settings are the hub’s: read from and written to {$hubStatus.url ?? 'the hub'}{#if $hubStatus.client_name} (paired as {$hubStatus.client_name}){/if}.
+            {#if !$settingsWritable}
+              <span data-testid="hub-scope-readonly">This device reads them. To change them here, the hub’s operator trusts it:
+                <code>fleet-hub client trust {$hubStatus.client_name ?? '<name>'}</code>.</span>
+            {/if}
+          </p>
+        {/if}
         {#key currentPage.id}
           <PageView
+            readonly={!ownsFleet && !$settingsWritable}
+            remote={!ownsFleet}
             page={currentPage}
             pages={$pagesBundle.pages}
             descs={$descriptors}
@@ -937,4 +991,16 @@
     color: var(--text-secondary, #888);
   }
 
+  .hub-scope {
+    margin: 0 0 0.6rem;
+  }
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+  }
 </style>

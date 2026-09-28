@@ -645,6 +645,21 @@ Index by area (names only; see the reference for details):
   already has is `E_INVALID`; a newer proposal for a key replaces its
   pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
   500 characters and shown to the person as written.
+  **Who** (declarative pages P6): the master token, and a person's own
+  paired device — a client bound to no org, such as the desktop paired with
+  a hub or a phone — reach `get_settings` and `set_setting`; a per-host token
+  and an org-bound client never do (the settings are the whole fleet's). A
+  device of either mode reads; a `full` device proposes; only a device the
+  operator **trusts** (`fleet-hub client trust <name>`) writes directly and
+  decides proposals, and its writes are audited as `person` with `client
+  <name>`. The UX agent's operator client is an agent: it proposes only.
+  Four more tools are served to a paired device and not to the master (who
+  has `fleet-hub settings` on the hub machine, and whose tool list is
+  budgeted): `setting_proposals` (pending, each with the key's value now,
+  and `can_write` for this device), `setting_history` (`key`, `limit`),
+  `decide_setting_proposals` (`accept`, `reject`; trusted only) and
+  `list_pages` (the page specs, data source shapes, resources and page
+  actions a device renders).
 
   The ticks and sweeps read their settings every pass, so a change takes
   effect on the next one. On a hub, this is how `reports.*` and `work.*`,

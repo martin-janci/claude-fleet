@@ -67,7 +67,7 @@ beforeEach(() => {
         decided.push(a);
         return { applied: a.accept.filter((id) => id !== 99), rejected: a.reject, failed: a.accept.includes(99) ? [{ id: 99, error: 'no longer waiting for review' }] : [] };
       }
-      if (cmd === 'setting_proposals') return [];
+      if (cmd === 'setting_proposals') return { can_write: true, proposals: [] };
       if (cmd === 'setting_history')
         return [
           { id: 2, at: NOW - 60, key: 'work.recent_days', before: '14', after: '3', actor: 'person', proposal_id: 1 },

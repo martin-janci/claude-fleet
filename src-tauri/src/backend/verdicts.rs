@@ -598,18 +598,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "get_fleet_settings",
-        Verdict::LocalOnly {
-            instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; read them on the \
-                      hub with get_settings (master token)",
+        Verdict::Routed {
+            tool: "get_settings",
         },
     ),
     (
         "describe_fleet_settings",
-        Verdict::LocalOnly {
-            instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; describe them on \
-                      the hub with get_settings describe (master token)",
+        Verdict::Routed {
+            tool: "get_settings",
         },
     ),
     (
@@ -657,31 +653,26 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "setting_proposals",
-        Verdict::LocalOnly {
-            instead: "settings proposals and their history belong to the fleet's settings, \
-                      which the hub owns; review them on the hub with fleet-hub settings proposals",
+        Verdict::Routed {
+            tool: "setting_proposals",
         },
     ),
     (
         "decide_setting_proposals",
-        Verdict::LocalOnly {
-            instead: "settings proposals and their history belong to the fleet's settings, \
-                      which the hub owns; review them on the hub with fleet-hub settings proposals",
+        Verdict::Routed {
+            tool: "decide_setting_proposals",
         },
     ),
     (
         "setting_history",
-        Verdict::LocalOnly {
-            instead: "settings proposals and their history belong to the fleet's settings, \
-                      which the hub owns; read a setting's history on the hub with fleet-hub settings history <key>",
+        Verdict::Routed {
+            tool: "setting_history",
         },
     ),
     (
         "set_fleet_setting",
-        Verdict::LocalOnly {
-            instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; change them on \
-                      the hub with set_setting (master token)",
+        Verdict::Routed {
+            tool: "set_setting",
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),

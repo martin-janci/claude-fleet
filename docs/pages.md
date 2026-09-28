@@ -270,6 +270,20 @@ To add a resource:
 4. Add its store reloaders to `RESOURCE_RELOADERS` in
    `src/lib/pages/resources.ts` when other views keep a copy.
 
+### On a paired desktop (P6)
+
+A desktop paired with a hub shows the **hub's** settings on the same pages:
+`describe_fleet_settings`, `get_fleet_settings`, `set_fleet_setting`, the
+proposals and a field's History all route to the hub. One line at the top
+of each page says so. A device the hub's operator trusts (`fleet-hub client
+trust <name>`) edits the fields and decides proposals; an untrusted one
+sees them read-only, with that command. Data items, page actions and
+custom components read or run on this app's own store, so a paired desktop
+shows none of them; a resource page (Trackers, Organisations) stays
+read-only with the hub's reason. A hub that serves no settings to the
+device (an older hub, or a device bound to one org) leaves the page on its
+reason and the hub's answer.
+
 ## Rules the validator enforces
 
 - Every registered setting is on exactly one page (`every_setting_has_one_home`),

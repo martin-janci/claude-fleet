@@ -35,6 +35,7 @@
     actions = [],
     focusKey = null,
     readonly = false,
+    remote = false,
     reason = null,
     proposals = [],
     onnavigate,
@@ -54,6 +55,10 @@
     focusKey?: string | null;
     /** Show every field without editing (a hub client). */
     readonly?: boolean;
+    /** A paired desktop (P6): the fields are the hub's, but data items,
+     *  page actions and custom components read or run on this app's own
+     *  store, so none is shown. */
+    remote?: boolean;
     /** Pending settings proposals (P5): a field shows its own inline, a
      *  review_apply page lists them all. */
     proposals?: SettingProposal[];
@@ -165,15 +170,15 @@
           >{item.label ?? titleOf(item.page)} →</button
         >
       {:else if item.type === 'custom'}
-        {#if readonly}
+        {#if readonly || remote}
           <!-- Custom components call local-only commands; nothing to show. -->
         {:else if item.component === 'auto_tidy_preview'}
           <AutoTidyPreview />
         {/if}
       {:else if item.type === 'action'}
         {@const action = actions.find((a) => a.id === item.action)}
-        {#if action && !readonly}<PageActionButton {action} onran={() => dataTick++} />{/if}
-      {:else if !readonly}
+        {#if action && !readonly && !remote}<PageActionButton {action} onran={() => dataTick++} />{/if}
+      {:else if !readonly && !remote}
         <DataItem {item} spec={sourceOf(item.source.id)} tick={dataTick} />
       {/if}
     {/each}

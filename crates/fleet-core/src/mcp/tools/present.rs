@@ -68,7 +68,7 @@ pub(super) fn visible_to(caller: &Caller, tool: &str) -> bool {
     if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
         return false;
     }
-    caller.is_master() || guard::is_client_tool(tool)
+    guard::access_allows(caller, tool)
 }
 
 /// MCP behaviour hints for one tool, from its policy row. Only the hint that

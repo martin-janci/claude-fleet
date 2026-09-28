@@ -26,6 +26,26 @@ pub mod validate;
 mod tests;
 
 pub use model::Page;
+
+/// Every page spec, data source shape, resource and page action: what
+/// `list_pages` answers on the desktop and the hub (P6, for a phone).
+/// Compiled in, so the same for every caller that may see pages.
+#[derive(Debug, serde::Serialize)]
+pub struct PagesBundle {
+    pub pages: &'static [Page],
+    pub sources: &'static [sources::SourceSpec],
+    pub resources: &'static [resources::ResourceType],
+    pub actions: &'static [actions::PageAction],
+}
+
+pub fn bundle() -> PagesBundle {
+    PagesBundle {
+        pages: all(),
+        sources: sources::SOURCES,
+        resources: resources::RESOURCES,
+        actions: actions::PAGE_ACTIONS,
+    }
+}
 use std::sync::OnceLock;
 
 /// Every page spec, by file name. A new file in `pages/` must be listed

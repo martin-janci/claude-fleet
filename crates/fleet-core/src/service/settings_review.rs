@@ -23,7 +23,7 @@ pub const HISTORY_MAX: i64 = 100;
 
 /// A pending proposal with the key's value now, which may have moved since
 /// it was proposed.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProposalView {
     #[serde(flatten)]
     pub row: SettingProposalRow,
@@ -31,14 +31,14 @@ pub struct ProposalView {
 }
 
 /// What one review did.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Decided {
     pub applied: Vec<i64>,
     pub rejected: Vec<i64>,
     pub failed: Vec<DecideFailure>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DecideFailure {
     pub id: i64,
     pub error: String,
@@ -122,6 +122,17 @@ pub fn pending(s: &Store) -> Result<Vec<ProposalView>, IpcError> {
 /// `reject`. Each is decided on its own: one that is no longer pending, or
 /// whose value is refused now, is reported in `failed` and the rest go on.
 pub fn decide(s: &Store, accept: &[i64], reject: &[i64]) -> Result<Decided, IpcError> {
+    decide_as(s, accept, reject, Actor::Person)
+}
+
+/// [`decide`] on behalf of `actor`: a person on a paired device is recorded
+/// as that device (declarative pages P6).
+pub fn decide_as(
+    s: &Store,
+    accept: &[i64],
+    reject: &[i64],
+    actor: Actor<'_>,
+) -> Result<Decided, IpcError> {
     if let Some(id) = accept.iter().find(|id| reject.contains(id)) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -137,9 +148,9 @@ pub fn decide(s: &Store, accept: &[i64], reject: &[i64]) -> Result<Decided, IpcE
             });
             continue;
         };
-        match settings::set_by(s, &row.key, &row.value, Actor::Person, Some(id)) {
+        match settings::set_by(s, &row.key, &row.value, actor, Some(id)) {
             Ok(()) => {
-                s.decide_setting_proposal(id, "applied", Actor::Person.word())?;
+                s.decide_setting_proposal(id, "applied", &decided_by(actor))?;
                 out.applied.push(id);
             }
             Err(e) => out.failed.push(DecideFailure {
@@ -150,7 +161,7 @@ pub fn decide(s: &Store, accept: &[i64], reject: &[i64]) -> Result<Decided, IpcE
     }
     for &id in reject {
         let row = s.setting_proposal(id)?;
-        if s.decide_setting_proposal(id, "rejected", Actor::Person.word())? {
+        if s.decide_setting_proposal(id, "rejected", &decided_by(actor))? {
             if let Some(row) = row {
                 s.emit_settings_changed(&row.key);
             }
@@ -163,6 +174,22 @@ pub fn decide(s: &Store, accept: &[i64], reject: &[i64]) -> Result<Decided, IpcE
         }
     }
     Ok(out)
+}
+
+/// `decided_by` for a proposal: the actor, with its detail when it has one.
+fn decided_by(actor: Actor<'_>) -> String {
+    match actor.detail() {
+        Some(d) => format!("{} ({d})", actor.word()),
+        None => actor.word().to_string(),
+    }
+}
+
+/// A caller's pending proposals and whether it may decide them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Pending {
+    /// This caller may apply and reject (and write settings directly).
+    pub can_write: bool,
+    pub proposals: Vec<ProposalView>,
 }
 
 /// A registered key's writes, newest first, at most `limit` (clamped to

@@ -47,6 +47,12 @@ Capture a session's terminal: the visible tmux pane, plus scrollback_lines of hi
 
 Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
+### `decide_setting_proposals`
+
+Apply or reject settings proposals by id, each on its own; a trusted device only.
+
+Parameters: `accept`, `reject`
+
 ### `delete_worktree`
 
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
@@ -91,7 +97,7 @@ Parameters: `host_alias`
 
 ### `get_settings`
 
-Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Master token or a paired device bound to no org.
 
 Parameters: `describe`
 
@@ -152,6 +158,10 @@ Registered hosts: reachability, claude/tmux versions, linked account.
 ### `list_layers`
 
 The catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app.
+
+### `list_pages`
+
+The settings page specs, data source shapes, resources and page actions a device renders.
 
 ### `list_peer_links`
 
@@ -477,9 +487,19 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 ### `set_setting`
 
-Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings, or with propose the proposal.
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master, or a trusted device. Returns the settings, or with propose the proposal.
 
 Parameters: `key`, `propose`, `value`, `why`
+
+### `setting_history`
+
+One setting's writes, newest first: who, before and after, the proposal applied.
+
+Parameters: `key`, `limit`
+
+### `setting_proposals`
+
+Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
 ### `spawn_review`
 

@@ -43,10 +43,25 @@ export interface SettingAudit {
 
 /** Pending proposals, oldest first. */
 export const settingProposals = writable<SettingProposal[]>([]);
+/** This app may change the fleet's settings and decide proposals: always
+ *  standalone; on a paired desktop, when the hub's operator trusts it
+ *  (declarative pages P6). */
+export const settingsWritable = writable<boolean>(true);
 
-export async function loadProposals(): Promise<Result<SettingProposal[]>> {
-  const r = await invokeCmd<SettingProposal[]>('setting_proposals');
-  if (r.ok && r.value) settingProposals.set(r.value);
+export interface Pending {
+  can_write: boolean;
+  proposals: SettingProposal[];
+}
+
+export async function loadProposals(): Promise<Result<Pending>> {
+  const r = await invokeCmd<Pending>('setting_proposals');
+  if (r.ok && r.value) {
+    settingProposals.set(r.value.proposals ?? []);
+    settingsWritable.set(r.value.can_write === true);
+  } else if (!r.ok) {
+    // A readonly device, or a hub that serves no review: read-only here.
+    settingsWritable.set(false);
+  }
   return r;
 }
 

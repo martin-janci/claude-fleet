@@ -561,6 +561,59 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Declarative pages P6: the fleet's settings are the hub's.
+        (
+            "get_fleet_settings",
+            "get_settings",
+            json!({}),
+            r#"{"gc.enabled":"true","work.recent_days":"7"}"#,
+            Box::new(|b, s, _| {
+                let m = block_on(commands::pages::routed::get_fleet_settings(b, s))?;
+                assert_eq!(m.get("gc.enabled").map(String::as_str), Some("true"));
+                Ok(())
+            }),
+        ),
+        (
+            "describe_fleet_settings",
+            "get_settings",
+            json!({ "describe": true }),
+            r#"[{"key":"work.recent_days","label":"Recent work","value":"7"}]"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::pages::routed::describe_fleet_settings(b, s))?;
+                assert_eq!(v[0]["value"], "7", "the hub's value, not this app's");
+                Ok(())
+            }),
+        ),
+        (
+            "setting_proposals",
+            "setting_proposals",
+            json!({}),
+            r#"{"can_write":false,"proposals":[{"id":4,"at":1,"key":"work.recent_days","value":"3","before":"14","source":"agent","state":"pending","current":"14"}]}"#,
+            Box::new(|b, s, _| {
+                let p = block_on(commands::pages::routed::setting_proposals(b, s))?;
+                assert!(
+                    !p.can_write,
+                    "the hub decides whether this device may write"
+                );
+                assert_eq!(p.proposals[0].row.id, 4);
+                Ok(())
+            }),
+        ),
+        (
+            "setting_history",
+            "setting_history",
+            json!({ "key": "work.recent_days", "limit": null }),
+            r#"[{"id":1,"at":1,"key":"work.recent_days","after":"3","actor":"person","actor_detail":"client laptop"}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::pages::routed::setting_history(
+                    b,
+                    s,
+                    "work.recent_days".into(),
+                    None,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_trackers",
             "work",
@@ -1206,6 +1259,37 @@ fn routed_mutation_cases() -> Vec<Case> {
     use fleet_core::service::worktrees::DeleteWorktreeArgs;
 
     vec![
+        // Declarative pages P6: a write the hub records as this device.
+        (
+            "set_fleet_setting",
+            "set_setting",
+            json!({ "key": "work.recent_days", "value": "3" }),
+            r#"{"work.recent_days":"3"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::pages::routed::set_fleet_setting(
+                    b,
+                    s,
+                    "work.recent_days".into(),
+                    "3".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_setting_proposals",
+            "decide_setting_proposals",
+            json!({ "accept": [4], "reject": [5] }),
+            r#"{"applied":[4],"rejected":[5],"failed":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::pages::routed::decide_setting_proposals(
+                    b,
+                    s,
+                    vec![4],
+                    vec![5],
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "send_prompt",
             "send_prompt",

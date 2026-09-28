@@ -118,6 +118,16 @@ impl Caller {
         self.client.is_some()
     }
 
+    /// True for a person's own paired device: a paired client bound to no
+    /// org, and not a hub link. The fleet-wide settings tools
+    /// ([`crate::mcp::guard::Access::Person`]) answer it; a per-host token or
+    /// an org-bound client is never one.
+    pub fn is_person_device(&self) -> bool {
+        self.host_alias.is_none()
+            && self.mode != TokenMode::Peer
+            && self.client.as_ref().is_some_and(|c| c.org_id.is_none())
+    }
+
     /// True for the UX agent's operator session: the paired client token
     /// `ensure_operator` mints under [`OPERATOR_CLIENT_NAME`]. Its session
     /// starts and kills always need a person's approval (work graph M9.7,

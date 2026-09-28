@@ -1,37 +1,24 @@
 //! Declarative pages (design
 //! `docs/superpowers/specs/2026-09-28-declarative-pages-design.md`, P3): the
-//! compiled-in page specs and the data sources they name. Logic lives in
-//! `fleet_core::pages`; the settings a page edits go through the existing
-//! `describe_fleet_settings` / `set_fleet_setting`.
+//! compiled-in page specs and the data sources they name, and the fleet's
+//! settings they edit (`describe_fleet_settings` / `set_fleet_setting`, the
+//! proposals and their history). Logic lives in `fleet_core::pages` and
+//! `fleet_core::service::settings{,_review}`.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{lock, IpcError};
-use fleet_core::pages::{self, resources, sources, Page};
+use fleet_core::pages::{self, sources};
+use fleet_core::service::settings_review;
 use fleet_core::store::Store;
-use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tauri::State;
-
-/// Every page spec and the declared shape of every data source, so the
-/// renderer can lay a page out and format a column before any data arrives.
-#[derive(Serialize)]
-pub struct PagesBundle {
-    pub pages: &'static [Page],
-    pub sources: &'static [sources::SourceSpec],
-    pub resources: &'static [resources::ResourceType],
-    pub actions: &'static [fleet_core::pages::actions::PageAction],
-}
 
 /// The page specs this build ships. Compiled into the binary, so the answer
 /// is the same whether or not the app is paired with a hub.
 #[tauri::command]
-pub fn list_pages() -> PagesBundle {
-    PagesBundle {
-        pages: pages::all(),
-        sources: sources::SOURCES,
-        resources: resources::RESOURCES,
-        actions: fleet_core::pages::actions::PAGE_ACTIONS,
-    }
+pub fn list_pages() -> pages::PagesBundle {
+    pages::bundle()
 }
 
 /// Run one data source with a page's literal parameters. `E_INVALID` for an
@@ -109,46 +96,173 @@ pub fn flow_cancel(flow_id: String, backend: State<'_, Arc<FleetBackend>>) -> Re
     Ok(())
 }
 
-// ── proposals and history (declarative pages P5, layout L6) ─────────────────
+// ── the fleet's settings (P1, P5; routed to the hub since P6) ───────────────
 //
-// An agent proposes a setting over the control API (`set_setting { propose:
-// true }`); a person reviews it here. Local-only like the settings they
-// change: on a paired desktop the hub owns them.
+// Typed key/value settings behind the generated pages (the registry in
+// `service::settings` owns keys, defaults and validation). On a paired
+// desktop they are the hub's: every command routes to the hub's tool, which
+// answers the master and a person's own paired device (a client bound to no
+// org); writing and deciding also need the operator to trust the device.
 
-/// Every pending settings proposal, with each key's value now.
+/// Every registered operator setting with its effective value.
 #[tauri::command]
-pub fn setting_proposals(
+pub async fn get_fleet_settings(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<Vec<fleet_core::service::settings_review::ProposalView>, IpcError> {
-    backend.refuse_local_only("setting_proposals")?;
-    let s = lock(&store)?;
-    fleet_core::service::settings_review::pending(&s)
+) -> Result<BTreeMap<String, String>, IpcError> {
+    routed::get_fleet_settings(&backend, &store).await
+}
+
+/// Every registered operator setting with its metadata (label, help, kind,
+/// bounds, unit, danger, restart, ai policy) and effective value, in display
+/// order: what a generated settings page renders. A JSON value on both paths,
+/// so the hub's answer passes through as it came.
+#[tauri::command]
+pub async fn describe_fleet_settings(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::describe_fleet_settings(&backend, &store).await
+}
+
+/// Validate and persist one operator setting as the person at this desktop.
+/// `E_INVALID` for an unknown key or a value of the wrong shape. Returns the
+/// full effective map so the page can re-render from one source of truth.
+#[tauri::command]
+pub async fn set_fleet_setting(
+    key: String,
+    value: String,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<BTreeMap<String, String>, IpcError> {
+    routed::set_fleet_setting(&backend, &store, key, value).await
+}
+
+/// Every pending settings proposal, with each key's value now, and whether
+/// this desktop may decide them (always, standalone).
+#[tauri::command]
+pub async fn setting_proposals(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<settings_review::Pending, IpcError> {
+    routed::setting_proposals(&backend, &store).await
 }
 
 /// A person's review: apply `accept`, reject `reject`. Each is decided on
 /// its own; what could not be is in `failed`.
 #[tauri::command]
-pub fn decide_setting_proposals(
+pub async fn decide_setting_proposals(
     accept: Vec<i64>,
     reject: Vec<i64>,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<fleet_core::service::settings_review::Decided, IpcError> {
-    backend.refuse_local_only("decide_setting_proposals")?;
-    let s = lock(&store)?;
-    fleet_core::service::settings_review::decide(&s, &accept, &reject)
+) -> Result<settings_review::Decided, IpcError> {
+    routed::decide_setting_proposals(&backend, &store, accept, reject).await
 }
 
 /// One setting's writes, newest first: who, when, before → after.
 #[tauri::command]
-pub fn setting_history(
+pub async fn setting_history(
     key: String,
     limit: Option<i64>,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<fleet_core::store::SettingAuditRow>, IpcError> {
-    backend.refuse_local_only("setting_history")?;
-    let s = lock(&store)?;
-    fleet_core::service::settings_review::history(&s, &key, limit)
+    routed::setting_history(&backend, &store, key, limit).await
+}
+
+pub(crate) mod routed {
+    use super::*;
+    use fleet_core::service::settings::{self, Actor};
+    use serde_json::json;
+
+    pub async fn get_fleet_settings(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<BTreeMap<String, String>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("get_fleet_settings", &json!({})).await,
+            None => Ok(settings::read_all(&*lock(store)?)),
+        }
+    }
+
+    pub async fn describe_fleet_settings(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("describe_fleet_settings", &json!({ "describe": true }))
+                    .await
+            }
+            None => serde_json::to_value(settings::describe(&*lock(store)?)).map_err(|e| {
+                IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string())
+            }),
+        }
+    }
+
+    pub async fn set_fleet_setting(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        key: String,
+        value: String,
+    ) -> Result<BTreeMap<String, String>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("set_fleet_setting", &json!({ "key": key, "value": value }))
+                    .await
+            }
+            None => {
+                let s = lock(store)?;
+                settings::set_by(&s, &key, &value, Actor::Person, None)?;
+                Ok(settings::read_all(&s))
+            }
+        }
+    }
+
+    pub async fn setting_proposals(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<settings_review::Pending, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("setting_proposals", &json!({})).await,
+            None => Ok(settings_review::Pending {
+                can_write: true,
+                proposals: settings_review::pending(&*lock(store)?)?,
+            }),
+        }
+    }
+
+    pub async fn decide_setting_proposals(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        accept: Vec<i64>,
+        reject: Vec<i64>,
+    ) -> Result<settings_review::Decided, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "decide_setting_proposals",
+                    &json!({ "accept": accept, "reject": reject }),
+                )
+                .await
+            }
+            None => settings_review::decide(&*lock(store)?, &accept, &reject),
+        }
+    }
+
+    pub async fn setting_history(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        key: String,
+        limit: Option<i64>,
+    ) -> Result<Vec<fleet_core::store::SettingAuditRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("setting_history", &json!({ "key": key, "limit": limit }))
+                    .await
+            }
+            None => settings_review::history(&*lock(store)?, &key, limit),
+        }
+    }
 }

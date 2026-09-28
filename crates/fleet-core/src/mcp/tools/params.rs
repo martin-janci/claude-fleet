@@ -909,6 +909,25 @@ pub struct SetSettingParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SettingHistoryParams {
+    /// A registered setting, e.g. "work.recent_days".
+    pub key: String,
+    /// Newest first, 1-100; 20 when unset.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideSettingProposalsParams {
+    /// Proposal ids to apply.
+    #[serde(default)]
+    pub accept: Vec<i64>,
+    /// Proposal ids to reject.
+    #[serde(default)]
+    pub reject: Vec<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ListClientsParams {
     /// Include revoked clients (kept for the audit trail).
     #[serde(default)]

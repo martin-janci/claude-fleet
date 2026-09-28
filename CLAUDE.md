@@ -126,6 +126,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   field's inline suggestion and History, search as a plain-words command
   (`settings_nl.ts`), and page actions (`pages/actions.rs`) — custom
   items are capped at 3.
+  P6: the settings route to the hub. `guard::Access::Person` (the master
+  or a paired client bound to no org) reaches `get_settings` /
+  `set_setting`; writes need a trusted `full` device (`settings_writer` in
+  `mcp/tools/fleet.rs`); `Access::PersonDevice` tools (`setting_proposals`,
+  `setting_history`, `decide_setting_proposals`, `list_pages`) are not
+  served to the master. A paired desktop's pages show the hub's settings
+  (`remote` hides data items, page actions and custom components).
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
@@ -135,7 +142,8 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 - **Client access** (`mcp/pairing.rs`, `mcp/events_route.rs`,
   `store/clients.rs`): a phone or browser pairs through a single-use code
   (`pair_client` → `POST /pair`) for a named, revocable client token
-  (`full`/`readonly`) that is never the master and never reaches fleet admin,
+  (`full`/`readonly`) that is never the master and never reaches fleet admin
+  (a trusted, unbound device writes the fleet's settings since pages P6),
   and follows `GET /events` instead of polling. Hub-only; `fleet-hub
   pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +

@@ -1395,6 +1395,9 @@ pub fn describe(s: &Store) -> Vec<Descriptor> {
 pub enum Actor<'a> {
     /// A person, in a settings page or a review.
     Person,
+    /// A person on a paired device (declarative pages P6); the detail names
+    /// the device's client.
+    PersonVia(&'a str),
     /// An agent over the control API (the master token); the detail names it.
     Agent(&'a str),
     /// Fleet itself (a migration of a value, a background pass).
@@ -1404,14 +1407,14 @@ pub enum Actor<'a> {
 impl Actor<'_> {
     pub fn word(&self) -> &'static str {
         match self {
-            Actor::Person => "person",
+            Actor::Person | Actor::PersonVia(_) => "person",
             Actor::Agent(_) => "agent",
             Actor::System => "system",
         }
     }
     pub fn detail(&self) -> Option<&str> {
         match self {
-            Actor::Agent(d) => Some(d),
+            Actor::Agent(d) | Actor::PersonVia(d) => Some(d),
             _ => None,
         }
     }

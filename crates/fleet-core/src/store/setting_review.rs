@@ -11,7 +11,7 @@ pub const SETTING_AUDIT_KEEP: i64 = 5_000;
 pub const DECIDED_PROPOSAL_KEEP_SECS: i64 = 30 * 24 * 60 * 60;
 
 /// One proposed value for one registered setting.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SettingProposalRow {
     pub id: i64,
     pub at: i64,
@@ -33,7 +33,7 @@ pub struct SettingProposalRow {
 }
 
 /// One write of a registered setting.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SettingAuditRow {
     pub id: i64,
     pub at: i64,

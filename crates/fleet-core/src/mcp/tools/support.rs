@@ -809,10 +809,22 @@ pub(super) fn apply_marker(
 /// while a name in neither list — nothing a client may ever call — gets a
 /// message that does not claim it as a real admin tool.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
-    if caller.is_master() || guard::is_client_tool(tool) {
+    if guard::access_allows(caller, tool) {
         return Ok(());
     }
-    let message = if guard::is_admin_tool(tool) {
+    let access = guard::policy(tool).map(|p| p.access);
+    let message = if access == Some(guard::Access::Person) {
+        format!(
+            "{tool} is for the fleet's operator or a person's own paired device, \
+             not a host's token or a device bound to an org ({} refused)",
+            caller.label()
+        )
+    } else if access == Some(guard::Access::PersonDevice) {
+        format!(
+            "{tool} is for a paired device; on the hub machine use fleet-hub settings ({} refused)",
+            caller.label()
+        )
+    } else if guard::is_admin_tool(tool) {
         format!(
             "{tool} is a fleet-admin tool: master token only ({} refused)",
             caller.label()
