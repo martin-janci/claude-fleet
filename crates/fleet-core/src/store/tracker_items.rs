@@ -467,6 +467,10 @@ impl Store {
         }
         let aliases: Vec<String> = aliases.into_iter().collect();
         let mut meta = before.as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+        // Kept before it is overwritten: the describe cache holds the WHOLE
+        // description this excerpt was cut from, so a changed description
+        // makes that cache stale (see the drop in the changed branch below).
+        let description_before = meta.description.clone();
         meta.description = w.description.clone();
         meta.description_chars = w.description_chars;
         meta.assignee_id = w.assignee_id.clone();
@@ -542,6 +546,19 @@ impl Store {
                     self.conn.execute(
                         "UPDATE work_items SET fetched_at = ?1 WHERE id = ?2",
                         rusqlite::params![now, id],
+                    )?;
+                }
+                // A changed description makes the describe cache's copy of
+                // the WHOLE description stale: `lookup` would report a fresh
+                // "shown 2000 of 9000" while `work { action: describe }`
+                // served the text from before the edit, for as long as the
+                // TTL allows. Dropped here, inside the change the upsert has
+                // already detected, so there is no second comparison and the
+                // next `describe` fetches once.
+                if changed && description_before.as_deref() != w.description.as_deref() {
+                    self.conn.execute(
+                        "DELETE FROM work_item_descriptions WHERE item_id = ?1",
+                        rusqlite::params![id],
                     )?;
                 }
                 // Work graph M7: a transition OUT of done is a reopen (an

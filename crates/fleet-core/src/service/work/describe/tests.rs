@@ -462,3 +462,187 @@ async fn an_expired_cache_entry_is_not_served() {
     assert_eq!(got.body, "fresh from the tracker");
     assert_eq!(w.fetches(), 1);
 }
+
+/// The tracker is gone (a person disconnected it): its items are kept, marked
+/// unavailable, so nothing cascades to their cached full descriptions. Two
+/// halves, both needed — `describe` resolves the capability BEFORE the cache,
+/// and `remove_tracker` clears the cache — because either alone leaves a
+/// per-host token reading a revoked tracker's ticket text for as long as the
+/// TTL says (a `Kind::Secs` setting: up to ten years, whatever the desktop's
+/// input suggests).
+#[tokio::test]
+async fn a_removed_trackers_cached_description_is_neither_kept_nor_served() {
+    let w = fake_jira_with_description("the whole requirement");
+    let net = w.net();
+    let first = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap();
+    assert_eq!(first.body, "the whole requirement");
+    let (tracker_id, item_id) = {
+        let s = w.store.lock().unwrap();
+        let t = s.list_trackers().unwrap()[0].id;
+        (t, s.work_item_by_key("ABC-1").unwrap().unwrap().id)
+    };
+    {
+        let s = w.store.lock().unwrap();
+        assert!(s.remove_tracker(tracker_id).unwrap());
+        // Nothing cached is left behind at rest.
+        assert_eq!(
+            s.cached_description(item_id, 10_000, crate::store::now_unix())
+                .unwrap(),
+            None,
+            "removing a tracker must take its items' cached descriptions"
+        );
+    }
+    // And even a cache entry written again by hand is not served: the
+    // capability check comes first, and the tracker is gone.
+    {
+        let s = w.store.lock().unwrap();
+        s.put_description(item_id, "still here", 10).unwrap();
+    }
+    let e = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_UNSUPPORTED);
+    assert_eq!(w.fetches(), 1, "no second tracker call either");
+}
+
+/// The TTL and the retention window are two knobs that must not contradict
+/// each other: an entry the sweep would already have deleted must never be
+/// served. `work.describe_cache_secs` accepts up to ten years, so the served
+/// TTL is clamped to the retention pass's own (floored) window — 30 days here,
+/// with `work.retention.tracker_items_days` at its "forever" `0`.
+#[tokio::test]
+async fn a_ttl_longer_than_the_retention_window_is_clamped_to_it() {
+    let w = fake_jira_always("fresh from the tracker");
+    {
+        let s = w.store.lock().unwrap();
+        // Ten years of TTL, and a retention window of "forever" — which the
+        // describe cache floors at 30 days, so 30 days is the real ceiling.
+        settings::set(&s, settings::WORK_DESCRIBE_CACHE_SECS, "315360000").unwrap();
+        settings::set(&s, settings::WORK_RETENTION_TRACKER_ITEMS_DAYS, "0").unwrap();
+    }
+    let net = w.net();
+    let item_id = {
+        let s = w.store.lock().unwrap();
+        s.work_item_by_key("ABC-1").unwrap().unwrap().id
+    };
+    // An entry from 31 days ago: inside the setting, outside the window.
+    {
+        let s = w.store.lock().unwrap();
+        s.put_description(item_id, "stale text", 10).unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE work_item_descriptions SET fetched_at = ?1 WHERE item_id = ?2",
+                rusqlite::params![crate::store::now_unix() - 31 * 86_400, item_id],
+            )
+            .unwrap();
+    }
+    let got = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap();
+    assert!(
+        !got.from_cache,
+        "an entry past the retention window must not be served, whatever the TTL says"
+    );
+    assert_eq!(got.body, "fresh from the tracker");
+    // Inside both: still served from the cache, so the clamp is a ceiling and
+    // not a reset to some shorter default.
+    let again = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap();
+    assert!(again.from_cache);
+}
+
+/// A provider that DOES serve descriptions, answering that this ticket has
+/// none: "this tracker does not serve full descriptions" would be false of a
+/// Jira ticket, and an agent a truncation notice had just sent here would read
+/// it as fleet contradicting itself.
+#[tokio::test]
+async fn an_empty_description_is_not_an_unsupported_tracker() {
+    let w = fake_jira_with_description("");
+    let net = w.net();
+    let e = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert!(e.message.contains("no description text"), "{}", e.message);
+    assert!(
+        !e.message.contains("does not serve"),
+        "not the capability refusal: {}",
+        e.message
+    );
+}
+
+/// A sync that CHANGES the description makes the cached full text stale: the
+/// notice `lookup` writes would be fresh while `describe` served the text from
+/// before the edit. The row is dropped where the upsert already detects the
+/// change, so the next `describe` fetches once.
+#[tokio::test]
+async fn a_sync_that_changes_the_description_drops_the_cached_copy() {
+    let w = fake_jira_always("v1 from the tracker");
+    let net = w.net();
+    let first = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap();
+    assert_eq!(first.body, "v1 from the tracker");
+    assert!(
+        describe(&w.store, &OrgScope::All, "ABC-1", &net)
+            .await
+            .unwrap()
+            .from_cache,
+        "warm to begin with"
+    );
+    // The same sync write, with an edited description.
+    {
+        let s = w.store.lock().unwrap();
+        let t = s.list_trackers().unwrap()[0].id;
+        s.upsert_tracker_item(
+            t,
+            &TrackerItemWrite {
+                external_id: "1".into(),
+                key: Some("ABC-1".into()),
+                title: "Refund".into(),
+                status_name: "In Progress".into(),
+                status_category: "in_progress".into(),
+                description: Some("the requirement, edited".into()),
+                description_chars: Some(9000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let after = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap();
+    assert!(
+        !after.from_cache,
+        "a changed description must not be answered from the pre-edit cache"
+    );
+    // A write that changes something else leaves the (now warm) cache alone.
+    {
+        let s = w.store.lock().unwrap();
+        let t = s.list_trackers().unwrap()[0].id;
+        s.upsert_tracker_item(
+            t,
+            &TrackerItemWrite {
+                external_id: "1".into(),
+                key: Some("ABC-1".into()),
+                title: "Refund (renamed)".into(),
+                status_name: "In Progress".into(),
+                status_category: "in_progress".into(),
+                description: Some("the requirement, edited".into()),
+                description_chars: Some(9000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    assert!(
+        describe(&w.store, &OrgScope::All, "ABC-1", &net)
+            .await
+            .unwrap()
+            .from_cache,
+        "only a changed DESCRIPTION drops the cache"
+    );
+}

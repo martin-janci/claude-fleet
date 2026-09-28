@@ -1495,13 +1495,39 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     let g = Graph::load(&s)?;
     let (task, aliases) = find_task(&g, scope, task_id, true)?;
     let item = task.item_id.and_then(|i| g.items.get(&i));
+    // The tracker that might serve the whole description, and the key to name
+    // it by — flattened as every other `fence_ticket` call site flattens it
+    // (`defuse` alone does not fold a newline), because it ends up inside
+    // fleet's own notice line.
+    let tracker = item
+        .and_then(|i| i.item.tracker_id)
+        .and_then(|t| g.trackers.get(&t));
+    let flat_key = item
+        .and_then(|i| i.item.key.as_deref())
+        .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
     let description = item
         .and_then(|i| i.meta.description.clone())
         .filter(|d| !d.trim().is_empty())
         .map(|d| match scope {
-            OrgScope::Host { .. } => {
-                crate::mcp::guard::fence_untrusted(&d, "a tracker ticket", DESCRIPTION_MAX_CHARS)
-            }
+            // An agent reads it: the same audience and marker as `lookup`,
+            // the start brief and the card, so the same helper — the notice
+            // when what is shown is less than the tracker holds, and the
+            // offer of `describe` when its provider serves one. This path's
+            // own cap is the Work view's (600), narrower than the 2000-char
+            // excerpt a row carries, so the notice fires here for a
+            // description the other paths show whole — which is exactly
+            // right: it names what THIS answer shows. Before this, the task
+            // detail cut at 600 in silence, through the bare
+            // `fence_untrusted` the rest of the branch replaced.
+            OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
+                &d,
+                "a tracker ticket",
+                DESCRIPTION_MAX_CHARS,
+                item.and_then(|i| i.meta.description_chars),
+                crate::service::trackers::tickets::describe_offer(tracker, flat_key.as_deref()),
+            ),
+            // A person reads it on a phone or the desktop (bound or not): as
+            // is, exactly as before.
             _ => d.chars().take(DESCRIPTION_MAX_CHARS).collect(),
         });
     // The newest past session the caller sees, and its conversation's

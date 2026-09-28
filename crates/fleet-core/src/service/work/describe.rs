@@ -3,7 +3,14 @@
 //! * **Never on the sync path.** Sync keeps writing the 2000-char excerpt;
 //!   this is a separate read, so no frame grows and the replay ring is
 //!   untouched (the reason D18 could accept the first-sync flood).
-//! * **Cache with a TTL** (`work.describe_cache_secs`): a warm entry is
+//! * **Capability first, cache second.** The item, its tracker and that
+//!   tracker's `describe` capability are resolved BEFORE the cache is read,
+//!   so a tracker a person disconnected cannot keep being served its own
+//!   ticket text (`Store::remove_tracker` clears the cache for its items in
+//!   the same transaction, and with the tracker row gone this refuses
+//!   anyway).
+//! * **Cache with a TTL** (`work.describe_cache_secs`, clamped to the
+//!   retention window — see `ttl_ceiling_secs`): a warm entry is
 //!   served without asking the tracker. The cache lives in its own table
 //!   (migration 068), so the excerpt stays authoritative for every other
 //!   path — a read path has exactly one source for "the" description. The
@@ -79,11 +86,46 @@ pub struct Described {
     pub from_cache: bool,
 }
 
+/// This item has no tracker fleet can ask (a local item, work graph M14), or
+/// its provider does not implement `describe` at all: the same honest refusal
+/// [`tickets::describe_offer`] gives a caller who was never offered the action
+/// — never an empty success.
 fn unsupported(key: &str) -> IpcError {
     IpcError::new(
         codes::E_UNSUPPORTED,
         format!("{key}'s tracker does not serve full descriptions; open the ticket"),
     )
+}
+
+/// The provider CAN serve descriptions and answered that this ticket has no
+/// description text (an ADF document that renders empty, a `null` field). A
+/// different answer from [`unsupported`] on purpose: "this tracker does not
+/// serve full descriptions" is simply false of a Jira ticket, and an agent a
+/// truncation notice has just sent here would read it as fleet contradicting
+/// itself. The operation is supported; this ticket's state is what is empty.
+fn no_description(key: &str) -> IpcError {
+    IpcError::new(
+        codes::E_INVALID_STATE,
+        format!("{key} has no description text at its tracker"),
+    )
+}
+
+/// The longest a cached description may be SERVED: the window the retention
+/// pass actually keeps it for (`work.retention.tracker_items_days`, floored
+/// by [`DESCRIBE_CACHE_RETENTION_FLOOR_DAYS`] — the same
+/// `retention::describe_effective_days` `work_admin { status }` reports and
+/// the sweep deletes by, so there is one definition of the window and not a
+/// third).
+///
+/// `work.describe_cache_secs` is a `Kind::Secs` setting: the desktop input
+/// suggests a day, but the registry accepts up to ten years and a hub
+/// operator's `set_setting` is not bound by the input. Unclamped, the TTL
+/// would promise to serve an entry the sweep deleted months ago, and would
+/// hand an agent months-old requirements behind a notice that was current —
+/// the same kind of defect as a notice that cries wolf.
+fn ttl_ceiling_secs(s: &Store) -> i64 {
+    use crate::service::work::retention::{describe_effective_days, RetentionDays};
+    describe_effective_days(RetentionDays::from_store(s).tracker_items) * 86_400
 }
 
 /// `work { action: describe, key }`: the cache, else one live fetch, cached
@@ -117,7 +159,11 @@ pub async fn describe(
             .into_iter()
             .find(|t| Some(t.id) == item.tracker_id);
         let out_key = item.key.clone().unwrap_or_else(|| key.clone());
-        let ttl_secs = settings::get_secs(&s, settings::WORK_DESCRIBE_CACHE_SECS) as i64;
+        // How long an entry may be served: the setting, never longer than
+        // the window the retention pass keeps it for (see
+        // [`ttl_ceiling_secs`]).
+        let ttl_secs = (settings::get_secs(&s, settings::WORK_DESCRIBE_CACHE_SECS) as i64)
+            .min(ttl_ceiling_secs(&s));
         (
             item.id,
             out_key,
@@ -126,6 +172,18 @@ pub async fn describe(
             tracker,
             ttl_secs,
         )
+    };
+
+    // BEFORE the cache, deliberately. A tracker a person disconnected is gone
+    // from `list_trackers`, so `tracker` is `None` here and this refuses —
+    // and `Store::remove_tracker` clears its items' cached descriptions in
+    // the same transaction as its secret. Reading the cache first made a
+    // per-host token keep receiving a deleted tracker's full ticket text for
+    // the whole TTL: a read that outlived the revocation gesture a person had
+    // just performed, and (the TTL being a `Kind::Secs` setting) for as long
+    // as an operator had set that TTL to.
+    let Some(t) = tracker.filter(|t| trackers::provider_caps(t).describe) else {
+        return Err(unsupported(&out_key));
     };
 
     let now = crate::service::catalog::now_secs();
@@ -152,21 +210,16 @@ pub async fn describe(
         });
     }
 
-    // No tracker (a local item, work graph M14) or one whose provider does
-    // not implement `describe`: the same honest refusal `describe_offer`
-    // gives a caller who was never offered the action in the first place —
-    // never an empty success.
-    let Some(t) = tracker.filter(|t| trackers::provider_caps(t).describe) else {
-        return Err(unsupported(&out_key));
-    };
     let cred = lock(store)?.resolve_tracker_credential(t.id)?;
     let provider = trackers::provider_for(&t, cred, net).map_err(|e| e.to_ipc())?;
     let item_ref = match item_key {
         Some(k) => ItemRef::parse(&k),
         None => ItemRef::Id(external_id.unwrap_or_default()),
     };
+    // The provider serves descriptions (checked above), so `None` here means
+    // this ticket has no description text — not an unsupported operation.
     let Some(body) = provider.describe(&item_ref).await.map_err(|e| e.to_ipc())? else {
-        return Err(unsupported(&out_key));
+        return Err(no_description(&out_key));
     };
     let chars = body.chars().count() as i64;
     lock(store)?.put_description(item_id, &body, chars)?;

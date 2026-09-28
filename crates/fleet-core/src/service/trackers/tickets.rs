@@ -45,9 +45,9 @@ pub const RECENT_DAYS: i64 = 14;
 /// whose provider does not implement `describe`, points at the ticket
 /// instead.
 ///
-/// `pub(crate)`: all three callers that fence a description share this one
-/// decision — `lookup` and `ticket_brief_with` here, and
-/// `service::work::card::card`.
+/// `pub(crate)`: all four callers that fence a description share this one
+/// decision — `lookup` and `ticket_brief_with` here,
+/// `service::work::card::card`, and `service::work::view::task`.
 pub(crate) fn describe_offer<'a>(
     tracker: Option<&crate::store::TrackerRow>,
     key: Option<&'a str>,

@@ -9,8 +9,12 @@
 -- reaches an event frame, a session row or the phone projection, so it costs
 -- no replay-ring pressure (the reason `DESCRIPTION_MAX_CHARS` stays 2000).
 --
--- Third-party text at rest: swept by the work retention pass with the
--- tracker items it belongs to, and by this FK when an item goes.
+-- Third-party text at rest, so every way the text can go is covered: the
+-- work retention pass sweeps it by age (`RetentionTable::Descriptions`, with
+-- a floor), this FK takes it when an item goes, `Store::remove_tracker`
+-- clears it for a disconnected tracker's items (which are KEPT, marked
+-- unavailable, so no cascade reaches them), and a sync that changes an item's
+-- description drops the row it just made stale.
 CREATE TABLE IF NOT EXISTS work_item_descriptions (
   item_id    INTEGER PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
   body       TEXT    NOT NULL,
