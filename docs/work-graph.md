@@ -123,7 +123,11 @@ host or in another org that you cannot see still keeps it in the tree.
 its group come from, the repositories it ran in, every session with its
 state and *why* it is linked (the branch, the ticket URL in a prompt, a
 person), the last known outcome of its newest past session, and **Open**,
-**Continue** (resume the last conversation) and **Start new**.
+**Continue** (resume the last conversation) and **Start new**. The ticket's
+description shows its first 600 characters; when the ticket holds more, a
+line under it says so — *Shown 600 of 6812 characters — open the ticket* —
+and *open the ticket* opens it in the tracker. A description that fits has
+no such line.
 
 **Where things come from.** Every value that fleet did not get from a person
 says so:
@@ -207,8 +211,10 @@ including tasks with no session at all — as reads of the `work` tool
   task is repeated across pages while the fleet changes; a task that moved
   meanwhile may be skipped until the next full read.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
-  with every session and why it is linked, its tracker description, the
-  last known outcome, its placement and the rules that match it.
+  with every session and why it is linked, its tracker description (at
+  most 600 characters, with `description_chars`, the full length fleet
+  knows, and `description_truncated` when it shows less), the last known
+  outcome, its placement and the rules that match it.
 - `work { action: session_tasks, session_id }`: every link of one session
   (active, suggested, rejected, ended), each with its task.
 - `work { action: review, cursor?, limit? }`: suggestions and conflicts

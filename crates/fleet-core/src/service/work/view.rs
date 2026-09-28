@@ -318,6 +318,16 @@ pub struct TaskDetail {
     /// The tracker's description (third-party text), capped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The description's full length as the hub knows it, in characters:
+    /// the tracker's own count when the sync recorded one, else the cached
+    /// excerpt's. Present whenever `description` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_chars: Option<usize>,
+    /// `description` shows less than `description_chars` (the 600-char cap
+    /// here, or the cache's own excerpt): a person's screen says so and
+    /// points at the ticket. Absent (false) from an older hub.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub description_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<LastOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1587,31 +1597,45 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     let flat_key = item
         .and_then(|i| i.item.key.as_deref())
         .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
-    let description = item
+    let excerpt = item
         .and_then(|i| i.meta.description.clone())
-        .filter(|d| !d.trim().is_empty())
-        .map(|d| match scope {
-            // An agent reads it: the same audience and marker as `lookup`,
-            // the start brief and the card, so the same helper — the notice
-            // when what is shown is less than the tracker holds, and the
-            // offer of `describe` when its provider serves one. This path's
-            // own cap is the Work view's (600), narrower than the 2000-char
-            // excerpt a row carries, so the notice fires here for a
-            // description the other paths show whole — which is exactly
-            // right: it names what THIS answer shows. Before this, the task
-            // detail cut at 600 in silence, through the bare
-            // `fence_untrusted` the rest of the branch replaced.
-            OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
-                &d,
-                "a tracker ticket",
-                DESCRIPTION_MAX_CHARS,
-                item.and_then(|i| i.meta.description_chars),
-                crate::service::trackers::tickets::describe_offer(tracker, flat_key.as_deref()),
-            ),
-            // A person reads it on a phone or the desktop (bound or not): as
-            // is, exactly as before.
-            _ => d.chars().take(DESCRIPTION_MAX_CHARS).collect(),
-        });
+        .filter(|d| !d.trim().is_empty());
+    // The full length and whether the answer shows less of it, for every
+    // caller: a person's screen has no fence notice to read it from. The
+    // larger of the tracker's count and the excerpt's own, so a count that
+    // trimmed differently from the excerpt never hides a cut.
+    let description_chars = excerpt.as_deref().map(|d| {
+        let cached = d.chars().count();
+        item.and_then(|i| i.meta.description_chars)
+            .and_then(|n| usize::try_from(n).ok())
+            .map_or(cached, |n| n.max(cached))
+    });
+    let shown = excerpt
+        .as_deref()
+        .map_or(0, |d| d.chars().count().min(DESCRIPTION_MAX_CHARS));
+    let description_truncated = description_chars.is_some_and(|n| n > shown);
+    let description = excerpt.map(|d| match scope {
+        // An agent reads it: the same audience and marker as `lookup`,
+        // the start brief and the card, so the same helper — the notice
+        // when what is shown is less than the tracker holds, and the
+        // offer of `describe` when its provider serves one. This path's
+        // own cap is the Work view's (600), narrower than the 2000-char
+        // excerpt a row carries, so the notice fires here for a
+        // description the other paths show whole — which is exactly
+        // right: it names what THIS answer shows. Before this, the task
+        // detail cut at 600 in silence, through the bare
+        // `fence_untrusted` the rest of the branch replaced.
+        OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
+            &d,
+            "a tracker ticket",
+            DESCRIPTION_MAX_CHARS,
+            item.and_then(|i| i.meta.description_chars),
+            crate::service::trackers::tickets::describe_offer(tracker, flat_key.as_deref()),
+        ),
+        // A person reads it on a phone or the desktop (bound or not): as
+        // is, exactly as before.
+        _ => d.chars().take(DESCRIPTION_MAX_CHARS).collect(),
+    });
     // The newest past session the caller sees, and its conversation's
     // newest summary, note or outcome.
     let last_outcome = task
@@ -1670,6 +1694,8 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         task,
         aliases,
         description,
+        description_chars,
+        description_truncated,
         last_outcome,
         placement,
         rules,

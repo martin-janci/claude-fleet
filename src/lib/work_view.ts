@@ -229,6 +229,12 @@ export interface TaskDetail {
   aliases?: string[];
   /** Tracker text (plain, fenced for an agent, ≤ 600 chars). */
   description?: string | null;
+  /** The description's full length the hub knows (the tracker's count, else
+   *  the cached excerpt's), in characters. Absent from an older hub. */
+  description_chars?: number | null;
+  /** `description` shows less than `description_chars`. Absent means whole
+   *  (or an older hub, which never said). */
+  description_truncated?: boolean;
   last_outcome?: LastOutcome | null;
   placement?: Placement | null;
   /** Ids of the rules that match. */

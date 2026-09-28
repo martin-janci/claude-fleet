@@ -1097,6 +1097,47 @@ fn a_whole_description_reaches_the_task_detail_without_a_notice() {
     );
 }
 
+/// A person's screen has no fence notice, so the task detail says in fields
+/// what it cut: `description_chars` is the tracker's true length (else the
+/// excerpt's) and `description_truncated` is set when the excerpt shown is
+/// shorter — for the 600-char cap and for a cache that kept less than the
+/// tracker holds. A whole description is marked whole, and serialises
+/// without the flag so an older client sees the shape it knew.
+#[test]
+fn the_task_detail_says_how_much_of_the_description_it_shows() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    let tid = format!("item:{}", w.t1);
+    // Longer than the cap, with no count from the tracker: the excerpt's.
+    recache_tk1_description(&w, &"y".repeat(900), None);
+    let d = task(&w.st, &OrgScope::All, &tid).unwrap();
+    assert_eq!(
+        d.description.as_deref().map(|t| t.chars().count()),
+        Some(DESCRIPTION_MAX_CHARS)
+    );
+    assert_eq!(d.description_chars, Some(900));
+    assert!(d.description_truncated);
+    // Under the cap, but the cache kept less than the tracker holds.
+    recache_tk1_description(&w, "short excerpt", Some(6812));
+    let d = task(&w.st, &OrgScope::All, &tid).unwrap();
+    assert_eq!(d.description_chars, Some(6812));
+    assert!(d.description_truncated);
+    // Whole: counted, not flagged, and the flag stays off the wire.
+    let text = "Login fails on partial captures.";
+    recache_tk1_description(&w, text, Some(text.chars().count() as i64));
+    let d = task(&w.st, &OrgScope::All, &tid).unwrap();
+    assert_eq!(d.description_chars, Some(text.chars().count()));
+    assert!(!d.description_truncated);
+    let wire = serde_json::to_value(&d).unwrap();
+    assert!(wire.get("description_truncated").is_none(), "{wire}");
+    // An older hub's answer (neither field) still reads.
+    let mut old = wire.clone();
+    old.as_object_mut().unwrap().remove("description_chars");
+    let back: TaskDetail = serde_json::from_value(old).unwrap();
+    assert_eq!(back.description_chars, None);
+    assert!(!back.description_truncated);
+}
+
 #[path = "view_write_tests.rs"]
 mod writes;
 
