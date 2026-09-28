@@ -34,6 +34,25 @@ sleep 1; FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$B" KEEP=2 bash "$REPO/depl
 sleep 1; FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$B" KEEP=2 bash "$REPO/deploy/hub/backup.sh" >/dev/null 2>&1
 check "retention keeps the KEEP=2 newest" test "$(count "$B"/state-*.db)" = 2
 check "retention is per prefix" test "$(count "$B"/pre-*.db)" = 0
+mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+check "the backup dir is 0700" test "$(mode "$B")" = 700
+check "every backup is 0600" test -z "$(for g in "$B"/state-*.db; do [ "$(mode "$g")" = 600 ] || echo "$g"; done)"
+# A directory an older run (or a person) left 0755 is tightened before the copy.
+B2="$ROOT/loose"; mkdir -m 755 "$B2"
+FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$B2" bash "$REPO/deploy/hub/backup.sh" >/dev/null 2>&1
+check "an existing 0755 backup dir is tightened to 0700" test "$(mode "$B2")" = 700
+check "…and the copy in it is 0600" test "$(mode "$(ls -1 "$B2"/state-*.db)")" = 600
+# A `'`, a `"` and a `\` in the path: the .backup argument is escaped, not cut.
+BQ="$ROOT/it's \"q\" \\n dir"
+FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$BQ" bash "$REPO/deploy/hub/backup.sh" >"$ROOT/backup-quote.log" 2>&1
+check "a backup dir with quotes and a backslash works" test $? = 0
+check "…and the copy lands in it, whole" test "$(sqlite3 "$(ls -1 "$BQ"/state-*.db)" 'SELECT COUNT(*) FROM t')" = 3
+# PREFIX=pre-1.0.0 prunes its own files only, not pre-1.0.0-rc1-*.
+BP="$ROOT/prefix"; mkdir -p "$BP"
+for s in 20260101-000000 20260102-000000 20260103-000000; do sqlite3 "$BP/pre-1.0.0-rc1-$s.db" 'CREATE TABLE t(x)'; done
+for _ in 1 2; do PREFIX=pre-1.0.0 KEEP=1 FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$BP" bash "$REPO/deploy/hub/backup.sh" >/dev/null 2>&1; done
+check "PREFIX=pre-1.0.0 keeps its KEEP=1 newest" test "$(count "$BP"/pre-1.0.0-2*.db)" = 1
+check "…and never prunes pre-1.0.0-rc1-*" test "$(count "$BP"/pre-1.0.0-rc1-*.db)" = 3
 FLEET_HUB_DATA="$ROOT/nowhere" bash "$REPO/deploy/hub/backup.sh" >/dev/null 2>&1
 check "a missing database exits 2" test $? = 2
 printf 'not a database' >"$D/data/state.db"
@@ -45,21 +64,28 @@ check "…and leaves no half-written copy behind" test "$(count "$B"/state-*.db)
 FAKE="$ROOT/bin"; mkdir -p "$FAKE"
 cat >"$FAKE/docker" <<'EOF'
 #!/usr/bin/env bash
-# Records every call. upgrade.sh speaks only `docker compose --env-file <f>
-# <sub> …`, so the pair is dropped before dispatching on <sub>. `pull` of a
-# `missing` FLEET_HUB_TAG fails like ghcr does; `stop` refuses when no
-# pre-upgrade backup exists yet (that is the order under test); `exec …
-# healthcheck` is healthy; `exec … --version` answers whatever tag .env pins.
+# Records every call. upgrade.sh speaks `docker compose --env-file <f> <sub>
+# …`, so the pair is dropped before dispatching on <sub>, plus a plain
+# `docker inspect` / `docker image inspect` for the running image. `pull` of
+# a `missing` FLEET_HUB_TAG fails like ghcr does; `ps -q` names container
+# c0ffee, which runs image sha256:0ld1d, pulled as ghcr.io/x/fleet-hub@sha256:d1g;
+# `exec … healthcheck` is healthy unless FAKE_UNHEALTHY=1; `exec … --version`
+# answers whatever tag .env pins.
 echo "docker $*" >>"$FAKE_LOG"
-[ "${1:-}" = compose ] || exit 0
+case "${1:-}" in
+  inspect) echo "sha256:0ld1d"; exit 0 ;;
+  image) echo "ghcr.io/x/fleet-hub@sha256:d1g ghcr.io/y/fleet-hub@sha256:d1g"; exit 0 ;;
+  compose) ;;
+  *) exit 0 ;;
+esac
 shift
 [ "${1:-}" = --env-file ] && shift 2
 case "${1:-}" in
   pull) [ "${FLEET_HUB_TAG:-}" = missing ] && { echo "manifest unknown" >&2; exit 1; } ;;
-  stop) ls "$FAKE_DIR"/backups/pre-*.db >/dev/null 2>&1 || { echo "stop before backup" >&2; exit 9; } ;;
+  ps) echo c0ffee ;;
   exec)
     case "${@: -1}" in
-      healthcheck) exit 0 ;;
+      healthcheck) [ "${FAKE_UNHEALTHY:-0}" = 1 ] && exit 1; exit 0 ;;
       --version) echo "fleet-hub $(sed -n 's/^FLEET_HUB_TAG=//p' "$FAKE_DIR/.env")" ;;
     esac ;;
 esac
@@ -73,7 +99,16 @@ case " $* " in *" @- "*) sed 's/^/curl-stdin: /' >>"$FAKE_LOG" ;; esac
 tag="$(sed -n 's/^FLEET_HUB_TAG=//p' "$FAKE_DIR/.env")"
 printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\\"version\\":\\"%s\\",\\"db_ready\\":true}"}]}}' "$tag"
 EOF
-chmod +x "$FAKE/docker" "$FAKE/curl"
+# sqlite3 as backup.sh runs it: logged (so the backup's place in the order
+# is visible), and `.backup` fails on FAKE_BACKUP_FAIL=1.
+cat >"$FAKE/sqlite3" <<'EOF'
+#!/usr/bin/env bash
+echo "sqlite3 $*" >>"$FAKE_LOG"
+case "$*" in *".backup "*) [ "${FAKE_BACKUP_FAIL:-0}" = 1 ] && { echo "disk I/O error" >&2; exit 1; } ;; esac
+exec "$FAKE_REAL_SQLITE" "$@"
+EOF
+FAKE_REAL_SQLITE="$(command -v sqlite3)"; export FAKE_REAL_SQLITE
+chmod +x "$FAKE/docker" "$FAKE/curl" "$FAKE/sqlite3"
 
 U="$ROOT/up"; mkdir -p "$U/data"
 cp "$REPO/deploy/hub/backup.sh" "$REPO/deploy/hub/upgrade.sh" "$U/"
@@ -89,9 +124,12 @@ PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.1 >"$ROOT/upgrade
 check "upgrade exits 0" test $? = 0
 check ".env now pins 0.3.1" grep -qx 'FLEET_HUB_TAG=0.3.1' "$U/.env"
 check "one pre-upgrade backup was taken" test "$(count "$U"/backups/pre-0.3.1-*.db)" = 1
-check "every compose call reads .env through --env-file" test -z "$(grep '^docker ' "$FAKE_LOG" | grep -v -- "^docker compose --env-file $U/.env ")"
+check "every compose call reads .env through --env-file" test -z "$(grep '^docker compose ' "$FAKE_LOG" | grep -v -- "^docker compose --env-file $U/.env ")"
 check "pull precedes stop" test "$(ord ' pull fleet-hub')" -lt "$(ord ' stop fleet-hub')"
-check "stop precedes up" test "$(ord ' stop fleet-hub')" -lt "$(ord ' up -d fleet-hub')"
+check "the running image is noted before the stop" test "$(ord 'docker inspect')" -lt "$(ord ' stop fleet-hub')"
+check "stop precedes the backup (an exact, offline copy)" test "$(ord ' stop fleet-hub')" -lt "$(ord '^sqlite3 .*\.backup')"
+check "the backup precedes up" test "$(ord '^sqlite3 .*\.backup')" -lt "$(ord ' up -d fleet-hub')"
+check "the running image is named" grep -q 'runs image sha256:0ld1d (ghcr.io/x/fleet-hub@sha256:d1g)' "$ROOT/upgrade1.log"
 check "up precedes the healthcheck" test "$(ord ' up -d fleet-hub')" -lt "$(ord 'healthcheck')"
 check "the healthcheck precedes --version" test "$(ord 'healthcheck')" -lt "$(ord '--version')"
 check "fleet_health is asked with the readonly token" grep -q '^curl-stdin: Authorization: Bearer cl_readonly' "$FAKE_LOG"
@@ -107,6 +145,37 @@ check "…and before the hub was stopped" test -z "$(grep ' stop fleet-hub' "$FA
 
 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" v0.3.2 >/dev/null 2>&1
 check "a v-prefixed tag is refused with exit 2" test $? = 2
+
+: >"$FAKE_LOG"
+HEALTH_TRIES=abc PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" timeout 20 bash "$U/upgrade.sh" 0.3.2 >/dev/null 2>&1
+check "a non-numeric HEALTH_TRIES is refused with exit 2 (no spin)" test $? = 2
+KEEP=x PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" timeout 20 bash "$U/upgrade.sh" 0.3.2 >/dev/null 2>&1
+check "a non-numeric KEEP is refused with exit 2" test $? = 2
+check "…both before anything was stopped" test -z "$(grep ' stop fleet-hub' "$FAKE_LOG")"
+
+# A backup that fails after the stop: the old container starts again, the pin
+# stays, nothing new is started, and the script exits non-zero.
+: >"$FAKE_LOG"
+FAKE_BACKUP_FAIL=1 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.2 >"$ROOT/upgrade-nobackup.log" 2>&1
+check "a failed backup after the stop exits 1" test $? = 1
+check "…the pin did not move" grep -qx 'FLEET_HUB_TAG=0.3.1' "$U/.env"
+check "…the old container is started again after the stop" test "$(ord ' stop fleet-hub')" -lt "$(ord ' start fleet-hub')"
+check "…and nothing new is brought up" test -z "$(grep ' up -d' "$FAKE_LOG")"
+check "…no pre-0.3.2 backup is left" test "$(count "$U"/backups/pre-0.3.2-*.db)" = 0
+
+# A tag set but no state.db where FLEET_HUB_DATA says: refused, hub untouched.
+: >"$FAKE_LOG"
+FLEET_HUB_DATA="$ROOT/nowhere" PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.2 >/dev/null 2>&1
+check "a missing state.db is refused with exit 2" test $? = 2
+check "…before the hub was stopped" test -z "$(grep ' stop fleet-hub' "$FAKE_LOG")"
+
+# A failure after the stop prints the rollback, naming the image that ran.
+: >"$FAKE_LOG"
+FAKE_UNHEALTHY=1 HEALTH_TRIES=1 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.2 >"$ROOT/upgrade-unhealthy.log" 2>&1
+check "an unhealthy new version exits non-zero" test $? != 0
+check "…the rollback names the previous tag" grep -q 'ROLLBACK: set FLEET_HUB_TAG=0.3.1' "$ROOT/upgrade-unhealthy.log"
+check "…and the image it ran, to re-point a moved tag" grep -q 'docker tag sha256:0ld1d ghcr.io/x/fleet-hub:0.3.1' "$ROOT/upgrade-unhealthy.log"
+printf 'FLEET_HUB_TAG=0.3.1\n' >"$U/.env"
 
 rm -f "$U/readonly.token"; : >"$FAKE_LOG"
 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.1 >/dev/null 2>&1
