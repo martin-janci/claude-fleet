@@ -46,10 +46,17 @@ is the only view, since they have no tmux pane to show a Terminal for.
   one-line description each; a prefix narrows the list, arrows move, Tab or
   Enter completes, Enter on the exact name sends.
 - **Chips.** Quick actions above the box: Clear, Compact, Status, Continue,
-  Review by default. A click fills the box so you can read or edit before
-  Enter; Shift+click sends at once. Edit them under *Settings → Conversation
-  composer*. A session stuck on *press Enter* gets a ⏎ chip that sends a bare
-  Enter.
+  Go on, Review by default, drawn in the order you set. A click fills the box
+  so you can read or edit before Enter; a chip with *Send* ticked (marked ↵)
+  sends on a click instead, and Shift+click does the other one on either
+  kind. While the session is waiting on an answer — a permission or choice
+  prompt, or any stuck screen — no chip sends: the click only fills the box
+  and the note under it says why, so a prompt is never typed into that
+  menu; answer it in the terminal, then press Send. Edit, reorder (↑/↓) and
+  tick *Send* under *Settings → Conversation composer*; the list is the
+  fleet's, shared with the phone, and if another device saved it first the
+  editor shows that list and asks you to make your change again. A session
+  stuck on *press Enter* gets a ⏎ chip that sends a bare Enter.
 - **Recall.** ArrowUp in an empty box brings back earlier prompts, newest
   first; ArrowDown walks forward again.
 - **Context meter.** `ctx 83%` next to the box shows the context window in
