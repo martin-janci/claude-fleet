@@ -1062,8 +1062,45 @@ pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then
 /// stands in. Without it a host whose `cl` lives only in interactive shells
 /// printed "command not found: cl" and dropped straight to the login shell.
 pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
+    pane_command_with(claude_session_id, tmux_name, &ClaudeLaunch::default())
+}
+
+/// Per-session `claude` launch options a new session was asked for. Values
+/// must already have passed `validate::claude_model` / `validate::effort_level`;
+/// they are shell-quoted here all the same.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ClaudeLaunch {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl ClaudeLaunch {
+    /// ` --model 'm' --effort 'e'`, each only when set; empty otherwise.
+    fn flags(&self) -> String {
+        let mut out = String::new();
+        if let Some(m) = self.model.as_deref() {
+            out.push_str(&format!(" --model {}", crate::shell::quote(m)));
+        }
+        if let Some(e) = self.effort.as_deref() {
+            out.push_str(&format!(" --effort {}", crate::shell::quote(e)));
+        }
+        out
+    }
+}
+
+/// [`pane_command_for`] with launch options: every `cl` in the chain gets
+/// the same `--model` / `--effort`, so which branch runs makes no difference.
+pub fn pane_command_with(
+    claude_session_id: Option<&str>,
+    tmux_name: &str,
+    launch: &ClaudeLaunch,
+) -> String {
     let tail = "exec ${SHELL:-/bin/zsh} -l";
-    let name = format!("--name {}", crate::shell::quote(tmux_name));
+    let name = format!(
+        "--name {}{}",
+        crate::shell::quote(tmux_name),
+        launch.flags()
+    );
     match claude_session_id {
         Some(id) => format!(
             "{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
@@ -1814,6 +1851,27 @@ mod tests {
             assert_eq!(
                 argv,
                 vec!["claude --dangerously-skip-permissions --continue --name dev-x".to_string()],
+                "{shell}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_command_passes_model_and_effort_to_claude() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let launch = ClaudeLaunch {
+            model: Some("sonnet[1m]".into()),
+            effort: Some("high".into()),
+        };
+        for shell in available_shells() {
+            let argv =
+                run_pane_command(shell, &pane_command_with(Some(id), "dev-x", &launch), true);
+            assert_eq!(
+                argv,
+                vec![format!(
+                    "cl --resume {id} --name dev-x --model sonnet[1m] --effort high"
+                )],
                 "{shell}"
             );
         }

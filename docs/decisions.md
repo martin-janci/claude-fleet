@@ -368,7 +368,17 @@ jev` or `--provider haiku` nothing is sent.
 `manual` or `started`; never `agent`, `agent_inferred` or a detection
 rule's — whose conversation kept its first prompt. The right answer is the
 linked item. Prompts fleet typed itself (a start, a resume, a quick reply)
-are left out. Each case also becomes a **none-case**: the same prompt, the
+are left out, and so are prompts Claude Code submitted itself — a
+`<task-notification>` when a background agent or command finishes, a
+slash command's `<command-name>` echo, a `<system-reminder>` — from both
+datasets (on the production hub, 6 of the first 25 `--export-unlinked`
+rows were task notifications). One test decides it for the benchmark, the
+census and work detection (`service/prompt_origin.rs`, through the
+detection loop guard): a prompt that *starts* with a harness block and has
+nothing after the blocks is not a person's; a person's words after such a
+head are kept without it. Since the hook stopped storing that text, the
+person's first prompt is the conversation's first; rows stored earlier are
+left out as fleet-typed. Each case also becomes a **none-case**: the same prompt, the
 candidates without the right item, and "abstain" as the right answer.
 
 **What a provider sees** is the first prompt with the answer taken out

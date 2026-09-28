@@ -164,6 +164,49 @@ fn the_loop_guard_skips_what_fleet_injected() {
 }
 
 #[test]
+fn what_claude_code_submits_itself_is_not_evidence() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    let notification = "<task-notification>\n<task-id>afb11347d54b0e640</task-id>\n\
+        <status>completed</status>\n<summary>Agent \"Fix ABC-9\" completed</summary>\n\
+        <result>Opened https://acme.atlassian.net/browse/ABC-9</result>\n</task-notification>";
+    assert_eq!(loop_guard(notification, None, &[]), Some("harness"));
+    assert_eq!(
+        loop_guard(
+            "<system-reminder>x</system-reminder>\nContinue ABC-1: fix the login",
+            Some("Continue ABC-1: fix the login"),
+            &[]
+        ),
+        Some("fleet_sent"),
+        "fleet's own prompt behind a harness head is still fleet's"
+    );
+    assert!(!on_prompt(&f.s, sid, notification, true).unwrap());
+    assert!(!on_prompt(
+        &f.s,
+        sid,
+        "<command-message>review</command-message>\n<command-name>/review</command-name>\n\
+         <command-args>ABC-8</command-args>",
+        true
+    )
+    .unwrap());
+    assert!(f.s.session_work_links(sid).unwrap().is_empty());
+
+    // A person's words after a harness head are read, and only they are.
+    on_prompt(
+        &f.s,
+        sid,
+        "<system-reminder>Also see ABC-1.</system-reminder>\nfix ABC-7, the retry bug",
+        true,
+    )
+    .unwrap();
+    let ls = f.s.session_work_links(sid).unwrap();
+    assert_eq!(ls.len(), 1, "{ls:?}");
+    let ev = &ls[0].evidence[0];
+    assert_eq!(ev["text"], "ABC-7");
+    assert!(!ev["snippet"].as_str().unwrap().contains("reminder"));
+}
+
+#[test]
 fn the_dump_guard_makes_a_reference_list_weak_and_unselected() {
     let f = fx();
     let sid = session(&f, "dev", "c1");
