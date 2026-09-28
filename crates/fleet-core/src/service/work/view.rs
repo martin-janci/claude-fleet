@@ -93,8 +93,8 @@ pub struct WorkTreeFilters {
     /// One group id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// Include archived tasks (done, or every session link archived, with
-    /// no active session). Absent/false hides them.
+    /// false hides archived tasks (done or every link archived, none
+    /// active) into archived_hidden; absent shows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
 }
@@ -231,8 +231,10 @@ pub struct WorkTask {
     pub sessions: Vec<TaskLink>,
     pub sessions_more: u32,
     /// No active session, and the task is done or every one of its links
-    /// (at least one of them ended) is archived: the tree hides it unless
-    /// `filters.archived` (or `status: done`) asks for it.
+    /// (at least one of them ended) is archived: the tree hides it when
+    /// asked to (`filters.archived: false`). Judged over every link, not
+    /// only the caller's: a fenced caller must not see a task as archived
+    /// while another host or org still works on it.
     #[serde(default)]
     pub archived: bool,
 }
@@ -585,6 +587,9 @@ struct Built<'g> {
     visible: Vec<(&'g ViewLink, &'static str)>,
     /// Every link of any state, visible or not.
     any_links: usize,
+    /// Every link with a wire state, visible or not: `archived` is the
+    /// task's, whoever reads it (never listed, only judged).
+    all: Vec<(&'g ViewLink, &'static str)>,
     /// A per-host token's fence: work of it on its own host.
     on_own_host: bool,
 }
@@ -601,6 +606,7 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
                 ref_key: None,
                 visible: Vec::new(),
                 any_links: 0,
+                all: Vec::new(),
                 on_own_host: false,
             },
         );
@@ -629,6 +635,7 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
                     ref_key: l.link.ref_key.clone(),
                     visible: Vec::new(),
                     any_links: 0,
+                    all: Vec::new(),
                     on_own_host: false,
                 },
             );
@@ -640,6 +647,7 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
         let Some(state) = state else {
             continue;
         };
+        b.all.push((l, state));
         if !g.link_visible(scope, l) {
             continue;
         }
@@ -1066,8 +1074,10 @@ fn to_task(
     let status_category = item
         .map(|i| i.item.status_category.clone())
         .filter(|c| !c.is_empty());
-    let archived = counts.active == 0
-        && (status_category.as_deref() == Some("done") || all_links_archived(&b.visible));
+    // Over every link: `counts.active` is the caller's, and a session on a
+    // host or in an org it cannot see still keeps the task in work.
+    let archived = !b.all.iter().any(|(_, st)| *st == "active")
+        && (status_category.as_deref() == Some("done") || all_links_archived(&b.all));
     if let Some(i) = item {
         let ext = i.item.updated_ext.unwrap_or(i.item.updated_at);
         last = Some(last.map_or(ext, |x| x.max(ext)));
@@ -1144,9 +1154,9 @@ fn to_task(
 
 /// At least one ended link, and every link but a rejected one archived
 /// (the UI-only archive of work graph M7).
-fn all_links_archived(visible: &[(&ViewLink, &str)]) -> bool {
+fn all_links_archived(links: &[(&ViewLink, &str)]) -> bool {
     let mut ended = false;
-    for (l, st) in visible {
+    for (l, st) in links {
         match *st {
             "rejected" => continue,
             "ended" => ended = true,
@@ -1259,12 +1269,17 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     !hidden_as_archived(t, f)
 }
 
-/// An archived task stays out of a tree listing unless the filters ask for
-/// archived tasks, or for done ones (an explicit Done filter shows them).
-/// Only the tree hides: a direct read (`task`, `session_tasks`, `review`)
-/// answers archived tasks as any other.
+/// An archived task stays out of a tree listing only when the caller asks
+/// (`archived: false`): a client from before the archive (a fleet-mobile
+/// that never sends it and has no "N hidden" row) keeps seeing every task.
+/// An explicit Done filter, or "past only" (past work is archived work),
+/// shows them anyway. Only the tree hides: a direct read (`task`,
+/// `session_tasks`, `review`) answers archived tasks as any other.
 fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
-    t.archived && f.archived != Some(true) && f.status.as_deref() != Some("done")
+    t.archived
+        && f.archived == Some(false)
+        && f.status.as_deref() != Some("done")
+        && f.has.as_deref() != Some("past_only")
 }
 
 /// A task's place in the order: named orgs by name then unassigned, groups

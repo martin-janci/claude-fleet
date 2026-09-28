@@ -567,7 +567,8 @@ impl FleetTools {
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
         {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
         describe {key} (the tracker's whole description, cached); \
-        tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; \
+        tidy; reopened. Work view: tree {filters, cursor} (archived: false hides \
+        archived tasks); task {task_id}; \
         session_tasks; review; rules; rule_preview {rule}; views; org_impact.")]
     pub(super) async fn work(
         &self,

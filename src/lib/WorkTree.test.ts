@@ -123,7 +123,7 @@ describe('WorkTree', () => {
     render(WorkTree);
     await flush();
     const first = treeCalls()[0];
-    expect(first).toEqual({ filters: {}, limit: 50 });
+    expect(first).toEqual({ filters: { archived: false }, limit: 50 });
     const orgs = screen.getAllByTestId('work-org');
     expect(orgs.map((o) => within(o).getByTestId('work-org-head').textContent?.replace(/\s+/g, ' ').trim())).toEqual([
       '▸ Acme 5',
@@ -157,12 +157,12 @@ describe('WorkTree', () => {
     await fireEvent.click(heads[1]);
     await flush();
     const sec = treeCalls().at(-1)!;
-    expect(sec).toEqual({ filters: { org: 1, group: 'label:Payments' }, limit: 50 });
+    expect(sec).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, limit: 50 });
     const group = screen.getAllByTestId('work-group')[1];
     expect(within(group).getAllByTestId('work-task').map((t) => t.getAttribute('data-task-id'))).toEqual(['item:30', 'item:31']);
     await fireEvent.click(within(group).getByTestId('work-load-more'));
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments' }, cursor: 'pay2', limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, cursor: 'pay2', limit: 50 });
     expect(within(group).getAllByTestId('work-task').map((t) => t.getAttribute('data-task-id'))).toEqual([
       'item:30',
       'item:31',
@@ -237,7 +237,7 @@ describe('WorkTree', () => {
     treeImpl = (a) => ({ ...firstPage, archived_hidden: a.filters?.archived ? 0 : 5 });
     render(WorkTree);
     await flush();
-    expect(treeCalls().at(-1)?.filters).toEqual({});
+    expect(treeCalls().at(-1)?.filters).toEqual({ archived: false });
     expect(screen.getByTestId('work-archived-row').textContent).toContain('5 archived tasks hidden');
     await fireEvent.click(screen.getByTestId('work-archived-toggle'));
     await flush();
@@ -265,7 +265,7 @@ describe('WorkTree', () => {
     const n = treeCalls().length;
     workViewFilters.set({ status: 'open' });
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { status: 'open' }, limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { status: 'open', archived: false }, limit: 50 });
     const m = treeCalls().length;
     expect(m).toBe(n + 1);
     bumpWorkChanged();
@@ -291,7 +291,7 @@ describe('WorkTree', () => {
     showTaskInWorkView('item:31');
     await flush();
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments' }, limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, limit: 50 });
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(get(workExpanded).custom?.['1|label:Payments']).toBe(true);
     expect(get(selectedTaskId)).toBe('item:31');
@@ -311,7 +311,7 @@ describe('WorkTree', () => {
     render(WorkTree);
     await flush();
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments' }, limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, limit: 50 });
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(get(workExpanded).custom?.['1|label:Payments']).toBe(true);
     // Consumed: a later mount does not reveal it again.

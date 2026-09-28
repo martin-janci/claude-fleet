@@ -113,7 +113,11 @@ filters (hosts, recency, org scope) do not apply here and step aside.
 Archived tasks (done, or every session archived, with nothing running)
 are hidden by default; the end of the tree says how many, with *Show
 archived*, and the panel has an *Archived tasks* switch. *Status: Done*
-shows done tasks regardless. ⌘⇧O cycles the Work view's organisation.
+shows done tasks regardless, and *Sessions: Past only* shows past work
+(which is archived work), as the Sessions list's *Past only* does. A task
+is archived only when it is archived for everyone: a session on another
+host or in another org that you cannot see still keeps it in the tree.
+⌘⇧O cycles the Work view's organisation.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its
@@ -190,11 +194,14 @@ including tasks with no session at all — as reads of the `work` tool
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
   `suggested`), `review`, `query`, `group`, `archived`. A task is
   *archived* when it has no active session and is done, or every one of
-  its links (at least one of them past) is archived; the tree hides
-  archived tasks unless `archived: true` (or `status: "done"`) asks for
-  them, and `archived_hidden` says how many passed every other filter but
-  were hidden that way (over the whole result, not the page). Each task
-  carries `archived`; `task` / `session_tasks` / `review` answer archived
+  its links (at least one of them past) is archived, judged over every
+  link of the task, not only the ones the caller sees. The tree hides
+  archived tasks only when asked, with `archived: false` (the desktop
+  always sends it); absent shows them, so a client from before the archive
+  keeps seeing every task. `status: "done"` and `has: "past_only"` show
+  them anyway. `archived_hidden` says how many passed every other filter
+  but were hidden that way (over the whole result, not the page). Each
+  task carries `archived`; `task` / `session_tasks` / `review` answer archived
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
