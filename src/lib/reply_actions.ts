@@ -1,4 +1,4 @@
-import { isQuietStatus, sessionActivity, type ActivityProbe, type ConvTurn } from './conversation';
+import { sessionActivity, type ActivityProbe, type ConvTurn } from './conversation';
 import type { Result } from './result';
 
 /** Which of the five reply actions this turn offers, and with what anchor. */
@@ -109,13 +109,24 @@ export const RETRY_READY_TIMEOUT_MS = 30_000;
 export const RETRY_READY_POLL_MS = 750;
 
 /**
- * Poll a session until its REPL is quiet, BOUNDED. `true` means it answered
- * quiet within the bound; `false` means it did not, and the caller must NOT
- * send — the prompt goes back into the composer with an error instead, so it
- * is never silently lost.
+ * Poll a session until its REPL is back at its input prompt, BOUNDED. `true`
+ * means it answered ready within the bound; `false` means it did not, and the
+ * caller must NOT send — the prompt goes back into the composer with an
+ * error instead, so it is never silently lost.
+ *
+ * "Ready" is stricter than `isQuietStatus`, because the pane was respawned
+ * moments ago and the probe reads a capture that includes scrollback: a
+ * reading can still be the OLD REPL's footer, or a blank pane that node has
+ * not drawn into yet. So readiness is `idle` — the REPL's own input chrome,
+ * the one status `pane_intel` derives from the prompt being on screen; the
+ * other quiet values (`completed` / `stopped` / `failed`) mean Claude is not
+ * taking input at all — with no dialog and no spinner, on TWO consecutive
+ * probes. One stale frame cannot pass that; a REPL that really is up passes
+ * it one poll later.
  *
  * A probe that cannot answer (a refused read, a hub too old) is not evidence
- * of readiness, so it counts as "not yet" and the bound still applies.
+ * of readiness, so it counts as "not yet" and resets the streak; the bound
+ * still applies.
  *
  * The dependencies are injected so this is testable without timers.
  */
@@ -132,12 +143,23 @@ export async function waitForReplQuiet(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const timeoutMs = deps.timeoutMs ?? RETRY_READY_TIMEOUT_MS;
   const pollMs = deps.pollMs ?? RETRY_READY_POLL_MS;
+  let streak = 0;
   for (let waited = 0; ; waited += pollMs) {
     await sleep(pollMs);
     const r = await probe(sessionId);
-    if (r.ok && isQuietStatus(r.value.claude_status)) return true;
+    streak = r.ok && isReplReady(r.value) ? streak + 1 : 0;
+    if (streak >= READY_STREAK) return true;
     if (waited + pollMs >= timeoutMs) return false;
   }
+}
+
+/** Consecutive ready probes `waitForReplQuiet` needs. */
+export const READY_STREAK = 2;
+
+/** One probe showing the REPL at its input prompt: `idle`, nothing on
+ *  screen asking a question, nothing generating. */
+export function isReplReady(p: ActivityProbe): boolean {
+  return p.claude_status === 'idle' && !p.pending_input && !p.spinner;
 }
 
 /** A reply as a Markdown block quote, ready to precede the user's own words. */

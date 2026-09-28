@@ -127,7 +127,7 @@ describe('quoteText', () => {
 });
 
 describe('waitForReplQuiet', () => {
-  it('returns true as soon as the REPL reports a quiet status', async () => {
+  it('returns true once the REPL has read idle on two consecutive probes', async () => {
     const seen: number[] = [];
     let n = 0;
     const ok = await waitForReplQuiet(7, {
@@ -140,7 +140,60 @@ describe('waitForReplQuiet', () => {
       timeoutMs: 1_000,
     });
     expect(ok).toBe(true);
-    expect(seen).toEqual([7, 7, 7]);
+    expect(seen).toEqual([7, 7, 7, 7]);
+  });
+
+  it('does not take one stale idle frame of a freshly respawned pane as ready', async () => {
+    // Right after the respawn the capture can still hold the OLD REPL's
+    // footer (idle), then the blank pane node has not drawn into (null).
+    // Only a streak of idle readings means the NEW REPL is at its prompt.
+    const script: ActivityProbe['claude_status'][] = ['idle', null, null, 'idle', 'idle'];
+    let n = 0;
+    const ok = await waitForReplQuiet(7, {
+      probe: async () => probe(script[Math.min(n++, script.length - 1)]),
+      sleep: async () => {},
+      pollMs: 10,
+      timeoutMs: 1_000,
+    });
+    expect(ok).toBe(true);
+    expect(n).toBe(5);
+  });
+
+  it('a single idle frame then the bound is not ready', async () => {
+    const script: ActivityProbe['claude_status'][] = [null, 'idle', null];
+    let n = 0;
+    const ok = await waitForReplQuiet(7, {
+      probe: async () => probe(script[Math.min(n++, script.length - 1)]),
+      sleep: async () => {},
+      pollMs: 10,
+      timeoutMs: 50,
+    });
+    expect(ok).toBe(false);
+  });
+
+  it('only idle counts: other quiet values mean Claude is not taking input', async () => {
+    const ok = await waitForReplQuiet(7, {
+      probe: async () => probe('completed'),
+      sleep: async () => {},
+      pollMs: 10,
+      timeoutMs: 50,
+    });
+    expect(ok).toBe(false);
+  });
+
+  it('an idle reading with a dialog on screen is not ready', async () => {
+    const withDialog = (): Result<ActivityProbe> => {
+      const r = probe('idle');
+      if (r.ok) r.value.pending_input = { kind: 'question', question: 'Trust?', options: [] } as never;
+      return r;
+    };
+    const ok = await waitForReplQuiet(7, {
+      probe: async () => withDialog(),
+      sleep: async () => {},
+      pollMs: 10,
+      timeoutMs: 50,
+    });
+    expect(ok).toBe(false);
   });
 
   it('gives up — bounded — when the REPL never goes quiet', async () => {
