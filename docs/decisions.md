@@ -251,7 +251,9 @@ administration (`work_admin`, master-only), so its commands
 **Follow-up.** When your `settings.section_map` later holds a section, its
 latest answered run is marked `confirmed` (the answer applies as your
 category) or `corrected` (to yours) — `fleet-hub decide status` counts them,
-with the `rejected` ones.
+with the `rejected` ones. A proposal nobody decided before a newer usable
+one for the same section arrived is marked `ignored` (only the latest is
+ever offered); a follow-up already there is never overwritten.
 
 **Off.** `decide.jev.status_map` to `off`; your confirmed maps stay (they
 are yours).

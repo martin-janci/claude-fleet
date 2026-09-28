@@ -957,3 +957,32 @@ async fn a_tracker_due_while_a_run_is_going_stays_due() {
         .unwrap();
     assert_eq!(fake.calls(), 3);
 }
+
+#[tokio::test]
+async fn a_proposal_nobody_decided_is_ignored_once_a_newer_one_arrives() {
+    let w = world();
+    let runs = w.three_proposals().await;
+    w.decide(runs["backlog"], ProposalAction::Reject).unwrap();
+    // After the re-ask window: ideas gets a proposal under the floor (not
+    // one that is shown), parked a new usable one.
+    w.advance(REASK_DAYS * 86_400 + 1);
+    let fake = Fake::answering(vec![says("todo", 0.3), says("done", 0.9)]);
+    let r = w.run(&fake).await;
+    assert_eq!((r.asked, r.skipped_rejected), (2, 1));
+    // The superseded proposal is `ignored`; the one still shown is not;
+    // a person's rejection is never overwritten.
+    assert_eq!(
+        w.run_row(runs["parked"]).followup.as_deref(),
+        Some("ignored")
+    );
+    assert!(w.run_row(runs["ideas"]).followup.is_none());
+    assert_eq!(
+        w.run_row(runs["backlog"]).followup.as_deref(),
+        Some("rejected")
+    );
+    let p = w.proposals();
+    let parked = p.proposals.iter().find(|x| x.section == "parked").unwrap();
+    assert!(parked.pending() && parked.run_id != runs["parked"]);
+    let stats = w.store.lock().unwrap().decision_stats(0).unwrap();
+    assert_eq!(stats.iter().map(|s| s.ignored).sum::<i64>(), 1);
+}

@@ -410,6 +410,28 @@ impl Store {
         )? > 0)
     }
 
+    /// Mark `ignored` every earlier usable answer (no fallback, an answer)
+    /// of `feature` in `mode` about the same subject, older than run
+    /// `newer_id`, that has no follow-up yet: a newer answer took its place
+    /// before anyone decided it. Never overwrites a follow-up (a person's
+    /// decision racing this one wins). Returns the runs marked.
+    pub fn supersede_decision_runs(
+        &self,
+        feature: &str,
+        subject_kind: &str,
+        subject_id: &str,
+        mode: &str,
+        newer_id: i64,
+        at: i64,
+    ) -> Result<usize, IpcError> {
+        Ok(self.conn.execute(
+            "UPDATE decision_runs SET followup = 'ignored', followup_at = ?6 \
+             WHERE feature = ?1 AND subject_kind = ?2 AND subject_id = ?3 AND mode = ?4 \
+               AND id < ?5 AND followup IS NULL AND fallback IS NULL AND answer IS NOT NULL",
+            rusqlite::params![feature, subject_kind, subject_id, mode, newer_id, at],
+        )?)
+    }
+
     /// Recent runs, newest first.
     pub fn list_decision_runs(
         &self,

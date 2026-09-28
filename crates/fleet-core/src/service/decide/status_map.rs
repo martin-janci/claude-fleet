@@ -31,7 +31,8 @@
 //! * **Follow-up.** When a person's `settings.section_map` later holds a
 //!   section, its latest answered run is marked `confirmed` (same category)
 //!   or `corrected` (to theirs) — [`record_followups`], called where the
-//!   settings are updated.
+//!   settings are updated. A proposal nobody decided before a newer one
+//!   for the same section arrived is marked `ignored`.
 //! * **Deciding one proposal** ([`decide_proposal`], by its run id):
 //!   *apply* (its category — `not_planned` applies as `done`), *apply as*
 //!   another category (a correction), both through `work_admin update`
@@ -377,12 +378,13 @@ pub async fn propose_for_tracker(ctx: &DecideCtx, tracker_id: i64) -> Result<Run
     report.mode = Some(mode);
     report.deferred = asks.len().saturating_sub(MAX_ASKS_PER_RUN);
     for ask in asks.into_iter().take(MAX_ASKS_PER_RUN) {
+        let subject = ask.subject;
         let out = decide(
             ctx,
             DecideRequest {
                 feature: Feature::StatusMap,
                 subject_kind: SUBJECT_KIND.into(),
-                subject_id: ask.subject,
+                subject_id: subject.clone(),
                 org_id: row.org_id,
                 request: ask.request,
                 baseline: Some(ask.baseline),
@@ -394,6 +396,26 @@ pub async fn propose_for_tracker(ctx: &DecideCtx, tracker_id: i64) -> Result<Run
         report.asked += 1;
         if out.usable().is_some() {
             report.usable += 1;
+        }
+        // A new proposal takes the place of an older one nobody decided:
+        // that one is `ignored` (the view only ever offers the latest).
+        if let (Some(_), Some(id)) = (out.proposal(), out.run_id) {
+            if let Ok(s) = lock(&ctx.store) {
+                if let Err(e) = s.supersede_decision_runs(
+                    Feature::StatusMap.as_str(),
+                    SUBJECT_KIND,
+                    &subject,
+                    Mode::Assist.as_str(),
+                    id,
+                    now,
+                ) {
+                    tracing::warn!(
+                        tracker_id,
+                        "[decide] ignored follow-up not recorded: {}",
+                        e.message
+                    );
+                }
+            }
         }
         if let Some(f) = out.fallback.filter(|f| stops_the_run(*f)) {
             report.stopped = Some(f);
@@ -974,9 +996,6 @@ pub fn pending_proposal(s: &Store, run_id: i64) -> Result<PendingProposal, IpcEr
             "{section:?} is already in your section map as {c}"
         )));
     }
-    if let Some(f) = &run.followup {
-        return Err(conflict(format!("run {run_id} is already {f}")));
-    }
     let runs = s.decision_runs_for_subjects(
         Feature::StatusMap.as_str(),
         SUBJECT_KIND,
@@ -993,6 +1012,11 @@ pub fn pending_proposal(s: &Store, run_id: i64) -> Result<PendingProposal, IpcEr
                 newer.id
             )));
         }
+    }
+    // After the latest-check: a proposal a newer one superseded (`ignored`)
+    // is refused as not the latest, which names the one to decide.
+    if let Some(f) = &run.followup {
+        return Err(conflict(format!("run {run_id} is already {f}")));
     }
     if was_rejected(&runs, &run) {
         return Err(conflict(format!(
