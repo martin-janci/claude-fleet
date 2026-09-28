@@ -1225,7 +1225,7 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1267,7 +1267,7 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
-                     pending_input = NULL, stale_working_at = NULL{END_COMPACTING} WHERE id = ?1"
+                     pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -1319,7 +1319,7 @@ impl Store {
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
-                 stale_working_at = NULL \
+                 stale_working_at = NULL, stale_demoted_at = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;
@@ -1350,7 +1350,7 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1368,9 +1368,12 @@ impl Store {
     /// says `working` but has had no hook, no turn, no transcript growth
     /// (`context_at`, `usage_updated_at`) and no pane output
     /// (`last_activity_at`) for `stale_secs` is demoted to `idle` and stamped
-    /// `stale_working_at = now`, which is what the attention model reads.
-    /// Pane-less and `shell` rows are never judged (no hooks or turns to
-    /// miss); a stamped row is not judged twice; `stale_secs <= 0` is off.
+    /// `stale_working_at = now`, which is what the attention model reads,
+    /// and `stale_demoted_at = now`, which arms the reconcile's
+    /// `stale_working_veto`. Pane-less and `shell` rows are never judged (no
+    /// hooks or turns to miss); a demoted row is not judged twice — even
+    /// once an attach or the TTL has lifted its attention stamp, since the
+    /// demotion itself still stands; `stale_secs <= 0` is off.
     /// Returns the demoted rows; each gets `session_updated`, a
     /// `status_change idle` and a `stale_working` timeline entry.
     pub fn age_out_stale_working(
@@ -1385,9 +1388,10 @@ impl Store {
         let ids: Vec<i64> = self
             .conn
             .prepare(
-                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, stale_working_at = ?1 \
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, \
+                     stale_working_at = ?1, stale_demoted_at = ?1 \
                  WHERE status = 'running' AND claude_status = 'working' \
-                   AND kind NOT IN ('bg','external','shell') AND stale_working_at IS NULL \
+                   AND kind NOT IN ('bg','external','shell') AND stale_demoted_at IS NULL \
                    AND COALESCE(last_hook_at, 0) < ?2 AND COALESCE(last_turn_at, 0) < ?2 \
                    AND COALESCE(context_at, 0) < ?2 AND COALESCE(usage_updated_at, 0) < ?2 \
                    AND last_activity_at < ?2 AND created_at < ?2 \
@@ -1417,8 +1421,12 @@ impl Store {
     /// the row is `working` or `blocked` again (a pane read lifted the
     /// demotion without a hook — `stale_working_veto`), or the stamp is
     /// older than `ttl_secs` (nobody looked; `0` = never by age). An attach
-    /// clears it too (`touch_session`), and every hook does. Returns the
-    /// rows it changed; each gets `session_updated`.
+    /// clears it too (`touch_session`), and every hook does. Only a row that
+    /// is `working` / `blocked` again also loses `stale_demoted_at` (the
+    /// veto): the TTL ends the reason, not the demotion. Returns the rows
+    /// whose stamp it lifted; each gets `session_updated` once. A row whose
+    /// only change is `stale_demoted_at` is not emitted — nothing a client
+    /// sees changed.
     pub fn expire_stale_working(
         &self,
         now: i64,
@@ -1432,13 +1440,24 @@ impl Store {
         let ids: Vec<i64> = self
             .conn
             .prepare(
-                "UPDATE sessions SET stale_working_at = NULL \
+                "UPDATE sessions SET stale_working_at = NULL, \
+                     stale_demoted_at = CASE WHEN claude_status IN ('working', 'blocked') \
+                                             THEN NULL ELSE stale_demoted_at END \
                  WHERE stale_working_at IS NOT NULL \
                    AND (claude_status IN ('working', 'blocked') OR stale_working_at < ?1) \
                  RETURNING id",
             )?
             .query_map(rusqlite::params![cutoff], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        // An acknowledged demotion (stamp already gone) whose row works
+        // again: disarm the veto too. Silent — `stale_demoted_at` is not on
+        // the wire, and the rows above already lost theirs.
+        self.conn.execute(
+            "UPDATE sessions SET stale_demoted_at = NULL \
+             WHERE stale_demoted_at IS NOT NULL AND stale_working_at IS NULL \
+               AND claude_status IN ('working', 'blocked')",
+            [],
+        )?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(row) = self.emit_session(id)? {
@@ -1446,6 +1465,29 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Whether the tick's stale-working rule demoted this row and nothing
+    /// has lifted the demotion since (`stale_demoted_at`, migration 072):
+    /// the reconcile's `stale_working_veto` reads it for the prior row,
+    /// since an attach or the TTL may have cleared `stale_working_at` while
+    /// the demotion still stands. `false` for a row that does not exist.
+    pub fn stale_demoted(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT stale_demoted_at IS NOT NULL FROM sessions \
+                 WHERE host_alias = ?1 AND tmux_name = ?2",
+                rusqlite::params![host_alias, tmux_name],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     /// The Notification hook's write. `status` is the mapped status;
@@ -1476,7 +1518,8 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             stale_working_at = NULL, idle_since = {idle}{stuck_sql} WHERE id = ?1",
+             stale_working_at = NULL, stale_demoted_at = NULL, \
+             idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
         let kind = match stuck {
@@ -3672,6 +3715,107 @@ mod tests {
                 .stale_working_at,
             Some(1)
         );
+    }
+
+    /// Final review of the acknowledgement: `stale_demoted_at` (the veto's
+    /// memory, migration 072) outlives the attention stamp. Every hook
+    /// clears both; the TTL clears only the stamp; a row working or blocked
+    /// again clears both — silently when the stamp was already gone, since
+    /// nothing a client sees changes.
+    #[test]
+    fn stale_demoted_at_ends_with_a_hook_or_a_resumed_row_but_not_the_ttl() {
+        let (s, bus) = crate::store::test_support::store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let mk = |name: &str, status: &str, stamp: Option<i64>| -> i64 {
+            let id = s
+                .upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2, stale_working_at = ?3, \
+                         stale_demoted_at = 500 WHERE id = ?1",
+                    rusqlite::params![id, status, stamp],
+                )
+                .unwrap();
+            id
+        };
+        let demoted = |name: &str| s.stale_demoted("local", name).unwrap();
+        let stamp = |id: i64| s.get_session_by_id(id).unwrap().unwrap().stale_working_at;
+
+        // Every hook write clears both.
+        let stop = mk("stop", "idle", Some(500));
+        s.record_stop_hook_for_row(stop).unwrap();
+        let prompt = mk("prompt", "idle", Some(500));
+        s.record_prompt_submit_hook_for_row(prompt).unwrap();
+        let end = mk("end", "idle", Some(500));
+        s.record_session_end_hook_for_row(end).unwrap();
+        let fail = mk("fail", "idle", Some(500));
+        s.record_stop_failure_hook_for_row(fail).unwrap();
+        let note = mk("note", "idle", Some(500));
+        s.record_notification_hook_for_row(
+            note,
+            crate::service::pane_intel::ClaudeStatus::Blocked,
+            None,
+        )
+        .unwrap();
+        let start = mk("start", "idle", None);
+        s.clear_ended_turn_state(start).unwrap();
+        for (id, name) in [
+            (stop, "stop"),
+            (prompt, "prompt"),
+            (end, "end"),
+            (fail, "fail"),
+            (note, "note"),
+            (start, "start"),
+        ] {
+            assert_eq!(stamp(id), None, "{name}: the hook clears the stamp");
+            assert!(!demoted(name), "{name}: the hook clears the veto");
+        }
+
+        // The TTL ends the reason, not the demotion.
+        let expired = mk("expired", "idle", Some(1_000));
+        // A pane read lifted the demotion (`working` / `blocked` again).
+        let resumed = mk("resumed", "working", Some(9_000));
+        let asking = mk("asking", "blocked", Some(9_000));
+        // Acknowledged earlier (stamp gone), working again: veto only.
+        let acked = mk("acked", "working", None);
+        // Acknowledged and still idle: nothing to lift.
+        let quiet = mk("quiet", "idle", None);
+        bus.take();
+        let mut lifted: Vec<i64> = s
+            .expire_stale_working(10_000, 3_600)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        lifted.sort();
+        let mut want = vec![expired, resumed, asking];
+        want.sort();
+        assert_eq!(lifted, want, "only a lifted stamp is returned");
+        assert_eq!(stamp(expired), None);
+        assert!(demoted("expired"), "the TTL keeps the veto");
+        assert!(!demoted("resumed"), "a working row lifts the veto");
+        assert!(!demoted("asking"), "a blocked row lifts the veto");
+        assert!(
+            !demoted("acked"),
+            "an acknowledged working row lifts it too"
+        );
+        assert!(demoted("quiet"), "an acknowledged idle row keeps it");
+        let events = bus.take();
+        for id in [expired, resumed, asking] {
+            let ev = format!("session:updated:{id}");
+            assert_eq!(
+                events.iter().filter(|e| **e == ev).count(),
+                1,
+                "{id} is emitted once: {events:?}"
+            );
+        }
+        for id in [acked, quiet] {
+            assert!(
+                !events.contains(&format!("session:updated:{id}")),
+                "{id}: a veto-only change is not a visible change: {events:?}"
+            );
+        }
     }
 
     #[test]

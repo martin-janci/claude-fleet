@@ -736,9 +736,27 @@ fn write_reachable_host(
             s.ensure_in_tx()?;
         }
         let prior_row = prior_read.as_ref().ok().cloned().flatten();
-        let stale = prior_row
-            .as_ref()
-            .is_some_and(|p| p.stale_working_at.is_some());
+        // The veto is armed by the attention stamp OR by the demotion's own
+        // memory (`stale_demoted_at`, not a `SessionRow` field): an attach
+        // or `reconcile.stale_working_ttl_secs` ends the reason, not the
+        // demotion. A failed read leaves the veto to the stamp alone.
+        let stale = match &prior_row {
+            None => false,
+            Some(p) if p.stale_working_at.is_some() => true,
+            Some(_) => match s.stale_demoted(&host.alias, &sess.name) {
+                Ok(demoted) => demoted,
+                Err(e) => {
+                    tracing::warn!(
+                        host = %host.alias,
+                        session = %sess.name,
+                        error = %e,
+                        "[reconcile] stale-demoted read failed"
+                    );
+                    s.ensure_in_tx()?;
+                    false
+                }
+            },
+        };
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
         // this pass actually asked, `Blocked`-only otherwise (a
@@ -1990,8 +2008,10 @@ pub(super) fn status_candidate(
     }
 }
 
-/// A row the tick demoted for staleness (`stale_working_at` set) is not
-/// handed back to `working` by the cached `claude agents` status alone.
+/// A row the tick demoted for staleness (`stale_working_at` or, once an
+/// attach or the TTL has ended the attention reason, `stale_demoted_at`
+/// set) is not handed back to `working` by the cached `claude agents`
+/// status alone.
 /// Only the pane's own spinner (`Working`) lifts the demotion; a `Blocked`
 /// pane still surfaces; anything else yields `None` so the upsert keeps
 /// the stored `idle`.
