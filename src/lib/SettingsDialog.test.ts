@@ -489,6 +489,19 @@ describe('SettingsDialog projects (W5 G3)', () => {
       entries: [{ label: 'Wipe', text: '/clear now' }, seeded[1]],
     });
 
+    // The Send box and the arrows save too; the arrows stop at either end.
+    await fireEvent.click(screen.getAllByTestId('preset-auto-send')[1]);
+    expect(get(composerPresets)[1].auto_send).toBe(true);
+    expect((screen.getAllByTestId('preset-up')[0] as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getAllByTestId('preset-down')[1] as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(screen.getAllByTestId('preset-down')[0]);
+    await flushComposerPresets();
+    expect(inv).toHaveBeenCalledWith('set_quick_replies', {
+      entries: [{ ...seeded[1], auto_send: true }, { label: 'Wipe', text: '/clear now' }],
+    });
+    await fireEvent.click(screen.getAllByTestId('preset-up')[1]);
+    expect(get(composerPresets)[0].label).toBe('Wipe');
+
     await fireEvent.click(screen.getByTestId('preset-add'));
     expect(get(composerPresets)).toHaveLength(seeded.length + 1);
     expect(screen.getAllByTestId('preset-label')).toHaveLength(seeded.length + 1);
@@ -617,6 +630,33 @@ describe('SettingsDialog — Decisions (Jev), experimental and off (D36)', () =>
     const text = (screen.getByTestId('decide-explainer').textContent ?? '').replace(/\s+/g, ' ');
     expect(text).toContain('only for organisations that opted in');
     expect(text).toContain('never grants a permission');
+    // The key: set with fleet-hub against THIS app's data folder.
+    expect(text).toContain('fleet-hub decide set-key --data-dir DIR');
+    expect(text).toContain('sk.rlt.claude-fleet');
+    expect(text).toContain('~/.local/share/claude-fleet');
+  });
+
+  it('shows work link read-only: J1 is an offline benchmark until it passes (D32)', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_fleet_settings') return { 'decide.jev.work_link': 'shadow' };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const wl = screen.getByTestId('decide-jev-work-link') as HTMLSelectElement;
+    expect(wl).toBeDisabled();
+    // A value set earlier stays readable.
+    await waitFor(() => expect(wl.value).toBe('shadow'));
+    expect(screen.getByTestId('decide-jev-work-link-desc').textContent).toContain(
+      'offline benchmark only until J1 passes its acceptance lines',
+    );
+    await fireEvent.change(wl, { target: { value: 'assist' } });
+    await tick();
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.objectContaining({ key: 'decide.jev.work_link' }));
+    // status map stays live.
+    expect(screen.getByTestId('decide-jev-status-map')).not.toBeDisabled();
   });
 
   it('writes the kill switch, a mode and a number through set_fleet_setting', async () => {
@@ -632,9 +672,9 @@ describe('SettingsDialog — Decisions (Jev), experimental and off (D36)', () =>
     await waitFor(() =>
       expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'decide.jev.enabled', value: 'true' }),
     );
-    await fireEvent.change(screen.getByTestId('decide-jev-work-link'), { target: { value: 'shadow' } });
+    await fireEvent.change(screen.getByTestId('decide-jev-status-map'), { target: { value: 'shadow' } });
     await waitFor(() =>
-      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'decide.jev.work_link', value: 'shadow' }),
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'decide.jev.status_map', value: 'shadow' }),
     );
     await fireEvent.change(screen.getByTestId('decide-jev-daily-token-budget'), { target: { value: '500000' } });
     await waitFor(() =>

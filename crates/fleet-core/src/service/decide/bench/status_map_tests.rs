@@ -91,6 +91,7 @@ fn a_label_file_is_checked_row_by_row() {
             lang: String::new(),
             note: Some("Ambiguous: a test".into()),
             org_id: None,
+            tracker_id: None,
         },
         SectionLabel {
             section: "Untitled section".into(),
@@ -99,6 +100,7 @@ fn a_label_file_is_checked_row_by_row() {
             lang: "en".into(),
             note: None,
             org_id: None,
+            tracker_id: None,
         },
     ]);
     assert_eq!(dropped, 1);
@@ -286,13 +288,18 @@ async fn jev_is_asked_only_through_the_gate_with_the_adapters_request() {
         .all(|o| !o.ran && o.reason.as_deref() == Some("flag_off")));
     assert!(runs(&store).is_empty());
 
-    // Flag, mode and key, but rows with no org are not allowed: org_off.
+    // Flag and key, but rows with no org are not allowed: org_off. The
+    // feature's live mode stays `off`: the benchmark does not need it (it
+    // would start the daily live runs).
     {
         let s = store.lock().unwrap();
         settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
-        settings::set(&s, settings::DECIDE_JEV_STATUS_MAP, "shadow").unwrap();
         s.set_decision_credential(Some(&Secret::new(KEY)), None)
             .unwrap();
+        assert_eq!(
+            crate::service::decide::FeatureMode::of(&s, crate::service::decide::Feature::StatusMap),
+            crate::service::decide::FeatureMode::Off
+        );
     }
     let outs = run_providers(&cases, &ps, Some(&ctx), DEFAULT_MAX_CALLS).await;
     assert_eq!(oracle.calls.load(Ordering::SeqCst), 0);
@@ -725,4 +732,62 @@ fn the_haiku_line_beats_ties_or_fails_on_paired_cases() {
     let c = haiku_criterion(Provider::Jev, &cases, &outs);
     assert_eq!(c.verdict, Verdict::NotJudged);
     assert!(c.measured.contains("--haiku-host"), "{}", c.measured);
+}
+
+#[test]
+fn a_labels_org_comes_from_the_database() {
+    let s = Store::open_in_memory().unwrap();
+    let acme = s.add_org("Acme", None, false).unwrap().id;
+    let other = s.add_org("Other", None, false).unwrap().id;
+    let t = s
+        .add_tracker("asana", "Company B", "https://app.asana.com")
+        .unwrap()
+        .id;
+    s.set_tracker_org(t, Some(acme)).unwrap();
+    s.set_tracker_probe(
+        t,
+        Some("1200000000000001"),
+        &crate::store::TrackerConfig {
+            unmapped_sections: vec!["parked".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let label = |section: &str, org_id: Option<i64>, tracker_id: Option<i64>| SectionLabel {
+        section: section.into(),
+        project_sections: vec![],
+        expect: "todo".into(),
+        lang: "en".into(),
+        note: None,
+        org_id,
+        tracker_id,
+    };
+    // The tracker names the org; a row without org_id takes it.
+    let mut rows = vec![label("Parked", None, Some(t)), label("Ideas", None, None)];
+    resolve_label_orgs(&s, &mut rows).unwrap();
+    assert_eq!((rows[0].org_id, rows[1].org_id), (Some(acme), None));
+    // A file that says otherwise is refused, naming the row.
+    let mut rows = vec![
+        label("Ideas", None, None),
+        label("Parked", Some(other), Some(t)),
+    ];
+    let e = resolve_label_orgs(&s, &mut rows).unwrap_err();
+    assert!(
+        e.contains("row 2") && e.contains(&format!("in org {acme}")),
+        "{e}"
+    );
+    // A section only another org's tracker lists.
+    let mut rows = vec![label(" PARKED ", Some(other), None)];
+    let e = resolve_label_orgs(&s, &mut rows).unwrap_err();
+    assert!(e.contains("row 1") && e.contains("tracker_id"), "{e}");
+    // An org the database does not know; a tracker it does not know.
+    assert!(resolve_label_orgs(&s, &mut [label("Ideas", Some(9_999), None)]).is_err());
+    assert!(resolve_label_orgs(&s, &mut [label("Ideas", None, Some(9_999))]).is_err());
+    // The right org, or a section no tracker lists: kept.
+    let mut rows = vec![
+        label("parked", Some(acme), None),
+        label("Ideas", Some(other), None),
+    ];
+    resolve_label_orgs(&s, &mut rows).unwrap();
+    assert_eq!((rows[0].org_id, rows[1].org_id), (Some(acme), Some(other)));
 }

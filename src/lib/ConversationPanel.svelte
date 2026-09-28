@@ -20,7 +20,7 @@
   import AnswerPrompt from './AnswerPrompt.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
-  import { composerPresets, type ComposerPreset } from './composer_presets';
+  import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
   import { timeAgo } from './session_status';
@@ -103,7 +103,7 @@
   import { invokeCmd } from './result';
   import { addFiles, pastedName, fmtBytes, clearSent, type Attachment, type PickedFile } from './attachments';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
-  import { pointInRect } from './geometry';
+  import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import SpiralLoader from './SpiralLoader.svelte';
@@ -1151,8 +1151,9 @@
     if (slashIndex >= slashMatches.length) slashIndex = 0;
   });
 
-  /** A chip fills the box (Shift+click sends at once). A filled command does
-   *  not pop the slash menu: the user picked it already. */
+  /** A chip fills the box, or sends at once when it is an auto-send chip;
+   *  Shift+click does the other one. A filled command does not pop the slash
+   *  menu: the user picked it already. */
   function usePreset(p: ComposerPreset, sendNow: boolean) {
     // A gated composer (see `blockWhileBusy`) degrades Shift+click to a
     // plain click rather than swallowing it: the chip still fills the box,
@@ -1549,16 +1550,17 @@
     dragDepth = 0;
   }
 
-  function pointInShell(px: number, py: number): boolean {
+  function pointInShell(position: { x: number; y: number }): boolean {
     // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts
     // and Assets overlays cover a panel that is still mounted and still laid
     // out at these very coordinates. Without this, a drop while one of them
     // is open attaches a file under an opaque overlay — the veil drawn
     // beneath it, the user seeing nothing happen.
     if (!visible || !shellEl) return false;
-    // NOT divided by devicePixelRatio: the event's position is already in
-    // logical points (see the contract on `pointInRect` in geometry.ts).
-    return pointInRect(px, py, shellEl.getBoundingClientRect());
+    // In logical pixels through `dropPoint`: as delivered on macOS and Linux,
+    // divided by the scale factor on Windows (see geometry.ts).
+    const { x, y } = dropPoint(position);
+    return pointInRect(x, y, shellEl.getBoundingClientRect());
   }
 
   /**
@@ -1597,11 +1599,11 @@
       .onDragDropEvent((event) => {
         const p = event.payload;
         if (p.type === 'enter' || p.type === 'over') {
-          dragOverShell = pointInShell(p.position.x, p.position.y);
+          dragOverShell = pointInShell(p.position);
         } else if (p.type === 'leave') {
           dragOverShell = false;
         } else if (p.type === 'drop') {
-          const over = pointInShell(p.position.x, p.position.y);
+          const over = pointInShell(p.position);
           dragOverShell = false;
           dragDepth = 0;
           if (over) onDroppedPaths(p.paths ?? []);
@@ -2169,11 +2171,15 @@
               class:btn--warn={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
-              title={suggested
-                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.\n\nClick fills the box; Shift+click sends now.`
-                : `${p.text}\n\nClick fills the box; Shift+click sends now.`}
+              data-auto-send={p.auto_send || undefined}
+              title={`${suggested
+                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
+                : p.text}\n\n${p.auto_send
+                ? 'Click sends now; Shift+click fills the box.'
+                : 'Click fills the box; Shift+click sends now.'}`}
               disabled={viewing !== null}
-              onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
+              onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
+              >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
             >
           {/if}
         {/each}
@@ -2380,6 +2386,10 @@
     /* One row by default; growth is a deliberate toggle, not a reflow. */
     flex-wrap: nowrap;
     overflow: hidden;
+  }
+  /* Marks an auto-send chip: a click sends rather than fills. */
+  .chip-send {
+    opacity: 0.6;
   }
   .chips[data-expanded='true'] {
     flex-wrap: wrap;

@@ -39,6 +39,18 @@ Phase 7 "WSL spike"); the `ssh` program is chosen once
 else PATH) and used by probes, the terminal and the tunnels alike; a
 non-system `ssh` also gets its own `$HOME/.ssh/config` read.
 
+Edge-case round (2026-09-28): WSL detection runs in the background (killed
+at its deadline, UTF-8 via `WSL_UTF8`, any NUL means UTF-16) and `wsl-`
+commands, the PTY attach and tunnels wait for it; `CLAUDE_FLEET_SSH` loses
+surrounding quotes and its program counts as `ssh` for orphan reaping;
+ssh config: every alias on a `Host` line, first value wins, `Match`,
+`Include` with globs; drag-drop positions divided by the scale factor on
+Windows only (WebView2 reports physical pixels); Credential Manager errors
+fall back to an old token file, 1312 explained, migration serialised
+against `set`; the installer's own contents are checked for ConPTY (and a
+release draft loses a bad installer); `fetch-conpty.sh` picks the host CPU;
+the first terminal logs which ConPTY actually loaded.
+
 Owner decision still open: Authenticode signing (the first Windows release ships unsigned; `docs/windows.md` says so).
 
 ## 0. Evidence: what actually fails today

@@ -49,7 +49,8 @@ pub use jev::{
 use crate::ipc_error::{lock, IpcError};
 use crate::service::settings;
 use crate::store::{
-    is_decision_word, DecisionKeyStatus, DecisionStatRow, NewDecisionRun, Secret, Store,
+    is_decision_word, DecisionKeyStatus, DecisionStatRow, NewDecisionRun, RunScope, Secret, Store,
+    DECISION_BENCH_SUBJECT,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -58,8 +59,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 /// The setting a desktop paired to a hub carries (`src-tauri`'s
-/// `backend::REMOTE_URL_KEY`): such a process is a window onto someone
-/// else's fleet and never calls out (D35).
+/// `backend::REMOTE_URL_KEY` is this constant): such a process is a window
+/// onto someone else's fleet and never calls out (D35).
 pub const HUB_REMOTE_URL_KEY: &str = "hub.remote_url";
 
 /// Rows the retention sweep deletes per lock, and per sweep.
@@ -275,17 +276,20 @@ pub struct BreakerState {
     pub open_until: Option<i64>,
 }
 
-/// The breaker of `provider` at `now`: open once `failures` calls in a row
-/// failed, for `open_secs` after the newest of them. After that one call
-/// goes through (half-open); another failure opens it again.
+/// The breaker of `provider` at `now`, over the runs of `scope`: open once
+/// `failures` calls in a row failed, for `open_secs` after the newest of
+/// them. After that one call goes through (half-open); another failure
+/// opens it again. The live breaker ([`RunScope::Live`]) never counts an
+/// offline benchmark's calls.
 pub fn breaker_state(
     s: &Store,
     provider: &str,
     failures: u32,
     open_secs: i64,
     now: i64,
+    scope: RunScope,
 ) -> Result<BreakerState, IpcError> {
-    let (streak, newest) = s.decision_failure_streak(provider, failures)?;
+    let (streak, newest) = s.decision_failure_streak(provider, failures, scope)?;
     let until = newest.map(|at| at + open_secs);
     let open = streak >= failures && until.is_some_and(|u| now < u);
     Ok(BreakerState {
@@ -295,6 +299,28 @@ pub fn breaker_state(
     })
 }
 
+/// Who is asking: a live adapter, or the offline benchmark (`fleet-hub
+/// decide bench`, subject kind [`DECISION_BENCH_SUBJECT`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    Live,
+    /// The mode check is waived — measuring a feature must not need its
+    /// live mode on (for `status_map` that would start the daily live
+    /// runs) — and the call counts as `shadow`: it never proposes. The
+    /// owner, the flag, the org's consent, the key, the breaker and the
+    /// budget still apply, counted over every run.
+    Bench,
+}
+
+impl Caller {
+    fn scope(self) -> RunScope {
+        match self {
+            Caller::Live => RunScope::Live,
+            Caller::Bench => RunScope::All,
+        }
+    }
+}
+
 /// What the gate hands [`decide`] when a call may be made.
 struct Cleared {
     mode: Mode,
@@ -302,14 +328,16 @@ struct Cleared {
     cfg: CallSettings,
 }
 
-/// The gate, at `now`, with the key it cleared. Order: owner, flag, mode,
-/// org, key, breaker, budget — the first refusal wins.
+/// The gate, at `now`, with the key it cleared. Order: owner, flag, mode
+/// (not for the benchmark), org, key, breaker, budget — the first refusal
+/// wins.
 fn clear(
     s: &Store,
     feature: Feature,
     org_id: Option<i64>,
     provider: &str,
     now: i64,
+    caller: Caller,
 ) -> Result<Cleared, Fallback> {
     if !owns_the_fleet(s) {
         return Err(Fallback::NotOwner);
@@ -317,10 +345,11 @@ fn clear(
     if !settings::get_bool(s, settings::DECIDE_JEV_ENABLED) {
         return Err(Fallback::FlagOff);
     }
-    let mode = match FeatureMode::of(s, feature) {
-        FeatureMode::Off => return Err(Fallback::ModeOff),
-        FeatureMode::Shadow => Mode::Shadow,
-        FeatureMode::Assist => Mode::Assist,
+    let mode = match (caller, FeatureMode::of(s, feature)) {
+        (Caller::Bench, _) => Mode::Shadow,
+        (Caller::Live, FeatureMode::Off) => return Err(Fallback::ModeOff),
+        (Caller::Live, FeatureMode::Shadow) => Mode::Shadow,
+        (Caller::Live, FeatureMode::Assist) => Mode::Assist,
     };
     let consented = match org_id {
         Some(id) => s.org_jev_allowed(id).unwrap_or(false),
@@ -342,11 +371,12 @@ fn clear(
         cfg.breaker_failures,
         cfg.breaker_open_secs,
         now,
+        caller.scope(),
     ) {
         Ok(b) if !b.open => {}
         _ => return Err(Fallback::BreakerOpen),
     }
-    match s.decision_usage_since(provider, day_start(now)) {
+    match s.decision_usage_since(provider, day_start(now), caller.scope()) {
         Ok((used, _)) if used < cfg.daily_token_budget => {}
         _ => return Err(Fallback::Budget),
     }
@@ -367,7 +397,22 @@ pub fn gate_at(
     org_id: Option<i64>,
     now: i64,
 ) -> Result<Mode, Fallback> {
-    clear(s, feature, org_id, PROVIDER_JEV, now).map(|c| c.mode)
+    clear(s, feature, org_id, PROVIDER_JEV, now, Caller::Live).map(|c| c.mode)
+}
+
+/// [`gate_at`] for the offline benchmark: the feature's mode is not
+/// checked (measuring `status_map` must not need `decide.jev.status_map`
+/// on, which would start its daily live runs); everything else is, the
+/// breaker and the budget over every run. `Ok` is always [`Mode::Shadow`].
+/// A benchmark's [`DecideRequest`] has subject kind
+/// [`DECISION_BENCH_SUBJECT`], which [`decide`] gates the same way.
+pub fn gate_bench_at(
+    s: &Store,
+    feature: Feature,
+    org_id: Option<i64>,
+    now: i64,
+) -> Result<Mode, Fallback> {
+    clear(s, feature, org_id, PROVIDER_JEV, now, Caller::Bench).map(|c| c.mode)
 }
 
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -437,6 +482,9 @@ pub fn fingerprint(fp_key: &Secret, redacted: &JevRequest) -> String {
 pub struct DecideRequest {
     pub feature: Feature,
     /// What is decided about: `session`, `tracker`, `section`, … (a word).
+    /// [`DECISION_BENCH_SUBJECT`] marks the offline benchmark's call: gated
+    /// as [`gate_bench_at`], never counted by the live breaker, budget or
+    /// stats.
     pub subject_kind: String,
     /// Its id (a word).
     pub subject_id: String,
@@ -476,6 +524,16 @@ pub struct DecisionOutcome {
     /// record; act on it only through [`Self::usable`].
     pub answer: Option<DecisionAnswer>,
     pub fallback: Option<Fallback>,
+}
+
+impl DecideRequest {
+    fn caller(&self) -> Caller {
+        if self.subject_kind == DECISION_BENCH_SUBJECT {
+            Caller::Bench
+        } else {
+            Caller::Live
+        }
+    }
 }
 
 impl DecisionOutcome {
@@ -587,9 +645,13 @@ pub async fn decide(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
     // 1. The gate, the fingerprint and the configured mode: one short lock.
     let gated = match lock(&ctx.store) {
         Ok(s) => {
-            run.mode = FeatureMode::of(&s, req.feature).as_str().into();
+            // A benchmark's call is a shadow call whatever the live mode.
+            run.mode = match req.caller() {
+                Caller::Live => FeatureMode::of(&s, req.feature).as_str().into(),
+                Caller::Bench => Mode::Shadow.as_str().into(),
+            };
             run.input_fp = s.decision_fp_key().ok().map(|k| fingerprint(&k, &redacted));
-            clear(&s, req.feature, req.org_id, provider, now)
+            clear(&s, req.feature, req.org_id, provider, now, req.caller())
         }
         Err(_) => Err(Fallback::FlagOff),
     };
@@ -736,7 +798,8 @@ fn record(
 }
 
 /// Delete runs older than `decide.retention_days` (`0` keeps them), in
-/// batches, at most [`RETENTION_TICK_CAP`] per call. The GC tick runs it;
+/// batches, at most [`RETENTION_TICK_CAP`] per call. A run a person
+/// confirmed, corrected or rejected is kept (D37: a rejection holds). The GC tick runs it;
 /// ungated like the work retention sweep. Returns the rows deleted.
 pub fn sweep_runs(store: &Mutex<Store>, now: i64) -> usize {
     let days = match store.lock() {
@@ -775,9 +838,16 @@ pub fn sweep_runs(store: &Mutex<Store>, now: i64) -> usize {
 pub struct TodayUsage {
     /// The UTC day's start.
     pub since: i64,
+    /// The live adapters' spend: what the budget counts.
     pub input_tokens: i64,
     pub cost_microusd: i64,
     pub budget: i64,
+    /// The offline benchmark's spend today, apart (a benchmark call is
+    /// gated on the live and its own spend together).
+    #[serde(default)]
+    pub bench_input_tokens: i64,
+    #[serde(default)]
+    pub bench_cost_microusd: i64,
 }
 
 /// An org that consented.
@@ -807,12 +877,16 @@ pub struct DecideStatus {
     pub stats: Vec<DecisionStatRow>,
 }
 
-/// Read-only: the flag, modes, consent, key (configured or not), breaker,
-/// today's spend and the runs of the last `days` days per feature, provider,
-/// fallback and org.
+/// Read-only: the flag, modes, consent, key (configured or not), the live
+/// breaker, today's spend (live, and the benchmark's apart) and the runs of
+/// the last `days` days per feature, live or benchmark, provider, fallback
+/// and org.
 pub fn status(s: &Store, now: i64, days: i64) -> Result<DecideStatus, IpcError> {
     let cfg = CallSettings::read(s);
-    let (input_tokens, cost_microusd) = s.decision_usage_since(PROVIDER_JEV, day_start(now))?;
+    let (input_tokens, cost_microusd) =
+        s.decision_usage_since(PROVIDER_JEV, day_start(now), RunScope::Live)?;
+    let (all_tokens, all_cost) =
+        s.decision_usage_since(PROVIDER_JEV, day_start(now), RunScope::All)?;
     Ok(DecideStatus {
         enabled: settings::get_bool(s, settings::DECIDE_JEV_ENABLED),
         owns_the_fleet: owns_the_fleet(s),
@@ -843,12 +917,15 @@ pub fn status(s: &Store, now: i64, days: i64) -> Result<DecideStatus, IpcError> 
             cfg.breaker_failures,
             cfg.breaker_open_secs,
             now,
+            RunScope::Live,
         )?,
         today: TodayUsage {
             since: day_start(now),
             input_tokens,
             cost_microusd,
             budget: cfg.daily_token_budget,
+            bench_input_tokens: all_tokens - input_tokens,
+            bench_cost_microusd: all_cost - cost_microusd,
         },
         retention_days: int_setting(s, settings::DECIDE_RETENTION_DAYS),
         runs_kept: s.decision_run_count()?,
@@ -922,10 +999,19 @@ impl DecideStatus {
                 }
             ),
             format!(
-                "today (UTC): {} of {} input tokens, {}",
+                "today (UTC): {} of {} input tokens, {}{}",
                 self.today.input_tokens,
                 self.today.budget,
-                fmt_usd(self.today.cost_microusd)
+                fmt_usd(self.today.cost_microusd),
+                if self.today.bench_input_tokens > 0 || self.today.bench_cost_microusd > 0 {
+                    format!(
+                        "   benchmark: {} input tokens, {}",
+                        self.today.bench_input_tokens,
+                        fmt_usd(self.today.bench_cost_microusd)
+                    )
+                } else {
+                    String::new()
+                }
             ),
             format!(
                 "runs kept: {}   retention: {}",
@@ -943,8 +1029,9 @@ impl DecideStatus {
             out.push(format!("runs in the last {} days:", self.window_days));
             for r in &self.stats {
                 out.push(format!(
-                    "  {:<11} {:<6} {:<15} org {:<5} runs {:>6}  calls {:>6}  tokens {:>9}  {}  agreed {}/{}  followups c{} r{} x{} i{}",
+                    "  {:<11} {:<5} {:<6} {:<15} org {:<5} runs {:>6}  calls {:>6}  tokens {:>9}  {}  agreed {}/{}  followups c{} r{} x{} i{}",
                     r.feature,
+                    if r.bench { "bench" } else { "live" },
                     r.provider,
                     r.fallback.as_deref().unwrap_or("answered"),
                     r.org_id.map(|o| o.to_string()).unwrap_or_else(|| "-".into()),
