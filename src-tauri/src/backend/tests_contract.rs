@@ -322,6 +322,24 @@ fn sample_health() -> Health {
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),
         peer_links_total: 2,
+        decide: Some(sample_decide_health()),
+    }
+}
+
+/// `Health.decide` (the Jev envelope's last hour, test map §7): every flag
+/// true and every option set, so a renamed field is a golden diff.
+fn sample_decide_health() -> fleet_core::service::decide::DecideHealth {
+    fleet_core::service::decide::DecideHealth {
+        enabled: true,
+        modes: BTreeMap::from([("status_map".to_string(), "assist".to_string())]),
+        window_secs: 3_600,
+        attempts: 12,
+        failures: 4,
+        failure_rate: Some(0.333),
+        breaker_open: true,
+        budget_spent: true,
+        degraded: true,
+        reason: Some("breaker_open".into()),
     }
 }
 
@@ -580,6 +598,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         }),
     );
     put("Health", wire_keys(&sample_health()));
+    put("Health.decide", wire_keys(&sample_decide_health()));
     let trackers = sample_trackers_health();
     put("Health.trackers", wire_keys(&trackers));
     put("Health.trackers.trackers", wire_keys(&trackers.trackers[0]));

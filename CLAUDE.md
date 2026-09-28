@@ -335,7 +335,14 @@ work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
 split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
 / `--labels`) with the `claude -p haiku` baseline (D33,
 `service/decide/haiku.rs`: a named host of the SAME org only, prompt on
-stdin). J1 has no live adapter: it waits on its acceptance lines. Label
+stdin). J1 has no live adapter: it waits on its acceptance lines.
+Their diagnostics are built too (evidence, never an acceptance line):
+`--perturb` (dataset C, `bench/perturb.rs`; J3 in `status_map_robust.rs`,
+J1 in `work_link_robust.rs`), J3's paired languages (dataset B, `pair` ids,
+`--paired-fixture`), `--floor-sweep` and `--question-set` (drafts in
+`service/testdata/decide/questions/`, dev only), and `fleet_health.decide`
+(`service::decide::health`, *degraded* per test map §7; the desktop's *Jev
+degraded* Attention item). Label
 hygiene (D34) is built: an agent never overturns a person's rejection,
 `store::Decider` records `agent` / `agent_started` vs `manual` / `started`
 (`PERSON_SOURCES` gate write-back, auto-trust and person counts), and a

@@ -1,0 +1,11 @@
+{
+  "version": "v2-position",
+  "instructions": "state.section is the name of one section (a column) of an Asana project board, in lower case. state.project_sections lists every section of that board in board order, first to last; it may be empty. Decide which status category the tasks placed in state.section are in. Read the name first. When the name alone does not settle it, use its position: sections before the first section whose name means active work hold work not started; sections between that one and the first finished section hold work under way (review, testing, waiting on someone); sections after the finished ones usually hold work that will not be done. Choose unsure when neither the name nor the position settles it.",
+  "options": {
+    "todo": "The tasks are not started yet: a backlog, inbox, to do, ideas, next up, planned, triage or waiting-to-start section, or a section placed before the active work.",
+    "in_progress": "The tasks are started and not finished: being worked on, reviewed, tested, waiting on someone, paused, or ready but not yet released.",
+    "done": "The tasks are finished: done, shipped, released, deployed, merged, published, paid or closed.",
+    "not_planned": "The tasks will not be done: won't do, cancelled, rejected, declined, duplicate, obsolete or abandoned.",
+    "unsure": "Neither the name nor the position shows which of todo, in_progress, done or not_planned applies."
+  }
+}
