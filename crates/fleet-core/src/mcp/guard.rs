@@ -152,6 +152,21 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "update_status",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "update_admin",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        // `refresh` fetches the channel and its manifests.
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
         name: "add_host",
         access: Access::Master,
         readonly: false,
@@ -172,6 +187,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Master,
         readonly: false,
         confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Host identity & health, task 5: folds one alias into another and
+    // deletes it — fleet admin, and destructive enough to confirm.
+    ToolPolicy {
+        name: "merge_host",
+        access: Access::Master,
+        readonly: false,
+        confirm: true,
         deadline: Deadline::Quick,
     },
     ToolPolicy {
@@ -604,6 +628,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         readonly: true,
         confirm: false,
         deadline: Deadline::Lifecycle,
+    },
+    // Host identity & health, task 7: drops a project row nothing can
+    // rescan away — fleet admin.
+    ToolPolicy {
+        name: "forget_project",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
     },
     // Clones or creates a repository on a host: a write, and a long one — a
     // clone's wall clock is 600 s (`service::add_project::CLONE_WALL_CLOCK`),
@@ -1642,10 +1675,11 @@ mod tests {
             "apply_sync",
             "work_admin",
             "work_link",
+            "merge_host",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 11);
+        assert_eq!(CONFIRM_TOOLS.len(), 12);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
@@ -1888,6 +1922,7 @@ mod tests {
             "provision_hosts",
             "add_host",
             "remove_host",
+            "merge_host",
             "hide_host",
             "apply_sync",
             "set_secret",

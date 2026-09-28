@@ -505,6 +505,33 @@ untouched. The previous file is saved as `settings.json.fleet-bak` first.
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
 
+**Stale content, and `fleet-hub provision`.** Every provisioning records a
+fingerprint of what it shipped (both skills, the managed CLAUDE.md block and
+the hook shape); `list_hosts` reports `provision_stale: true` for a host whose
+fingerprint is not this build's. A minute after start the hub refreshes every
+reachable stale host *content only* — skills, the CLAUDE.md block and hooks,
+with the host's existing token; no new token, no `~/.claude.json` rewrite, no
+Claude restart. By hand: `fleet-hub provision [--host <alias>]
+[--content-only]` (the `provision_hosts {host, content_only}` tool).
+
+**Who owns what on a host.**
+
+| Path on host | Owner | Written by |
+|---|---|---|
+| `~/.claude/skills/claude-fleet-control/` | fleet (carries `.fleet-managed`) | `provision_hosts` (overwrites) |
+| `~/.claude/skills/fleet-friendly-name/` | fleet (carries `.fleet-managed`) | `provision_hosts` (overwrites) |
+| `~/.claude/CLAUDE.md` between the sentinels | fleet | the rest is the user's |
+| `~/.claude/settings.json` → the 9 `FLEET_HOOK_EVENTS` entries | fleet | sibling hooks are kept |
+| `~/.claude/fleet-hook.headers` | fleet (secret, 0600) | `provision_hook` |
+| `~/.claude.json` → `mcpServers.claude-fleet` | fleet (secret) | sibling keys are kept |
+| `~/.tmux.conf` `set -g set-clipboard on` line | fleet (append-only) | `provision_tmux_clipboard` |
+| every other skill, hook, plugin, `~/.claude/projects` | the user / dotfiles | never touched |
+
+If `~/.claude/skills` is inside a git work tree (a dotfiles checkout),
+provisioning **refuses** that host (`E_INVALID`, `details.git_toplevel`) rather
+than dirty tracked files: untrack the two fleet dirs there (or `.gitignore`
+them), or set `provision.force_git_tree = true` to write anyway.
+
 **What a host needs for prompt delivery.** A prompt rides to the pane as
 `base64 -d` piped into `tmux load-buffer -`, so each managed host needs
 `base64(1)` with `-d` (GNU coreutils and the BSD/macOS build both have it) and
@@ -2170,11 +2197,37 @@ row is hidden and marked unreachable automatically on first start — not
 deleted, just no longer listed, counted, probed or polled for usage. The
 sessions that were live on it are ghosted with `lost_reason =
 local_disabled` on every start (nothing probes `local` on such a hub, so
-they would otherwise stay live and refuse every action); they stay
-dismissable and are pruned like any other ghost. `refresh_projects` has no
-local projects directory to scan there and returns the stored list, and the
+they would otherwise stay live and refuse every action); they are ghosted
+on the start that finds them and reaped on the next
+(`retire_local_sessions`); any host nothing probes is reaped the same way
+each reconcile pass. `refresh_projects` has no
+local projects directory to scan there and returns the stored list, after
+folding duplicate worktree rows; `forget_project {project_id}` (master) drops
+a row the scan can never revisit. And the
 new-session, add-project and background-session dialogs start on the first
 pickable host instead of `local`.
+
+### Retire a renamed alias (`local` → `mac`)
+
+A store copied from the desktop keeps its old machine under `local` while
+the same machine was re-added under a new alias; worktrees, dismissals and
+usage stay stranded on the hidden row. Fold it in one transaction:
+
+1. Back up first, as root on the NAS:
+   `sqlite3 /volume1/docker/fleet-hub/data/state.db ".backup /volume1/docker/fleet-hub/backup-$(date +%F).db"`
+2. With the hub running: `fleet-hub host merge local mac` (or the
+   `merge_host {from: "local", into: "mac"}` tool with the master token).
+   If `mcp.confirm_destructive` is on, approve the request on the desktop
+   or pass `confirm_nonce` from the `E_CONFIRM_REQUIRED` reply.
+3. Verify: `list_hosts` no longer lists `local`; `list_worktrees
+   {host_alias: "mac"}` shows the moved rows; `usage_report {host_alias:
+   "mac"}`'s `by_day` includes the old days.
+
+What moves: `worktrees` (a name `mac` already has keeps `mac`'s),
+`worktree_parent_fingerprints`, `dismissed_agents`, `host_layers`,
+`catalog_secrets_host`, `usage_daily` (summed per day). What is dropped: a
+`local` session whose `claude_session_id` or `tmux_name` already exists
+under `mac`. What is deleted: the `local` host row and its token.
 
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a
@@ -2373,7 +2426,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 204 commands, 128 route to a hub tool, 1 routes except for one argument shape, 54 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 205 commands, 128 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2398,8 +2451,9 @@ Of the 204 commands, 128 route to a hub tool, 1 routes except for one argument s
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
+| `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
-| `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub` |
+| `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |

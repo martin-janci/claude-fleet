@@ -6,10 +6,12 @@ mod census;
 mod config;
 mod decide;
 mod demo;
+mod host;
 mod org;
 mod out;
 mod pair;
 mod peer;
+mod provision;
 mod ready;
 mod reports;
 mod serve;
@@ -84,7 +86,7 @@ enum Cmd {
         /// Name for the client, as it will appear in `client list` (1-64 characters).
         #[arg(long)]
         name: String,
-        /// What the client may do: full (drive sessions), readonly (observe), or peer (another hub; see fleet-hub peer add). [default: full]
+        /// What the client may do: full (drive sessions), readonly (observe), peer (another hub; see fleet-hub peer add), or updater (fleet-updater; /update only). [default: full]
         #[arg(long)]
         mode: Option<String>,
         /// Seconds the pairing code stays valid (30-3600). [default: 600]
@@ -172,6 +174,13 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Host administration (merge a renamed alias). Needs a running hub.
+    Host {
+        #[command(subcommand)]
+        cmd: host::HostCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Fill the store with obviously-fake hosts, projects and sessions, so a
     /// freshly paired client has something to draw. Development only.
     ///
@@ -193,6 +202,18 @@ enum Cmd {
         /// Seed even though the store holds real rows.
         #[arg(long)]
         force: bool,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Provision every active host (or one) from this hub: skills, the
+    /// managed CLAUDE.md block, hooks and the MCP entry. Needs a running hub.
+    Provision {
+        /// One host; every active host when omitted.
+        #[arg(long)]
+        host: Option<String>,
+        /// Skills, CLAUDE.md block and hooks only (no token, no ~/.claude.json).
+        #[arg(long)]
+        content_only: bool,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -369,6 +390,12 @@ async fn main() -> ExitCode {
         },
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
+        Cmd::Host { cmd, opts } => host::run(cmd, &opts, &env).await,
+        Cmd::Provision {
+            host,
+            content_only,
+            opts,
+        } => provision::run(host, content_only, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Catalog { cmd, opts } => catalog::run(cmd, &opts, &env),
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
@@ -506,6 +533,33 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "token", "show"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "regenerate"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "agent-token", "laptop"]).unwrap();
+        // Host identity & health, task 5: the alias merge.
+        let Cmd::Host { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "host", "merge", "local", "mac"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("host merge parses")
+        };
+        assert!(
+            matches!(cmd, host::HostCmd::Merge { ref from, ref into } if from == "local" && into == "mac")
+        );
+        // Task 6: the content-only re-provision of one host.
+        let Cmd::Provision {
+            host, content_only, ..
+        } = Cli::try_parse_from([
+            "fleet-hub",
+            "provision",
+            "--host",
+            "mefistos",
+            "--content-only",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("provision parses")
+        };
+        assert_eq!((host.as_deref(), content_only), (Some("mefistos"), true));
         Cli::try_parse_from([
             "fleet-hub",
             "agent-token",

@@ -190,6 +190,42 @@ impl Store {
             .collect()
     }
 
+    /// Two-phase reap for a host nothing probes (hidden, or `local` on a
+    /// hub without a local host): every live row is ghosted this call and
+    /// every already-ghost row is deleted, both kinds, no TTL exemption —
+    /// nothing on such a host can be resumed from here. A ghosted row also
+    /// loses `claude_status` / `stuck_kind` / `current_activity`: a dead
+    /// row saying `working` kept being counted (data-sync F2). Returns the
+    /// number of rows hard-deleted.
+    pub fn reap_host_ghosts(&self, host_alias: &str, now: i64) -> Result<usize, rusqlite::Error> {
+        let (changes, deleted) = self.in_savepoint("reap_host_ghosts", |tx| {
+            let mut out: Vec<RowChange> = Vec::new();
+            let before: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_alias = ?1",
+                [host_alias],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "UPDATE sessions SET claude_status = NULL, stuck_kind = NULL, current_activity = NULL \
+                 WHERE host_alias = ?1 AND status != 'ghost'",
+                [host_alias],
+            )?;
+            for kind in [KIND_TMUX, KIND_PANE_LESS] {
+                Self::ghost_and_clean(tx, host_alias, &[], now, kind, None, None, None, &mut out)?;
+            }
+            let after: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_alias = ?1",
+                [host_alias],
+                |r| r.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((out, (before - after).max(0) as usize))
+        })?;
+        for c in &changes {
+            self.bus.emit_change(c);
+        }
+        Ok(deleted)
+    }
+
     fn update_host_probe_in_tx(
         tx: &rusqlite::Connection,
         alias: &str,
@@ -218,17 +254,29 @@ impl Store {
             // which is why this emitted ~265 B per host per pass to every
             // connected client to say nothing had changed. When the stamp is
             // the only thing that moved, say just that.
+            // The health sample (task 2) moves every pass too, so it rides
+            // the ping rather than forcing a full row.
             let only_the_stamp_moved = prior.is_some_and(|before| {
                 HostRow {
                     last_pinged_at: row.last_pinged_at,
+                    claude_version_at: row.claude_version_at,
+                    disk_home_free_kb: row.disk_home_free_kb,
+                    disk_home_total_kb: row.disk_home_total_kb,
+                    disk_tmp_free_kb: row.disk_tmp_free_kb,
+                    load_1m: row.load_1m,
+                    mem_avail_kb: row.mem_avail_kb,
+                    uptime_secs: row.uptime_secs,
+                    health_at: row.health_at,
                     ..before
                 } == row
             });
             out.push(if only_the_stamp_moved {
                 RowChange::HostPinged {
+                    health: Some(crate::store::HostHealth::of(&row)),
                     alias: row.alias,
                     last_pinged_at: row.last_pinged_at.unwrap_or(last_pinged_at),
                     reachable: row.reachable,
+                    claude_version_at: row.claude_version_at,
                 }
             } else {
                 RowChange::HostProbed(row)
@@ -486,7 +534,7 @@ impl Store {
                -- does not watch it, so it never bumps `row_version` either.
                last_reconciled_at=COALESCE(?23, last_reconciled_at),
                -- The pane showed a live turn this pass (?25): the stale-working
-               -- sweep's evidence of life (migration 076). Bookkeeping like
+               -- sweep's evidence of life (migration 080). Bookkeeping like
                -- `last_reconciled_at`: not a `SessionRow` field, not watched
                -- by the row_version trigger, so stamping it never emits.
                pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END
@@ -912,6 +960,38 @@ mod tests {
     use super::*;
     use crate::store::test_support::*;
 
+    /// data-sync F2/F5, hub-ops F6: a host nothing probes (hidden, or `local`
+    /// on a hub without one) kept its rows forever, some still `working`.
+    #[test]
+    fn reap_host_ghosts_ghosts_live_rows_then_deletes_ghosts_without_a_probe() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let live = s
+            .upsert_session("dev-a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let bg = s
+            .upsert_session("bg:abc", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET kind='external', claude_status='working', stuck_kind='oom' WHERE id=?1",
+                [bg],
+            )
+            .unwrap();
+        // Pass 1: everything live on the host is ghosted, with its status cleared.
+        assert_eq!(s.reap_host_ghosts("local", 100).unwrap(), 0);
+        for id in [live, bg] {
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.status, "ghost");
+            assert_eq!(row.claude_status, None, "a ghost has no live status");
+            assert_eq!(row.stuck_kind, None);
+        }
+        // Pass 2: already-ghost rows are hard-deleted, TTL or not.
+        assert_eq!(s.reap_host_ghosts("local", 200).unwrap(), 2);
+        assert!(s.get_session_by_id(live).unwrap().is_none());
+        assert!(s.get_session_by_id(bg).unwrap().is_none());
+    }
+
     /// A minimal, DB-free `SessionRow` for `lifecycle_kind` classification
     /// tests — only `lost_at` varies between cases, every other field is a
     /// harmless default.
@@ -982,6 +1062,18 @@ mod tests {
             provisioned: false,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
         }
     }
 

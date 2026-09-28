@@ -25,7 +25,14 @@
   import { timeAgo } from './session_status';
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
   import { pushError, push } from './toasts';
-  import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
+  import {
+    diskMeter,
+    healthLine,
+    removeHostMessage,
+    rotateTokenMessage,
+    versionAge,
+    type HostAttention,
+  } from './hosts_view';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import AccountNickname from './AccountNickname.svelte';
@@ -80,6 +87,8 @@
   let busy = $state(false);
 
   const isLocal = $derived(host.alias === 'local');
+  /** The $HOME disk meter, null until the host was sampled. */
+  const disk = $derived(diskMeter(host));
 
   // Sessions the backend marked lost (host reboot / tmux server restart) that
   // still carry a Claude conversation to resume. `bg`/`external` rows have no
@@ -310,9 +319,20 @@
       <dd data-testid="detail-ping">
         {host.last_pinged_at ? `${formatAge(now - host.last_pinged_at)} ago` : 'never'}
       </dd>
-      <dt>claude</dt><dd>{host.claude_version ?? '—'}</dd>
+      <dt>claude</dt>
+      <dd>{host.claude_version ?? '—'} <span class="muted" data-testid="detail-claude-age">{versionAge(host, now)}</span></dd>
       <dt>tmux</dt><dd>{host.tmux_version ?? '—'}</dd>
     </dl>
+    <!-- ux F-14: disk, load, uptime and the agent version — the facts the
+         live fleet had no signal for (two hosts at 98 % disk). -->
+    <div class="health" data-testid="detail-health" aria-label="Health">
+      {#if disk}
+        <div class="meter" data-testid="detail-health-meter" data-level={disk.level} role="meter" aria-valuenow={disk.pct} aria-valuemin="0" aria-valuemax="100" aria-label="disk used">
+          <div class="fill" style:width={`${disk.pct}%`}></div>
+        </div>
+      {/if}
+      <span class="line">{healthLine(host, now)}</span>
+    </div>
     {#if attention}
       <p class="attention" data-testid="detail-attention">{attention.glyph} {attention.title}</p>
     {/if}
@@ -596,6 +616,11 @@
   }
   .status.off { color: var(--usage-warn); }
   .muted { color: var(--fg-muted); }
+  .health { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem; }
+  .meter { width: 6rem; height: 0.4rem; background: var(--bg-muted, #333); border-radius: 0.2rem; overflow: hidden; flex-shrink: 0; }
+  .fill { height: 100%; background: var(--ok, #3a3); }
+  .meter[data-level='warn'] .fill { background: var(--warn, #ca3); }
+  .meter[data-level='crit'] .fill { background: var(--danger, #c33); }
   .facts {
     display: grid;
     grid-template-columns: max-content 1fr;

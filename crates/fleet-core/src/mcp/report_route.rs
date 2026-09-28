@@ -25,6 +25,11 @@ impl ReportState {
             windows: Arc::new(RateWindows::new()),
         }
     }
+
+    /// The store, for the `/update` routes that share this state.
+    pub(crate) fn store(&self) -> &Mutex<Store> {
+        &self.store
+    }
 }
 
 /// `POST /report`: any authenticated caller — `readonly` included, since
@@ -112,6 +117,10 @@ mod tests {
             s.upsert_host_token("box", "host-tok").unwrap();
             s.insert_client_token("phone", &auth::sha256_hex("ro-tok"), "readonly")
                 .unwrap();
+            s.insert_client_token("updater", &auth::sha256_hex("upd-tok"), "updater")
+                .unwrap();
+            s.insert_client_token("peer-link", &auth::sha256_hex("peer-link-tok"), "peer")
+                .unwrap();
         }
         let app = build_app(
             crate::mcp::metrics::MetricsState {
@@ -181,6 +190,117 @@ mod tests {
         let (head, body) = text.split_once("\r\n\r\n").unwrap();
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
         (status, body.to_string())
+    }
+
+    fn check_body(component: &str, os: &str, variant: &str) -> String {
+        serde_json::json!({
+            "update_proto": 1,
+            "component": component,
+            "platform": {"os": os, "arch": "x86_64", "variant": variant},
+            "installed": {"version": "0.3.3"},
+            "speaks": {"contract_accepts": [5, 5]}
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_update_wire_answers_each_credential_for_itself() {
+        let (addr, store) = app().await;
+        // No release key yet: a well-formed answer that offers nothing.
+        let (st, body) = http(
+            addr,
+            "POST",
+            "/update/check",
+            "upd-tok",
+            &check_body("hub", "linux", "oci"),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            (d["status"].as_str(), d["component"].as_str()),
+            (Some("unknown"), Some("hub"))
+        );
+        assert!(store
+            .lock()
+            .unwrap()
+            .update_observed("hub:self")
+            .unwrap()
+            .is_some());
+
+        let report = serde_json::json!({
+            "update_proto": 1, "component": "hub", "installed": {"version": "0.3.3"},
+            "phase": "checking", "attempt": "a1"
+        })
+        .to_string();
+        assert_eq!(
+            http(addr, "POST", "/update/report", "upd-tok", &report)
+                .await
+                .0,
+            204
+        );
+
+        // A readonly phone asks for itself, never for the hub.
+        let (st, _) = http(
+            addr,
+            "POST",
+            "/update/check",
+            "ro-tok",
+            &check_body("android", "android", "apk"),
+        )
+        .await;
+        assert_eq!(st, 200);
+        let (st, body) = http(
+            addr,
+            "POST",
+            "/update/check",
+            "ro-tok",
+            &check_body("hub", "linux", "oci"),
+        )
+        .await;
+        assert_eq!(st, 403, "{body}");
+        assert!(body.contains("E_FORBIDDEN"));
+        // The master looks but never reports.
+        assert_eq!(
+            http(addr, "POST", "/update/report", "s3cret", &report)
+                .await
+                .0,
+            403
+        );
+    }
+
+    #[tokio::test]
+    async fn an_updater_token_has_one_door_and_a_peer_token_none_here() {
+        let (addr, _store) = app().await;
+        assert_eq!(
+            http(addr, "POST", "/report", "upd-tok", &batch(1)).await.0,
+            403
+        );
+        assert_eq!(http(addr, "GET", "/reports", "upd-tok", "").await.0, 403);
+        let (st, _) = http(
+            addr,
+            "POST",
+            "/update/check",
+            "peer-link-tok",
+            &check_body("hub", "linux", "oci"),
+        )
+        .await;
+        assert_eq!(st, 403);
+        assert_eq!(
+            http(addr, "POST", "/update/check", "nope", "{}").await.0,
+            401
+        );
+        let (st, body) = http(addr, "POST", "/update/check", "upd-tok", "{not json").await;
+        assert_eq!(st, 400);
+        assert!(body.contains("E_INVALID"));
+        let newer =
+            check_body("hub", "linux", "oci").replace("\"update_proto\":1", "\"update_proto\":2");
+        assert_eq!(
+            http(addr, "POST", "/update/check", "upd-tok", &newer)
+                .await
+                .0,
+            400
+        );
     }
 
     fn batch(n: usize) -> String {

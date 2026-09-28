@@ -15,6 +15,7 @@
   // (WorkFiltersBar, the same strip and panel shape); the Sessions list's
   // controls step aside there.
   import { sessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy } from './sessions';
+  import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
   import { hintAnchor } from './hints';
   import { accountByUuid } from './accounts';
@@ -216,7 +217,8 @@
     return acc.seat_tier ? ` · ${email} (${acc.seat_tier})` : ` · ${email}`;
   }
   function hostTitle(h: (typeof visibleHosts)[number]): string {
-    return `${h.alias} — ${h.reachable ? 'reachable' : 'unreachable'}${h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}${h.claude_version ? ` · claude ${h.claude_version}` : ''}${accountLabel(h)}`;
+    const disk = diskMeter(h);
+    return `${h.alias} — ${h.reachable ? 'reachable' : 'unreachable'}${h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}${h.claude_version ? ` · claude ${h.claude_version}` : ''}${disk ? ` · disk ${disk.text}` : ''}${accountLabel(h)}`;
   }
 </script>
 
@@ -440,6 +442,7 @@
                   label: h.alias,
                   title: hostTitle(h),
                   dot: h.reachable ? ('on' as const) : ('off' as const),
+                  alert: diskMeter(h)?.level === 'crit' ? 'disk almost full' : undefined,
                 })),
               ]}
               testidFor={(id) => `filter-host-${id}`}

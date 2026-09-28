@@ -62,6 +62,9 @@
     toggleAutoTidyReason,
     DECIDE_MODES,
     DECIDE_JEV_MODELS,
+    UPDATE_TRACKS,
+    UPDATE_MODES,
+    UPDATE_MOBILE_MODES,
     type SettingKey,
     type ProjectsLayout,
   } from './fleet_settings';
@@ -414,6 +417,30 @@
   // --- Decisions (Jev): experimental, off (docs/decisions.md) ---
   let decideError: string | null = $state(null);
   let decideBusy = $state(false);
+  // --- Updates (update.*): the hub's policy for the fleet's own software ---
+  let updateError: string | null = $state(null);
+  let updateBusy = $state(false);
+  async function applyUpdate(key: SettingKey, value: string) {
+    updateBusy = true;
+    updateError = null;
+    const r = await setFleetSetting(key, value);
+    updateBusy = false;
+    if (!r.ok) updateError = r.error.message;
+  }
+  function onUpdateIntervalChange(e: Event) {
+    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
+    if ('error' in r) {
+      updateError = `Check every: ${r.error}`;
+      return;
+    }
+    void applyUpdate(SETTING_KEYS.updateCheckIntervalSecs, r.value);
+  }
+  const UPDATE_MODE_ROWS = [
+    { key: SETTING_KEYS.updateHubMode, label: 'hub', id: 'update-hub-mode', modes: UPDATE_MODES },
+    { key: SETTING_KEYS.updateAgentMode, label: 'agents', id: 'update-agent-mode', modes: UPDATE_MODES },
+    { key: SETTING_KEYS.updateDesktopMode, label: 'desktops', id: 'update-desktop-mode', modes: UPDATE_MODES },
+    { key: SETTING_KEYS.updateMobileMode, label: 'phones', id: 'update-mobile-mode', modes: UPDATE_MOBILE_MODES },
+  ] as const;
   async function applyDecide(key: SettingKey, value: string) {
     decideBusy = true;
     decideError = null;
@@ -972,6 +999,15 @@
       </div>
       <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
 
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.provisionForceGitTree)}
+          disabled={automationBusy}
+          data-testid="provision-force-git-tree"
+          onchange={() => toggleSetting(SETTING_KEYS.provisionForceGitTree)} />
+        Write fleet's two skill dirs even when ~/.claude/skills is a git checkout
+      </label>
       <label class="toggle gc-toggle">
         <input
           type="checkbox"
@@ -1127,6 +1163,46 @@
           data-testid="health-context-red-pct"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.healthContextRedPct, 'Context red threshold (%)', e)} />
         <span class="hook-desc" id="limit-context-red-pct-desc">percent of the context window at which a session needs you (the chip turns red here, amber 15 points below)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-version-max-age-hours">version badge</label>
+        <input class="port" id="health-version-max-age-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-version-max-age-hours-desc"
+          data-testid="health-version-max-age-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthVersionMaxAgeSecs, e)} />
+        <span class="hook-desc" id="health-version-max-age-hours-desc">hours a probed Claude version stays trusted for the "older than the fleet" mark</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-disk-low-pct">disk low</label>
+        <input class="port" id="health-disk-low-pct" type="number" min="50" max="100" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct)}
+          disabled={limitsBusy}
+          aria-describedby="health-disk-low-pct-desc"
+          data-testid="health-disk-low-pct"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthDiskLowPct, 'Disk low threshold (%)', e)} />
+        <span class="hook-desc" id="health-disk-low-pct-desc">percent of a host's home filesystem in use at which it is marked low on disk</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-claude-max-behind">claude behind</label>
+        <input class="port" id="health-claude-max-behind" type="number" min="0" max="1000" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthClaudeMaxBehind)}
+          disabled={limitsBusy}
+          aria-describedby="health-claude-max-behind-desc"
+          data-testid="health-claude-max-behind"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthClaudeMaxBehind, 'Claude patch releases behind', e)} />
+        <span class="hook-desc" id="health-claude-max-behind-desc">patch releases a host's Claude may trail the fleet's newest before fleet_health flags it</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-hooks-silent-hours">hooks silent</label>
+        <input class="port" id="health-hooks-silent-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthHooksSilentSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-hooks-silent-hours-desc"
+          data-testid="health-hooks-silent-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthHooksSilentSecs, e)} />
+        <span class="hook-desc" id="health-hooks-silent-hours-desc">hours a reachable host with live sessions may go without an accepted hook before fleet_health flags it</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
@@ -1569,6 +1645,54 @@
         <span class="hook-desc" id="decide-retention-days-desc">days a decision record (ids and numbers, never text) is kept (0 = forever)</span>
       </div>
       {#if decideError}<p class="err" role="alert" data-testid="decide-error">{decideError}</p>{/if}
+    </section>
+
+    <section class="block" data-testid="update-section">
+      <div class="section-header">
+        <h4>Updates</h4>
+      </div>
+      <p class="hook-desc" data-testid="update-explainer">
+        What the hub offers the fleet's own software: its track, and per component whether a newer
+        release is only pinned by hand (manual), offered (notify) or installed at the next quiet point
+        (automatic). Every release is signed; nothing unsigned is ever offered (see <code>docs/updates.md</code>).
+      </p>
+      <div class="mcp-field">
+        <label class="lbl" for="update-track">track</label>
+        <select
+          class="layout-select"
+          id="update-track"
+          value={$fleetSettings[SETTING_KEYS.updateTrack] ?? 'stable'}
+          disabled={updateBusy}
+          data-testid="update-track"
+          onchange={(e) => void applyUpdate(SETTING_KEYS.updateTrack, (e.currentTarget as HTMLSelectElement).value)}>
+          {#each UPDATE_TRACKS as t (t)}<option value={t}>{t}</option>{/each}
+        </select>
+      </div>
+      {#each UPDATE_MODE_ROWS as row (row.key)}
+        <div class="mcp-field">
+          <label class="lbl" for={row.id}>{row.label}</label>
+          <select
+            class="layout-select"
+            id={row.id}
+            value={$fleetSettings[row.key] ?? 'notify'}
+            disabled={updateBusy}
+            data-testid={row.id}
+            onchange={(e) => void applyUpdate(row.key, (e.currentTarget as HTMLSelectElement).value)}>
+            {#each row.modes as m (m)}<option value={m}>{m}</option>{/each}
+          </select>
+        </div>
+      {/each}
+      <div class="mcp-field">
+        <label class="lbl" for="update-check-interval">check every</label>
+        <input class="port" id="update-check-interval" type="number" min="900" max="604800" step="900"
+          value={settingInt($fleetSettings, SETTING_KEYS.updateCheckIntervalSecs)}
+          disabled={updateBusy}
+          aria-describedby="update-check-interval-desc"
+          data-testid="update-check-interval"
+          onchange={onUpdateIntervalChange} />
+        <span class="hook-desc" id="update-check-interval-desc">seconds between reading the release channel (at least 900)</span>
+      </div>
+      {#if updateError}<p class="err" role="alert" data-testid="update-error">{updateError}</p>{/if}
     </section>
 
     <!-- Provisioning mints host tokens: refresh the shared token cache the

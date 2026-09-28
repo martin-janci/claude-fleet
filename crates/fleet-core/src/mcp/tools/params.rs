@@ -154,10 +154,23 @@ pub struct KillSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ForgetProjectParams {
+    /// The project's id.
+    pub project_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ProvisionHostsParams {
     /// Mint fresh per-host tokens (invalidates each host's current one).
     #[serde(default)]
     pub rotate: bool,
+    /// One host alias; every active host when omitted.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Skills, CLAUDE.md block and hooks only: no token, no ~/.claude.json
+    /// rewrite, no tunnel.
+    #[serde(default)]
+    pub content_only: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -886,7 +899,7 @@ pub struct PairClientParams {
     /// Shown in `list_clients` and in the untrusted-input marker on what it
     /// sends. Rules: see the tool.
     pub name: String,
-    /// `full` (default), `readonly` or `peer`; see the tool.
+    /// `full` (default), `readonly`, `peer` or `updater`; see the tool.
     #[serde(default)]
     pub mode: Option<String>,
     /// Code lifetime: default 600, max 3600; it also dies on first use.
@@ -962,4 +975,25 @@ pub struct CatalogAdminParams {
     /// apply_sync: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateAdminParams {
+    /// pin | unpin | refresh.
+    pub action: String,
+    /// hub | agent | desktop | android | ios.
+    #[serde(default)]
+    pub component: Option<String>,
+    /// One target (hub:self, agent:<alias>, client:<id>); absent = every target.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// pin: the release to serve.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// pin: required, not merely offered.
+    #[serde(default)]
+    pub mandatory: Option<bool>,
+    /// pin: why, for the dashboard.
+    #[serde(default)]
+    pub reason: Option<String>,
 }

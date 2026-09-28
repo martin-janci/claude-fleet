@@ -16,12 +16,13 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
+use crate::channel_doc::ReleaseRef;
 use crate::decide::{decide, DecideInput, Policy};
 use crate::manifest::ReleaseManifest;
 use crate::model::{Source, Track};
 use crate::verify::{
-    sha256_hex, verify_channel, verify_manifest, verify_target, TrustedKeys, VerifiedTarget,
-    VerifyError,
+    sha256_hex, verify_channel, verify_manifest, verify_target, TrustedKeys, VerifiedChannel,
+    VerifiedTarget, VerifyError,
 };
 use crate::wire::{CheckRequest, Decision, Evidence, Report, UPDATE_PROTO};
 use crate::Version;
@@ -53,9 +54,9 @@ pub enum UpdateError {
 impl fmt::Display for UpdateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            UpdateError::Transport(m) => write!(f, "update check failed: {m}"),
+            UpdateError::Transport(m) => write!(f, "unreachable: {m}"),
             UpdateError::Http { status, body } => {
-                write!(f, "update check got HTTP {status}: {body}")
+                write!(f, "HTTP {status}: {body}")
             }
             UpdateError::Decode(m) => write!(f, "unreadable update response: {m}"),
             UpdateError::TooLarge => write!(f, "update document too large"),
@@ -206,26 +207,109 @@ impl<F: Fetch> GitUpdateChannel<F> {
         self.now = Box::new(now);
         self
     }
+}
 
-    async fn raw(&self, url: &str) -> Result<RawDoc, UpdateError> {
-        let body = self.fetch.get(url, MAX_DOC_BYTES).await?;
-        let sig = self.fetch.get(&format!("{url}.minisig"), 4096).await?;
-        let text =
-            |b: Vec<u8>| String::from_utf8(b).map_err(|e| UpdateError::Decode(e.to_string()));
-        Ok(RawDoc {
-            body: text(body)?,
-            sig: text(sig)?,
-        })
+/// A document and its `.minisig`, fetched verbatim.
+pub async fn fetch_raw<F: Fetch + ?Sized>(fetch: &F, url: &str) -> Result<RawDoc, UpdateError> {
+    let body = fetch.get(url, MAX_DOC_BYTES).await?;
+    let sig = fetch.get(&format!("{url}.minisig"), 4096).await?;
+    let text = |b: Vec<u8>| String::from_utf8(b).map_err(|e| UpdateError::Decode(e.to_string()));
+    Ok(RawDoc {
+        body: text(body)?,
+        sig: text(sig)?,
+    })
+}
+
+/// `<base>/<track>.json`.
+pub fn channel_url(base_url: &str, track: Track) -> String {
+    let sep = if base_url.ends_with('/') { "" } else { "/" };
+    format!("{base_url}{sep}{}.json", track.as_str())
+}
+
+/// Fetch and verify a track's channel document. The caller records
+/// `doc.sequence` in its [`SequenceStore`] afterwards.
+pub async fn fetch_channel<F: Fetch + ?Sized>(
+    fetch: &F,
+    base_url: &str,
+    track: Track,
+    keys: &TrustedKeys,
+    seen: u64,
+    now: i64,
+) -> Result<(VerifiedChannel, RawDoc), UpdateError> {
+    let raw = fetch_raw(fetch, &channel_url(base_url, track)).await?;
+    let channel = verify_channel(raw.body.as_bytes(), &raw.sig, keys, track, seen, now)?;
+    Ok((channel, raw))
+}
+
+/// Verify one release's manifest against the channel's listing: the exact
+/// bytes the channel names (sha256), a trusted signature, and the version it
+/// is listed under. `None` for anything else: it simply cannot be a target.
+pub fn verify_listed_manifest(
+    raw: &RawDoc,
+    listed: &ReleaseRef,
+    keys: &TrustedKeys,
+) -> Option<ReleaseManifest> {
+    if !sha256_hex(raw.body.as_bytes()).eq_ignore_ascii_case(&listed.manifest_sha256) {
+        return None;
     }
+    let m = verify_manifest(raw.body.as_bytes(), &raw.sig, keys).ok()?;
+    (m.release.version == listed.version).then_some(m)
+}
 
-    fn channel_url(&self) -> String {
-        let sep = if self.base_url.ends_with('/') {
-            ""
-        } else {
-            "/"
+/// Verified manifests, with the raw documents they came from (the evidence a
+/// decision relays).
+#[derive(Debug, Clone, Default)]
+pub struct Manifests {
+    pub verified: BTreeMap<Version, ReleaseManifest>,
+    pub raw: BTreeMap<Version, RawDoc>,
+}
+
+/// Fetch and verify the manifests of `versions` the channel lists. One that
+/// fails to fetch or verify is left out.
+pub async fn fetch_manifests<F: Fetch + ?Sized>(
+    fetch: &F,
+    channel: &VerifiedChannel,
+    versions: impl IntoIterator<Item = Version>,
+    keys: &TrustedKeys,
+) -> Manifests {
+    let mut out = Manifests::default();
+    for v in versions {
+        let Some(listed) = channel.doc.release(&v) else {
+            continue;
         };
-        format!("{}{sep}{}.json", self.base_url, self.track.as_str())
+        let Ok(raw) = fetch_raw(fetch, &listed.manifest).await else {
+            continue;
+        };
+        if let Some(m) = verify_listed_manifest(&raw, listed, keys) {
+            out.verified.insert(v.clone(), m);
+            out.raw.insert(v, raw);
+        }
     }
+    out
+}
+
+/// The versions worth a manifest fetch: the `newest` releases above `above`
+/// (all of them when `above` is `None`), plus the signed rollback target.
+pub fn wanted_versions(
+    channel: &VerifiedChannel,
+    above: Option<&Version>,
+    newest: usize,
+) -> Vec<Version> {
+    let mut vs: Vec<Version> = channel
+        .doc
+        .releases
+        .iter()
+        .map(|r| r.version.clone())
+        .filter(|v| above.is_none_or(|a| v > a))
+        .collect();
+    vs.sort_by(|a: &Version, b: &Version| b.cmp(a));
+    vs.truncate(newest);
+    if let Some(rb) = &channel.doc.rollback {
+        if !vs.contains(rb) && channel.doc.release(rb).is_some() {
+            vs.push(rb.clone());
+        }
+    }
+    vs
 }
 
 #[async_trait]
@@ -237,44 +321,23 @@ impl<F: Fetch> UpdateChannel for GitUpdateChannel<F> {
     async fn check(&self, req: &CheckRequest) -> Result<CheckOutcome, UpdateError> {
         let now = (self.now)();
         let seen = self.seen.seen(self.track);
-        let channel_raw = self.raw(&self.channel_url()).await?;
-        let channel = verify_channel(
-            channel_raw.body.as_bytes(),
-            &channel_raw.sig,
-            &self.keys,
+        let (channel, channel_raw) = fetch_channel(
+            &self.fetch,
+            &self.base_url,
             self.track,
+            &self.keys,
             seen,
             now,
-        )?;
+        )
+        .await?;
         self.seen.record(self.track, channel.doc.sequence);
 
-        // Manifests of the newest releases above what is installed. One that
-        // fails to fetch or verify is left out: it simply cannot be a target.
-        let mut newer: Vec<_> = channel
-            .doc
-            .releases
-            .iter()
-            .filter(|r| r.version > req.installed.version)
-            .collect();
-        newer.sort_by(|a, b| b.version.cmp(&a.version));
-        let mut manifests: BTreeMap<Version, ReleaseManifest> = BTreeMap::new();
-        let mut raws: BTreeMap<Version, RawDoc> = BTreeMap::new();
-        for r in newer.into_iter().take(MAX_MANIFESTS) {
-            let Ok(raw) = self.raw(&r.manifest).await else {
-                continue;
-            };
-            if !sha256_hex(raw.body.as_bytes()).eq_ignore_ascii_case(&r.manifest_sha256) {
-                continue;
-            }
-            let Ok(m) = verify_manifest(raw.body.as_bytes(), &raw.sig, &self.keys) else {
-                continue;
-            };
-            if m.release.version != r.version {
-                continue;
-            }
-            manifests.insert(r.version.clone(), m);
-            raws.insert(r.version.clone(), raw);
-        }
+        // Manifests of the newest releases above what is installed.
+        let wanted = wanted_versions(&channel, Some(&req.installed.version), MAX_MANIFESTS);
+        let Manifests {
+            verified: manifests,
+            raw: raws,
+        } = fetch_manifests(&self.fetch, &channel, wanted, &self.keys).await;
 
         let mut decision = decide(&DecideInput {
             component: req.component,

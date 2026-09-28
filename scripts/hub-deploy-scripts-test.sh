@@ -118,20 +118,30 @@ printf 'FLEET_HUB_PUBLIC_URL=https://fleet.example.com\n' >"$U/fleet-hub.env"
 printf 'cl_readonly\n' >"$U/readonly.token"
 export FAKE_LOG="$ROOT/calls.log" FAKE_DIR="$U"
 ord() { grep -n -- "$1" "$FAKE_LOG" | head -n1 | cut -d: -f1; }
+# `before A B`: the first call matching A precedes the first matching B. A
+# call that never happened fails by name, not as `test`'s "integer expected".
+before() {
+  local a b; a="$(ord "$1")"; b="$(ord "$2")"
+  [ -n "$a" ] || { echo "  no call matching '$1' in $FAKE_LOG" >&2; return 1; }
+  [ -n "$b" ] || { echo "  no call matching '$2' in $FAKE_LOG" >&2; return 1; }
+  [ "$a" -lt "$b" ]
+}
 
 : >"$FAKE_LOG"
 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.1 >"$ROOT/upgrade1.log" 2>&1
 check "upgrade exits 0" test $? = 0
 check ".env now pins 0.3.1" grep -qx 'FLEET_HUB_TAG=0.3.1' "$U/.env"
 check "one pre-upgrade backup was taken" test "$(count "$U"/backups/pre-0.3.1-*.db)" = 1
+# Only compose calls read .env: `docker inspect` / `docker image inspect`
+# (noting the running image for the rollback line) take no env file.
 check "every compose call reads .env through --env-file" test -z "$(grep '^docker compose ' "$FAKE_LOG" | grep -v -- "^docker compose --env-file $U/.env ")"
-check "pull precedes stop" test "$(ord ' pull fleet-hub')" -lt "$(ord ' stop fleet-hub')"
-check "the running image is noted before the stop" test "$(ord 'docker inspect')" -lt "$(ord ' stop fleet-hub')"
-check "stop precedes the backup (an exact, offline copy)" test "$(ord ' stop fleet-hub')" -lt "$(ord '^sqlite3 .*\.backup')"
-check "the backup precedes up" test "$(ord '^sqlite3 .*\.backup')" -lt "$(ord ' up -d fleet-hub')"
+check "pull precedes stop" before ' pull fleet-hub' ' stop fleet-hub'
+check "the running image is noted before the stop" before 'docker inspect' ' stop fleet-hub'
+check "stop precedes the backup (an exact, offline copy)" before ' stop fleet-hub' '^sqlite3 .*\.backup'
+check "the backup precedes up" before '^sqlite3 .*\.backup' ' up -d fleet-hub'
 check "the running image is named" grep -q 'runs image sha256:0ld1d (ghcr.io/x/fleet-hub@sha256:d1g)' "$ROOT/upgrade1.log"
-check "up precedes the healthcheck" test "$(ord ' up -d fleet-hub')" -lt "$(ord 'healthcheck')"
-check "the healthcheck precedes --version" test "$(ord 'healthcheck')" -lt "$(ord '--version')"
+check "up precedes the healthcheck" before ' up -d fleet-hub' 'healthcheck'
+check "the healthcheck precedes --version" before 'healthcheck' '--version'
 check "fleet_health is asked with the readonly token" grep -q '^curl-stdin: Authorization: Bearer cl_readonly' "$FAKE_LOG"
 check "…which never reaches curl's command line" test -z "$(grep '^curl .*cl_readonly' "$FAKE_LOG")"
 check "…against /mcp/json on the public URL" grep -q 'https://fleet.example.com/mcp/json' "$FAKE_LOG"
