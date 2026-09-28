@@ -182,6 +182,30 @@ impl FleetTools {
         ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Fold host `from` into `into` in one transaction: \
+        worktrees, fingerprints, dismissals, layers and daily usage move \
+        (usage sums), sessions move unless `into` already has the same \
+        claude_session_id or tmux_name (those are dropped), then `from` is \
+        deleted. For a renamed host (`local` -> `mac`). Master only; may \
+        return E_CONFIRM_REQUIRED.")]
+    pub(super) async fn merge_host(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<hosts::MergeHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "merge_host",
+            &format!("from={} into={}", args.from, args.into),
+        );
+        self.confirm_gate(
+            "merge_host",
+            args.confirm_nonce.as_deref(),
+            &format!("from={} into={}", args.from, args.into),
+            &caller,
+        )?;
+        ok_json(&hosts::merge_host(args, &self.store).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Hide or show a host (hidden: skipped by \
         reconcile). Returns the host row.")]
     pub(super) async fn hide_host(

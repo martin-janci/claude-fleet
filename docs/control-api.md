@@ -64,7 +64,7 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
-`hide_host` — are **master-token only** in either mode: a token lifted from
+`merge_host`, `hide_host` — are **master-token only** in either mode: a token lifted from
 one host must not be able to rotate, re-provision or remove the others.
 
 **Rotate** next to a host mints a fresh token and re-provisions that host with
@@ -256,7 +256,8 @@ Index by area (names only; see the reference for details):
   health and the detection backlog, from cached sync state; a per-host token
   sees its own org's trackers), `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
-  `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
+  `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
+  `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,

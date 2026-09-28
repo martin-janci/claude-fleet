@@ -2331,6 +2331,56 @@ fn versions_health_deps(
     )
 }
 
+/// data-sync F2/F5, hub-ops F6: a hidden host's rows were immortal because
+/// the reaper only ran inside a probed host's write.
+#[tokio::test]
+async fn reconcile_reaps_the_rows_of_a_hidden_host_without_probing_it() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let (on_old, on_h) = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_host("old").unwrap();
+        s.set_host_hidden("old", true).unwrap();
+        (
+            s.upsert_session("dev-old", "old", None, None, 1, 1, "running", None)
+                .unwrap(),
+            s.upsert_session("dev-h", "h", None, None, 1, 1, "running", None)
+                .unwrap(),
+        )
+    };
+    let deps = || {
+        ReconcileDeps::fake_without_local(
+            |alias| {
+                Box::new(IdentityTmux {
+                    sessions: if alias == "h" {
+                        vec![tmux_session("dev-h")]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                })
+            },
+            std::time::Duration::from_secs(5),
+        )
+    };
+    // Pass 1 ghosts, pass 2 deletes; `h` is probed and its row lives on.
+    reconcile_sessions_with(&store, &deps()).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_session_by_id(on_old).unwrap().unwrap().status,
+            "ghost"
+        );
+    }
+    reconcile_sessions_with(&store, &deps()).await.unwrap();
+    let s = store.lock().unwrap();
+    assert!(s.get_session_by_id(on_old).unwrap().is_none());
+    assert_eq!(
+        s.get_session_by_id(on_h).unwrap().unwrap().status,
+        "running"
+    );
+}
+
 #[tokio::test]
 async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
     // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal.

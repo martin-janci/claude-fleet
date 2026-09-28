@@ -326,6 +326,7 @@ fn fleet_admin_tools_are_master_only() {
         "provision_hosts",
         "add_host",
         "remove_host",
+        "merge_host",
         "hide_host",
         "apply_sync",
         "set_secret",
@@ -444,6 +445,33 @@ fn keys_test_tools() -> (FleetTools, Arc<Mutex<Store>>, i64) {
 /// Validation happens before any tmux/ssh delivery is attempted, so this
 /// needs no real backend: an unknown key name, and text alongside `keys`,
 /// are both refused up front.
+/// Host identity & health, task 5: the master folds a renamed alias in one
+/// call and the old row is gone.
+#[tokio::test]
+async fn merge_host_folds_the_old_alias_into_the_new_one() {
+    let (t, store, _sid) = keys_test_tools();
+    {
+        let s = store.lock().unwrap();
+        s.insert_host("old", Some("old")).unwrap();
+        s.upsert_session("dev-old", "old", None, None, 1, 1, "ghost", None)
+            .unwrap();
+    }
+    let res = t
+        .merge_host(
+            Extension(Caller::master()),
+            Parameters(crate::service::hosts::MergeHostArgs {
+                from: "old".into(),
+                into: "local".into(),
+                confirm_nonce: None,
+            }),
+        )
+        .await;
+    assert!(res.is_ok(), "{res:?}");
+    let s = store.lock().unwrap();
+    assert!(s.get_host_row("old").unwrap().is_none());
+    assert!(s.get_session("dev-old", "local").unwrap().is_some());
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -1912,7 +1940,8 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; host identity &
+/// health's `merge_host`: 90.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1933,7 +1962,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 89);
+    assert_eq!(served, 90);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3457,7 +3486,10 @@ fn the_served_definition_budget_stays_bounded() {
     // (+144); plus 100.
     // Merged with M13.4c (`work_link` `summarize`): measured at 56,950 on
     // 2026-09-27; plus 100.
-    const BUDGET_BYTES: usize = 57_050;
+    // Host identity & health (`fleet_health` `hosts[]` clause, `merge_host`,
+    // `provision_hosts` `host` / `content_only`): measured at 57,689 on
+    // 2026-09-27; plus 100.
+    const BUDGET_BYTES: usize = 57_789;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

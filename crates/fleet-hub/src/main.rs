@@ -2,6 +2,7 @@
 
 mod config;
 mod demo;
+mod host;
 mod org;
 mod out;
 mod pair;
@@ -132,6 +133,13 @@ enum Cmd {
     Org {
         #[command(subcommand)]
         cmd: org::OrgCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Host administration (merge a renamed alias). Needs a running hub.
+    Host {
+        #[command(subcommand)]
+        cmd: host::HostCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -283,6 +291,7 @@ async fn main() -> ExitCode {
         },
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
+        Cmd::Host { cmd, opts } => host::run(cmd, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
@@ -399,6 +408,17 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "token", "show"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "regenerate"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "agent-token", "laptop"]).unwrap();
+        // Host identity & health, task 5: the alias merge.
+        let Cmd::Host { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "host", "merge", "local", "mac"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("host merge parses")
+        };
+        assert!(
+            matches!(cmd, host::HostCmd::Merge { ref from, ref into } if from == "local" && into == "mac")
+        );
         Cli::try_parse_from([
             "fleet-hub",
             "agent-token",

@@ -391,6 +391,7 @@ pub fn run() {
             commands::hosts::probe_host,
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
+            commands::hosts::merge_host,
             commands::hosts::hide_host,
             commands::hosts::set_account_nickname,
             commands::account_usage::list_account_usage,

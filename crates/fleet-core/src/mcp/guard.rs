@@ -174,6 +174,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Host identity & health, task 5: folds one alias into another and
+    // deletes it — fleet admin, and destructive enough to confirm.
+    ToolPolicy {
+        name: "merge_host",
+        access: Access::Master,
+        readonly: false,
+        confirm: true,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "hide_host",
         access: Access::Master,
@@ -1536,10 +1545,11 @@ mod tests {
             "apply_sync",
             "work_admin",
             "work_link",
+            "merge_host",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 11);
+        assert_eq!(CONFIRM_TOOLS.len(), 12);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
@@ -1782,6 +1792,7 @@ mod tests {
             "provision_hosts",
             "add_host",
             "remove_host",
+            "merge_host",
             "hide_host",
             "apply_sync",
             "set_secret",

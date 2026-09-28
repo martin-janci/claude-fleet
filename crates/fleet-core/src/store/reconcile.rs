@@ -190,6 +190,42 @@ impl Store {
             .collect()
     }
 
+    /// Two-phase reap for a host nothing probes (hidden, or `local` on a
+    /// hub without a local host): every live row is ghosted this call and
+    /// every already-ghost row is deleted, both kinds, no TTL exemption —
+    /// nothing on such a host can be resumed from here. A ghosted row also
+    /// loses `claude_status` / `stuck_kind` / `current_activity`: a dead
+    /// row saying `working` kept being counted (data-sync F2). Returns the
+    /// number of rows hard-deleted.
+    pub fn reap_host_ghosts(&self, host_alias: &str, now: i64) -> Result<usize, rusqlite::Error> {
+        let (changes, deleted) = self.in_savepoint("reap_host_ghosts", |tx| {
+            let mut out: Vec<RowChange> = Vec::new();
+            let before: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_alias = ?1",
+                [host_alias],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "UPDATE sessions SET claude_status = NULL, stuck_kind = NULL, current_activity = NULL \
+                 WHERE host_alias = ?1 AND status != 'ghost'",
+                [host_alias],
+            )?;
+            for kind in [KIND_TMUX, KIND_PANE_LESS] {
+                Self::ghost_and_clean(tx, host_alias, &[], now, kind, None, None, None, &mut out)?;
+            }
+            let after: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_alias = ?1",
+                [host_alias],
+                |r| r.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((out, (before - after).max(0) as usize))
+        })?;
+        for c in &changes {
+            self.bus.emit_change(c);
+        }
+        Ok(deleted)
+    }
+
     fn update_host_probe_in_tx(
         tx: &rusqlite::Connection,
         alias: &str,
@@ -916,6 +952,38 @@ impl Store {
 mod tests {
     use super::*;
     use crate::store::test_support::*;
+
+    /// data-sync F2/F5, hub-ops F6: a host nothing probes (hidden, or `local`
+    /// on a hub without one) kept its rows forever, some still `working`.
+    #[test]
+    fn reap_host_ghosts_ghosts_live_rows_then_deletes_ghosts_without_a_probe() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let live = s
+            .upsert_session("dev-a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let bg = s
+            .upsert_session("bg:abc", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET kind='external', claude_status='working', stuck_kind='oom' WHERE id=?1",
+                [bg],
+            )
+            .unwrap();
+        // Pass 1: everything live on the host is ghosted, with its status cleared.
+        assert_eq!(s.reap_host_ghosts("local", 100).unwrap(), 0);
+        for id in [live, bg] {
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.status, "ghost");
+            assert_eq!(row.claude_status, None, "a ghost has no live status");
+            assert_eq!(row.stuck_kind, None);
+        }
+        // Pass 2: already-ghost rows are hard-deleted, TTL or not.
+        assert_eq!(s.reap_host_ghosts("local", 200).unwrap(), 2);
+        assert!(s.get_session_by_id(live).unwrap().is_none());
+        assert!(s.get_session_by_id(bg).unwrap().is_none());
+    }
 
     /// A minimal, DB-free `SessionRow` for `lifecycle_kind` classification
     /// tests — only `lost_at` varies between cases, every other field is a

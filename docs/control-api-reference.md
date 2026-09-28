@@ -167,6 +167,12 @@ Git worktrees fleet knows about, with their alive-session occupants (0 = free to
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
+### `merge_host`
+
+Fold host `from` into `into` in one transaction: worktrees, fingerprints, dismissals, layers and daily usage move (usage sums), sessions move unless `into` already has the same claude_session_id or tmux_name (those are dropped), then `from` is deleted. For a renamed host (`local` -> `mac`). Master only; may return E_CONFIRM_REQUIRED.
+
+Parameters: `confirm_nonce`, `from`, `into`
+
 ### `move_session`
 
 Move a work session to another host, carrying its work as it is: the transcript, unpushed commits, staged/modified/untracked and small git-ignored files (.env), plus the session's Claude directory and the project's Claude memory (added without replacing anything; these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the conversation and the source is killed only once the target runs. strict refuses instead of carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED, E_FORBIDDEN (cross-org; see force_cross_org). Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
@@ -640,6 +646,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::probe_host`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
+- `commands::hosts::merge_host`
 - `commands::hosts::hide_host`
 - `commands::hosts::set_account_nickname`
 - `commands::account_usage::list_account_usage`

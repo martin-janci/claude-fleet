@@ -1719,7 +1719,39 @@ pub(crate) async fn reconcile_sessions_with(
         // comes back for the lock.
         tokio::task::yield_now().await;
     }
+
+    // 4. Hosts nothing probes — hidden rows, and `local` on a hub without a
+    //    local host — still hold session rows (a copied desktop store, a
+    //    host hidden after its rename). Reap them here, one savepoint per
+    //    host, so "hidden" stops meaning "immortal" (data-sync F2/F5).
+    reap_hidden_hosts(store, deps, now_unix());
     Ok(())
+}
+
+/// Step 4 of [`reconcile_sessions_with`]. Best-effort per host: a failure
+/// is logged and the next pass tries again.
+pub(super) fn reap_hidden_hosts(store: &Mutex<Store>, deps: &ReconcileDeps, now: i64) {
+    let Ok(s) = lock(store) else { return };
+    let Ok(rows) = s.list_hosts() else { return };
+    for h in rows {
+        let unprobed = h.hidden || (!deps.local_host && h.alias == "local");
+        if !unprobed {
+            continue;
+        }
+        match s.reap_host_ghosts(&h.alias, now) {
+            Ok(n) if n > 0 => tracing::info!(
+                host = %h.alias,
+                reaped = n,
+                "[reconcile] reaped rows of an unprobed host"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                host = %h.alias,
+                error = %e,
+                "[reconcile] reap of an unprobed host failed"
+            ),
+        }
+    }
 }
 
 /// Claim the gate and run one full pass. Returns `Ok(false)` without probing

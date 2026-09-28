@@ -115,6 +115,9 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // (list/resolve/propose/set-host-layers/template/write/delete) has no
   // Svelte component yet.
   noUiControl: [
+    // Host identity & health, task 5: the alias merge is an operator's
+    // `fleet-hub host merge` / master-token tool; no Svelte control calls it.
+    'merge_host',
     'catalog_list_layers',
     'catalog_resolve_preview',
     'catalog_propose_layers',

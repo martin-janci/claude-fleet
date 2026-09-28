@@ -325,6 +325,38 @@ pub fn remove_host(args: HostAliasArgs, store: &Mutex<Store>) -> Result<HostRow,
     Ok(row)
 }
 
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "MergeHostParams")]
+pub struct MergeHostArgs {
+    /// The alias to retire (its rows move).
+    pub from: String,
+    /// The alias that keeps them.
+    pub into: String,
+    /// Nonce from an approved `E_CONFIRM_REQUIRED`.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
+/// Fold `from` into `into` (see `Store::merge_host_alias`). `local` may be
+/// the source only on a hub that disabled it — on the desktop `local` is
+/// this machine and `delete_host` refuses it anyway.
+pub fn merge_host(
+    args: MergeHostArgs,
+    store: &Mutex<Store>,
+) -> Result<crate::store::MergeReport, IpcError> {
+    crate::validate::host_alias_syntax(&args.into)?;
+    if args.from == crate::service::projects::LOCAL_HOST
+        && crate::service::hub::local_host_enabled()
+    {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "local is this machine; merge it only on a hub with hub.local_host=false",
+        ));
+    }
+    let s = lock(store)?;
+    s.merge_host_alias(&args.from, &args.into)
+}
+
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "HideHostParams")]
 pub struct HideHostArgs {

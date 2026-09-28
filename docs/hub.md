@@ -1707,11 +1707,35 @@ row is hidden and marked unreachable automatically on first start — not
 deleted, just no longer listed, counted, probed or polled for usage. The
 sessions that were live on it are ghosted with `lost_reason =
 local_disabled` on every start (nothing probes `local` on such a hub, so
-they would otherwise stay live and refuse every action); they stay
-dismissable and are pruned like any other ghost. `refresh_projects` has no
+they would otherwise stay live and refuse every action); they are ghosted
+on the start that finds them and reaped on the next
+(`retire_local_sessions`); any host nothing probes is reaped the same way
+each reconcile pass. `refresh_projects` has no
 local projects directory to scan there and returns the stored list, and the
 new-session, add-project and background-session dialogs start on the first
 pickable host instead of `local`.
+
+### Retire a renamed alias (`local` → `mac`)
+
+A store copied from the desktop keeps its old machine under `local` while
+the same machine was re-added under a new alias; worktrees, dismissals and
+usage stay stranded on the hidden row. Fold it in one transaction:
+
+1. Back up first, as root on the NAS:
+   `sqlite3 /volume1/docker/fleet-hub/data/state.db ".backup /volume1/docker/fleet-hub/backup-$(date +%F).db"`
+2. With the hub running: `fleet-hub host merge local mac` (or the
+   `merge_host {from: "local", into: "mac"}` tool with the master token).
+   If `mcp.confirm_destructive` is on, approve the request on the desktop
+   or pass `confirm_nonce` from the `E_CONFIRM_REQUIRED` reply.
+3. Verify: `list_hosts` no longer lists `local`; `list_worktrees
+   {host_alias: "mac"}` shows the moved rows; `usage_report {host_alias:
+   "mac"}`'s `by_day` includes the old days.
+
+What moves: `worktrees` (a name `mac` already has keeps `mac`'s),
+`worktree_parent_fingerprints`, `dismissed_agents`, `host_layers`,
+`catalog_secrets_host`, `usage_daily` (summed per day). What is dropped: a
+`local` session whose `claude_session_id` or `tmux_name` already exists
+under `mac`. What is deleted: the `local` host row and its token.
 
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a

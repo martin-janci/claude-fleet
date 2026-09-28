@@ -12,7 +12,7 @@ use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::hosts::{
-    self, AddHostArgs, HideHostArgs, HostAliasArgs, ProbePreview, ProbeSshAliasArgs,
+    self, AddHostArgs, HideHostArgs, HostAliasArgs, MergeHostArgs, ProbePreview, ProbeSshAliasArgs,
     SetAccountNicknameArgs,
 };
 use fleet_core::ssh::SshClient;
@@ -87,6 +87,19 @@ pub fn remove_host(
 ) -> Result<HostRow, IpcError> {
     backend.refuse_local_only("remove_host")?;
     hosts::remove_host(args, &store)
+}
+
+/// Host identity & health, task 5. LocalOnly like `remove_host`: the hub
+/// tool is master-only and a paired desktop holds a client token, so
+/// routing it would always come back `E_FORBIDDEN`.
+#[tauri::command]
+pub fn merge_host(
+    args: MergeHostArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<fleet_core::store::MergeReport, IpcError> {
+    backend.refuse_local_only("merge_host")?;
+    hosts::merge_host(args, &store)
 }
 
 #[tauri::command]

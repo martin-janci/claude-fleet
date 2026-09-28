@@ -744,6 +744,18 @@ impl HostHealth {
     }
 }
 
+/// What [`crate::store::Store::merge_host_alias`] did (host identity &
+/// health, task 5).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MergeReport {
+    pub from: String,
+    pub into: String,
+    pub worktrees_moved: usize,
+    pub sessions_moved: usize,
+    pub sessions_dropped: usize,
+    pub usage_days_merged: usize,
+}
+
 /// The only values `hosts.transport` may hold (migration 034). The single
 /// definition `Store::set_host_transport` and `service::hosts::add_host`
 /// both validate against, so the allowed set can't drift between them.
