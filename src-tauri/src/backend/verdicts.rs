@@ -179,12 +179,6 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
-        "related_sessions",
-        Verdict::Routed {
-            tool: "related_sessions",
-        },
-    ),
-    (
         "new_session",
         Verdict::Routed {
             tool: "new_session",
@@ -218,21 +212,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     // ── worktrees ───────────────────────────────────────────────────────────
     (
-        "list_worktrees",
-        Verdict::Routed {
-            tool: "list_worktrees",
-        },
-    ),
-    (
         "list_host_worktrees",
         Verdict::Routed {
             tool: "list_host_worktrees",
-        },
-    ),
-    (
-        "delete_worktree",
-        Verdict::Routed {
-            tool: "delete_worktree",
         },
     ),
     (
@@ -291,15 +273,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_tidy", Verdict::Routed { tool: "work" }),
     ("work_reopened", Verdict::Routed { tool: "work" }),
     (
-        "archive_session_work",
-        Verdict::Routed { tool: "work_link" },
-    ),
-    (
         "unarchive_session_work",
         Verdict::Routed { tool: "work_link" },
     ),
-    ("snooze_tidy", Verdict::Routed { tool: "work_link" }),
-    ("never_tidy", Verdict::Routed { tool: "work_link" }),
     ("tidy_apply", Verdict::Routed { tool: "work_link" }),
     ("dismiss_reopened", Verdict::Routed { tool: "work_link" }),
     // Work graph M2.4: resume past work, and what a purge would strand.
@@ -323,7 +299,6 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
     // Work graph M11.1: "Name this work…" — local work items, listed from
     // `work`, named and renamed through `work_link { name }`.
-    ("list_local_work_items", Verdict::Routed { tool: "work" }),
     ("name_session_work", Verdict::Routed { tool: "work_link" }),
     ("rename_work_item", Verdict::Routed { tool: "work_link" }),
     // Work graph M14: the Work view — eight reads of `work` and ten
@@ -477,7 +452,6 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: ORGS_ARE_ADMIN,
         },
     ),
-    ("work_scopes", Verdict::Routed { tool: "work" }),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
     (

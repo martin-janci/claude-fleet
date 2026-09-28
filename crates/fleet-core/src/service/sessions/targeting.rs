@@ -12,16 +12,9 @@ pub struct RelatedSessionsArgs {
     pub session_id: i64,
 }
 
-pub fn related_sessions(
-    args: RelatedSessionsArgs,
-    store: &Mutex<Store>,
-) -> Result<Vec<SessionRow>, IpcError> {
-    related_sessions_scoped(args, store, &crate::service::orgs::OrgScope::All)
-}
-
-/// [`related_sessions`] under an org scope (work graph M5, D7): sessions of
-/// an org isolated from the caller's host are left out, and an anchor that
-/// is one of them reads as missing.
+/// The sessions sharing one's project and worktree, under an org scope (work graph M5, D7): sessions of an org isolated from the
+/// caller's host are left out, and an anchor that is one of them reads as
+/// missing.
 pub fn related_sessions_scoped(
     args: RelatedSessionsArgs,
     store: &Mutex<Store>,

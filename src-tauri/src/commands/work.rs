@@ -8,18 +8,16 @@
 //! local one does here (work graph M2.4 added the resume half).
 //!
 //! Work graph M7.2 adds the lifecycle: `work_tidy` / `work_reopened` →
-//! `work`, and archive / unarchive / snooze / never / tidy_apply / dismiss →
-//! `work_link`.
+//! `work`, and unarchive / tidy_apply (which carries archive, snooze and
+//! never per item) / dismiss → `work_link`.
 //!
 //! Work graph M11.1 adds local work ("Name this work…"):
-//! `list_local_work_items` → `work { local_items }`, and `name_session_work`
-//! / `rename_work_item` → `work_link { name }`.
+//! `name_session_work` / `rename_work_item` → `work_link { name }`.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::card::TicketCard;
-use fleet_core::service::work::local::LocalWorkItem;
 use fleet_core::service::work::resume::ResumePlan;
 use fleet_core::service::work::summary::SummaryOutcome;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
@@ -139,22 +137,11 @@ pub struct WorkPurgeImpactArgs {
     pub host_aliases: Vec<String>,
 }
 
-/// Archive a live session from the UI (it collapses into its work group's
-/// Done; tmux keeps running), or un-archive it — which an attach also does.
+/// Un-archive a session (it leaves its work group's Done) — which an attach
+/// also does.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionLifecycleArgs {
     pub session_id: i64,
-}
-
-/// Snooze tidy-up for a session's work (`days`, default 7), or never
-/// suggest it (`days` ignored).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TidyFlagArgs {
-    pub session_id: i64,
-    #[serde(default)]
-    pub link_id: Option<i64>,
-    #[serde(default)]
-    pub days: Option<u32>,
 }
 
 /// The Tidy-up sheet's choices, one per session.
@@ -184,15 +171,6 @@ pub struct NameSessionWorkArgs {
 pub struct RenameWorkItemArgs {
     pub item_id: i64,
     pub title: String,
-}
-
-/// The local work items (work graph M11.1).
-#[tauri::command]
-pub async fn list_local_work_items(
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<Vec<LocalWorkItem>, IpcError> {
-    routed::list_local_work_items(&backend, &store).await
 }
 
 /// A person names the session's work from the desktop.
@@ -233,39 +211,12 @@ pub async fn work_reopened(
 }
 
 #[tauri::command]
-pub async fn archive_session_work(
-    args: SessionLifecycleArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
-    routed::archive_session_work(&backend, args, &store).await
-}
-
-#[tauri::command]
 pub async fn unarchive_session_work(
     args: SessionLifecycleArgs,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
     routed::unarchive_session_work(&backend, args, &store).await
-}
-
-#[tauri::command]
-pub async fn snooze_tidy(
-    args: TidyFlagArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
-    routed::snooze_tidy(&backend, args, &store).await
-}
-
-#[tauri::command]
-pub async fn never_tidy(
-    args: TidyFlagArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<SessionRow, IpcError> {
-    routed::never_tidy(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -482,18 +433,6 @@ pub(crate) mod routed {
         }
     }
 
-    pub async fn archive_session_work(
-        backend: &FleetBackend,
-        args: SessionLifecycleArgs,
-        store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
-        let args = lifecycle("archive", args.session_id);
-        match backend.hub() {
-            Some(hub) => hub.route("archive_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
-        }
-    }
-
     pub async fn unarchive_session_work(
         backend: &FleetBackend,
         args: SessionLifecycleArgs,
@@ -502,37 +441,6 @@ pub(crate) mod routed {
         let args = lifecycle("unarchive", args.session_id);
         match backend.hub() {
             Some(hub) => hub.route("unarchive_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
-        }
-    }
-
-    pub async fn snooze_tidy(
-        backend: &FleetBackend,
-        args: TidyFlagArgs,
-        store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
-        let args = WorkLinkArgs {
-            link_id: args.link_id,
-            days: args.days,
-            ..lifecycle("snooze", args.session_id)
-        };
-        match backend.hub() {
-            Some(hub) => hub.route("snooze_tidy", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
-        }
-    }
-
-    pub async fn never_tidy(
-        backend: &FleetBackend,
-        args: TidyFlagArgs,
-        store: &Mutex<Store>,
-    ) -> Result<SessionRow, IpcError> {
-        let args = WorkLinkArgs {
-            link_id: args.link_id,
-            ..lifecycle("never", args.session_id)
-        };
-        match backend.hub() {
-            Some(hub) => hub.route("never_tidy", &args).await,
             None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
@@ -580,20 +488,6 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("dismiss_reopened", &args).await,
             None => work::dismiss_reopened(&args, store),
-        }
-    }
-
-    pub async fn list_local_work_items(
-        backend: &FleetBackend,
-        store: &Mutex<Store>,
-    ) -> Result<Vec<LocalWorkItem>, IpcError> {
-        let args = WorkArgs {
-            action: Some("local_items".into()),
-            ..Default::default()
-        };
-        match backend.hub() {
-            Some(hub) => hub.route("list_local_work_items", &args).await,
-            None => work::local::local_items(store, &fleet_core::service::orgs::OrgScope::All),
         }
     }
 

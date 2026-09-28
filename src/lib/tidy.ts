@@ -262,11 +262,6 @@ async function rowCmd(cmd: string, args: Record<string, unknown>): Promise<Resul
   return r;
 }
 
-/** Collapse a live session into its group's Done (tmux keeps running). */
-export function archiveSession(sessionId: number): Promise<Result<SessionRow>> {
-  return rowCmd('archive_session_work', { session_id: sessionId });
-}
-
 /** Un-archive (one click) — also the touch an attach sends. */
 export function unarchiveSession(sessionId: number): Promise<Result<SessionRow>> {
   return rowCmd('unarchive_session_work', { session_id: sessionId });

@@ -42,9 +42,8 @@ use fleet_core::service::safe_kill::{
 };
 use fleet_core::service::sessions::{
     self, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, LostCandidate,
-    NewSessionArgs, RecreateSessionArgs, RelatedSessionsArgs, RenameSessionArgs,
-    RestartSessionArgs, RestoreHostSessionsArgs, RestoreReport, SendPromptArgs,
-    SetFriendlyNameArgs, SpawnReviewArgs,
+    NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
+    RestoreHostSessionsArgs, RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store};
@@ -62,15 +61,6 @@ pub async fn list_sessions(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<SessionRow>, IpcError> {
     routed::list_sessions(&backend, force, &store, &ssh).await
-}
-
-#[tauri::command]
-pub async fn related_sessions(
-    args: RelatedSessionsArgs,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<Vec<SessionRow>, IpcError> {
-    routed::related_sessions(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -511,17 +501,6 @@ pub(crate) mod routed {
             Some(hub) => hub.list_sessions(force).await,
             None if force => sessions::refresh_sessions(store, ssh).await,
             None => sessions::list_sessions(store, ssh).await,
-        }
-    }
-
-    pub async fn related_sessions(
-        backend: &FleetBackend,
-        args: RelatedSessionsArgs,
-        store: &Mutex<Store>,
-    ) -> Result<Vec<SessionRow>, IpcError> {
-        match backend.hub() {
-            Some(hub) => hub.route("related_sessions", &args).await,
-            None => sessions::related_sessions(args, store),
         }
     }
 

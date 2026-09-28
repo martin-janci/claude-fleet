@@ -100,10 +100,6 @@ function removeWorktreeRow(arr: ProjectTreeRow[], id: number): ProjectTreeRow[] 
   });
 }
 
-function removeWorktree(id: number): void {
-  projects.update((arr) => removeWorktreeRow(arr, id));
-}
-
 /** One backend project/worktree event, as delivered by `events.ts`. Both
  *  kinds land in the same `projects` store, so they batch together. */
 export type ProjectEvent =
@@ -123,19 +119,6 @@ export function applyProjectEvents(events: readonly ProjectEvent[]): void {
     }
     return next;
   });
-}
-
-/** Delete a git worktree on its host and drop the fleet row. The backend
- *  refuses (`E_WORKTREE_BUSY`) when an alive session uses it unless `force`. */
-export async function deleteWorktree(
-  worktreeId: number,
-  force = false,
-): Promise<Result<void>> {
-  const r = await invokeCmd<void>('delete_worktree', {
-    args: { worktree_id: worktreeId, force },
-  });
-  if (r.ok) removeWorktree(worktreeId);
-  return r;
 }
 
 /** `list_host_worktrees` result: one project's worktrees as they exist on

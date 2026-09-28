@@ -56,7 +56,6 @@ vi.mock('@tauri-apps/api/core', () => ({
       tmux_version: '3.6a',
       account: null,
     };
-    if (cmd === 'related_sessions') return [];
     if (cmd === 'send_prompt') return null;
     if (cmd === 'spawn_review') return null;
     if (cmd === 'mcp_status' || cmd === 'mcp_configure')
