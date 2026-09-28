@@ -15,6 +15,12 @@ export interface ReplyActionsView {
    * user approved a re-send.
    */
   canRetry: boolean;
+  /**
+   * Why Retry is NOT offered on a turn that could otherwise be rewound, or
+   * `null`. The row shows Retry disabled with this as its tooltip rather than
+   * dropping it silently: the prompt on screen is not what would be re-sent.
+   */
+  retryUnavailable: string | null;
   /** Keep strictly before this; `null` keeps the whole transcript. */
   forkAnchor: string | null;
   rewindAnchor: string | null;
@@ -37,6 +43,7 @@ export function replyActionsFor(
     canFork: false,
     canRewind: false,
     canRetry: false,
+    retryUnavailable: null,
     forkAnchor: null,
     rewindAnchor: null,
   };
@@ -59,13 +66,34 @@ export function replyActionsFor(
   const isConversationStart = index === 0 && !truncated;
   const canRewind = own !== null && !isConversationStart;
 
+  const retryUnavailable = !canRewind ? null : retryBlockedReason(turns[index]);
+
   return {
     canFork: true,
     canRewind,
-    canRetry: canRewind && (turns[index]?.prompt ?? null) !== null,
+    canRetry: canRewind && retryUnavailable === null,
+    retryUnavailable,
     forkAnchor,
     rewindAnchor: canRewind ? own : null,
   };
+}
+
+/**
+ * Why this turn's prompt cannot be re-sent as "the same prompt", or `null`
+ * when it can. `prompt` is only the prompt's text: an image-only prompt has
+ * none, a prompt with an image lost the image, and a prompt too long for the
+ * read budget lost its tail (`prompt_partial`, set by `transcript.rs`).
+ * Sending any of those would send something other than what the user asked
+ * to retry.
+ */
+export function retryBlockedReason(turn: ConvTurn | undefined): string | null {
+  if (!turn || turn.prompt === null) {
+    return 'Retry is unavailable: this prompt had no text to send again (an image only). Rewind puts the conversation back; attach the image again yourself.';
+  }
+  if (turn.prompt_partial) {
+    return 'Retry is unavailable: the prompt shown is not the whole prompt (it was cut to fit, or held an image). Rewind here, then send it yourself.';
+  }
+  return null;
 }
 
 /**

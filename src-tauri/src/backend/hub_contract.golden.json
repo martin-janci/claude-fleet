@@ -114,6 +114,7 @@
       "ended_at",
       "items",
       "prompt",
+      "prompt_partial",
       "prompt_uuid",
       "reminders"
     ],

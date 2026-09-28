@@ -94,6 +94,19 @@ describe('replyActionsFor', () => {
     expect(v.canRetry).toBe(false);
   });
 
+  it('offers Rewind but NOT Retry when the prompt is partial, and says why', () => {
+    const v = replyActionsFor([turn('a1'), { ...turn('a2'), prompt_partial: true }], 1, false, true);
+    expect(v.canRewind).toBe(true);
+    expect(v.canRetry).toBe(false);
+    expect(v.retryUnavailable).toMatch(/not the whole prompt/);
+  });
+
+  it('gives no Retry reason where Rewind is not offered either', () => {
+    const v = replyActionsFor([turn('a1'), turn('a2')], 0, false, true);
+    expect(v.canRetry).toBe(false);
+    expect(v.retryUnavailable).toBeNull();
+  });
+
   it('offers Retry when the turn does have prompt text', () => {
     const v = replyActionsFor([turn('a1'), turn('a2')], 1, false, true);
     expect(v.canRetry).toBe(true);
