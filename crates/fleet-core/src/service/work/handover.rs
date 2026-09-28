@@ -684,7 +684,9 @@ pub fn gather_stored(
         convs.push(ConvFact {
             claude_session_id: j.claude_session_id.clone().unwrap_or_default(),
             started_at: meta["started_at"].as_i64(),
-            first_prompt: j.body.clone(),
+            // Written from the conversation row; one journalled before #370
+            // may still hold Claude Code's blocks.
+            first_prompt: crate::service::prompt_origin::clean_first_prompt(j.body.clone()),
             turns: meta["turns"].as_i64(),
             host: meta["host"].as_str().map(String::from),
             live: false,
@@ -1119,6 +1121,74 @@ Verify the git state before acting; this summary may be stale. Full context: the
             brief.contains("Prior work: 2 sessions / 2 conversations (1 still live)"),
             "{brief}"
         );
+    }
+
+    /// First prompts stored before #370 held Claude Code's blocks: the
+    /// brief reads them cleaned, from a live conversation's row and from an
+    /// ended one's journal entry alike, and never quotes a notification.
+    #[test]
+    fn an_old_harness_first_prompt_never_reaches_the_brief() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let old = s
+            .upsert_session("old", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let live = s
+            .upsert_session("live", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let st = crate::store::StartSource::Startup;
+        s.rebind_conversation(old, "c-old", st, None, None).unwrap();
+        s.rebind_conversation(live, "c-live", st, None, None)
+            .unwrap();
+        let raw = |c: &str, p: &str| {
+            s.conn_for_test()
+                .execute(
+                    "UPDATE conversations SET first_prompt = ?2 WHERE claude_session_id = ?1",
+                    rusqlite::params![c, p],
+                )
+                .unwrap();
+        };
+        raw(
+            "c-old",
+            "<system-reminder>Plan mode.</system-reminder>\nfix the login bug",
+        );
+        raw(
+            "c-live",
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>",
+        );
+        s.create_local_work_item(Some("ABC-1"), "Fix login")
+            .unwrap();
+        for sid in [old, live] {
+            s.link_session_work(sid, crate::store::WorkTarget::Key("abc-1"), "manual")
+                .unwrap();
+        }
+        s.delete_session(old).unwrap();
+        // The ended conversation's journal row as it was written before
+        // #370: the raw stored prompt.
+        s.conn_for_test()
+            .execute(
+                "UPDATE work_journal SET body = ?1 \
+                 WHERE kind = 'conversation' AND claude_session_id = 'c-old'",
+                ["<system-reminder>Plan mode.</system-reminder>\nfix the login bug"],
+            )
+            .unwrap();
+
+        let g = gather_stored(&s, "abc-1", None, &crate::service::orgs::OrgScope::All).unwrap();
+        let prompts: Vec<_> = g
+            .input
+            .conversations
+            .iter()
+            .map(|c| (c.live, c.first_prompt.clone()))
+            .collect();
+        assert!(
+            prompts.contains(&(false, Some("fix the login bug".into()))),
+            "{prompts:?}"
+        );
+        assert!(prompts.contains(&(true, None)), "{prompts:?}");
+        let brief = build_handover(&g.input);
+        assert!(!brief.contains("task-notification"), "{brief}");
+        assert!(!brief.contains("system-reminder"), "{brief}");
+        assert!(brief.contains("fix the login bug"), "{brief}");
     }
 
     #[test]

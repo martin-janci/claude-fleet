@@ -287,9 +287,13 @@ impl FleetPrompts {
     /// Code typed it ([`Self::is_fleet`]), else the prompt without the
     /// harness blocks at its head (rows stored before the hook took them
     /// off).
-    pub fn person_text<'a>(&self, prompt: &'a str, last_prompt: Option<&str>) -> Option<&'a str> {
+    pub fn person_text<'a>(
+        &self,
+        prompt: &'a str,
+        last_prompt: Option<&str>,
+    ) -> Option<std::borrow::Cow<'a, str>> {
         let p = crate::service::prompt_origin::human_part(prompt)?;
-        (!self.is_fleet(p, last_prompt)).then_some(p)
+        (!self.is_fleet(&p, last_prompt)).then_some(p)
     }
 }
 

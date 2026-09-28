@@ -14,18 +14,25 @@
 //! recognised only at the HEAD of the prompt, so a person who pastes a
 //! transcript or mentions a tag keeps their prompt.
 
-/// Tags Claude Code opens a user turn with. A block of one of these that is
-/// never closed still runs to the end of the prompt: a stored first prompt
-/// is cut at 200 characters, and a task notification is longer than that.
-/// Any other harness-shaped tag (`transcript::is_harness_tag`) counts only
-/// when its block is closed, so `<my-widget> renders blank` stays a prompt.
+use std::borrow::Cow;
+
+/// Tags Claude Code opens a user turn with — the ONE list both readers of
+/// a user turn use: this module (the hook's prompt, a stored first prompt)
+/// and `transcript::parse_conversation` (through [`is_harness_tag`]), so a
+/// turn the conversation view folds away is never a conversation's first
+/// prompt, and the reverse. Only a listed tag is the harness: an unlisted
+/// one, however harness-shaped (`<my-widget>x</my-widget> renders blank`),
+/// is the person's text. A listed block that is never closed runs to the
+/// end of the prompt: a stored first prompt is cut at 200 characters, and a
+/// task notification is longer than that.
 ///
 /// The list is what 600 local transcripts opened user turns with
 /// (2026-09-28): `task-notification` by far the most, then
 /// `system-reminder` (usually followed by the person's words), the slash
-/// command and `!` bash echoes, and the desktop app's `ci-monitor-event`,
-/// `scheduled-task` and `create-pr-command`. `<pasted_content …>` is the
-/// person's paste and stays theirs.
+/// command and `!` bash echoes, the IDE's context blocks, and the desktop
+/// app's `ci-monitor-event`, `scheduled-task` and `create-pr-command`.
+/// `<pasted_content …>` is the person's paste and stays theirs. A tag
+/// Claude Code starts writing tomorrow is added here, once, for both.
 pub const HARNESS_TAGS: &[&str] = &[
     "task-notification",
     "system-reminder",
@@ -47,15 +54,44 @@ pub const HARNESS_TAGS: &[&str] = &[
     "ide_selection",
 ];
 
+/// Whether `tag` is one Claude Code opens a user turn with
+/// ([`HARNESS_TAGS`]). The one predicate: the transcript parser asks it too.
+pub fn is_harness_tag(tag: &str) -> bool {
+    HARNESS_TAGS.contains(&tag)
+}
+
 /// The person's part of `prompt`: the text left once every harness block at
 /// its head is taken off, trimmed. `None` when nothing is left — the prompt
 /// is Claude Code talking (or it is empty).
-pub fn human_part(prompt: &str) -> Option<&str> {
+///
+/// One harness block carries the person's words: a slash command's
+/// `<command-args>`. `/fix PAY-7` reaches the hook as
+/// `<command-name>/fix</command-name><command-args>PAY-7</command-args>`,
+/// and the `PAY-7` is what they typed — so a command with arguments reads
+/// back as `/fix PAY-7` (owned, hence the `Cow`), where work detection
+/// still sees the key. A command without arguments is the harness's echo.
+pub fn human_part(prompt: &str) -> Option<Cow<'_, str>> {
     let mut t = prompt.trim();
-    while let Some(rest) = strip_harness_block(t) {
+    let mut name: Option<&str> = None;
+    let mut args: Option<&str> = None;
+    while let Some((tag, inner, rest)) = split_harness_block(t) {
+        match tag {
+            "command-name" => name = Some(inner.trim()),
+            "command-args" => args = Some(inner.trim()),
+            _ => {}
+        }
         t = rest.trim_start();
     }
-    (!t.is_empty()).then_some(t)
+    let command = args.filter(|a| !a.is_empty()).map(|a| match name {
+        Some(n) if !n.is_empty() => format!("{n} {a}"),
+        _ => a.to_string(),
+    });
+    match (command, t.is_empty()) {
+        (None, true) => None,
+        (None, false) => Some(Cow::Borrowed(t)),
+        (Some(c), true) => Some(Cow::Owned(c)),
+        (Some(c), false) => Some(Cow::Owned(format!("{c}\n{t}"))),
+    }
 }
 
 /// A non-empty prompt with nothing of a person's in it.
@@ -63,23 +99,51 @@ pub fn is_harness(prompt: &str) -> bool {
     !prompt.trim().is_empty() && human_part(prompt).is_none()
 }
 
-/// `text` after the harness block it starts with, or `None` when it does
-/// not start with one.
-fn strip_harness_block(text: &str) -> Option<&str> {
+/// A stored first prompt as a reader should see it: [`human_part`] of it,
+/// owned. Rows written before the hook took harness blocks off (#370) hold
+/// a `<task-notification>` or a reminder; every read of
+/// `conversations.first_prompt` (the conversation list, the handover
+/// brief) goes through this, so no consumer shows Claude Code's words as
+/// what the person asked.
+pub fn clean_first_prompt(stored: Option<String>) -> Option<String> {
+    let p = stored?;
+    match human_part(&p)? {
+        Cow::Borrowed(b) if b.len() == p.len() => Some(p),
+        c => Some(c.into_owned()),
+    }
+}
+
+/// The listed harness block `text` starts with, as `(tag, what is
+/// inside)` — for the transcript parser, which folds a harness-only entry
+/// under it.
+pub fn head_block(text: &str) -> Option<(&str, &str)> {
+    split_harness_block(text).map(|(tag, inner, _)| (tag, inner))
+}
+
+/// The harness block `text` starts with: `(tag, what is inside, the text
+/// after it)`, or `None` when it does not start with a listed one. An
+/// unclosed block runs to the end.
+fn split_harness_block(text: &str) -> Option<(&str, &str, &str)> {
     let rest = text.strip_prefix('<')?;
     let name_end = rest
         .find(|c: char| c == '>' || c.is_whitespace())
         .unwrap_or(rest.len());
     let tag = &rest[..name_end];
-    let known = HARNESS_TAGS.contains(&tag);
-    if !known && !crate::service::transcript::is_harness_tag(tag) {
+    if !is_harness_tag(tag) {
         return None;
     }
+    let body_at = rest[name_end..]
+        .find('>')
+        .map(|i| 1 + name_end + i + 1)
+        .unwrap_or(text.len());
     let close = format!("</{tag}>");
-    match text.find(&close) {
-        Some(i) => Some(&text[i + close.len()..]),
-        None if known => Some(""),
-        None => None,
+    match text[body_at..].find(&close) {
+        Some(i) => Some((
+            tag,
+            &text[body_at..body_at + i],
+            &text[body_at + i + close.len()..],
+        )),
+        None => Some((tag, &text[body_at..], "")),
     }
 }
 
@@ -111,8 +175,9 @@ mod tests {
             "<system-reminder>\nThe TodoWrite tool hasn't been used recently.\n</system-reminder>"
                 .into(),
             "<command-message>review</command-message>\n<command-name>/review</command-name>\n\
-             <command-args>PAY-7</command-args>"
+             <command-args></command-args>"
                 .into(),
+            "<command-name>/clear</command-name>".into(),
             "<local-command-caveat>Caveat: The messages below were generated by the user while \
              running local commands.</local-command-caveat>"
                 .into(),
@@ -135,7 +200,7 @@ mod tests {
             "<task-notification".into(),
         ] {
             assert!(is_harness(&p), "{p}");
-            assert_eq!(human_part(&p), None, "{p}");
+            assert_eq!(human_part(&p).as_deref(), None, "{p}");
         }
     }
 
@@ -144,15 +209,90 @@ mod tests {
         assert_eq!(
             human_part(
                 "<system-reminder>Plan mode is on.</system-reminder>\n\n  fix the PAY-7 retry bug"
-            ),
+            )
+            .as_deref(),
             Some("fix the PAY-7 retry bug")
         );
         assert_eq!(
             human_part(
                 "<ide_opened_file>The user opened src/pay.rs</ide_opened_file> why does this panic?"
-            ),
+            )
+            .as_deref(),
             Some("why does this panic?")
         );
+    }
+
+    /// `/fix PAY-7` as the hook receives it: the arguments are what the
+    /// person typed, so the key stays visible to work detection.
+    #[test]
+    fn a_slash_commands_arguments_are_the_persons() {
+        for (p, want) in [
+            (
+                "<command-message>fix</command-message>\n<command-name>/fix</command-name>\n\
+                 <command-args>PAY-7</command-args>",
+                "/fix PAY-7",
+            ),
+            (
+                "<command-name>/fix</command-name><command-args>PAY-7</command-args>",
+                "/fix PAY-7",
+            ),
+            (
+                "<command-args>PAY-7 and the retry</command-args>",
+                "PAY-7 and the retry",
+            ),
+            (
+                "<command-name>/fix</command-name><command-args>PAY-7</command-args>\nplease",
+                "/fix PAY-7\nplease",
+            ),
+        ] {
+            assert!(!is_harness(p), "{p}");
+            assert_eq!(human_part(p).as_deref(), Some(want), "{p}");
+        }
+    }
+
+    /// Only a LISTED tag is the harness: a closed block of an unlisted,
+    /// harness-shaped tag at the head is the person's (a pasted component),
+    /// and the transcript parser agrees because it asks the same predicate.
+    #[test]
+    fn an_unlisted_tag_is_the_persons_even_when_closed() {
+        for p in [
+            "<my-widget>x</my-widget> renders blank",
+            "<my-widget>x</my-widget>",
+            "<foo-bar>\nsome config\n</foo-bar>",
+        ] {
+            assert!(!is_harness(p), "{p}");
+            assert_eq!(human_part(p).as_deref(), Some(p), "{p}");
+        }
+        assert!(is_harness_tag("task-notification"));
+        assert!(is_harness_tag("ide_selection"));
+        assert!(!is_harness_tag("my-widget"));
+        assert!(!is_harness_tag("pasted_content"));
+    }
+
+    /// A first prompt stored before #370 is read back without Claude Code's
+    /// blocks; a harness-only one reads as none at all.
+    #[test]
+    fn an_old_stored_first_prompt_is_cleaned_on_read() {
+        assert_eq!(
+            clean_first_prompt(Some(
+                "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+                 <summary>Agent \"Fix PAY-7\" completed</summary>\n</task-notification>"
+                    .into()
+            )),
+            None
+        );
+        assert_eq!(
+            clean_first_prompt(Some(
+                "<system-reminder>Plan mode.</system-reminder>\nfix the login bug".into()
+            ))
+            .as_deref(),
+            Some("fix the login bug")
+        );
+        assert_eq!(
+            clean_first_prompt(Some("fix the login bug".into())).as_deref(),
+            Some("fix the login bug")
+        );
+        assert_eq!(clean_first_prompt(None), None);
     }
 
     #[test]
@@ -169,10 +309,10 @@ mod tests {
             "[claude-fleet: message from task #3] done",
         ] {
             assert!(!is_harness(p), "{p}");
-            assert_eq!(human_part(p), Some(p.trim()), "{p}");
+            assert_eq!(human_part(p).as_deref(), Some(p.trim()), "{p}");
         }
         assert!(!is_harness(""));
         assert!(!is_harness("   "));
-        assert_eq!(human_part("  "), None);
+        assert_eq!(human_part("  ").as_deref(), None);
     }
 }
