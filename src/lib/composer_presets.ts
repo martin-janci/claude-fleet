@@ -22,6 +22,9 @@ import type { Result } from './result';
 export interface ComposerPreset {
   label: string;
   text: string;
+  /** A plain click sends at once instead of only filling the box. Served
+   *  always; missing only in a cache written before the flag existed. */
+  auto_send?: boolean;
 }
 
 export function isPresetArray(v: unknown): v is ComposerPreset[] {
@@ -32,7 +35,8 @@ export function isPresetArray(v: unknown): v is ComposerPreset[] {
         typeof p === 'object' &&
         p !== null &&
         typeof (p as ComposerPreset).label === 'string' &&
-        typeof (p as ComposerPreset).text === 'string',
+        typeof (p as ComposerPreset).text === 'string' &&
+        ['boolean', 'undefined'].includes(typeof (p as ComposerPreset).auto_send),
     )
   );
 }
@@ -133,7 +137,7 @@ export function resetComposerPresets(): void {
 }
 
 export function addPreset(): void {
-  composerPresets.update((list) => [...list, { label: '', text: '' }]);
+  composerPresets.update((list) => [...list, { label: '', text: '', auto_send: false }]);
   // Not scheduled: a blank row is the editor's "new chip" placeholder, and
   // the backend refuses a chip with no text. It saves on the first keystroke
   // in it, through updatePreset.
@@ -147,4 +151,26 @@ export function updatePreset(index: number, patch: Partial<ComposerPreset>): voi
 export function removePreset(index: number): void {
   composerPresets.update((list) => list.filter((_, i) => i !== index));
   schedule();
+}
+
+/**
+ * Move a chip one place up (`-1`) or down (`1`). The list's order is the chip
+ * row's order on every client, so this is saved like any other edit.
+ */
+export function movePreset(index: number, dir: -1 | 1): void {
+  const to = index + dir;
+  const list = get(composerPresets);
+  if (index < 0 || index >= list.length || to < 0 || to >= list.length) return;
+  const next = [...list];
+  [next[index], next[to]] = [next[to], next[index]];
+  composerPresets.set(next);
+  schedule();
+}
+
+/**
+ * Whether a click on the chip sends it: the chip's own `auto_send`, inverted
+ * by Shift so either behaviour stays one gesture away.
+ */
+export function presetSendsNow(p: ComposerPreset, shiftKey: boolean): boolean {
+  return (p.auto_send === true) !== shiftKey;
 }

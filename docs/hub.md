@@ -883,7 +883,9 @@ What a client may do:
   classified as a write: a `full` client may call it and a `readonly` one is
   not shown it (a readonly device draws no chip row to begin with). The list
   itself is fleet state in the hub's database, not a device preference, so a
-  chip written on the laptop is on the phone and the other way round.
+  chip written on the laptop is on the phone and the other way round — its
+  order and each chip's `auto_send` (a tap sends at once instead of only
+  filling the box) included.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
