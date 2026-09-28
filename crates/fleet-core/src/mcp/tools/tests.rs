@@ -8334,3 +8334,28 @@ fn add_projects_audit_line_never_carries_a_raw_clone_url() {
     });
     assert_eq!(line, "kind=clone repo=acme/widget");
 }
+
+/// An MCP caller's `call_id` is never bound: the field is the desktop
+/// dialog's Cancel handle (schema-skipped, but serde still reads it), and
+/// binding it would replace a desktop call's token of the same id and then
+/// release that slot, so the dialog's Cancel would find nothing to cancel.
+#[cfg(unix)]
+#[tokio::test]
+async fn add_project_never_binds_an_mcp_callers_call_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    // A desktop Add-project dialog's call in flight under id 7.
+    let desktop = tokio_util::sync::CancellationToken::new();
+    t.reg.bind(7, desktop.clone());
+    let mut params = add_params("hostb", clone_src());
+    params.args.call_id = Some(7);
+    t.add_project(Extension(Caller::master()), Parameters(params))
+        .await
+        .expect("the clone succeeds on the fake host");
+    t.reg.cancel(7);
+    assert!(
+        desktop.is_cancelled(),
+        "the desktop's slot survives the MCP call and its Cancel still works"
+    );
+}
