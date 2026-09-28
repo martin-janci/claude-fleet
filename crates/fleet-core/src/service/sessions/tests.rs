@@ -187,6 +187,120 @@ fn a_long_tool_call_is_not_demoted_and_lifted_again_every_tick() {
     );
 }
 
+/// A pass of `vps` that sees `dev-a` the way a stale-demoted row looks: the
+/// cached `claude agents` status says `working` (live subagents), the pane
+/// shows `pane_status`.
+fn stale_probe(s: &Store, pane_status: crate::service::pane_intel::ClaudeStatus) -> HostProbe {
+    let mut probe = vps_probe(
+        s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![agent("uuid-a", Some("dev-a"), Some("/tmp"))],
+        PrInfoMap::new(),
+    );
+    probe.intel.insert(
+        "dev-a".into(),
+        crate::service::pane_intel::PaneIntel {
+            activity: None,
+            stuck: None,
+            context_pct: None,
+            derived_status: Some(pane_status),
+            waiting_for: None,
+            pending_input: None,
+        },
+    );
+    probe
+}
+
+/// `dev-a` on `vps`, `working` by the agents' status, then demoted by the
+/// tick's stale-working rule (both the attention stamp and the veto armed).
+fn demoted_dev_a(s: &mut Store, projects: &[ProjectRow]) -> SessionRow {
+    use crate::service::pane_intel::ClaudeStatus;
+    s.upsert_host("vps").unwrap();
+    let probe = stale_probe(s, ClaudeStatus::Idle);
+    reconcile_write_one_host(s, &probe, projects).unwrap();
+    let row = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(
+        row.claude_status.as_deref(),
+        Some("working"),
+        "precondition"
+    );
+    let demoted = s.age_out_stale_working(now_unix(), 60).unwrap();
+    assert_eq!(demoted.len(), 1, "precondition: the tick demotes dev-a");
+    assert_eq!(demoted[0].claude_status.as_deref(), Some("idle"));
+    assert!(demoted[0].stale_working_at.is_some());
+    demoted.into_iter().next().unwrap()
+}
+
+/// Final review of the stale_working acknowledgement: an attach ends the
+/// attention reason, but not the demotion. The next pass must not let the
+/// cached agents status flip the idle pane back to `working`, and the tick
+/// must not re-demote (and re-stamp) it half an hour later.
+#[test]
+fn an_attach_ends_the_stale_working_reason_but_keeps_the_demotion() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let mut s = Store::open_in_memory().unwrap();
+    let projects = s.list_projects().unwrap();
+    let row = demoted_dev_a(&mut s, &projects);
+    assert!(s.touch_session(row.id).unwrap());
+    let get = |s: &Store| s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(get(&s).stale_working_at, None, "the attach acknowledged it");
+
+    let probe = stale_probe(&s, ClaudeStatus::Idle);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(
+        get(&s).claude_status.as_deref(),
+        Some("idle"),
+        "the cached agents status must not undo the demotion after an attach"
+    );
+    assert_eq!(get(&s).stale_working_at, None, "the reason stays ended");
+    assert!(
+        s.age_out_stale_working(now_unix() + 3_600, 60)
+            .unwrap()
+            .is_empty(),
+        "an acknowledged demotion is not re-stamped"
+    );
+    assert_eq!(get(&s).stale_working_at, None);
+
+    // The pane's own spinner is real: it lifts the demotion, and a row that
+    // then goes quiet again can be demoted again.
+    let probe = stale_probe(&s, ClaudeStatus::Working);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(get(&s).claude_status.as_deref(), Some("working"));
+    let again = s.age_out_stale_working(now_unix() + 3_600, 60).unwrap();
+    assert_eq!(again.len(), 1, "a lifted demotion re-arms the rule");
+}
+
+/// The same for the TTL: `reconcile.stale_working_ttl_secs` expires the
+/// attention stamp, and the demotion still stands.
+#[test]
+fn an_expired_stale_working_stamp_keeps_the_demotion() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let mut s = Store::open_in_memory().unwrap();
+    let projects = s.list_projects().unwrap();
+    demoted_dev_a(&mut s, &projects);
+    let ttl = 3_600;
+    let expired = s.expire_stale_working(now_unix() + ttl + 1, ttl).unwrap();
+    assert_eq!(expired.len(), 1, "the TTL lifts the stamp");
+    let get = |s: &Store| s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(get(&s).stale_working_at, None);
+
+    let probe = stale_probe(&s, ClaudeStatus::Idle);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(
+        get(&s).claude_status.as_deref(),
+        Some("idle"),
+        "the cached agents status must not undo the demotion after the TTL"
+    );
+    assert!(
+        s.age_out_stale_working(now_unix() + 2 * ttl, 60)
+            .unwrap()
+            .is_empty(),
+        "an expired demotion is not re-stamped"
+    );
+    assert_eq!(get(&s).stale_working_at, None);
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),

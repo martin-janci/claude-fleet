@@ -10,4 +10,4 @@
 -- schema.rs.
 ALTER TABLE sessions ADD COLUMN pane_working_at INTEGER;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (80);
+INSERT OR IGNORE INTO schema_version (version) VALUES (81);
