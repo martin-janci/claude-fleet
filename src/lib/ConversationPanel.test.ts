@@ -941,6 +941,34 @@ describe('ConversationPanel composer auto-grow', () => {
   });
 });
 
+describe('ConversationPanel model / effort pickers', () => {
+  async function mountPanel(over: Partial<SessionRow> = {}) {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(over), visible: true });
+    await settle();
+  }
+
+  it('shows the current model and sends /model for a pick, then resets', async () => {
+    await mountPanel({ model: 'claude-opus-5-5' });
+    const pick = screen.getByTestId('conv-model-pick') as HTMLSelectElement;
+    expect(pick.options[0].textContent).toBe('opus 5.5');
+    await fireEvent.change(pick, { target: { value: 'sonnet' } });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/model sonnet');
+    expect(pick.value).toBe('');
+  });
+
+  it('sends /effort for a pick and keeps it selected', async () => {
+    await mountPanel();
+    const pick = screen.getByTestId('conv-effort-pick') as HTMLSelectElement;
+    await fireEvent.change(pick, { target: { value: 'high' } });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/effort high');
+    expect(pick.value).toBe('high');
+  });
+});
+
 describe('ConversationPanel slash commands', () => {
   async function mountWithDraft(text: string) {
     mockedConv.mockReturnValue(ok(conv()));

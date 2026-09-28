@@ -347,10 +347,33 @@ jobs:
       - name: Verify ConPTY is in the Windows build
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           set -euo pipefail
+          # tauri-action has uploaded the installer to the draft already, and
+          # verify-release runs even when a build leg fails. So a failure here
+          # also takes the installer off the draft: verify-release then finds
+          # the release incomplete, and it is never published without ConPTY.
+          fail() {
+            echo "::error::$1"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+              --jq '.[] | select(.name | endswith("-setup.exe")) | .id' \
+              | while read -r id; do
+                  gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+                done || true
+            exit 1
+          }
           for f in conpty.dll OpenConsole.exe licenses/ConPTY-LICENSE.txt; do
-            test -s "target/release/$f" || { echo "::error::target/release/$f missing: the installer would ship without ConPTY"; exit 1; }
+            test -s "target/release/$f" || fail "target/release/$f missing: the installer would ship without ConPTY"
+          done
+          # The installer itself, which is what users get: files in target/
+          # prove the copy, not the NSIS payload. 7-Zip reads NSIS.
+          setup=$(ls target/release/bundle/nsis/*-setup.exe)
+          listing=$(7z l "$setup") || fail "7z could not read $setup"
+          for f in conpty.dll OpenConsole.exe ConPTY-LICENSE.txt; do
+            grep -q "$f" <<<"$listing" || fail "$f missing from $setup: the installer ships without ConPTY"
           done
       # The signing config can fail to apply without failing the build (tauri
       # falls back to ad-hoc). This turns that into a red leg: the bundle must
@@ -444,7 +467,12 @@ jobs:
           key: agent-hub-binaries-${{ matrix.target }}
       # Both crates build with no Tauri system libraries and no fleet-core
       # (see ci.yml's hub-headless job) — nothing to install first.
+      # FLEET_GIT_SHA / FLEET_BUILD_ID: the build identity fleet-hub's
+      # build.rs compiles in (`healthcheck --ready`, update design U11).
       - run: cargo build -p fleet-agent -p fleet-hub --release --locked --target ${{ matrix.target }}
+        env:
+          FLEET_GIT_SHA: ${{ github.sha }}
+          FLEET_BUILD_ID: gh-run-${{ github.run_id }}-${{ github.run_attempt }}
       # A checked-in script rather than an inline heredoc: no ${{ }}
       # expression carrying tag/ref text is interpolated inside a `run:`
       # body — tag, target and repository all arrive through `env:` instead,

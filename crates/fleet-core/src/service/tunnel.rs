@@ -272,12 +272,17 @@ pub fn stale_tunnel_pids(
     remote_port: u16,
     mcp_port: u16,
 ) -> Vec<u32> {
+    let configured = crate::ssh::default_ssh_binary()
+        .to_string_lossy()
+        .into_owned();
     let spec = forward_spec(remote_port, mcp_port);
     procs
         .iter()
         .filter(|(_, cmd)| {
             let tokens: Vec<&str> = cmd.split_whitespace().collect();
-            let is_ssh = tokens.first().is_some_and(|t| is_ssh_program(t));
+            let is_ssh = tokens
+                .first()
+                .is_some_and(|t| is_ssh_program(t, file_stem(&configured)));
             let forwards_ours = tokens.windows(2).any(|w| w[0] == "-R" && w[1] == spec);
             is_ssh && forwards_ours && tokens.contains(&"-N") && tokens.last() == Some(&host)
         })
@@ -285,16 +290,32 @@ pub fn stale_tunnel_pids(
         .collect()
 }
 
-/// Whether `program` (a path or a bare name) is `ssh`: the file name after
-/// the last `/` or `\\`. A Windows `ssh.exe` counts in any case, as Windows
-/// file names do; a bare name is compared exactly, as Unix ones are.
-fn is_ssh_program(program: &str) -> bool {
+/// Whether `program` (a path or a bare name) is `ssh`, or the program
+/// `CLAUDE_FLEET_SSH` names (`configured`, its file stem): the tunnels are
+/// spawned with that one, so its orphans must be recognised too.
+fn is_ssh_program(program: &str, configured: &str) -> bool {
+    is_program_named(program, "ssh") || is_program_named(program, configured)
+}
+
+/// The file name of a `/`- or `\\`-separated path, without a Windows `.exe`
+/// (any case).
+fn file_stem(program: &str) -> &str {
     let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
     match name.len().checked_sub(4) {
-        Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => {
-            name[..i].eq_ignore_ascii_case("ssh")
-        }
-        _ => name == "ssh",
+        Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    }
+}
+
+/// Whether `program` is `name`: a Windows `.exe` compares in any case, as
+/// Windows file names do; a bare name exactly, as Unix ones are.
+fn is_program_named(program: &str, name: &str) -> bool {
+    let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = file_stem(program);
+    if stem.len() != file.len() {
+        stem.eq_ignore_ascii_case(name)
+    } else {
+        stem == name
     }
 }
 
@@ -475,6 +496,17 @@ impl TunnelSupervisor {
             // now belongs to an instance that is gone. Later attempts sweep
             // only after a bind conflict.
             let mut reap_before_attempt = true;
+            // A WSL distribution is not dialed over SSH (see provision.rs).
+            // Tunnels are ensured at startup, when the distributions may
+            // still be being detected: only then is `wsl-x` known to be one.
+            crate::wsl::settled_for(&host_s).await;
+            if crate::wsl::is_wsl_host(&host_s) {
+                stats
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&host_s);
+                return;
+            }
             loop {
                 if reap_before_attempt {
                     reap_orphans(&lister, &killer, &host_s, remote_port, mcp_port).await;
@@ -835,8 +867,19 @@ mod tests {
             stale_tunnel_pids(&procs, "mefistos", 4180, 4180),
             vec![3, 4]
         );
-        assert!(!is_ssh_program("ssh.exe.bak"));
-        assert!(!is_ssh_program(".exe"));
+        assert!(!is_ssh_program("ssh.exe.bak", "ssh"));
+        assert!(!is_ssh_program(".exe", "ssh"));
+    }
+
+    /// A tunnel spawned with `CLAUDE_FLEET_SSH` is reaped by that name too;
+    /// a Unix name compares exactly, a Windows `.exe` in any case.
+    #[test]
+    fn the_configured_ssh_program_is_recognised_as_ssh() {
+        assert!(is_ssh_program("/opt/bin/ssh-9.8", "ssh-9.8"));
+        assert!(is_ssh_program(r"C:\tools\OpenSSH-Win64\SSH.EXE", "ssh"));
+        assert!(!is_ssh_program("/opt/bin/SSH-9.8", "ssh-9.8"));
+        assert!(!is_ssh_program("/usr/bin/scp", "ssh-9.8"));
+        assert_eq!(file_stem(r"C:\Program Files\Git\usr\bin\ssh.exe"), "ssh");
     }
 
     #[test]

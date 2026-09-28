@@ -698,6 +698,54 @@ impl Store {
         Ok(())
     }
 
+    /// The `claude --model` / `--effort` a session launches with
+    /// (`sessions.launch_model` / `effort_level`); `(None, None)` for a
+    /// missing row. Unvalidated: callers pass them to
+    /// `tmux::ClaudeLaunch::checked`.
+    pub fn session_launch(
+        &self,
+        id: i64,
+    ) -> Result<(Option<String>, Option<String>), rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT launch_model, effort_level FROM sessions WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None)))
+    }
+
+    /// Record the model a session launches with (`None` = the host's
+    /// default). Not client-visible, so no event.
+    pub fn set_session_launch_model(
+        &self,
+        id: i64,
+        model: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET launch_model = ?1 WHERE id = ?2",
+            rusqlite::params![model, id],
+        )?;
+        Ok(())
+    }
+
+    /// Record the effort a session runs at (`None` = the host's default).
+    /// `effort_level` is on the row (the sidebar's badge), so this emits
+    /// `session_updated`.
+    pub fn set_session_effort(&self, id: i64, effort: Option<&str>) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET effort_level = ?1 WHERE id = ?2 AND effort_level IS NOT ?1",
+            rusqlite::params![effort, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
     /// Link a session to its worktree row (`sessions.worktree_id`), which
     /// reconcile never sets. Emits `session_updated`.
     pub fn link_session_worktree(&self, id: i64, worktree_id: i64) -> Result<(), rusqlite::Error> {
@@ -1468,7 +1516,7 @@ impl Store {
     }
 
     /// Whether the tick's stale-working rule demoted this row and nothing
-    /// has lifted the demotion since (`stale_demoted_at`, migration 072):
+    /// has lifted the demotion since (`stale_demoted_at`, migration 079):
     /// the reconcile's `stale_working_veto` reads it for the prior row,
     /// since an attach or the TTL may have cleared `stale_working_at` while
     /// the demotion still stands. `false` for a row that does not exist.
@@ -3718,7 +3766,7 @@ mod tests {
     }
 
     /// Final review of the acknowledgement: `stale_demoted_at` (the veto's
-    /// memory, migration 072) outlives the attention stamp. Every hook
+    /// memory, migration 079) outlives the attention stamp. Every hook
     /// clears both; the TTL clears only the stamp; a row working or blocked
     /// again clears both — silently when the stamp was already gone, since
     /// nothing a client sees changes.

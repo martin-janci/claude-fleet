@@ -3,11 +3,11 @@
 use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::store::Store;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposedLayer {
     pub name: String,
     /// Always `"role"`: the proposal cannot know what is a context.
@@ -17,13 +17,13 @@ pub struct ProposedLayer {
     pub members: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposedSingleton {
     pub key: String,
     pub host: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayerProposal {
     pub layers: Vec<ProposedLayer>,
     /// Assets on exactly one host: a context, or a mistake. The user decides.

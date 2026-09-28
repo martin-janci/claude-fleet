@@ -187,26 +187,38 @@ pub fn run() {
             // refused with E_NOTFOUND, and the seeded row is hidden.
             #[cfg(windows)]
             {
-                // WSL distributions become hosts (`fleet_core::wsl`). Found
-                // before the ticks start, so the first reconcile pass already
-                // routes `wsl-<name>` through wsl.exe; bounded, because a WSL
-                // service that is still starting can take seconds.
-                let ssh_aliases: Vec<String> = fleet_core::ssh_config::load_user_config()
-                    .into_iter()
-                    .map(|h| h.alias)
-                    .collect();
-                fleet_core::wsl::refresh(&ssh_aliases, std::time::Duration::from_secs(3));
+                // WSL distributions become hosts (`fleet_core::wsl`), found on
+                // a thread of their own: the first wsl.exe after a boot starts
+                // the WSL service and can take seconds, which must not hold up
+                // the window. Commands for `wsl-` aliases wait for it.
+                fleet_core::wsl::refresh_in_background(
+                    || {
+                        fleet_core::ssh_config::load_user_config()
+                            .into_iter()
+                            .map(|h| h.alias)
+                            .collect()
+                    },
+                    std::time::Duration::from_secs(15),
+                );
+                let ssh_bin = fleet_core::ssh::default_ssh_binary();
+                if ssh_bin.is_absolute() && !ssh_bin.is_file() {
+                    tracing::warn!(
+                        ssh = %ssh_bin.display(),
+                        "[startup] the ssh program (CLAUDE_FLEET_SSH) does not exist; every host will fail"
+                    );
+                }
                 // portable-pty prefers a conpty.dll beside the exe (the one the
-                // installer ships) to the built-in ConPTY; say which this run
-                // got, since bracketed paste and the mouse depend on it.
+                // installer ships) to the built-in ConPTY. This says whether the
+                // file is there; the first terminal logs which one actually
+                // loaded (`pty::log_conpty_once`) — a DLL for another CPU is
+                // there and still falls back.
                 let bundled_conpty = std::env::current_exe()
                     .ok()
                     .and_then(|exe| exe.parent().map(|d| d.join("conpty.dll").is_file()))
                     .unwrap_or(false);
                 tracing::info!(
-                    wsl_hosts = ?fleet_core::wsl::hosts(),
-                    ssh = %fleet_core::ssh::default_ssh_binary().display(),
-                    conpty = if bundled_conpty { "bundled" } else { "system" },
+                    ssh = %ssh_bin.display(),
+                    conpty_file = if bundled_conpty { "present" } else { "absent" },
                     "[startup] Windows host sources"
                 );
                 fleet_core::service::hub::disable_local_host();
@@ -474,6 +486,7 @@ pub fn run() {
             commands::hosts::probe_host,
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
+            commands::hosts::merge_host,
             commands::hosts::hide_host,
             commands::hosts::set_account_nickname,
             commands::account_usage::list_account_usage,

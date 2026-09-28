@@ -11,7 +11,9 @@
     hint,
   }: {
     label: string;
-    options: readonly { id: T; label: string; title?: string; dot?: 'on' | 'off' }[];
+    /** `alert`: a red mark after the label, its text the mark's aria-label
+     *  ("disk almost full"); its testid is the chip's plus `-alert`. */
+    options: readonly { id: T; label: string; title?: string; dot?: 'on' | 'off'; alert?: string }[];
     value: T;
     onchange: (id: T) => void;
     testidFor?: (id: T) => string;
@@ -32,7 +34,11 @@
         data-testid={testidFor?.(o.id)}
         onclick={() => onchange(o.id)}
       >
-        {#if o.dot}<span class="dot dot-{o.dot}" aria-hidden="true"></span>{/if}{o.label}
+        {#if o.dot}<span class="dot dot-{o.dot}" aria-hidden="true"></span>{/if}{o.label}{#if o.alert}<span
+            class="alert"
+            aria-label={o.alert}
+            data-testid={testidFor ? `${testidFor(o.id)}-alert` : undefined}
+          ></span>{/if}
       </button>
     {/each}
   </div>
@@ -69,5 +75,13 @@
   }
   .dot-off {
     background: rgb(220, 130, 130);
+  }
+  .alert {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-left: 4px;
+    background: var(--danger, #c33);
   }
 </style>

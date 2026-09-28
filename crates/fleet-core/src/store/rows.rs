@@ -631,13 +631,17 @@ pub struct UsageCursor {
     pub last_msg_id: Option<String>,
     /// What was counted for `last_msg_id`: `in,out,cache_write,cache_read,cache_write_5m`.
     pub last_msg_usage: Option<String>,
+    /// The file's size when this cursor last started it from byte 0
+    /// (migration 072): a read starting below it is still that file's
+    /// history. 0 = none pending.
+    pub backfill_until: i64,
 }
 
 /// The `sessions` columns every `UsageCursor` read selects, in
 /// [`map_usage_cursor`] order.
 pub(super) const USAGE_CURSOR_COLUMNS: &str =
     "id, transcript_path, claude_session_id, usage_offset_bytes, usage_source, \
-     usage_last_msg_id, usage_last_msg_usage";
+     usage_last_msg_id, usage_last_msg_usage, usage_backfill_until";
 
 /// Map a row selected with [`USAGE_CURSOR_COLUMNS`].
 pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageCursor> {
@@ -649,6 +653,7 @@ pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<Usag
         source: row.get(4)?,
         last_msg_id: row.get(5)?,
         last_msg_usage: row.get(6)?,
+        backfill_until: row.get(7)?,
     })
 }
 
@@ -677,6 +682,9 @@ pub struct UsageDelta {
     /// Per-day slices of `totals`; empty means "book everything to the day
     /// of `now`" (a reader without `D` lines).
     pub by_day: Vec<DayDelta>,
+    /// A read from byte 0 sets the cursor's backfill mark (the file size it
+    /// saw); `None` keeps the stored one.
+    pub backfill_until: Option<i64>,
 }
 
 /// `claude_status` values that mean "no turn in progress" — the states
@@ -728,6 +736,82 @@ pub struct HostRow {
     /// per-host token. `None` = no org (the token sees only unassigned work).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// When `claude_version` / `tmux_version` were last read from the host
+    /// (migration 072). `None`: never — the values are whatever `add_host`
+    /// or an older store left. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub claude_version_at: Option<i64>,
+    /// Health sample from the last reachable probe (migration 073). All
+    /// per-field default: an older hub omits them.
+    #[serde(default)]
+    pub disk_home_free_kb: Option<i64>,
+    #[serde(default)]
+    pub disk_home_total_kb: Option<i64>,
+    #[serde(default)]
+    pub disk_tmp_free_kb: Option<i64>,
+    #[serde(default)]
+    pub load_1m: Option<f64>,
+    #[serde(default)]
+    pub mem_avail_kb: Option<i64>,
+    #[serde(default)]
+    pub uptime_secs: Option<i64>,
+    /// When the sample above was taken. `None`: never.
+    #[serde(default)]
+    pub health_at: Option<i64>,
+    /// Last hook accepted from this host's own token.
+    #[serde(default)]
+    pub last_hook_at: Option<i64>,
+    /// The fleet-agent version its last hello reported (agent hosts).
+    #[serde(default)]
+    pub agent_version: Option<String>,
+    /// When `provision_hosts` last completed on this host (migration 074).
+    #[serde(default)]
+    pub provisioned_at: Option<i64>,
+    /// `provisioned` but with content older than this build ships (or
+    /// unknown). Computed from the stored fingerprint, never stored.
+    #[serde(default)]
+    pub provision_stale: bool,
+}
+
+/// The volatile half of a host row, as `host:pinged` carries it (host
+/// identity & health, task 2): a value that moves every pass must not turn
+/// every ping into a full-row `host:probed`. Mirrors the migration-073
+/// columns.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HostHealth {
+    pub disk_home_free_kb: Option<i64>,
+    pub disk_home_total_kb: Option<i64>,
+    pub disk_tmp_free_kb: Option<i64>,
+    pub load_1m: Option<f64>,
+    pub mem_avail_kb: Option<i64>,
+    pub uptime_secs: Option<i64>,
+    pub health_at: Option<i64>,
+}
+
+impl HostHealth {
+    pub fn of(row: &HostRow) -> Self {
+        HostHealth {
+            disk_home_free_kb: row.disk_home_free_kb,
+            disk_home_total_kb: row.disk_home_total_kb,
+            disk_tmp_free_kb: row.disk_tmp_free_kb,
+            load_1m: row.load_1m,
+            mem_avail_kb: row.mem_avail_kb,
+            uptime_secs: row.uptime_secs,
+            health_at: row.health_at,
+        }
+    }
+}
+
+/// What [`crate::store::Store::merge_host_alias`] did (host identity &
+/// health, task 5).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MergeReport {
+    pub from: String,
+    pub into: String,
+    pub worktrees_moved: usize,
+    pub sessions_moved: usize,
+    pub sessions_dropped: usize,
+    pub usage_days_merged: usize,
 }
 
 /// The only values `hosts.transport` may hold (migration 034). The single
@@ -738,10 +822,16 @@ pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
-     last_pinged_at, account_uuid, provisioned, transport, org_id";
+     last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
+     disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
+     uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
+    let provisioned = row.get::<_, i64>(8)? != 0;
+    // Task 6: a provisioned host whose stored content fingerprint is not
+    // this build's (or unknown, an older provisioning) reads as stale.
+    let fingerprint: Option<String> = row.get(22)?;
     Ok(HostRow {
         alias: row.get(0)?,
         ssh_alias: row.get(1)?,
@@ -751,9 +841,22 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         hidden: row.get::<_, i64>(5)? != 0,
         last_pinged_at: row.get(6)?,
         account_uuid: row.get(7)?,
-        provisioned: row.get::<_, i64>(8)? != 0,
+        provisioned,
         transport: row.get(9)?,
         org_id: row.get(10)?,
+        claude_version_at: row.get(11)?,
+        disk_home_free_kb: row.get(12)?,
+        disk_home_total_kb: row.get(13)?,
+        disk_tmp_free_kb: row.get(14)?,
+        load_1m: row.get(15)?,
+        mem_avail_kb: row.get(16)?,
+        uptime_secs: row.get(17)?,
+        health_at: row.get(18)?,
+        last_hook_at: row.get(19)?,
+        agent_version: row.get(20)?,
+        provisioned_at: row.get(21)?,
+        provision_stale: provisioned
+            && fingerprint.as_deref() != Some(crate::service::provision::fingerprint()),
     })
 }
 
@@ -875,6 +978,10 @@ pub struct ClientTokenRow {
     pub trusted_at: Option<i64>,
     /// The org the client is bound to (migration 066), `None` unbound.
     pub org_id: Option<i64>,
+    /// Set when the operator lets this client manage the asset catalog
+    /// (migration 074, `fleet-hub client grant <name> assets`): the hub's
+    /// `catalog_admin` tool answers it as it answers the master.
+    pub assets_admin_at: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of
@@ -951,7 +1058,7 @@ pub struct TaskRow {
 
 /// Where the catalog repo lives and its last-loaded HEAD (migration 030).
 /// Singleton row (`id = 1`).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CatalogConfigRow {
     pub repo_path: String,
     pub remote_url: Option<String>,
@@ -979,7 +1086,7 @@ pub struct AssetInventoryRow {
 /// A secret name known to the sync engine (migration 031). Never carries the
 /// value: `list_secrets` is for display, `secret_values_for_host` resolves
 /// actual values.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SecretRow {
     pub name: String,
     pub host_alias: Option<String>,

@@ -15,7 +15,9 @@ impl FleetTools {
         detection_backlog: suggestions undecided for detection_backlog_days). \
         A per-host token sees its own host's usage and its org's trackers. \
         hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
-        peer_links_total.")]
+        peer_links_total. \
+        hosts[]: per host disk_home_pct/disk_low, claude_behind, \
+        agent_behind, hooks_silent.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -30,6 +32,16 @@ impl FleetTools {
             h.db_ready = false;
         }
         h.set_tunnels(self.tunnels.health());
+        // Host identity & health, task 2: the agents connected right now
+        // outrank the stored hello for `agent_version` / `agent_behind`.
+        if let Some(reg) = self.ssh.agent_registry() {
+            let live: Vec<(String, String)> = reg
+                .snapshot()
+                .into_iter()
+                .map(|a| (a.alias, a.agent_version))
+                .collect();
+            health::overlay_agents(&mut h.hosts, &live, crate::app_version::get());
+        }
         if let Some(host) = caller.host_alias.as_deref() {
             match self.reader().lock() {
                 Ok(s) => {
@@ -215,6 +227,30 @@ impl FleetTools {
         ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Fold host `from` into `into` in one transaction: \
+        worktrees, fingerprints, dismissals, layers and daily usage move \
+        (usage sums), sessions move unless `into` already has the same \
+        claude_session_id or tmux_name (those are dropped), then `from` is \
+        deleted. For a renamed host (`local` -> `mac`). Master only; may \
+        return E_CONFIRM_REQUIRED.")]
+    pub(super) async fn merge_host(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<hosts::MergeHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "merge_host",
+            &format!("from={} into={}", args.from, args.into),
+        );
+        self.confirm_gate(
+            "merge_host",
+            args.confirm_nonce.as_deref(),
+            &format!("from={} into={}", args.from, args.into),
+            &caller,
+        )?;
+        ok_json(&hosts::merge_host(args, &self.store).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Hide or show a host (hidden: skipped by \
         reconcile). Returns the host row.")]
     pub(super) async fn hide_host(
@@ -234,12 +270,19 @@ impl FleetTools {
         / EnterWorktree http hooks and this fleet's MCP server entry \
         (per-host bearer token) into every reachable host's ~/.claude.json \
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
-        per-host status; each host must restart Claude to load it.")]
+        per-host status; each host must restart Claude to load it. host: \
+        one alias; content_only: skills, CLAUDE.md and hooks only, no token.")]
     pub(super) async fn provision_hosts(
         &self,
         Parameters(p): Parameters<ProvisionHostsParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("provision_hosts", &format!("rotate={}", p.rotate));
+        audit(
+            "provision_hosts",
+            &format!(
+                "rotate={} host={:?} content_only={}",
+                p.rotate, p.host, p.content_only
+            ),
+        );
         let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
@@ -249,7 +292,11 @@ impl FleetTools {
             &self.ssh,
             &self.tunnels,
             &base,
-            p.rotate,
+            crate::service::provision::ProvisionScope {
+                rotate: p.rotate,
+                only_host: p.host,
+                content_only: p.content_only,
+            },
         )
         .await
         .map_err(to_mcp_err)?;

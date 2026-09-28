@@ -135,26 +135,26 @@ pub fn layer_commit_message(verb: &str, name: &str) -> String {
 
 // --------------------------------------------------------------------- lint
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
     pub field: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LintReport {
     pub errors: Vec<Finding>,
     pub warnings: Vec<Finding>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetLint {
     pub kind: String,
     pub name: String,
     pub report: LintReport,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LintAll {
     pub assets: Vec<AssetLint>,
     pub problems: Vec<Problem>,
@@ -494,7 +494,7 @@ pub fn lint_all(catalog: &Catalog, root: &Path) -> LintAll {
 
 // --------------------------------------------------------------- operations
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateArgs {
     pub kind: Kind,
     pub name: String,
@@ -502,18 +502,18 @@ pub struct CreateArgs {
     pub duplicate_from: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateArgs {
     pub asset: Asset,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetRef {
     pub kind: Kind,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddResourceArgs {
     pub kind: Kind,
     pub name: String,
@@ -522,20 +522,20 @@ pub struct AddResourceArgs {
     pub rel_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveResourceArgs {
     pub kind: Kind,
     pub name: String,
     pub rel_path: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommitPendingArgs {
     #[serde(default)]
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteResult {
     pub commit: String,
     pub lint: LintReport,
@@ -795,39 +795,48 @@ const MAX_RESOURCE_BYTES: u64 = 1024 * 1024;
 
 /// Copy a local file into the asset's `resources/…` and commit it.
 pub fn add_resource(args: AddResourceArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
-    let root = repo_root(store)?;
     check_name(&args.name)?;
     check_has_resources(args.kind)?;
+    let (rel_path, bytes) = read_resource_file(&args.local_path, args.rel_path)?;
+    add_resource_bytes(
+        AddResourceBytesArgs {
+            kind: args.kind,
+            name: args.name,
+            rel_path,
+            bytes,
+        },
+        store,
+    )
+}
+
+/// The half of [`add_resource`] that runs where the file is: check the local
+/// file and read it, answering the resource path it lands at (`rel_path`, or
+/// `resources/<file name>`). A hub-client desktop runs this on its own disk
+/// and sends the bytes to the hub's `catalog_admin { add_resource_bytes }`.
+pub fn read_resource_file(
+    local_path: &str,
+    rel_path: Option<String>,
+) -> Result<(String, Vec<u8>), IpcError> {
     // `symlink_metadata` does not follow the link, so a symlinked source is
     // rejected rather than silently copied through — the same discipline
     // `repo.rs` applies to everything it reads out of, or removes from, the
     // repo. It also gives us the file size up front, before reading a single
     // byte, to enforce `MAX_RESOURCE_BYTES`.
-    let local = PathBuf::from(&args.local_path);
+    let local = PathBuf::from(local_path);
     let metadata = std::fs::symlink_metadata(&local).ok();
     let is_regular_file = metadata.as_ref().is_some_and(|m| m.is_file());
     if !local.is_absolute() || !is_regular_file {
         return Err(IpcError::new(
             E_INVALID,
-            format!(
-                "{} is not an absolute path to an existing regular file",
-                args.local_path
-            ),
+            format!("{local_path} is not an absolute path to an existing regular file"),
         ));
     }
     if let Some(len) = metadata.as_ref().map(|m| m.len()) {
         if len > MAX_RESOURCE_BYTES {
-            return Err(IpcError::new(
-                E_INVALID,
-                format!(
-                    "{} is {len} bytes, over the {} MiB resource limit",
-                    args.local_path,
-                    MAX_RESOURCE_BYTES / (1024 * 1024)
-                ),
-            ));
+            return Err(too_big(local_path, len));
         }
     }
-    let rel_path = match args.rel_path {
+    let rel_path = match rel_path {
         Some(p) => p,
         None => format!(
             "resources/{}",
@@ -835,13 +844,51 @@ pub fn add_resource(args: AddResourceArgs, store: &Mutex<Store>) -> Result<Write
         ),
     };
     check_resource_path(&rel_path)?;
-    let bytes = std::fs::read(&local)?;
+    Ok((rel_path, std::fs::read(&local)?))
+}
+
+fn too_big(what: &str, len: u64) -> IpcError {
+    IpcError::new(
+        E_INVALID,
+        format!(
+            "{what} is {len} bytes, over the {} MiB resource limit",
+            MAX_RESOURCE_BYTES / (1024 * 1024)
+        ),
+    )
+}
+
+/// [`add_resource`] with the file's bytes in hand rather than its path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddResourceBytesArgs {
+    pub kind: Kind,
+    pub name: String,
+    pub rel_path: String,
+    #[serde(with = "super::model::bytes_b64")]
+    pub bytes: Vec<u8>,
+}
+
+/// Put `bytes` at `rel_path` in the asset (replacing a file already there)
+/// and commit. The size limit and the path rules are checked here too, since
+/// the bytes may have come over the wire.
+pub fn add_resource_bytes(
+    args: AddResourceBytesArgs,
+    store: &Mutex<Store>,
+) -> Result<WriteResult, IpcError> {
+    let root = repo_root(store)?;
+    check_name(&args.name)?;
+    check_has_resources(args.kind)?;
+    check_resource_path(&args.rel_path)?;
+    let len = args.bytes.len() as u64;
+    if len > MAX_RESOURCE_BYTES {
+        return Err(too_big(&args.rel_path, len));
+    }
+    let rel_path = args.rel_path;
 
     let mut asset = catalog_asset(args.kind, &args.name)?;
     asset.resources.retain(|r| r.rel_path != rel_path);
     asset.resources.push(super::model::Resource {
         rel_path: rel_path.clone(),
-        bytes,
+        bytes: args.bytes,
     });
     asset.resources.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 

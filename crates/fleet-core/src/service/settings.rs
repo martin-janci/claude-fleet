@@ -74,6 +74,25 @@ pub const RECONCILE_STALE_WORKING_TTL_SECS: &str = "reconcile.stale_working_ttl_
 /// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
 /// by Task 6.
 pub const SESSIONS_LOST_TTL_SECS: &str = "sessions.lost_ttl_secs";
+/// How old `hosts.claude_version_at` may be for the desktop's "Claude older
+/// than the newest in the fleet" badge to trust the stored version. Older
+/// than this (or never stamped) shows no badge at all: a stale number was
+/// the wrong badge on 3 of 4 hosts (ux F-13). Default 24 h.
+pub const HEALTH_VERSION_MAX_AGE_SECS: &str = "health.version_max_age_secs";
+/// Used percent of `$HOME`'s filesystem at or past which a host reads as
+/// `disk_low` in `fleet_health.hosts[]` and on the desktop (hosts F4: two
+/// hosts sat at 98 % with no signal). Default 90.
+pub const HEALTH_DISK_LOW_PCT: &str = "health.disk_low_pct";
+/// Patch releases a host's Claude may trail the fleet's newest fresh
+/// version before it reads as `claude_behind` (hosts F3). Default 30.
+pub const HEALTH_CLAUDE_MAX_BEHIND: &str = "health.claude_max_behind";
+/// Seconds without an accepted hook from a reachable host that has a live
+/// session before it reads as `hooks_silent` (hosts F9). Default 1 h.
+pub const HEALTH_HOOKS_SILENT_SECS: &str = "health.hooks_silent_secs";
+/// Write fleet's two skill dirs even when `~/.claude/skills` is inside a
+/// git work tree (a dotfiles checkout, hosts F2). Off: provisioning
+/// refuses such a host with `E_INVALID` (decision B-2).
+pub const PROVISION_FORCE_GIT_TREE: &str = "provision.force_git_tree";
 /// How many resumable lost sessions a batch restore resumes in parallel.
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
@@ -202,6 +221,11 @@ pub const WORK_RECENT_DAYS: &str = "work.recent_days";
 /// Seconds between tracker sync passes (work graph M3); `0` turns the sync
 /// off. Values under a minute are raised to one.
 pub const WORK_SYNC_INTERVAL_SECS: &str = "work.sync_interval_secs";
+/// How long `work { action: describe }` serves a description it already
+/// fetched. `0` turns the cache off — every ask is one tracker call. Swept
+/// with the tracker items (`service::work::retention`), at a fixed 30-day
+/// floor when `work.retention.tracker_items_days` is `0`.
+pub const WORK_DESCRIBE_CACHE_SECS: &str = "work.describe_cache_secs";
 
 /// Project ids whose branch keys are trusted (work graph M4, rule R3): a
 /// sole branch key there links automatically, with Undo; elsewhere it is a
@@ -463,6 +487,31 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Int { min: 1, max: 100 },
     },
     Spec {
+        key: HEALTH_VERSION_MAX_AGE_SECS,
+        default: "86400",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: HEALTH_DISK_LOW_PCT,
+        default: "90",
+        kind: Kind::Int { min: 50, max: 100 },
+    },
+    Spec {
+        key: HEALTH_CLAUDE_MAX_BEHIND,
+        default: "30",
+        kind: Kind::Int { min: 0, max: 1000 },
+    },
+    Spec {
+        key: HEALTH_HOOKS_SILENT_SECS,
+        default: "3600",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: PROVISION_FORCE_GIT_TREE,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
         key: WORK_RETENTION_JOURNAL_DAYS,
         default: "365",
         kind: Kind::Int { min: 0, max: 3650 },
@@ -484,6 +533,11 @@ pub const SPECS: &[Spec] = &[
     },
     Spec {
         key: WORK_SYNC_INTERVAL_SECS,
+        default: "300",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: WORK_DESCRIBE_CACHE_SECS,
         default: "300",
         kind: Kind::Secs,
     },

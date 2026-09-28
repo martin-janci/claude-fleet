@@ -119,6 +119,18 @@ function budgetRejection(f: PickedFile, totalSoFar: number): string | null {
   return null;
 }
 
+/** Whether two local paths name the same file. A Windows path (drive letter
+ *  or UNC) compares without case and with either separator, as Windows
+ *  resolves it — `C:\A.png` dropped twice as `c:\a.png` is one file, not
+ *  two uploads; anything else compares exactly, as a Unix path must. */
+export function samePath(a: string, b: string): boolean {
+  if (a === b) return true;
+  const windows = /^([A-Za-z]:[\\/]|\\\\)/;
+  if (!windows.test(a) || !windows.test(b)) return false;
+  const norm = (p: string) => p.replace(/\//g, '\\').toLowerCase();
+  return norm(a) === norm(b);
+}
+
 export function addFiles(
   current: Attachment[],
   picked: PickedFile[],
@@ -143,7 +155,7 @@ export function addFiles(
       continue;
     }
 
-    const dupIndex = next.findIndex((a) => a.path === f.path);
+    const dupIndex = next.findIndex((a) => samePath(a.path, f.path));
     if (dupIndex !== -1) {
       const existing = next[dupIndex];
       // An ordinary live duplicate still collapses. A tile whose

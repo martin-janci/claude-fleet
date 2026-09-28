@@ -1761,6 +1761,64 @@ mod tests {
     }
 
     #[test]
+    fn work_rev_moves_on_a_secondary_link_change_that_work_does_not_show() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let dyn_bus: std::sync::Arc<dyn crate::events::EventBus> = bus.clone();
+        let s = Store::open_with_bus_in_memory(dyn_bus).unwrap();
+        let sid = seed(&s, "dev");
+        let row = || s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row().work_rev, 0, "no live link: omitted");
+        s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let primary = row().work;
+        let first = row().work_rev;
+        assert_ne!(first, 0, "a live link");
+        let mut seen = vec![first];
+        let mut step = |what: &str, r: crate::store::SessionRow| {
+            assert_eq!(r.work, primary, "{what}: the primary did not move");
+            // Only a change from the value before matters to a client (the
+            // same set of links reads the same again: removing what was
+            // added gives back the first value).
+            let rev = r.work_rev;
+            assert_ne!(Some(&rev), seen.last(), "{what}: work_rev did not move");
+            seen.push(rev);
+        };
+        // Added as a secondary; the row goes out (`emit_session` re-reads
+        // it, so the event carries the new digest).
+        bus.take();
+        let b = s
+            .link_session_work_as(sid, WorkTarget::Key("DEF-2"), "manual", false, None)
+            .unwrap();
+        assert_eq!(bus.names(), vec!["session:updated"]);
+        step("add", row());
+        // A secondary rejected (a new rejected link), then confirmed.
+        let c = s
+            .reject_session_work(sid, WorkTarget::Key("GHI-3"))
+            .unwrap();
+        step("reject", row());
+        s.link_session_work_as(sid, WorkTarget::Key("GHI-3"), "manual", false, None)
+            .unwrap();
+        step("confirm", row());
+        // Archived, then ended by the R7 path's column.
+        s.conn
+            .execute(
+                "UPDATE work_links SET archived_at = 5 WHERE id = ?1",
+                [b.id],
+            )
+            .unwrap();
+        step("archive", row());
+        s.conn
+            .execute("UPDATE work_links SET ended_at = 9 WHERE id = ?1", [c.id])
+            .unwrap();
+        step("end", row());
+        // Removed.
+        bus.take();
+        assert!(s.unlink_session_work(sid, b.id).unwrap());
+        assert_eq!(bus.names(), vec!["session:updated"]);
+        step("unlink", row());
+    }
+
+    #[test]
     fn a_rejection_is_sticky_and_never_primary() {
         let s = Store::open_in_memory().unwrap();
         let sid = seed(&s, "dev");

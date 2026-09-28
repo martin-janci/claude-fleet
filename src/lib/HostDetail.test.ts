@@ -110,6 +110,29 @@ describe('HostDetail', () => {
     expect(screen.queryByTestId('detail-transport')).toBeNull();
   });
 
+  it('shows a Health block with the disk meter, versions and their age', () => {
+    mount('claude-fleet-trn', {
+      host: host('claude-fleet-trn', {
+        transport: 'agent',
+        agent_version: '0.2.26',
+        disk_home_free_kb: 3_600_000,
+        disk_home_total_kb: 150_000_000,
+        load_1m: 5.25,
+        uptime_secs: 144 * 86400,
+        claude_version: '2.1.282',
+        claude_version_at: NOW - 2 * 3600,
+        health_at: NOW - 60,
+      }),
+    });
+    const block = screen.getByTestId('detail-health');
+    expect(block.textContent).toContain('disk 98% · 3.4 GB free');
+    expect(block.textContent).toContain('load 5.3');
+    expect(block.textContent).toContain('up 144d');
+    expect(block.textContent).toContain('agent 0.2.26');
+    expect(screen.getByTestId('detail-health-meter').getAttribute('data-level')).toBe('crit');
+    expect(screen.getByTestId('detail-claude-age').textContent).toBe('checked 2h ago');
+  });
+
   it('the "View sessions" button jumps the sidebar filter and asks to close the Hosts overlay', async () => {
     hostFilter.set('all');
     const onCloseRequested = vi.fn();

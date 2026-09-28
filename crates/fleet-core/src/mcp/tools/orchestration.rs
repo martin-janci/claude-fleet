@@ -374,6 +374,8 @@ impl FleetTools {
                         start_command: None,
                         friendly_name: None,
                         resume_claude_session_id: None,
+                        model: None,
+                        effort: None,
                     },
                     &self.store,
                     &self.ssh,
@@ -542,6 +544,7 @@ impl FleetTools {
         {key} → ended (past) links; neither → recently ended. action \
         context|resume_plan {key}; purge_impact; tickets (cached); lookup \
         {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; \
+        describe {key} (the tracker's whole description, cached); \
         tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; \
         session_tasks; review; rules; rule_preview {rule}; views; org_impact.")]
     pub(super) async fn work(
@@ -622,6 +625,22 @@ impl FleetTools {
                 &w::card::card(&self.store, args.key.as_deref().unwrap_or_default(), &scope)
                     .map_err(to_mcp_err)?,
             ),
+            WorkAction::Describe => {
+                let key = args
+                    .key
+                    .as_deref()
+                    .ok_or_else(|| mcp_err("E_INVALID", "describe needs key", None))?;
+                ok_json(
+                    &w::describe::describe(
+                        &self.store,
+                        &scope,
+                        key,
+                        &crate::service::trackers::default_net(),
+                    )
+                    .await
+                    .map_err(to_mcp_err)?,
+                )
+            }
             WorkAction::Today => ok_json_compact(
                 &w::today::today(&self.store, args.since, &scope).map_err(to_mcp_err)?,
             ),
@@ -1052,10 +1071,15 @@ impl FleetTools {
         })?;
         self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
         // The caller, not the `source` it passes, decides whether this is a
-        // person's decision or an agent's (D34).
-        let row =
-            crate::service::work::work_link_as(&args, &self.store, &scope, caller.work_decider())
-                .map_err(to_mcp_err)?;
+        // person's decision or an agent's (D34). A decision on one link by
+        // id also answers that link's new version (`link_version`).
+        let row = crate::service::work::work_link_decided(
+            &args,
+            &self.store,
+            &scope,
+            caller.work_decider(),
+        )
+        .map_err(to_mcp_err)?;
         ok_json(&row)
     }
 

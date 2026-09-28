@@ -125,8 +125,8 @@ run_rust() {
   if ! pkg-config --exists gtk+-3.0 2>/dev/null; then
     echo "ci-local: no Tauri system libs (gtk+-3.0); running the headless subset only" >&2
     step cargo fmt --all --check
-    step cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent --all-targets -- -D warnings
-    step cargo test -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent
+    step cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --all-targets -- -D warnings
+    step cargo test -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update
     step cargo deny check
     step cargo build -p fleet-hub --locked
     step cargo build -p fleet-agent --locked

@@ -400,6 +400,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -674,7 +683,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claude-fleet"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1364,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-agent"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "clap",
  "fleet-proto",
@@ -1423,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-hub"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1433,6 +1442,7 @@ dependencies = [
  "qrcode",
  "rcgen",
  "rustls-pki-types",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1443,11 +1453,27 @@ dependencies = [
 
 [[package]]
 name = "fleet-proto"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "fleet-update"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blake2",
+ "minisign-verify",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -2713,6 +2739,12 @@ name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
 
 [[package]]
 name = "miniz_oxide"

@@ -3,11 +3,11 @@
 use crate::service::catalog::layer::{split_key, Layer};
 use crate::service::catalog::model::Asset;
 use crate::service::catalog::repo::Catalog;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Where one effective asset came from.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Provenance {
     /// The layer that last introduced it.
     pub introduced_by: String,
@@ -16,7 +16,7 @@ pub struct Provenance {
 }
 
 /// The effective catalog plus why it looks the way it does.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resolution {
     pub catalog: Catalog,
     /// `<kind>/<name>` → provenance, for the UI's "where did this come from".

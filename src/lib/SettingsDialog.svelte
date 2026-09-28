@@ -920,6 +920,15 @@
       </div>
       <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
 
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.provisionForceGitTree)}
+          disabled={automationBusy}
+          data-testid="provision-force-git-tree"
+          onchange={() => toggleSetting(SETTING_KEYS.provisionForceGitTree)} />
+        Write fleet's two skill dirs even when ~/.claude/skills is a git checkout
+      </label>
       <label class="toggle gc-toggle">
         <input
           type="checkbox"
@@ -1086,6 +1095,46 @@
         <span class="hook-desc" id="limit-context-red-pct-desc">percent of the context window at which a session needs you (the chip turns red here, amber 15 points below)</span>
       </div>
       <div class="mcp-field">
+        <label class="lbl" for="health-version-max-age-hours">version badge</label>
+        <input class="port" id="health-version-max-age-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-version-max-age-hours-desc"
+          data-testid="health-version-max-age-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthVersionMaxAgeSecs, e)} />
+        <span class="hook-desc" id="health-version-max-age-hours-desc">hours a probed Claude version stays trusted for the "older than the fleet" mark</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-disk-low-pct">disk low</label>
+        <input class="port" id="health-disk-low-pct" type="number" min="50" max="100" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct)}
+          disabled={limitsBusy}
+          aria-describedby="health-disk-low-pct-desc"
+          data-testid="health-disk-low-pct"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthDiskLowPct, 'Disk low threshold (%)', e)} />
+        <span class="hook-desc" id="health-disk-low-pct-desc">percent of a host's home filesystem in use at which it is marked low on disk</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-claude-max-behind">claude behind</label>
+        <input class="port" id="health-claude-max-behind" type="number" min="0" max="1000" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthClaudeMaxBehind)}
+          disabled={limitsBusy}
+          aria-describedby="health-claude-max-behind-desc"
+          data-testid="health-claude-max-behind"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthClaudeMaxBehind, 'Claude patch releases behind', e)} />
+        <span class="hook-desc" id="health-claude-max-behind-desc">patch releases a host's Claude may trail the fleet's newest before fleet_health flags it</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-hooks-silent-hours">hooks silent</label>
+        <input class="port" id="health-hooks-silent-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthHooksSilentSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-hooks-silent-hours-desc"
+          data-testid="health-hooks-silent-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthHooksSilentSecs, e)} />
+        <span class="hook-desc" id="health-hooks-silent-hours-desc">hours a reachable host with live sessions may go without an accepted hook before fleet_health flags it</span>
+      </div>
+      <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>
         <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
           value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}
@@ -1214,6 +1263,16 @@
           data-testid="work-sync-interval"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workSyncIntervalSecs, 'Tracker sync', e)} />
         <span class="hook-desc" id="work-sync-interval-desc">seconds between tracker (Jira) sync passes (0 = off; read at launch)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-describe-cache">describe cache</label>
+        <input class="port" id="work-describe-cache" type="number" min="0" max="86400" step="60"
+          value={settingInt($fleetSettings, SETTING_KEYS.workDescribeCacheSecs)}
+          disabled={limitsBusy}
+          aria-describedby="work-describe-cache-desc"
+          data-testid="work-describe-cache"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workDescribeCacheSecs, 'Describe cache', e)} />
+        <span class="hook-desc" id="work-describe-cache-desc">seconds a ticket's full description, once fetched, is reused before fleet asks the tracker again (0 = off)</span>
       </div>
       <label class="toggle">
         <input
@@ -1399,7 +1458,10 @@
         session is working on. Data is sent to TypeSafe only for organisations that opted in
         (Organisations), redacted, and never raw text is recorded. A model answer never grants a
         permission or runs a risky action: at most it pre-selects a suggestion you confirm.
-        The key is set on the machine with <code>fleet-hub decide set-key</code>.
+        The key is not set here: on this machine, with the app's data folder,
+        <code>fleet-hub decide set-key --data-dir DIR</code>, where DIR is
+        <code>~/Library/Application Support/sk.rlt.claude-fleet</code> on macOS and
+        <code>~/.local/share/claude-fleet</code> on Linux (see <code>docs/decisions.md</code>).
       </p>
       <label class="toggle">
         <input
@@ -1420,13 +1482,12 @@
           class="layout-select"
           id="decide-jev-work-link"
           value={$fleetSettings[SETTING_KEYS.decideJevWorkLink] ?? 'off'}
-          disabled={decideBusy}
+          disabled
           aria-describedby="decide-jev-work-link-desc"
-          data-testid="decide-jev-work-link"
-          onchange={(e) => void applyDecide(SETTING_KEYS.decideJevWorkLink, (e.currentTarget as HTMLSelectElement).value)}>
+          data-testid="decide-jev-work-link">
           {#each DECIDE_MODES as m (m)}<option value={m}>{m}</option>{/each}
         </select>
-        <span class="hook-desc" id="decide-jev-work-link-desc">choosing a ticket for a session no rule could link (shadow: record only; assist: suggest)</span>
+        <span class="hook-desc" id="decide-jev-work-link-desc" data-testid="decide-jev-work-link-desc">choosing a ticket for a session no rule could link — offline benchmark only until J1 passes its acceptance lines (<code>fleet-hub decide bench work-link</code>); no live path reads this yet</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="decide-jev-status-map">status map</label>

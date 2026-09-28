@@ -256,6 +256,18 @@ mod tests {
             provisioned: true,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
         }
     }
 

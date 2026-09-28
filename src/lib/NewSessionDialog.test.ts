@@ -131,6 +131,27 @@ describe('NewSessionDialog', () => {
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
   });
 
+  it('sends the picked model and effort for a Claude session, nothing for a shell', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: false,
+      error: { code: 'E_INVALID', message: 'stop here' },
+    } as never);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.change(screen.getByTestId('launch-model'), { target: { value: 'opus' } });
+    await fireEvent.change(screen.getByTestId('launch-effort'), { target: { value: 'xhigh' } });
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy.mock.calls[0][0]).toMatchObject({ model: 'opus', effort: 'xhigh' });
+
+    await fireEvent.click(screen.getByTestId('kind-shell'));
+    expect(screen.queryByTestId('launch-model')).toBeNull();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy.mock.calls[1][0]).toMatchObject({ model: null, effort: null });
+    spy.mockRestore();
+  });
+
   it('clicking + new chip, typing a name, and clicking Create passes new_worktree and worktree_id=null', async () => {
     const newSessionAbortableSpy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: true,

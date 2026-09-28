@@ -278,6 +278,51 @@ impl Store {
         Ok(self.emit_session(session_id)?)
     }
 
+    /// Undo a [`Self::rebind_conversation`] to `new_id` whose follow-up never
+    /// ran — a rewind whose pane restart failed — and put the session back on
+    /// `prior_id` as if the rebind had not happened.
+    ///
+    /// Not a second rebind: rebinding back (with `Resume`) would leave
+    /// `new_id`'s row listed as a conversation that never ran, and mark the
+    /// context stale. Here `new_id`'s row is deleted, `prior_id`'s row is
+    /// reopened (the rebind closed it as `replaced`), and the session row
+    /// gets `prior_id` and `prior_path` back — only while it still names
+    /// `new_id`, so a hook that rebound it meanwhile is not overwritten.
+    /// Returns the session row, `None` when it no longer names `new_id`.
+    pub fn revert_rebind(
+        &self,
+        session_id: i64,
+        new_id: &str,
+        prior_id: &str,
+        prior_path: Option<&str>,
+    ) -> Result<Option<SessionRow>, IpcError> {
+        let reverted = self.in_savepoint("revert_rebind", |_| -> Result<bool, IpcError> {
+            let n = self.conn.execute(
+                "UPDATE sessions SET claude_session_id = ?3, transcript_path = ?4 \
+                 WHERE id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, new_id, prior_id, prior_path],
+            )?;
+            if n == 0 {
+                return Ok(false);
+            }
+            self.conn.execute(
+                "DELETE FROM conversations WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, new_id],
+            )?;
+            self.conn.execute(
+                "UPDATE conversations SET ended_at = NULL, end_reason = NULL \
+                 WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, prior_id],
+            )?;
+            Ok(true)
+        })?;
+        if !reverted {
+            return Ok(None);
+        }
+        self.bus.conversations_changed(session_id);
+        Ok(self.emit_session(session_id)?)
+    }
+
     /// Relabel a just-recorded conversation's origin, for a start whose real
     /// source only the caller knows and only AFTER the start has run.
     ///

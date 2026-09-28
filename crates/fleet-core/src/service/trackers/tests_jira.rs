@@ -620,16 +620,206 @@ fn resolutions_are_told_apart_conservatively() {
     assert_eq!(map_status_category(None), "todo");
 }
 
+/// A description the excerpt CUT reports more than it shows, by the block
+/// separators `adf_walk` counts on its way past the cap: that number only
+/// has to say "there is more". The figures here are exact all the same — the
+/// walk is deterministic, and the tolerance this helper used to allow (±5)
+/// is what let the over-count of a COMPLETE description ship, firing the
+/// notice on every Jira ticket. A complete description's length is asserted
+/// against the text it returns, with `==`, by
+/// [`assert_reports_the_length_it_returns`].
+fn assert_cut_length(actual: Option<i64>, expected: i64) {
+    assert_eq!(actual, Some(expected));
+}
+
+/// A snapshot whose description was NOT cut: `description_chars` must equal
+/// the length of the description actually returned, or `fence_ticket` writes
+/// a "there is more" notice for a whole description.
+fn assert_reports_the_length_it_returns(snap: &WorkItemSnapshot) {
+    let d = snap.description.as_deref().expect("a description");
+    assert_eq!(
+        snap.description_chars,
+        Some(d.chars().count() as i64),
+        "a complete description must report exactly what it returns: {d:?}"
+    );
+}
+
 #[test]
 fn adf_excerpts_are_capped() {
     let long = json!({"type":"doc","content":[{"type":"paragraph","content":[
         {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS * 2)}]}]});
+    let (excerpt, chars) = adf_excerpt(&long);
+    assert_eq!(excerpt.unwrap().chars().count(), DESCRIPTION_MAX_CHARS);
+    // The text, plus the one paragraph's separator.
+    assert_cut_length(chars, (DESCRIPTION_MAX_CHARS * 2 + 1) as i64);
+    assert_eq!(adf_excerpt(&Value::Null), (None, None));
     assert_eq!(
-        adf_excerpt(&long).unwrap().chars().count(),
-        DESCRIPTION_MAX_CHARS
+        adf_excerpt(&json!({"type":"doc","content":[]})),
+        (None, None)
     );
-    assert_eq!(adf_excerpt(&Value::Null), None);
-    assert_eq!(adf_excerpt(&json!({"type":"doc","content":[]})), None);
+}
+
+/// Fetch one Jira issue over [`FakeTransport`], with `description` as its
+/// ADF description body.
+async fn fetch_one_with_body(description: Value) -> WorkItemSnapshot {
+    let f = FakeTransport::new();
+    let mut body = fixture("bulkfetch.json");
+    body["issues"][0]["fields"]["description"] = description;
+    f.once(
+        Method::Post,
+        "/issue/bulkfetch",
+        Ok(Response::json(200, &body)),
+    );
+    let got = jira(&f)
+        .fetch(&[ItemRef::Id("10101".into())])
+        .await
+        .unwrap();
+    match got.into_iter().next().unwrap() {
+        Fetched::Found(s) => *s,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Fetch one Jira issue over [`FakeTransport`], with `text` as its
+/// description body (a single ADF text node — the shape
+/// [`adf_excerpts_are_capped`] uses for a description longer than the cap).
+async fn fetch_one_with_description(text: &str) -> WorkItemSnapshot {
+    fetch_one_with_body(json!({"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text": text}]}
+    ]}))
+    .await
+}
+
+#[tokio::test]
+async fn a_long_jira_description_reports_its_true_length() {
+    // The existing cap test in this file builds an ADF body of
+    // DESCRIPTION_MAX_CHARS * 2 characters; reuse that fixture shape.
+    let snap = fetch_one_with_description(&"x".repeat(DESCRIPTION_MAX_CHARS * 2)).await;
+    assert_eq!(
+        snap.description.as_ref().map(|d| d.chars().count()),
+        Some(DESCRIPTION_MAX_CHARS)
+    );
+    assert_cut_length(
+        snap.description_chars,
+        (DESCRIPTION_MAX_CHARS * 2 + 1) as i64,
+    );
+}
+
+/// The case the branch's own signal depends on and no test drove through an
+/// adapter: a description the tracker holds WHOLE. Its reported length must
+/// equal the description returned, exactly — `fence_ticket` compares
+/// `full > shown`, so one character of drift puts a "there is more" notice on
+/// every complete Jira ticket. `lookup`'s end of it is
+/// `tests_tickets.rs::a_complete_jira_cloud_description_gets_no_notice`.
+#[tokio::test]
+async fn a_complete_jira_description_reports_the_length_it_returns() {
+    // One paragraph, well under the cap.
+    let snap = fetch_one_with_description("Ship the refund flow.").await;
+    assert_eq!(
+        snap.description.as_deref(),
+        Some("Ship the refund flow."),
+        "nothing was cut"
+    );
+    assert_reports_the_length_it_returns(&snap);
+    // Several blocks: the separators between them are part of the text that
+    // is returned, so they are part of the length reported.
+    let snap = fetch_one_with_body(json!({"type":"doc","content":[
+        {"type":"heading","content":[{"type":"text","text":"Context"}]},
+        {"type":"paragraph","content":[{"type":"text","text":"Refunds fail."}]},
+        {"type":"paragraph","content":[{"type":"text","text":"Fix them."}]}]}))
+    .await;
+    assert_eq!(
+        snap.description.as_deref(),
+        Some("Context\nRefunds fail.\nFix them.")
+    );
+    assert_reports_the_length_it_returns(&snap);
+}
+
+/// The Jira Data Center shape of the same rule: a v2 body arrives as a plain
+/// string, and its trailing newline used to be counted into the length while
+/// the excerpt's `.trim()` removed it.
+#[tokio::test]
+async fn a_complete_plain_string_description_reports_the_length_it_returns() {
+    let snap = fetch_one_with_body(json!("Ship the refund flow.\n\n")).await;
+    assert_eq!(snap.description.as_deref(), Some("Ship the refund flow."));
+    assert_reports_the_length_it_returns(&snap);
+}
+
+#[tokio::test]
+async fn a_jira_description_spread_across_many_small_nodes_counts_them_all() {
+    // The normal shape of a real Jira description: several small blocks
+    // (here, 40 paragraphs of 100 characters — 4000 total) rather than one
+    // giant text node. Each block individually stays far under the cap, so
+    // `adf_walk`'s append-guard would previously also stop *counting* once
+    // the running excerpt crossed DESCRIPTION_MAX_CHARS partway through —
+    // `a_long_jira_description_reports_its_true_length`'s single-node
+    // fixture cannot reach that bug, because one `push_str` appends
+    // everything before the guard is next checked.
+    let paragraphs: Vec<Value> = (0..40)
+        .map(|_| {
+            json!({"type": "paragraph", "content": [
+                {"type": "text", "text": "x".repeat(100)}
+            ]})
+        })
+        .collect();
+    let snap = fetch_one_with_body(json!({"type": "doc", "content": paragraphs})).await;
+    assert_eq!(
+        snap.description.as_ref().map(|d| d.chars().count()),
+        Some(DESCRIPTION_MAX_CHARS),
+        "the excerpt itself is still capped"
+    );
+    // 4000 characters of text plus one separator per paragraph: the true
+    // length, not the ~2000 the excerpt stopped appending at.
+    assert_cut_length(snap.description_chars, 4000 + 40);
+}
+
+/// `describe` reads the single-issue endpoint directly (not `bulkfetch`),
+/// asks only for `description`, and is uncapped by `DESCRIPTION_MAX_CHARS` —
+/// capped only at `DESCRIBE_MAX_CHARS`.
+#[tokio::test]
+async fn describe_reads_the_single_issue_endpoint_uncapped() {
+    let f = FakeTransport::new();
+    let long = "x".repeat(DESCRIPTION_MAX_CHARS + 500);
+    let body = json!({
+        "id": "10101",
+        "key": "ABC-101",
+        "fields": { "description": {"type":"doc","content":[
+            {"type":"paragraph","content":[{"type":"text","text": long}]}
+        ]} }
+    });
+    f.once(
+        Method::Get,
+        "/issue/ABC-101?fields=description",
+        Ok(Response::json(200, &body)),
+    );
+    let p = jira(&f);
+    assert!(p.caps().describe, "Jira Cloud implements describe");
+    let out = p
+        .describe(&ItemRef::Key("ABC-101".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(out.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+    let sent = f.requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].method, Method::Get);
+    assert!(
+        sent[0]
+            .url
+            .ends_with("/rest/api/3/issue/ABC-101?fields=description"),
+        "{}",
+        sent[0].url
+    );
+
+    // A key shape a real Jira key can never be: refused, not interpolated
+    // into a path (the same fence `write` gives a bad key).
+    let f = FakeTransport::new();
+    assert!(jira(&f)
+        .describe(&ItemRef::Key("../../myself".into()))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(f.requests().is_empty());
 }
 
 // --- the provider conformance suite (M6.0) -----------------------------------
@@ -758,6 +948,16 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
                 );
             }
         }
+    }
+
+    async fn provider_for_describe(&self) -> Box<dyn TrackerProvider> {
+        let f = FakeTransport::new();
+        f.once(Method::Get, "/issue/ABC-101", ok("issue_description.json"));
+        self.provider(&f)
+    }
+
+    fn describe_ref(&self) -> &'static str {
+        "ABC-101"
     }
 }
 

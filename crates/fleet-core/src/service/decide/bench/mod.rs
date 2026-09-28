@@ -3,8 +3,12 @@
 //! §2): each reads a frozen dataset from the store, asks its providers, and
 //! reports the test map's metrics (§4). Nothing here runs by itself or
 //! changes what fleet does; the one network path is an explicit
-//! `--provider jev` run through [`super::decide`], so its gate (flag, mode,
-//! org consent, key, breaker, budget) applies to every case.
+//! `--provider jev` run through [`super::decide`], so its gate (flag, org
+//! consent, key, breaker, budget) applies to every case. The feature's live
+//! mode is not needed ([`super::gate_bench_at`]): measuring `status_map`
+//! must not start its daily live runs. A benchmark's runs (subject kind
+//! [`crate::store::DECISION_BENCH_SUBJECT`]) never count toward the live
+//! breaker, budget or stats.
 //!
 //! - [`work_link`]: card J1, choosing a work item for a session
 //!   (`fleet-hub decide bench work-link`).
@@ -23,7 +27,46 @@ pub mod work_link;
 mod work_link_tests;
 
 use crate::service::nl::census::{Shown, SUPPRESS_BELOW};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// Which cases a benchmark reports: its `dev` cases, its `test` cases or
+/// `all`. Each bench says what makes a case dev (J1: the oldest share by
+/// decision time; J3: its board's hash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Split {
+    Dev,
+    Test,
+    All,
+}
+
+impl Split {
+    pub fn parse(s: &str) -> Option<Split> {
+        match s {
+            "dev" => Some(Split::Dev),
+            "test" => Some(Split::Test),
+            "all" => Some(Split::All),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Split::Dev => "dev",
+            Split::Test => "test",
+            Split::All => "all",
+        }
+    }
+
+    /// Whether a case in the dev split (`dev`) or not is reported.
+    pub fn keeps(self, dev: bool) -> bool {
+        match self {
+            Split::Dev => dev,
+            Split::Test => !dev,
+            Split::All => true,
+        }
+    }
+}
 
 /// A deterministic generator (splitmix64) for the bootstrap: the same seed
 /// gives the same intervals on every machine.

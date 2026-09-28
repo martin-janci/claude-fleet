@@ -21,4 +21,4 @@ ALTER TABLE sessions ADD COLUMN stale_demoted_at INTEGER;
 -- conversation-branch database that column only exists once
 -- `repair_skipped_main_migrations` has run.
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+INSERT OR IGNORE INTO schema_version (version) VALUES (79);

@@ -279,6 +279,30 @@ pub(super) fn require_bound_client_may_create(
     Ok(())
 }
 
+/// A paired client bound to an org (work graph M14) acts on a host with no
+/// session in play (`add_project`, `list_github_repos`) only when it may see
+/// that host's org: its own, or none while its org's `bound_sees_unassigned`
+/// is on (D31). Everyone else passes; a per-host token's own rule is
+/// [`require_host`].
+pub(super) fn require_bound_client_sees_host(
+    s: &Store,
+    caller: &Caller,
+    host: &str,
+) -> Result<(), McpError> {
+    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
+        return Ok(());
+    }
+    let scope = caller.org_scope(s).map_err(to_mcp_err)?;
+    if !scope.sees_org(s.host_org(host).map_err(to_mcp_err)?) {
+        return Err(mcp_err(
+            codes::E_FORBIDDEN,
+            format!("host {host} is outside this client's org"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// A paired client bound to an org (work graph M14) reaches only its org's
 /// and unassigned sessions — to read, prompt, kill or link them. Another
 /// org's session answers exactly as one that does not exist. A per-host
@@ -335,7 +359,7 @@ pub(super) fn bound_body(text: Option<&str>) -> String {
 pub(super) fn new_session_summary(p: &NewSessionParams) -> String {
     format!(
         "host={} name={} project_id={} worktree_id={:?} new_worktree={} base_branch={} \
-         kind={} start_command={} friendly_name={} resume_claude_session_id={}",
+         kind={} start_command={} friendly_name={} resume_claude_session_id={} model={} effort={}",
         bound_text(Some(&p.host_alias)),
         bound_text(Some(&p.name)),
         p.project_id,
@@ -346,6 +370,8 @@ pub(super) fn new_session_summary(p: &NewSessionParams) -> String {
         bound_text(p.start_command.as_deref()),
         bound_text(p.friendly_name.as_deref()),
         bound_text(p.resume_claude_session_id.as_deref()),
+        bound_text(p.model.as_deref()),
+        bound_text(p.effort.as_deref()),
     )
 }
 
@@ -812,6 +838,16 @@ pub(super) fn apply_marker(
 /// while a name in neither list — nothing a client may ever call — gets a
 /// message that does not claim it as a real admin tool.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
+    if caller.host_alias.is_some() && guard::NOT_FOR_HOST_TOKENS.contains(&tool) {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{tool} is never a per-host token's ({} refused)",
+                caller.label()
+            ),
+            None,
+        ));
+    }
     if caller.is_master() || guard::is_client_tool(tool) {
         return Ok(());
     }
@@ -1026,6 +1062,10 @@ pub(super) struct ClientSummary {
     /// The org the client is bound to (work graph M14); absent: unbound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) org_id: Option<i64>,
+    /// When the operator let this client manage the asset catalog
+    /// (`catalog_admin`, migration 074); absent: not granted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) assets_admin_at: Option<i64>,
 }
 
 impl From<crate::store::ClientTokenRow> for ClientSummary {
@@ -1039,6 +1079,7 @@ impl From<crate::store::ClientTokenRow> for ClientSummary {
             revoked_at: r.revoked_at,
             trusted_at: r.trusted_at,
             org_id: r.org_id,
+            assets_admin_at: r.assets_admin_at,
         }
     }
 }
@@ -1244,6 +1285,21 @@ impl FleetTools {
         summary: &str,
         caller: &Caller,
     ) -> Result<(), McpError> {
+        self.confirm_gate_with(tool, nonce, summary, caller, false)
+    }
+
+    /// [`Self::confirm_gate`], with `person` forcing a person's approval
+    /// for this call whoever the caller is — as the operator's starts and
+    /// kills always are — for a call site that decides that itself (see
+    /// `add_project`'s `create_remote`).
+    pub(super) fn confirm_gate_with(
+        &self,
+        tool: &str,
+        nonce: Option<&str>,
+        summary: &str,
+        caller: &Caller,
+        person: bool,
+    ) -> Result<(), McpError> {
         debug_assert!(
             guard::needs_confirmation(tool) || guard::OPERATOR_CONFIRMS.contains(&tool),
             "{tool} is not in guard::CONFIRM_TOOLS"
@@ -1251,7 +1307,7 @@ impl FleetTools {
         // The operator's starts and kills are always confirmed (D12); for
         // everyone else only the `confirm: true` tools, and only with the
         // toggle on.
-        let forced = guard::operator_must_confirm(caller.is_operator(), tool);
+        let forced = person || guard::operator_must_confirm(caller.is_operator(), tool);
         if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
             return Ok(());
         }
@@ -1259,8 +1315,13 @@ impl FleetTools {
             return Err(mcp_err(
                 "E_FORBIDDEN",
                 format!(
-                    "{tool} from the operator needs a person to approve it, and this hub has \
-                     no approver; ask the person to do it from the sidebar"
+                    "{tool} from {} needs a person to approve it, and this hub has \
+                     no approver; ask the person to do it from the sidebar",
+                    if caller.is_operator() {
+                        "the operator"
+                    } else {
+                        "this caller"
+                    }
                 ),
                 None,
             ));
@@ -1295,7 +1356,9 @@ impl FleetTools {
             format!(
                 "{tool} needs approval on the claude-fleet desktop ({}); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
-                if forced {
+                if person && !caller.is_operator() {
+                    "a person approves this call whoever makes it"
+                } else if forced {
                     "the operator's starts and kills always do"
                 } else {
                     "mcp.confirm_destructive is on"

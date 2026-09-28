@@ -153,7 +153,15 @@ peers configured".
 `usage_by_day` books each token to the UTC day of the transcript line that
 produced it. The first time a transcript is read (a new host, a hub takeover)
 its history before that day lands in `backfill_cost_micros`, apart from the
-day's live `cost_micros`, so a takeover never reads as an $850 day.
+day's live `cost_micros`, so a takeover never reads as an $850 day — however
+many passes a large transcript takes, and likewise when a transcript is
+rewritten. Yesterday's lines stay live for two collection intervals after
+midnight UTC, so a session that started just before midnight is not history.
+The split applies from the upgrade that introduced it on: rows booked before
+it (migration 071) all became live rows, so a takeover spike that is already
+in the roll-up stays one. `usage_daily` is kept for as long as its host is
+configured (removing the host deletes its rows) and has no retention window:
+it is at most two rows (live and backfill) per host per day, a few KB a year.
 `usage_report` says what each figure counts: `by_host_population: live_rows`
 (session rows that still exist, over their lifetime — ghosts included) and
 `by_day_population: durable` (the daily roll-up, killed sessions included);
@@ -353,6 +361,40 @@ or any off-box target. `upgrade.sh` calls the same script with
 keeps its own three and older versions' `pre-*` files stay until you delete
 them.
 
+**From the binary, with no `sqlite3` on the host.** `fleet-hub backup` takes
+the same kind of copy from inside the container. It opens `state.db`
+read-only and never migrates it, copies it with `VACUUM INTO` while the hub
+keeps serving, and checks the copy with `PRAGMA integrity_check` before
+renaming it out of `.part`. It never overwrites an existing file. It does
+not prune: retention stays with `backup.sh`.
+
+```bash
+docker compose exec fleet-hub fleet-hub backup --prefix pre-0.3.4 --json
+# {"path":"/var/lib/fleet-hub/backups/pre-0.3.4-20260930-101200.db","schema":73,"bytes":524288}
+```
+
+The default path is `<data dir>/backups/<prefix>-<UTC stamp>.db`, the same
+name `backup.sh` uses. `--to <path>` names the file instead. This is the
+backup `fleet-updater` takes before it replaces the hub (update design
+`docs/superpowers/specs/2026-09-28-update-channel-design.md` §8).
+
+**Readiness, beside liveness.** The image's `HEALTHCHECK` (`fleet-hub
+healthcheck`) says only that `/healthz` answers, and `/healthz` names no
+version. `fleet-hub healthcheck --ready --json` also reads the readiness
+file that `serve` rewrites every 5 s at `<data dir>/run/ready.json`. It exits
+0 only when all three hold:
+
+- the hub is **live**;
+- the file is **fresh**, meaning its heartbeat is at most 20 s old and its
+  pid is running;
+- the hub is **ready**, meaning the store is migrated, the listener is bound
+  and the first reconcile pass has finished.
+
+It prints the build the process runs (`version`, `commit`, `build_id`,
+`contract`, `agent_proto`, `peer_proto`, `schema`). None of it goes on the
+network: run it with `docker compose exec`. A hub that stops removes the
+file, and one that was killed leaves a stale file, which reads as not ready.
+
 **Restore drill** (rehearse it once; a backup nobody restored is a hope):
 
 ```bash
@@ -450,6 +492,33 @@ untouched. The previous file is saved as `settings.json.fleet-bak` first.
 
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
+
+**Stale content, and `fleet-hub provision`.** Every provisioning records a
+fingerprint of what it shipped (both skills, the managed CLAUDE.md block and
+the hook shape); `list_hosts` reports `provision_stale: true` for a host whose
+fingerprint is not this build's. A minute after start the hub refreshes every
+reachable stale host *content only* — skills, the CLAUDE.md block and hooks,
+with the host's existing token; no new token, no `~/.claude.json` rewrite, no
+Claude restart. By hand: `fleet-hub provision [--host <alias>]
+[--content-only]` (the `provision_hosts {host, content_only}` tool).
+
+**Who owns what on a host.**
+
+| Path on host | Owner | Written by |
+|---|---|---|
+| `~/.claude/skills/claude-fleet-control/` | fleet (carries `.fleet-managed`) | `provision_hosts` (overwrites) |
+| `~/.claude/skills/fleet-friendly-name/` | fleet (carries `.fleet-managed`) | `provision_hosts` (overwrites) |
+| `~/.claude/CLAUDE.md` between the sentinels | fleet | the rest is the user's |
+| `~/.claude/settings.json` → the 9 `FLEET_HOOK_EVENTS` entries | fleet | sibling hooks are kept |
+| `~/.claude/fleet-hook.headers` | fleet (secret, 0600) | `provision_hook` |
+| `~/.claude.json` → `mcpServers.claude-fleet` | fleet (secret) | sibling keys are kept |
+| `~/.tmux.conf` `set -g set-clipboard on` line | fleet (append-only) | `provision_tmux_clipboard` |
+| every other skill, hook, plugin, `~/.claude/projects` | the user / dotfiles | never touched |
+
+If `~/.claude/skills` is inside a git work tree (a dotfiles checkout),
+provisioning **refuses** that host (`E_INVALID`, `details.git_toplevel`) rather
+than dirty tracked files: untrack the two fleet dirs there (or `.gitignore`
+them), or set `provision.force_git_tree = true` to write anyway.
 
 **What a host needs for prompt delivery.** A prompt rides to the pane as
 `base64 -d` piped into `tmux load-buffer -`, so each managed host needs
@@ -852,6 +921,8 @@ fleet-hub client trust mac-desktop
 fleet-hub client untrust mac-desktop
 fleet-hub client bind contractor-phone 2
 fleet-hub client unbind contractor-phone
+fleet-hub client grant mac-desktop assets
+fleet-hub client ungrant mac-desktop assets
 ```
 
 `client list` prints one line per client, newest first:
@@ -892,6 +963,19 @@ What a client may do:
   master-token only, so a paired phone can neither re-provision the fleet nor
   pair a second device nor revoke (or trust) your own client — nor even
   enumerate the other devices you have paired.
+- **Except what you grant: the asset catalog.** `fleet-hub client grant
+  <name> assets` lets that one client manage the asset catalog from its
+  Assets tab — configure and load the checkout, create / edit / delete
+  assets and their resources, lint, commit and push, Sync (plan and
+  apply), Secrets and layers — through the hub's `catalog_admin` tool.
+  Everything else above stays the master's. Only a `full` client bound to no
+  org can hold it (a Sync writes to every host, across orgs); `fleet-hub
+  client ungrant <name> assets` takes it back, and `client list` shows it in
+  the ASSETS column. The hub reads the grant on every call, so both take
+  effect from the client's next call, and neither needs a running hub. Grant
+  it to the desktop whose keyboard is yours, like `trust` — never to a token
+  an agent holds: a Sync writes files and plugins to every host. A per-host
+  token can never use `catalog_admin`, and is not shown it.
 - A prompt typed on a phone reaches an agent **marked** as untrusted input,
   naming the client it came from, unless you have **trusted** that client.
   `raw: true` is the master token's alone.
@@ -1403,7 +1487,11 @@ What it reads, per org:
 
 Prompts fleet typed itself — a ticket start or resume, a handover or
 safe-kill request, a quick-reply chip, anything `[claude-fleet`-marked —
-are counted as `fleet-typed` and left out. Each text is read as one of `en
+and prompts Claude Code submitted itself (a `<task-notification>`, a
+slash command's echo) are counted as `fleet-typed` and left out; a
+person's words after a `<system-reminder>` head are read without it.
+fleet no longer stores such a prompt as a conversation's first, so the
+person's next prompt is. Each text is read as one of `en
 sk cs de pl hu other mixed unknown`, with Slovak and Czech written without
 diacritics flagged, and how much of it is code (`none`, `low`, `high`).
 The output lists what it cannot count (later prompts, Claude's replies as
@@ -1439,6 +1527,10 @@ retention, how to turn it off — is [`decisions.md`](decisions.md).
 ```bash
 fleet-hub decide set-key < jev-key.txt          # or --from-env NAME / --ref file:/run/secrets/jev
 fleet-hub org set 2 --jev on                    # this org consents
+fleet-hub decide enable                         # the kill switch on (disable: every call stops)
+fleet-hub decide mode status_map shadow         # off | shadow | assist, per feature
+fleet-hub decide unassigned on                  # rows with no org may be sent too
+fleet-hub decide set decide.jev.daily_token_budget 500000   # any other decide.* setting
 fleet-hub decide status                         # read-only: flag, modes, consent, breaker, spend
 fleet-hub decide runs --feature work_link --limit 20
 fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]   # status_map: section → category (confidence)
@@ -1447,8 +1539,9 @@ fleet-hub decide proposals apply 812 [--as in_progress]   # or one at a time, by
 fleet-hub decide proposals reject 814                    # "not this": stays unmapped
 ```
 
-The `decide.*` settings are set like the `work.*` ones, with `set_setting`
-(master token). `set-key` and `clear-key` write `state.db` directly, like
+`enable`, `disable`, `mode`, `unassigned` and `set` change the `decide.*`
+settings over the running hub's `set_setting` (loopback, master token),
+like `org set`: the hub checks the value and audits the change. `set-key` and `clear-key` write `state.db` directly, like
 `fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
@@ -1487,6 +1580,8 @@ labeled Asana sections — the owner's file, or the built-in synthetic set
 fleet-hub decide bench status-map --fixture                      # todo + rule, offline
 fleet-hub decide bench status-map --labels sections.jsonl --provider rule --provider jev
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1 \
+    --split dev --question q.json   # try a reworded question on the dev boards
 ```
 
 Without `--provider jev` or `--provider haiku` neither sends anything
@@ -2022,6 +2117,42 @@ Code writes is refused (`E_PROVISION`) before anything is written — that
 refusal ends the birth with no token committed and no session started, and
 the next press retries.
 
+## Asset catalog
+
+The asset catalog — skills, agents, hooks, MCP servers and plugin refs that
+Sync installs on hosts — is a git checkout on the hub's machine. The desktop
+sets it in its Assets tab; on a hub, set it with `fleet-hub catalog`. A
+running hub is not needed, and does not need a restart: it picks the change
+up at its next catalog call (on a paired client, Assets → Refresh).
+
+```bash
+# Docker: keep the checkout on the data volume so it survives the container.
+docker compose exec fleet-hub fleet-hub catalog set /var/lib/fleet-hub/agent-assets \
+  --remote git@github.com:you/agent-assets.git
+docker compose exec fleet-hub fleet-hub catalog show
+docker compose exec fleet-hub fleet-hub catalog reload --pull   # after a push to the remote
+```
+
+- `set <path> [--remote <url>]` records the path and loads it. A path with
+  no checkout is cloned from `--remote`, with this machine's git
+  credentials: for an SSH remote, allow the key `fleet-hub ssh-key` prints
+  to read the repository.
+- `reload [--pull]` re-reads the checkout (optionally `git pull --ff-only`
+  first). Nothing pulls on its own.
+- `show` prints the path, remote and last loaded commit.
+
+The hub also loads the configured catalog when it starts. A desktop whose
+`state.db` was copied over (*Migrating from the desktop*) brings its
+catalog path with it; if that path is not on the hub's machine, `set` it
+again.
+
+A paired desktop sees the catalog read-only, unless you grant it the
+catalog (`fleet-hub client grant <name> assets`, see *Clients*): then its
+Assets tab manages this checkout — edits, commits, pushes, Sync, Secrets —
+as the desktop app manages its own, and can also set the path itself (a
+path on the hub's machine). Without a grant, editing is `git` in the
+checkout, followed by `reload`.
+
 ## Migrating from the desktop
 
 1. Quit the desktop app.
@@ -2052,11 +2183,37 @@ row is hidden and marked unreachable automatically on first start — not
 deleted, just no longer listed, counted, probed or polled for usage. The
 sessions that were live on it are ghosted with `lost_reason =
 local_disabled` on every start (nothing probes `local` on such a hub, so
-they would otherwise stay live and refuse every action); they stay
-dismissable and are pruned like any other ghost. `refresh_projects` has no
-local projects directory to scan there and returns the stored list, and the
+they would otherwise stay live and refuse every action); they are ghosted
+on the start that finds them and reaped on the next
+(`retire_local_sessions`); any host nothing probes is reaped the same way
+each reconcile pass. `refresh_projects` has no
+local projects directory to scan there and returns the stored list, after
+folding duplicate worktree rows; `forget_project {project_id}` (master) drops
+a row the scan can never revisit. And the
 new-session, add-project and background-session dialogs start on the first
 pickable host instead of `local`.
+
+### Retire a renamed alias (`local` → `mac`)
+
+A store copied from the desktop keeps its old machine under `local` while
+the same machine was re-added under a new alias; worktrees, dismissals and
+usage stay stranded on the hidden row. Fold it in one transaction:
+
+1. Back up first, as root on the NAS:
+   `sqlite3 /volume1/docker/fleet-hub/data/state.db ".backup /volume1/docker/fleet-hub/backup-$(date +%F).db"`
+2. With the hub running: `fleet-hub host merge local mac` (or the
+   `merge_host {from: "local", into: "mac"}` tool with the master token).
+   If `mcp.confirm_destructive` is on, approve the request on the desktop
+   or pass `confirm_nonce` from the `E_CONFIRM_REQUIRED` reply.
+3. Verify: `list_hosts` no longer lists `local`; `list_worktrees
+   {host_alias: "mac"}` shows the moved rows; `usage_report {host_alias:
+   "mac"}`'s `by_day` includes the old days.
+
+What moves: `worktrees` (a name `mac` already has keeps `mac`'s),
+`worktree_parent_fingerprints`, `dismissed_agents`, `host_layers`,
+`catalog_secrets_host`, `usage_daily` (summed per day). What is dropped: a
+`local` session whose `claude_session_id` or `tmux_name` already exists
+under `mac`. What is deleted: the `local` host row and its token.
 
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a
@@ -2184,7 +2341,8 @@ standalone exactly as before.
   creates the repository on the host you pick, with that host's `git` and
   `gh`; the new row arrives like any other change. Cancel stops the desktop
   waiting, not the run on the host. The *Existing folder* source is absent
-  here, because it would mean a folder on the hub's machine.
+  here, because it would mean a folder on the hub's machine, and so is the
+  "into …" destination preview: the project roots are the hub's settings.
 - **Its errors reach the hub.** Error-level events and frontend crashes are
   queued and posted to the hub's `/report` every few seconds — see *Error
   reports*; `CLAUDE_FLEET_HUB_REPORTS=0` turns it off.
@@ -2219,12 +2377,19 @@ standalone exactly as before.
   such a host, which is the whole reason it dials the hub instead — so the tab
   says that rather than showing a command that cannot work. Dropping files on
   the pane (`upload_to_session`) follows the same rule, for the same reason.
-- **The asset catalog** is a read-only overview: the hub's catalog through
-  `list_assets` (each asset's per-host state, unmanaged assets, problems) and
-  a Scan hosts button through `scan_assets`, both open to any paired client.
-  Editing assets, Sync and Secrets need the catalog's git checkout and the
-  sync secrets, which live on the hub's machine, so the panel does not offer
-  them.
+- **The asset catalog** is the hub's. The Assets tab asks the hub's
+  `catalog_admin` once when it opens. For a client granted the catalog
+  (`fleet-hub client grant <name> assets`, see *Clients*) it is the full
+  panel onto the hub's checkout: set it up, edit assets, lint, commit, push,
+  Sync and Secrets, exactly as standalone — only *Import from host* (it reads
+  host `local`, which on a hub is the hub's machine) and *Open in session*
+  stay disabled. A resource file you add is read on this machine and its
+  bytes sent to the hub. For any other client the hub answers `E_FORBIDDEN`
+  and the tab is a read-only overview: the hub's catalog through
+  `list_assets` (each asset's per-host state, unmanaged assets, problems)
+  and a Scan hosts button through `scan_assets`, with the grant command to
+  ask the operator for. The catalog itself can also be set on the hub's
+  machine with `fleet-hub catalog set` (see *Asset catalog*).
 - **The setup checklist** is about the machine that owns the fleet, so it
   shows the reason instead of its panel.
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
@@ -2247,7 +2412,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 204 commands, 99 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 205 commands, 128 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2255,39 +2420,10 @@ Of the 204 commands, 99 route to a hub tool, 1 routes except for one argument sh
 | `add_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `add_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
-| `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `catalog_add_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_apply_sync` | the hub's apply_sync is master-only: a paired client is never the fleet's administrator, and a sync writes to every host over SSH; run the sync on the hub |
-| `catalog_commit_pending` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_config` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_configure` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_create_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_delete_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_delete_layer` | deleting a layer removes a file from the catalog's git checkout, which only the machine that owns the fleet has, and the hub exposes no layer-authoring tool; author on that machine |
-| `catalog_delete_secret` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_get_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_import_host` | the hub has this as its import_assets tool, but the import lands in the catalog's git checkout, which only the machine that owns the fleet has; call import_assets on the hub, or import on that machine |
-| `catalog_last_sync` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_layer_template` | a template is the first step of authoring a layer into the catalog's git checkout, and catalog_write_layer refuses here for want of that checkout; the hub exposes no layer-authoring tool, so author on the machine that owns the fleet |
-| `catalog_lint_all` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_lint_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_list_layers` | the hub does serve this (its read-only list_layers tool), but the layer definitions live in the catalog's git checkout, which only the machine that owns the fleet has; call list_layers on the hub, or work on the catalog there |
-| `catalog_list_secrets` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_load` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_plan_sync` | the hub has this as its plan_sync tool, but the plan is shown in a sync panel built on the catalog checkout, which only the machine that owns the fleet has; call plan_sync on the hub, or plan on that machine |
-| `catalog_propose_layers` | the hub does serve this (its read-only propose_layers tool), but a proposal is only useful where the layers can then be written — the catalog's git checkout, which only the machine that owns the fleet has; call propose_layers on the hub, or propose on that machine |
-| `catalog_push` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_remove_resource` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_repo_status` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_resolve_preview` | the hub has a resolve_preview tool, but it answers a summary — kind, name and version per asset — while this command returns the full Resolution the UI renders, so routing it would silently drop every asset body; call resolve_preview on the hub for the summary, or resolve on the machine that owns the fleet |
-| `catalog_set_host_layers` | the hub has a set_host_layers tool, but it is master-only — a host's layer assignment decides what the next apply_sync writes to its filesystem — and a paired client is never the master; set layers on the machine that owns the fleet |
-| `catalog_set_secret` | the hub's set_secret is master-only: a paired client is never the fleet's administrator, and the sync secrets belong to the machine that runs the sync; set it on the hub |
-| `catalog_spawn_author_session` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_template` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_update_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
-| `catalog_write_layer` | writing a layer edits a file in the catalog's git checkout, which only the machine that owns the fleet has, and the hub exposes no layer-authoring tool; author on that machine |
+| `catalog_import_host` | an import reads the Claude config of host `local`, which on a hub is the hub's own machine, not this one; call import_assets on the hub, or import on the machine whose ~/.claude you mean |
+| `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
@@ -2301,8 +2437,9 @@ Of the 204 commands, 99 route to a hub tool, 1 routes except for one argument sh
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
+| `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
-| `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub` |
+| `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |

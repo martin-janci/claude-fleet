@@ -233,7 +233,10 @@ pub fn cost_micros(t: &UsageTotals, cache_write_5m_tokens: i64, p: Price) -> i64
 /// carries a subagent's own `usage` — verified on a live transcript) and
 /// `<synthetic>` entries; cut the LAST `"usage":{` object, read the 5-minute
 /// cache-write split from it, strip its nested objects, and read the four
-/// counters. A new message id adds its counters; a repeat of the last id
+/// counters. The line's UTC day is the LAST `"timestamp":"YYYY-MM-DD`
+/// match: Claude Code writes the entry's own `timestamp` after `message`,
+/// whose `tool_use` input can carry a `timestamp` key of its own. A new
+/// message id adds its counters; a repeat of the last id
 /// (its next content block) adds only what grew. `last`/`lu` carry that id
 /// and its counted usage (`in,out,cw,cr,cw5m`) across passes. Escaped JSON
 /// inside a string never contains an unescaped `"usage":{`. Must not contain
@@ -250,7 +253,7 @@ function num(u, k,   i, r) {
   return 0
 }
 function pos(x) { return x > 0 ? x : 0 }
-function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d5, d, key) {
+function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d5, d, r, key) {
   if (index(line, "\"usage\":{") == 0) return
   id = ""
   if (match(line, /"id":"msg_[A-Za-z0-9_-]+"/)) id = substr(line, RSTART + 6, RLENGTH - 7)
@@ -293,7 +296,8 @@ function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d
   tr[m] += dr
   t5[m] += d5
   d = ""
-  if (match(line, /"timestamp":"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) d = substr(line, RSTART + 13, 10)
+  r = line
+  while (match(r, /"timestamp":"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) { d = substr(r, RSTART + 13, 10); r = substr(r, RSTART + RLENGTH) }
   if (d == "") d = "?"
   key = m SUBSEP d
   if (!(key in dseen)) { dseen[key] = 1; dorder[++nd] = key; dm[key] = m; dd[key] = d }
@@ -319,7 +323,7 @@ END {
 /// `~/.claude/projects/*/<claude id>.jsonl` — ids are unique UUIDs), picks
 /// the read mode, charges the chunk to `budget`, and prints:
 /// - `M\t<sid>` — no transcript;
-/// - `F\t<sid>\t<cont|new|shrink>\t<start offset>\t<chunk bytes>\t<file name>`
+/// - `F\t<sid>\t<cont|new|shrink>\t<start offset>\t<chunk bytes>\t<file name>\t<file size>`
 ///   then zero or more
 ///   `U\t<sid>\t<model>\t<in>\t<out>\t<cache write>\t<cache read>\t<cache write 5m>`
 ///   and `E\t<sid>\t<bytes consumed>\t<last msg id>\t<last model>\t<last usage>`.
@@ -346,7 +350,7 @@ const ONE_FN: &str = r#"one() {
   if [ "$n" -gt "$cap" ]; then n=$cap; fi
   if [ "$n" -gt "$budget" ]; then n=$budget; fi
   if [ "$n" -gt 0 ]; then budget=$((budget - n)); fi
-  printf 'F\t%s\t%s\t%s\t%s\t%s\n' "$sid" "$mode" "$off" "$n" "$base"
+  printf 'F\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sid" "$mode" "$off" "$n" "$base" "$size"
   if [ "$n" -le 0 ]; then printf 'E\t%s\t0\t%s\t\t%s\n' "$sid" "$last" "$lu"; return 0; fi
   tail -c +$((off + 1)) "$f" 2>/dev/null | head -c "$n" | awk -v sid="$sid" -v chunk="$n" -v last="$last" -v lu="$lu" '"#;
 
@@ -413,6 +417,9 @@ pub struct FileRead {
     pub start: i64,
     pub chunk: i64,
     pub source: String,
+    /// The file's size when the script looked; `None` from a reader that
+    /// did not print it.
+    pub size: Option<i64>,
     pub by_model: Vec<ModelUsage>,
     /// `by_model`, split by the transcript line's UTC day (the `D` lines).
     /// Empty from a reader without them.
@@ -478,7 +485,7 @@ pub fn parse_batch_output(stdout: &str) -> BTreeMap<i64, FileOutcome> {
             ["M", _] => {
                 out.insert(sid, FileOutcome::Missing);
             }
-            ["F", _, mode, start, chunk, source] => {
+            ["F", _, mode, start, chunk, source, rest @ ..] if rest.len() <= 1 => {
                 let mode = match *mode {
                     "cont" => ReadMode::Cont,
                     "new" => ReadMode::New,
@@ -497,6 +504,7 @@ pub fn parse_batch_output(stdout: &str) -> BTreeMap<i64, FileOutcome> {
                         start,
                         chunk,
                         source,
+                        size: rest.first().and_then(|s| count(s)),
                         by_model: Vec::new(),
                         by_day: Vec::new(),
                         consumed: 0,
@@ -555,6 +563,34 @@ pub fn parse_batch_output(stdout: &str) -> BTreeMap<i64, FileOutcome> {
     out
 }
 
+/// What decides whether a read's earlier days are backfill (perf-logs §6a).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackfillRule {
+    /// The cursor's stored mark ([`UsageCursor::backfill_until`]): a `cont`
+    /// read that starts below it is still the history a read from byte 0
+    /// found — the later chunks of a transcript larger than one pass's cap.
+    pub until: i64,
+    /// Yesterday's lines are live until `now` is this far past midnight UTC:
+    /// a session that started before midnight and is first collected just
+    /// after it spent that money on the day it says, not in history.
+    pub grace_secs: i64,
+}
+
+impl BackfillRule {
+    /// Grace for a collection interval: two intervals (a pass that ran late
+    /// plus the one after it), at most a day.
+    pub fn grace_for_interval(interval_secs: u64) -> i64 {
+        (interval_secs.min(SECS_PER_DAY as u64) as i64 * 2).min(SECS_PER_DAY)
+    }
+
+    /// Whether a fresh read's slice of UTC day `day` is backfill at `now`:
+    /// any day before yesterday; yesterday once `now` is past the grace.
+    fn is_history(&self, day: i64, now: i64) -> bool {
+        let today = now.div_euclid(SECS_PER_DAY);
+        day < today - 1 || (day == today - 1 && now - today * SECS_PER_DAY >= self.grace_secs)
+    }
+}
+
 /// Turn one file's read into the store update: price each model's tokens,
 /// and advance the offset by the complete lines consumed. A single line
 /// longer than the whole `cap` would pin the offset forever, so a chunk that
@@ -564,6 +600,7 @@ pub fn plan_delta(
     overrides: &BTreeMap<String, Price>,
     cap: i64,
     now: i64,
+    rule: BackfillRule,
 ) -> UsageDelta {
     let mut totals = UsageTotals::default();
     for mu in &read.by_model {
@@ -583,12 +620,16 @@ pub fn plan_delta(
         consumed
     };
     // Per-day slices, priced like `totals`. A read that started at byte 0 of
-    // a transcript that already existed (`new` / `shrink`) books every day
-    // before the collection day as backfill: history a takeover read in one
-    // go, not that day's spend. A `cont` read is live whatever day the line
-    // carries; a line with no timestamp books to today.
+    // a transcript that already existed (`new` / `shrink`), or a `cont` read
+    // still below the size that read saw (the next chunks of a transcript
+    // larger than `cap`), books the days before the collection day as
+    // backfill: history a takeover read, not that day's spend. Yesterday is
+    // live within the grace after midnight ([`BackfillRule`]). Any other
+    // `cont` read is live whatever day the line carries; a line with no
+    // timestamp books to today.
     let today = now.div_euclid(SECS_PER_DAY);
-    let fresh = read.mode != ReadMode::Cont;
+    let from_zero = read.mode != ReadMode::Cont;
+    let fresh = from_zero || read.start < rule.until;
     let mut by_day: BTreeMap<(i64, bool), UsageTotals> = BTreeMap::new();
     for dm in &read.by_day {
         let mut t = dm.totals;
@@ -599,7 +640,7 @@ pub fn plan_delta(
             .map(|p| cost_micros(&t, dm.cache_write_5m_tokens, p))
             .unwrap_or(0);
         let day = dm.day.as_deref().and_then(day_number).unwrap_or(today);
-        let backfill = fresh && day < today;
+        let backfill = fresh && rule.is_history(day, now);
         by_day.entry((day, backfill)).or_default().add(&t);
     }
     let by_day = by_day
@@ -620,6 +661,10 @@ pub fn plan_delta(
         last_msg_usage: read.last_msg_usage.clone(),
         now,
         by_day,
+        // A read from byte 0 marks the file's size at that moment: every
+        // chunk below it is history. `chunk` bounds it for a reader that
+        // did not print the size.
+        backfill_until: from_zero.then(|| read.size.unwrap_or(read.start + read.chunk).max(0)),
     }
 }
 
@@ -680,13 +725,14 @@ pub async fn collect_host(
     now: i64,
 ) -> Result<usize, IpcError> {
     crate::validate::host_alias(host)?;
-    let cursors: Vec<UsageCursor> = {
+    let (cursors, interval_secs) = {
         let s = lock(store)?;
-        s.list_usage_cursors(host)?
-    }
-    .into_iter()
-    .filter_map(sanitize_cursor)
-    .collect();
+        (
+            s.list_usage_cursors(host)?,
+            settings::get_secs(&s, settings::USAGE_INTERVAL_SECS),
+        )
+    };
+    let cursors: Vec<UsageCursor> = cursors.into_iter().filter_map(sanitize_cursor).collect();
     if cursors.is_empty() {
         return Ok(0);
     }
@@ -703,6 +749,7 @@ pub async fn collect_host(
         ));
     }
     let results = parse_batch_output(&stdout);
+    let grace_secs = BackfillRule::grace_for_interval(interval_secs);
     let s = lock(store)?;
     // One transaction for the whole host: every session's pass commits
     // together instead of one autocommit per session, and a no-op pass
@@ -712,7 +759,11 @@ pub async fn collect_host(
         let mut changed = 0;
         for c in &cursors {
             if let Some(FileOutcome::Read(read)) = results.get(&c.session_id) {
-                let delta = plan_delta(read, overrides, MAX_CHUNK_BYTES, now);
+                let rule = BackfillRule {
+                    until: c.backfill_until,
+                    grace_secs,
+                };
+                let delta = plan_delta(read, overrides, MAX_CHUNK_BYTES, now, rule);
                 if s.apply_usage_in_tx(c.session_id, host, &delta)? {
                     changed += 1;
                 }
@@ -748,10 +799,14 @@ pub async fn collect_all(store: &Mutex<Store>, exec: &dyn SshExec, now: i64) -> 
     let (hosts, overrides) = match store.lock() {
         Ok(s) => (
             collection_hosts(
-                s.list_hosts()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|h| (h.alias, h.reachable)),
+                // `active_hosts` is the one hidden/local rule (hub-ops F6);
+                // `collection_hosts` keeps the reachability test.
+                crate::service::hosts::active_hosts(
+                    s.list_hosts().unwrap_or_default(),
+                    crate::service::hub::local_host_enabled(),
+                )
+                .into_iter()
+                .map(|h| (h.alias, h.reachable)),
                 crate::service::hub::local_host_enabled(),
             ),
             price_overrides(&s),
@@ -1127,6 +1182,24 @@ mod tests {
             collection_hosts(vec![("local".to_string(), true)], false),
             Vec::<String>::new()
         );
+        // A hidden reachable row never reaches `collection_hosts`: the
+        // caller feeds it through `active_hosts` (hub-ops F6).
+        let mut hidden = crate::store::Store::open_in_memory()
+            .unwrap()
+            .list_hosts()
+            .unwrap();
+        assert!(hidden.is_empty());
+        hidden.push({
+            let s = crate::store::Store::open_in_memory().unwrap();
+            s.insert_host("parked", Some("parked")).unwrap();
+            s.update_host_probe("parked", true, None, None, 1).unwrap();
+            s.set_host_hidden("parked", true).unwrap();
+            s.get_host_row("parked").unwrap().unwrap()
+        });
+        let fed = crate::service::hosts::active_hosts(hidden, true)
+            .into_iter()
+            .map(|h| (h.alias, h.reachable));
+        assert_eq!(collection_hosts(fed, true), Vec::<String>::new());
     }
 
     fn tokens(i: i64, o: i64, w: i64, r: i64) -> UsageTotals {
@@ -1341,6 +1414,7 @@ mod tests {
             source: source.map(str::to_string),
             last_msg_id: last.map(str::to_string),
             last_msg_usage: None,
+            backfill_until: 0,
         }
     }
 
@@ -1392,12 +1466,13 @@ mod tests {
     /// The cursor the store would hold after applying `r`.
     #[cfg(unix)]
     fn advance(c: &UsageCursor, r: &FileRead, cap: i64) -> UsageCursor {
-        let d = plan_delta(r, &BTreeMap::new(), cap, 0);
+        let d = plan_delta(r, &BTreeMap::new(), cap, 0, BackfillRule::default());
         UsageCursor {
             offset_bytes: d.offset,
             source: Some(d.source),
             last_msg_id: d.last_msg_id,
             last_msg_usage: d.last_msg_usage,
+            backfill_until: d.backfill_until.unwrap_or(c.backfill_until),
             ..c.clone()
         }
     }
@@ -1563,7 +1638,13 @@ mod tests {
             r.by_model[0].cache_write_5m_tokens, 400,
             "the top-level split, not the one inside iterations"
         );
-        let d = plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0);
+        let d = plan_delta(
+            &r,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            0,
+            BackfillRule::default(),
+        );
         assert_eq!(d.totals.cache_write_tokens, 1_000);
         assert_eq!(d.totals.cost_micros, 600 * 10 + 400 * 25 / 4);
     }
@@ -1587,13 +1668,31 @@ mod tests {
             tokens(7, 7, 0, 0),
             "last id reset too"
         );
-        assert!(plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0).reset);
+        assert!(
+            plan_delta(
+                &r,
+                &BTreeMap::new(),
+                MAX_CHUNK_BYTES,
+                0,
+                BackfillRule::default()
+            )
+            .reset
+        );
         // The offset refers to another file (e.g. after /clear): new → from 0.
         let c = cursor(Some(&fx.file), 3, Some("other.jsonl"), Some("msg_1"));
         let r = read(run(&fx.home, &c, MAX_CHUNK_BYTES));
         assert_eq!(r.mode, ReadMode::New);
         assert_eq!(model_totals(&r, "claude-opus-5"), tokens(7, 7, 0, 0));
-        assert!(!plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0).reset);
+        assert!(
+            !plan_delta(
+                &r,
+                &BTreeMap::new(),
+                MAX_CHUNK_BYTES,
+                0,
+                BackfillRule::default()
+            )
+            .reset
+        );
     }
 
     #[cfg(unix)]
@@ -1720,6 +1819,7 @@ mod tests {
             source: Some("x.jsonl".into()),
             last_msg_id: Some("msg_1".into()),
             last_msg_usage: Some("1,2,3,4,0".into()),
+            backfill_until: 0,
         };
         let s = batch_script(&[c], 1024, 4096);
         assert!(s.contains("cap='1024'"));
@@ -1752,7 +1852,13 @@ mod tests {
         assert_eq!(r.last_model, None);
         assert_eq!(r.last_msg_usage.as_deref(), Some("5,0,0,0,0"));
         // Unknown model: tokens counted, zero cost.
-        let d = plan_delta(r, &BTreeMap::new(), MAX_CHUNK_BYTES, 9);
+        let d = plan_delta(
+            r,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            9,
+            BackfillRule::default(),
+        );
         assert_eq!(d.totals, tokens(5, 0, 0, 0));
         assert_eq!(d.offset, 9);
         let FileOutcome::Read(r) = &all[&5] else {
@@ -1771,6 +1877,7 @@ mod tests {
             start: 100,
             chunk: 50,
             source: "a.jsonl".into(),
+            size: None,
             by_model: vec![
                 ModelUsage {
                     model: Some("claude-opus-5".into()),
@@ -1789,7 +1896,13 @@ mod tests {
             last_model: Some("claude-haiku-4-5".into()),
             last_msg_usage: Some("0,1,0,0,0".into()),
         };
-        let d = plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 77);
+        let d = plan_delta(
+            &r,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            77,
+            BackfillRule::default(),
+        );
         assert_eq!(d.totals.input_tokens, 1_000_000);
         assert_eq!(d.totals.output_tokens, 1_000_000);
         assert_eq!(d.totals.cost_micros, 5_000_000 + 5_000_000);
@@ -1804,6 +1917,7 @@ mod tests {
             &BTreeMap::new(),
             MAX_CHUNK_BYTES,
             0,
+            BackfillRule::default(),
         );
         assert_eq!(d.offset, 150);
     }
@@ -2239,6 +2353,7 @@ mod tests {
                     last_msg_usage: None,
                     now: at,
                     by_day: Vec::new(),
+                    backfill_until: None,
                 },
             )
             .unwrap();
@@ -2381,6 +2496,7 @@ mod tests {
             start: 0,
             chunk: 100,
             source: "x.jsonl".into(),
+            size: None,
             by_model: vec![ModelUsage {
                 model: Some("claude-opus-5".into()),
                 totals: tokens(3, 0, 0, 0),
@@ -2393,7 +2509,13 @@ mod tests {
             last_msg_usage: None,
         };
         let now = day_number("2026-09-21").unwrap() * SECS_PER_DAY + 3_600;
-        let d = plan_delta(&read, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        let d = plan_delta(
+            &read,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            now,
+            BackfillRule::default(),
+        );
         assert_eq!(
             d.by_day
                 .iter()
@@ -2408,19 +2530,195 @@ mod tests {
         let mut cont = read.clone();
         cont.mode = ReadMode::Cont;
         cont.start = 50;
-        let d = plan_delta(&cont, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        let d = plan_delta(
+            &cont,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            now,
+            BackfillRule::default(),
+        );
         assert!(
             d.by_day.iter().all(|x| !x.backfill),
             "a continuing cursor is live usage whatever day the line carries"
         );
         let mut undated = read.clone();
         undated.by_day[0].day = None;
-        let d = plan_delta(&undated, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        let d = plan_delta(
+            &undated,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            now,
+            BackfillRule::default(),
+        );
         assert_eq!(
             d.by_day[0].day,
             now.div_euclid(SECS_PER_DAY),
             "a line without a timestamp books to today"
         );
+    }
+
+    /// A first read of a transcript larger than one pass's cap takes several
+    /// passes; only the first is a `new` read. The size that read saw is
+    /// kept as the cursor's backfill mark, so every later chunk below it is
+    /// history too, and only bytes written after it are live.
+    #[cfg(unix)]
+    #[test]
+    fn a_multi_chunk_first_read_books_every_chunk_as_backfill() {
+        let fx = fixture();
+        let old: String = (0..6)
+            .map(|n| {
+                assistant_at(
+                    &format!("msg_{n}"),
+                    "claude-opus-5",
+                    "2026-09-10T12:00:00.000Z",
+                    10,
+                    1,
+                    0,
+                    0,
+                    "x",
+                ) + "\n"
+            })
+            .collect();
+        append(&fx.file, &old);
+        let size = old.len() as i64;
+        // Two lines and a bit per pass: the history takes three passes.
+        let cap = (old.lines().next().unwrap().len() as i64 + 1) * 2 + 10;
+        let now = day_number("2026-09-20").unwrap() * SECS_PER_DAY + 3_600;
+        let mut c = cursor(Some(&fx.file), 0, None, None);
+        let (mut passes, mut counted) = (0, 0);
+        while c.offset_bytes < size {
+            let r = read(run(&fx.home, &c, cap));
+            let rule = BackfillRule {
+                until: c.backfill_until,
+                grace_secs: 600,
+            };
+            let d = plan_delta(&r, &BTreeMap::new(), cap, now, rule);
+            assert!(
+                d.by_day.iter().all(|x| x.backfill),
+                "pass {passes} ({:?}) booked history as live: {:?}",
+                r.mode,
+                d.by_day
+            );
+            counted += d.by_day.iter().map(|x| x.totals.input_tokens).sum::<i64>();
+            c = advance(&c, &r, cap);
+            passes += 1;
+            assert_eq!(c.backfill_until, size, "the mark is the first read's size");
+        }
+        assert!(passes >= 3, "the fixture needs several chunks ({passes})");
+        assert_eq!(counted, 60);
+        // Spend written after the first read is live, even an old-dated line.
+        append(
+            &fx.file,
+            &(assistant_at(
+                "msg_new",
+                "claude-opus-5",
+                "2026-09-18T12:00:00.000Z",
+                4,
+                1,
+                0,
+                0,
+                "y",
+            ) + "\n"),
+        );
+        let r = read(run(&fx.home, &c, cap));
+        assert_eq!(r.mode, ReadMode::Cont);
+        let rule = BackfillRule {
+            until: c.backfill_until,
+            grace_secs: 600,
+        };
+        let d = plan_delta(&r, &BTreeMap::new(), cap, now, rule);
+        assert_eq!(d.backfill_until, None, "a cont read keeps the mark");
+        assert_eq!(d.by_day.len(), 1);
+        assert!(!d.by_day[0].backfill, "past the mark is live");
+    }
+
+    /// Midnight UTC: a session that started before midnight and is first
+    /// collected just after it spent yesterday's money on yesterday, live.
+    /// Only past the grace does a fresh read's yesterday become history.
+    #[test]
+    fn yesterday_is_live_within_the_grace_after_midnight() {
+        assert_eq!(BackfillRule::grace_for_interval(300), 600);
+        assert_eq!(BackfillRule::grace_for_interval(0), 0);
+        assert_eq!(
+            BackfillRule::grace_for_interval(u64::MAX),
+            SECS_PER_DAY,
+            "at most a day"
+        );
+        let today = day_number("2026-09-21").unwrap();
+        let slice = |day: i64| DayModelUsage {
+            day: Some(day_string(day)),
+            model: Some("claude-opus-5".into()),
+            totals: tokens(1, 0, 0, 0),
+            cache_write_5m_tokens: 0,
+        };
+        let read = FileRead {
+            mode: ReadMode::New,
+            start: 0,
+            chunk: 100,
+            source: "x.jsonl".into(),
+            size: Some(100),
+            by_model: Vec::new(),
+            by_day: vec![slice(today - 2), slice(today - 1), slice(today)],
+            consumed: 100,
+            last_msg_id: None,
+            last_model: None,
+            last_msg_usage: None,
+        };
+        let rule = BackfillRule {
+            until: 0,
+            grace_secs: 600,
+        };
+        let flags = |now: i64| -> Vec<(i64, bool)> {
+            plan_delta(&read, &BTreeMap::new(), MAX_CHUNK_BYTES, now, rule)
+                .by_day
+                .iter()
+                .map(|x| (x.day, x.backfill))
+                .collect()
+        };
+        let midnight = today * SECS_PER_DAY;
+        assert_eq!(
+            flags(midnight + 300),
+            vec![(today - 2, true), (today - 1, false), (today, false)],
+            "five minutes past midnight: yesterday is still live"
+        );
+        assert_eq!(
+            flags(midnight + 3_600),
+            vec![(today - 2, true), (today - 1, true), (today, false)],
+            "an hour past midnight: yesterday is history"
+        );
+    }
+
+    /// perf-logs §6a: the day is the entry's own `timestamp`, which Claude
+    /// Code writes after `message`; a `tool_use` input inside `message` can
+    /// carry a `timestamp` key of its own and must not win.
+    #[cfg(unix)]
+    #[test]
+    fn awk_takes_the_entrys_own_timestamp_not_a_nested_one() {
+        let fx = fixture();
+        let line = assistant_at(
+            "msg_1",
+            "claude-opus-5",
+            "2026-09-19T08:00:00.000Z",
+            10,
+            1,
+            0,
+            0,
+            "a",
+        )
+        .replace(
+            r#"{"type":"text","text":"a"}"#,
+            r#"{"type":"tool_use","id":"toolu_1","name":"Write","input":{"timestamp":"2020-01-01T00:00:00Z","n":1}}"#,
+        );
+        assert!(line.find("2020-01-01") < line.find("2026-09-19"));
+        append(&fx.file, &(line + "\n"));
+        let r = read(run(
+            &fx.home,
+            &cursor(Some(&fx.file), 0, None, None),
+            MAX_CHUNK_BYTES,
+        ));
+        assert_eq!(r.by_day.len(), 1);
+        assert_eq!(r.by_day[0].day.as_deref(), Some("2026-09-19"));
+        assert_eq!(r.by_day[0].totals.input_tokens, 10);
     }
 
     /// perf-logs §5: a failed collection was DEBUG, invisible with the

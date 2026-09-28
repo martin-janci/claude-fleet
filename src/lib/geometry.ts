@@ -22,3 +22,32 @@ export interface Rect {
 export function pointInRect(px: number, py: number, rect: Rect): boolean {
   return px >= rect.left && px <= rect.right && py >= rect.top && py <= rect.bottom;
 }
+
+/** Whether this webview runs on Windows (WebView2 reports `Win32` and a
+ *  `Windows NT` user agent). */
+export function detectWindows(nav: { platform?: string; userAgent?: string } | undefined): boolean {
+  if (!nav) return false;
+  return /^Win/.test(nav.platform ?? '') || /Windows NT/.test(nav.userAgent ?? '');
+}
+
+/** A Tauri drag-drop `position` in the logical pixels `getBoundingClientRect()`
+ *  uses. macOS (AppKit points) and Linux (GTK widget coordinates) already
+ *  deliver logical pixels — see `pointInRect`. Windows does not: wry's
+ *  WebView2 drop target runs `ScreenToClient`, which gives PHYSICAL client
+ *  pixels, so at 150% scaling a drop on the lower-right of the terminal read
+ *  as outside it. There, and only there, divide by the scale factor. */
+export function dropPointToLogical(
+  pos: { x: number; y: number },
+  windows: boolean,
+  devicePixelRatio: number,
+): { x: number; y: number } {
+  if (!windows || !(devicePixelRatio > 0)) return { x: pos.x, y: pos.y };
+  return { x: pos.x / devicePixelRatio, y: pos.y / devicePixelRatio };
+}
+
+/** `dropPointToLogical` for this webview. */
+export function dropPoint(pos: { x: number; y: number }): { x: number; y: number } {
+  const nav = typeof navigator === 'undefined' ? undefined : navigator;
+  const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio;
+  return dropPointToLogical(pos, detectWindows(nav), dpr);
+}

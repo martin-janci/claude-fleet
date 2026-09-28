@@ -5,6 +5,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import AssetEditor from './AssetEditor.svelte';
   import AuthorSessionDialog from './AuthorSessionDialog.svelte';
+  import { hubStatus, hubBlock } from './hub';
 
   let {
     kind,
@@ -111,6 +112,9 @@
 
   // ── Open in session ──────────────────────────────────────────────────
   let showAuthorDialog = $state(false);
+  // On a hub the checkout is on the hub's machine, where this window cannot
+  // start a session (`catalog_spawn_author_session` is local-only).
+  const authorBlocked = $derived(hubBlock('catalog_spawn_author_session', $hubStatus));
 
   const harnesses = $derived(detail ? detail.previews.map((p) => p.harness) : []);
   const preview = $derived(detail?.previews.find((p) => p.harness === harnessTab) ?? null);
@@ -159,7 +163,7 @@
           onclick={() => onsync?.({ kind: detail?.asset.kind, name: detail?.asset.name })}
           data-testid="asset-sync"
         >Sync this asset</button>
-        <button class="sync-btn" onclick={() => (showAuthorDialog = true)} data-testid="asset-open-session">Open in session</button>
+        <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session</button>
         <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{lintBusy ? 'Linting…' : 'Lint'}</button>
         {#if !editing}
           <button class="sync-btn" onclick={() => (editing = true)} data-testid="asset-edit">Edit</button>
