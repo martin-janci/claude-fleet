@@ -1440,6 +1440,24 @@ impl RateLimiter {
     }
 
     pub fn check_at(&self, key: &str, now: Instant, interval: Duration) -> Result<(), Duration> {
+        self.check_at_capped(key, now, interval, usize::MAX)
+    }
+
+    /// [`Self::check`] holding at most `cap` keys: once that many are live,
+    /// a key it has not seen is refused rather than stored, so a caller who
+    /// can mint keys (a spoofed forwarding header, a /64 of addresses) can
+    /// neither grow the map nor get a fresh bucket each time.
+    pub fn check_capped(&self, key: &str, interval: Duration, cap: usize) -> Result<(), Duration> {
+        self.check_at_capped(key, Instant::now(), interval, cap)
+    }
+
+    pub fn check_at_capped(
+        &self,
+        key: &str,
+        now: Instant,
+        interval: Duration,
+        cap: usize,
+    ) -> Result<(), Duration> {
         let mut b = self
             .last
             .lock()
@@ -1455,6 +1473,9 @@ impl RateLimiter {
         let horizon = b.max_interval;
         b.entries
             .retain(|_, t| now.saturating_duration_since(*t) < horizon);
+        if b.entries.len() >= cap && !b.entries.contains_key(key) {
+            return Err(interval);
+        }
         b.entries.insert(key.to_string(), now);
         Ok(())
     }
@@ -2129,6 +2150,30 @@ mod tests {
     /// (one per source address), so the map must not grow for the life of the
     /// process: every call drops entries older than the longest interval ever
     /// passed to `check` — past that age an entry can refuse nothing.
+    /// A capped limiter never holds more than its cap: an unseen key is
+    /// refused (not stored) while that many are live, a known one is judged
+    /// as usual, and the room comes back as entries age out.
+    #[test]
+    fn a_capped_limiter_refuses_new_keys_at_its_cap() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        let s = Duration::from_secs(1);
+        assert!(rl.check_at_capped("a", t0, s, 2).is_ok());
+        assert!(rl.check_at_capped("b", t0, s, 2).is_ok());
+        assert!(rl.check_at_capped("c", t0, s, 2).is_err(), "full");
+        assert_eq!(rl.len(), 2);
+        let later = t0 + Duration::from_millis(1_500);
+        assert!(
+            rl.check_at_capped("a", later, s, 2).is_ok(),
+            "a known key's interval passed"
+        );
+        assert!(
+            rl.check_at_capped("c", later, s, 2).is_ok(),
+            "b aged out: room again"
+        );
+        assert_eq!(rl.len(), 2);
+    }
+
     #[test]
     fn rate_limiter_evicts_entries_older_than_the_longest_interval() {
         let rl = RateLimiter::new();
