@@ -896,6 +896,7 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
             ],
             bare_repo: "",
             secret: Some("ATATT3xFfGF0-test-token-not-real-0000"),
+            describe: true,
         }
     }
 
@@ -974,10 +975,8 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
         }
     }
 
-    async fn provider_for_describe(&self) -> Box<dyn TrackerProvider> {
-        let f = FakeTransport::new();
+    fn script_describe(&self, f: &FakeTransport) {
         f.once(Method::Get, "/issue/ABC-101", ok("issue_description.json"));
-        self.provider(&f)
     }
 
     fn describe_ref(&self) -> &'static str {

@@ -54,10 +54,9 @@ fn mine() -> ViewDef {
 }
 
 /// Data Center's `describe` is the v2 issue endpoint, uncapped by
-/// [`DESCRIPTION_MAX_CHARS`] and capped only by `DESCRIBE_MAX_CHARS` (not
-/// exercised through the conformance suite, which overrides only Jira Cloud
-/// and GitHub — the same `jira_common::adf_text` those two rely on, over the
-/// v2 API this adapter speaks).
+/// [`DESCRIPTION_MAX_CHARS`] and capped only by `DESCRIBE_MAX_CHARS` (the
+/// conformance suite's scenario 12 covers the plain-string body; this one
+/// covers an ADF document and the request itself).
 #[tokio::test]
 async fn describe_reads_the_v2_issue_endpoint_uncapped() {
     let f = FakeTransport::new();
@@ -171,11 +170,24 @@ impl Harness for DcHarness {
             ],
             bare_repo: "",
             secret: Some(pat()),
+            describe: true,
         }
     }
 
     fn provider(&self, fake: &FakeTransport) -> Box<dyn TrackerProvider> {
         Box::new(dc(fake))
+    }
+
+    fn script_describe(&self, f: &FakeTransport) {
+        f.once(
+            Method::Get,
+            "/rest/api/2/issue/OPS-1",
+            ok("issue_description.json"),
+        );
+    }
+
+    fn describe_ref(&self) -> &'static str {
+        "OPS-1"
     }
 
     fn script_probe(&self, f: &FakeTransport) {

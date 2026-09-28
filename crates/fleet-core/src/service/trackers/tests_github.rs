@@ -105,6 +105,7 @@ impl Harness for GitHubHarness {
             ],
             bare_repo: "acme/api",
             secret: None,
+            describe: true,
         }
     }
 
@@ -179,10 +180,8 @@ impl Harness for GitHubHarness {
         }
     }
 
-    async fn provider_for_describe(&self) -> Box<dyn TrackerProvider> {
-        let f = FakeTransport::new();
+    fn script_describe(&self, f: &FakeTransport) {
         f.once(Method::Post, "/graphql", ok("describe_issue.json"));
-        self.provider(&f)
     }
 
     fn describe_ref(&self) -> &'static str {
@@ -1071,6 +1070,14 @@ mod ghes {
         fn script_error(&self, f: &FakeTransport, case: ErrorCase) {
             GitHubHarness.script_error(f, case)
         }
+
+        fn script_describe(&self, f: &FakeTransport) {
+            GitHubHarness.script_describe(f)
+        }
+
+        fn describe_ref(&self) -> &'static str {
+            "ghe.corp.example/acme/api#1"
+        }
     }
 
     crate::conformance_suite!(GhesHarness);
@@ -1210,4 +1217,25 @@ mod ghes {
         let policy = crate::service::trackers::host_policy(&row);
         assert!(policy("ghe.corp.example") && !policy("api.github.com"));
     }
+}
+
+/// An issue's body becomes the excerpt: cut at `DESCRIPTION_MAX_CHARS`, with
+/// the true length beside it, and an uncut one reports exactly its own
+/// length.
+#[test]
+fn a_body_is_cut_to_the_excerpt_with_its_true_length() {
+    let cap = crate::service::trackers::DESCRIPTION_MAX_CHARS;
+    let f = FakeTransport::new();
+    let mut n = fixture("github", "search_mine_p1.json")["data"]["search"]["nodes"][0].clone();
+    n["body"] = json!("b".repeat(cap + 321));
+    let s = github(&f).snapshot(&n).expect("a snapshot");
+    assert_eq!(
+        s.description.as_deref().map(|d| d.chars().count()),
+        Some(cap)
+    );
+    assert_eq!(s.description_chars, Some((cap + 321) as i64));
+    n["body"] = json!("short body");
+    let s = github(&f).snapshot(&n).expect("a snapshot");
+    assert_eq!(s.description.as_deref(), Some("short body"));
+    assert_eq!(s.description_chars, Some(10));
 }

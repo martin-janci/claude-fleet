@@ -101,6 +101,7 @@ impl Harness for LinearHarness {
             ],
             bare_repo: "",
             secret: Some(api_key()),
+            describe: false,
         }
     }
 
@@ -444,4 +445,25 @@ fn the_site_is_a_workspace_and_a_pasted_issue_url_names_it() {
     ] {
         assert!(normalize_provider_site("linear", bad).is_err(), "{bad}");
     }
+}
+
+/// An issue's description becomes the excerpt: cut at
+/// `DESCRIPTION_MAX_CHARS`, with the true length beside it, and an uncut one
+/// reports exactly its own length.
+#[test]
+fn a_description_is_cut_to_the_excerpt_with_its_true_length() {
+    let cap = crate::service::trackers::DESCRIPTION_MAX_CHARS;
+    let f = FakeTransport::new();
+    let mut n = fixture("linear", "issues_mine_p1.json")["data"]["issues"]["nodes"][0].clone();
+    n["description"] = serde_json::json!("d".repeat(cap + 321));
+    let s = linear(&f).snapshot(&n).expect("a snapshot");
+    assert_eq!(
+        s.description.as_deref().map(|d| d.chars().count()),
+        Some(cap)
+    );
+    assert_eq!(s.description_chars, Some((cap + 321) as i64));
+    n["description"] = serde_json::json!("short one");
+    let s = linear(&f).snapshot(&n).expect("a snapshot");
+    assert_eq!(s.description.as_deref(), Some("short one"));
+    assert_eq!(s.description_chars, Some(9));
 }
