@@ -71,7 +71,8 @@ pub fn layout_item_types(layout: Layout) -> &'static [&'static str] {
         Layout::Cards => &["stat", "record", "notice", "link"],
         Layout::DataPage => &["stat", "record", "table", "chart", "notice", "link"],
         Layout::MasterDetail => &["field", "notice", "custom"],
-        Layout::Flow | Layout::ObjectEditor | Layout::ReviewApply => &[],
+        Layout::ReviewApply => &["notice", "link"],
+        Layout::Flow | Layout::ObjectEditor => &[],
     }
 }
 

@@ -39,6 +39,17 @@
         "null"
       ]
     },
+    "review": {
+      "description": "A `review_apply` page's proposals: what the page lists for a person\nto apply or reject.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReviewSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "sections": {
       "description": "Either `sections` or `tabs`, never both.",
       "type": "array",
@@ -415,6 +426,16 @@
           "description": "L7: stats, charts and tables over data sources.",
           "type": "string",
           "const": "data_page"
+        }
+      ]
+    },
+    "ReviewSource": {
+      "description": "What a `review_apply` page reviews. Closed: each is a list of proposed\nchanges with an apply and a reject command behind it.",
+      "oneOf": [
+        {
+          "description": "Settings an agent proposed over the control API (`set_setting\n{ propose: true }`): `setting_proposals`, applied or rejected with\n`decide_setting_proposals`.",
+          "type": "string",
+          "const": "settings"
         }
       ]
     },

@@ -3604,7 +3604,11 @@ fn the_served_definition_budget_stays_bounded() {
     // Declarative pages P1: `get_settings` gains `describe` (the registry's
     // metadata as a tool RESULT, so the description stays one line): +122 B,
     // measured at 62,377 on 2026-09-28; plus 100.
-    const BUDGET_BYTES: usize = 62_477;
+    // Declarative pages P5: `set_setting` gains `propose` and `why` (an
+    // agent's change as a proposal a person reviews, D-P4) — one clause on
+    // the description and two one-line field docs: +256 B, measured at
+    // 62,633 on 2026-09-28; plus 100.
+    const BUDGET_BYTES: usize = 62_733;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8001,6 +8005,8 @@ async fn get_settings_describe_returns_the_registry_with_values() {
         .set_setting(Parameters(SetSettingParams {
             key: "work.recent_days".into(),
             value: serde_json::json!(30),
+            propose: false,
+            why: None,
         }))
         .await
         .expect("set");
@@ -8036,6 +8042,8 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
         tools.set_setting(Parameters(SetSettingParams {
             key: key.into(),
             value,
+            propose: false,
+            why: None,
         }))
     };
     let v = result_json(
@@ -8125,6 +8133,60 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     );
     assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
     assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
+}
+
+/// Declarative pages P5: `set_setting { propose: true }` writes nothing; it
+/// leaves a proposal a person applies in Settings. A direct write is audited
+/// as the agent.
+#[tokio::test]
+async fn set_setting_propose_leaves_a_proposal_and_writes_are_audited() {
+    let (tools, _guards, store) = client_tools();
+    let v = result_json(
+        &tools
+            .set_setting(Parameters(SetSettingParams {
+                key: "work.recent_days".into(),
+                value: serde_json::json!(3),
+                propose: true,
+                why: Some("a shorter Recent list".into()),
+            }))
+            .await
+            .expect("propose"),
+    );
+    assert_eq!(v["state"], "pending");
+    assert_eq!(v["value"], "3");
+    assert_eq!(v["why"], "a shorter Recent list");
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_setting("work.recent_days").unwrap(), None);
+    }
+    // A confirmed change cannot even be proposed.
+    let err = tools
+        .set_setting(Parameters(SetSettingParams {
+            key: "work.auto_tidy".into(),
+            value: serde_json::json!(true),
+            propose: true,
+            why: None,
+        }))
+        .await
+        .expect_err("confirmed");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+
+    tools
+        .set_setting(Parameters(SetSettingParams {
+            key: "work.recent_days".into(),
+            value: serde_json::json!(5),
+            propose: false,
+            why: None,
+        }))
+        .await
+        .expect("write");
+    let s = store.lock().unwrap();
+    let h = crate::service::settings_review::history(&s, "work.recent_days", None).unwrap();
+    assert_eq!(h.len(), 1);
+    assert_eq!(
+        (h[0].actor.as_str(), h[0].actor_detail.as_deref()),
+        ("agent", Some("control API"))
+    );
 }
 
 // ---- add_project / list_github_repos (a hub client adds a project) --------

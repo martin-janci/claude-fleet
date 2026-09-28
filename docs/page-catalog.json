@@ -44,8 +44,11 @@
     },
     {
       "id": "review_apply",
-      "items": [],
-      "supported": false
+      "items": [
+        "notice",
+        "link"
+      ],
+      "supported": true
     },
     {
       "id": "data_page",

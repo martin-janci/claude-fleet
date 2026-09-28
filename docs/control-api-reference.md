@@ -477,9 +477,9 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 ### `set_setting`
 
-Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings.
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings, or with propose the proposal.
 
-Parameters: `key`, `value`
+Parameters: `key`, `propose`, `value`, `why`
 
 ### `spawn_review`
 
@@ -655,6 +655,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::flow_submit`
 - `commands::pages::flow_back`
 - `commands::pages::flow_cancel`
+- `commands::pages::setting_proposals`
+- `commands::pages::decide_setting_proposals`
+- `commands::pages::setting_history`
 - `commands::sessions::set_fleet_setting`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`

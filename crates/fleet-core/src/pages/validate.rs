@@ -401,7 +401,15 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
             }
             _ => {}
         }
+        let reviews = page.layout == super::model::Layout::ReviewApply;
+        match (page.review.is_some(), reviews) {
+            (true, false) => cx.bad("", "only a review_apply page names a review"),
+            (false, true) => cx.bad("", "a review_apply page names what it reviews"),
+            _ => {}
+        }
         match (page.sections.is_empty(), page.tabs.is_empty()) {
+            // The proposals are the page: notes around them are optional.
+            (true, true) if reviews => {}
             (true, true) => cx.bad("", "a page needs sections or tabs"),
             (false, false) => cx.bad("", "a page has sections or tabs, not both"),
             _ => {}

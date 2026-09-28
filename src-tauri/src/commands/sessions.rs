@@ -355,7 +355,13 @@ pub fn set_fleet_setting(
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
     backend.refuse_local_only("set_fleet_setting")?;
     let s = lock(&store)?;
-    fleet_core::service::settings::set(&s, &key, &value)?;
+    fleet_core::service::settings::set_by(
+        &s,
+        &key,
+        &value,
+        fleet_core::service::settings::Actor::Person,
+        None,
+    )?;
     Ok(fleet_core::service::settings::read_all(&s))
 }
 

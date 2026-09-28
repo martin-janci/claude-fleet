@@ -412,7 +412,7 @@ impl FleetTools {
 
     #[tool(description = "Change one get_settings key, validated; E_INVALID \
         otherwise. mcp.*, hub.* and controller.* are refused. Master token \
-        only. Returns the settings.")]
+        only. Returns the settings, or with propose the proposal.")]
     pub(super) async fn set_setting(
         &self,
         Parameters(p): Parameters<SetSettingParams>,
@@ -429,9 +429,26 @@ impl FleetTools {
             )),
             other => other.to_string(),
         };
+        let actor = crate::service::settings::Actor::Agent("control API");
+        if p.propose {
+            let row = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                crate::service::settings_review::propose(
+                    &s,
+                    &p.key,
+                    &value,
+                    p.why.as_deref(),
+                    actor,
+                )
+                .map_err(to_mcp_err)?
+            };
+            tracing::info!(key = %p.key.escape_debug(), id = row.id, "[mcp] proposed a setting");
+            return ok_json_compact(&row);
+        }
         let all = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::service::settings::set(&s, &p.key, &value).map_err(to_mcp_err)?;
+            crate::service::settings::set_by(&s, &p.key, &value, actor, None)
+                .map_err(to_mcp_err)?;
             crate::service::settings::read_all(&s)
         };
         tracing::info!(key = %p.key.escape_debug(), "[mcp] changed a setting");

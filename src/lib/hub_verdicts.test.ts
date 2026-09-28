@@ -165,6 +165,12 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   gatedByReadonlyResourcePage: ['flow_start', 'flow_submit', 'flow_back', 'flow_cancel'],
   gatedBySettingsDialog: [
     'set_fleet_setting',
+    // Declarative pages P5: proposals and history are read only when the
+    // app owns the fleet (SettingsDialog's own gate); a paired desktop's
+    // pages show the hub reason and render no suggestion or History.
+    'setting_proposals',
+    'decide_setting_proposals',
+    'setting_history',
     'describe_fleet_settings',
     'fetch_page_source',
     'work_retention_status',

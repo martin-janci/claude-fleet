@@ -86,6 +86,8 @@ export interface Page {
   resource?: string;
   /** A `master_detail` page's items about the whole list. */
   list_items?: Item[];
+  /** A `review_apply` page's proposals (`pages/review.ts`). */
+  review?: 'settings';
   sections?: Section[];
   tabs?: Tab[];
 }

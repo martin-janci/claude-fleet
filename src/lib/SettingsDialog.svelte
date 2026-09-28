@@ -11,6 +11,7 @@
     settingValues,
   } from './pages/pages';
   import { subscribeToRowEvents } from './events';
+  import { loadProposals, settingProposals } from './pages/review';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
@@ -210,11 +211,17 @@
     // Settings while mcpStatus() is in flight leaves it unset — and a throw
     // here would also skip resetProjectDrafts() below.
     mcpSettings?.applyStatus(r);
-    const [fs, ds] = await Promise.all([loadFleetSettings(), loadDescriptors()]);
+    const [fs, ds] = await Promise.all([loadFleetSettings(), loadDescriptors(), loadProposals()]);
     if (!fs.ok) settingsLoadError = fs.error.message;
     else if (!ds.ok) settingsLoadError = ds.error.message;
     resetProjectDrafts();
-    const off = await subscribeToRowEvents({ onSettingsChanged: () => void loadFleetSettings() });
+    // A write, a proposal or a review: re-read the values and what waits.
+    const off = await subscribeToRowEvents({
+      onSettingsChanged: () => {
+        void loadFleetSettings();
+        void loadProposals();
+      },
+    });
     if (destroyed) off();
     else unlistenSettings = off;
     // Last, and only standalone: on macOS this reads the keychain, which is
@@ -345,7 +352,13 @@
       <button class="close" onclick={onClose} aria-label="Close">×</button>
     </header>
     <div class="settings-body">
-    <SettingsNav pages={$pagesBundle.pages} descs={$descriptors} values={$settingValues} selected={view} onselect={select} />
+    <SettingsNav
+      pages={$pagesBundle.pages}
+      descs={$descriptors}
+      values={$settingValues}
+      selected={view}
+      counts={ownsFleet ? { 'settings.review': $settingProposals.length } : {}}
+      onselect={select} />
     <div class="settings-content">
     {#if view === 'general'}
 
@@ -806,7 +819,9 @@
             sources={$pagesBundle.sources}
             resources={$pagesBundle.resources}
             {focusKey}
-            onnavigate={(id) => select(id)} />
+            proposals={$settingProposals}
+            onnavigate={(id) => select(id)}
+            onopen={(id, key) => select(id, key)} />
         {/key}
       {/if}
     {/if}

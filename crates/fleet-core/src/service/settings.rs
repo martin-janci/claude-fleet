@@ -1390,9 +1390,37 @@ pub fn describe(s: &Store) -> Vec<Descriptor> {
         .collect()
 }
 
-/// Validate then persist one setting. A `PathMap` is stored normalised
-/// (trimmed paths, sorted keys).
-pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
+/// Who wrote a setting, as the audit trail records it (design §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Actor<'a> {
+    /// A person, in a settings page or a review.
+    Person,
+    /// An agent over the control API (the master token); the detail names it.
+    Agent(&'a str),
+    /// Fleet itself (a migration of a value, a background pass).
+    System,
+}
+
+impl Actor<'_> {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Actor::Person => "person",
+            Actor::Agent(_) => "agent",
+            Actor::System => "system",
+        }
+    }
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Actor::Agent(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+/// Validate `value` for `key` and return the form it is stored in: a
+/// `PathMap` trimmed with sorted keys, a `ChoiceSet` in option order, an
+/// `IdSet` / `PriceMap` as canonical JSON, anything else trimmed.
+pub fn normalize(key: &str, value: &str) -> Result<String, IpcError> {
     if let Some(how) = spec(key).and_then(|sp| sp.owned_by) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -1401,7 +1429,7 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
     }
     validate(key, value)?;
     let v = value.trim();
-    let stored = match spec(key).map(|sp| sp.kind) {
+    Ok(match spec(key).map(|sp| sp.kind) {
         Some(Kind::PathMap) => serde_json::to_string(&parse_path_map(key, v)?)
             .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?,
         Some(Kind::ChoiceSet(options)) => parse_choice_set(key, options, v)?.join(","),
@@ -1412,8 +1440,50 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
                 .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?
         }
         _ => v.to_string(),
+    })
+}
+
+/// The effective value of a registered key (stored, else its default), as
+/// a page shows it. `None` for a key that is not registered.
+pub fn effective_value(s: &Store, key: &str) -> Option<String> {
+    spec(key).map(|sp| effective(s, sp))
+}
+
+/// Validate then persist one setting, as fleet itself ([`Actor::System`]).
+/// A `PathMap` is stored normalised (trimmed paths, sorted keys).
+pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
+    set_by(s, key, value, Actor::System, None)
+}
+
+/// Validate then persist one setting on behalf of `actor`. A registered
+/// key's write that changes the stored value is recorded in the audit trail
+/// with `proposal`, the proposal it applies, if any.
+pub fn set_by(
+    s: &Store,
+    key: &str,
+    value: &str,
+    actor: Actor<'_>,
+    proposal: Option<i64>,
+) -> Result<(), IpcError> {
+    let stored = normalize(key, value)?;
+    let before = if spec(key).is_some() {
+        Some(s.get_setting(key)?)
+    } else {
+        None
     };
     s.set_setting(key, &stored)?;
+    if let Some(before) = before {
+        if before.as_deref() != Some(stored.as_str()) {
+            s.insert_setting_audit(
+                key,
+                before.as_deref(),
+                &stored,
+                actor.word(),
+                actor.detail(),
+                proposal,
+            )?;
+        }
+    }
     s.emit_settings_changed(key);
     Ok(())
 }

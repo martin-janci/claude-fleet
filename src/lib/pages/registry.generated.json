@@ -1495,6 +1495,10 @@
             {
               "page": "settings.control_api",
               "type": "link"
+            },
+            {
+              "page": "settings.review",
+              "type": "link"
             }
           ],
           "title": "Running the fleet"
@@ -2310,6 +2314,27 @@
       ],
       "spec": "fleet.page/1",
       "title": "Organisations"
+    },
+    {
+      "id": "settings.review",
+      "intro": "Settings an agent proposed. Nothing changes until you apply it.",
+      "layout": "review_apply",
+      "parent": "settings",
+      "review": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "text": "An agent proposes with set_setting { propose: true } and says why. A change that needs confirming is never proposed, and one you reject stays rejected until the agent proposes again. Every applied change is in the setting's History.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "How proposals work"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Proposed changes"
     },
     {
       "id": "usage",

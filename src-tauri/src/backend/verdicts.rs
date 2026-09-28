@@ -656,6 +656,27 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "setting_proposals",
+        Verdict::LocalOnly {
+            instead: "settings proposals and their history belong to the fleet's settings, \
+                      which the hub owns; review them on the hub with fleet-hub settings proposals",
+        },
+    ),
+    (
+        "decide_setting_proposals",
+        Verdict::LocalOnly {
+            instead: "settings proposals and their history belong to the fleet's settings, \
+                      which the hub owns; review them on the hub with fleet-hub settings proposals",
+        },
+    ),
+    (
+        "setting_history",
+        Verdict::LocalOnly {
+            instead: "settings proposals and their history belong to the fleet's settings, \
+                      which the hub owns; read a setting's history on the hub with fleet-hub settings history <key>",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \

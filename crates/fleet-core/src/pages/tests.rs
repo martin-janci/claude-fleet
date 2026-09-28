@@ -425,11 +425,42 @@ fn the_catalog_names_what_the_validator_accepts() {
         .collect();
     assert_eq!(
         supported,
-        ["category", "master_detail", "cards", "data_page"]
+        [
+            "category",
+            "master_detail",
+            "cards",
+            "review_apply",
+            "data_page"
+        ]
     );
     assert_eq!(
         v["settings"].as_array().unwrap().len(),
         SPECS.len(),
         "every setting is in the catalog"
     );
+}
+
+// ── P5: review_apply ──
+
+#[test]
+fn a_review_page_names_its_review_and_needs_no_sections() {
+    let ok = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "review_apply",
+        "review": "settings"
+    }));
+    assert_eq!(messages(&[ok]), "");
+    let missing = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "review_apply"
+    }));
+    assert!(messages(&[missing]).contains("names what it reviews"));
+    let mut elsewhere = category(json!([{ "type": "field", "key": "gc.enabled" }]));
+    elsewhere.review = Some(super::model::ReviewSource::Settings);
+    assert!(messages(&[elsewhere]).contains("only a review_apply page names a review"));
+    let field = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "review_apply",
+        "review": "settings",
+        "sections": [{ "title": "S", "items": [{ "type": "field", "key": "gc.enabled" }] }]
+    }));
+    let m = messages(&[field]);
+    assert!(m.contains("ReviewApply page cannot hold a `field`"), "{m}");
 }

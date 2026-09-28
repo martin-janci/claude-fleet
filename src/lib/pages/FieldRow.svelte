@@ -16,6 +16,15 @@
     type Descriptor,
     type Widget,
   } from './pages';
+  import { ago } from './resources';
+  import {
+    decideProposals,
+    settingHistory,
+    valueInWords,
+    whoWords,
+    type SettingAudit,
+    type SettingProposal,
+  } from './review';
 
   let {
     d,
@@ -24,6 +33,8 @@
     hint,
     highlighted = false,
     readonly: forceReadonly = false,
+    proposal,
+    now = () => Math.floor(Date.now() / 1000),
   }: {
     d: Descriptor;
     value: string;
@@ -32,6 +43,10 @@
     highlighted?: boolean;
     /** Show without editing (a hub client, where the backend refuses). */
     readonly?: boolean;
+    /** An agent's pending proposal for this setting (P5): shown as a
+     *  suggestion the person applies or rejects, never applied by itself. */
+    proposal?: SettingProposal;
+    now?: () => number;
   } = $props();
 
   const DEFAULT_WIDGET: Record<Descriptor['kind']['type'], Widget> = {
@@ -143,6 +158,28 @@
     write(JSON.stringify(Object.fromEntries(rows.filter(([k]) => k.trim() !== ''))));
   }
 
+  // P5: the agent's suggestion, and who changed this setting before.
+  let whyOpen = $state(false);
+  async function decideSuggestion(apply: boolean) {
+    if (!proposal) return;
+    busy = true;
+    error = null;
+    const r = await decideProposals(apply ? [proposal.id] : [], apply ? [] : [proposal.id]);
+    busy = false;
+    if (!r.ok) error = r.error.message;
+    else if (r.value.failed.length) error = r.value.failed[0].error;
+  }
+
+  let history = $state<SettingAudit[] | null>(null);
+  let historyOpen = $state(false);
+  async function toggleHistory() {
+    historyOpen = !historyOpen;
+    if (!historyOpen) return;
+    const r = await settingHistory(d.key);
+    if (r.ok) history = r.value;
+    else error = r.error.message;
+  }
+
   const ids = $derived.by<number[]>(() => {
     try {
       const v: unknown = JSON.parse(value || '[]');
@@ -168,6 +205,15 @@
     {#if d.tags.includes('experimental')}<span class="tag">experimental</span>{/if}
     {#if d.restart === 'app'}<span class="tag" title="Read once at launch">applies after a restart</span>{/if}
     {#if d.restart === 'hooks'}<span class="tag" title="Takes effect on each host's next hook install">applies when hooks are reinstalled</span>{/if}
+    {#if !readonly && d.owned_by === undefined}
+      <button
+        type="button"
+        class="btn btn--quiet history-btn"
+        aria-expanded={historyOpen}
+        data-testid={`setting-history-${d.key}`}
+        onclick={() => void toggleHistory()}>History</button
+      >
+    {/if}
     {#if modified && !readonly}
       <button
         type="button"
@@ -342,6 +388,35 @@
     {/if}
   </div>
 
+  {#if proposal && !readonly}
+    <div class="suggestion" data-testid={`setting-suggestion-${d.key}`}>
+      <span class="chip">✦ suggested by {whoWords(proposal.source, proposal.source_detail)}</span>
+      <span class="proposed" data-testid={`setting-suggestion-value-${d.key}`}>{valueInWords(d, proposal.value)}</span>
+      <button
+        type="button"
+        class="btn"
+        disabled={busy}
+        data-testid={`setting-suggestion-apply-${d.key}`}
+        aria-label={`Apply the suggested ${d.label}`}
+        onclick={() => void decideSuggestion(true)}>✓ Apply</button
+      >
+      <button
+        type="button"
+        class="btn btn--quiet"
+        disabled={busy}
+        data-testid={`setting-suggestion-reject-${d.key}`}
+        aria-label={`Reject the suggested ${d.label}`}
+        onclick={() => void decideSuggestion(false)}>✗ Not this</button
+      >
+      {#if proposal.why}
+        <button type="button" class="btn btn--quiet" aria-expanded={whyOpen} onclick={() => (whyOpen = !whyOpen)}
+          >Why?</button
+        >
+        {#if whyOpen}<p class="why" data-testid={`setting-suggestion-why-${d.key}`}>“{proposal.why}”</p>{/if}
+      {/if}
+    </div>
+  {/if}
+
   <p class="help" id={`${id}-help`}>
     {d.help}
     {#if range}<span class="range">({range})</span>{/if}
@@ -349,6 +424,24 @@
     {#if d.owned_by}<span class="owner">Change it with {d.owned_by}.</span>{/if}
   </p>
   {#if error}<p class="err" role="alert" data-testid={`setting-error-${d.key}`}>{error}</p>{/if}
+  {#if historyOpen}
+    <div class="history" data-testid={`setting-history-list-${d.key}`}>
+      {#if history === null}
+        loading…
+      {:else if history.length === 0}
+        No changes recorded yet.
+      {:else}
+        <ul>
+          {#each history as h (h.id)}
+            <li>
+              {ago(h.at, now())} · {h.before == null ? `default (${valueInWords(d, d.default)})` : valueInWords(d, h.before)}
+              → {valueInWords(d, h.after)} · {whoWords(h.actor, h.actor_detail)}{#if h.proposal_id}, applying proposal #{h.proposal_id}{/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 {#if pending !== null && d.danger.level === 'confirm'}
@@ -388,8 +481,15 @@
     font-size: 0.85rem;
     font-weight: 500;
   }
-  .reset {
+  .reset,
+  .history-btn {
     margin-left: auto;
+  }
+  .history-btn ~ .reset {
+    margin-left: 0;
+  }
+  .history-btn {
+    font-size: 0.72rem;
   }
   .control {
     display: flex;
@@ -466,5 +566,37 @@
     margin: 0.2rem 0 0;
     font-size: 0.75rem;
     color: var(--usage-crit);
+  }
+  .suggestion {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.3rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px dashed var(--accent);
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
+  }
+  .suggestion .chip {
+    color: var(--accent);
+  }
+  .suggestion .proposed {
+    font-weight: 600;
+    opacity: 0.85;
+  }
+  .suggestion .why {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--fg-muted);
+  }
+  .history {
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+    margin-top: 0.25rem;
+  }
+  .history ul {
+    margin: 0;
+    padding-left: 1rem;
   }
 </style>

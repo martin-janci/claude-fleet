@@ -11,6 +11,7 @@
     descs,
     values,
     selected,
+    counts = {},
     onselect,
   }: {
     pages: Page[];
@@ -18,6 +19,8 @@
     values: Record<string, string>;
     /** `general`, or a page id. */
     selected: string;
+    /** A badge by a page's name: proposals waiting for review. */
+    counts?: Record<string, number>;
     onselect: (view: string, focusKey?: string) => void;
   } = $props();
 
@@ -78,7 +81,10 @@
             class:depth1={e.depth === 1}
             aria-current={selected === e.id ? 'page' : undefined}
             data-testid={`settings-nav-${e.id}`}
-            onclick={() => onselect(e.id)}>{e.title}</button
+            onclick={() => onselect(e.id)}
+            >{e.title}{#if counts[e.id]}<span class="count" data-testid={`settings-nav-count-${e.id}`}
+                aria-label={`${counts[e.id]} waiting`}>{counts[e.id]}</span
+              >{/if}</button
           >
         </li>
       {/each}
@@ -143,5 +149,13 @@
     font-size: 0.8rem;
     color: var(--fg-muted);
     padding: 0.3rem 0.45rem;
+  }
+  .count {
+    margin-left: 0.4rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 0.7rem;
   }
 </style>

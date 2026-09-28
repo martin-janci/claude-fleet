@@ -12,6 +12,8 @@
   import WorkRetention from '../WorkRetention.svelte';
   import AutoTidyPreview from '../AutoTidyPreview.svelte';
   import ResourcePage from './ResourcePage.svelte';
+  import ReviewApply from './ReviewApply.svelte';
+  import type { SettingProposal } from './review';
   import type { ResourceType } from './resources';
   import { evalCondition, sectionsOf, type Descriptor, type Page, type Section, type SourceSpec } from './pages';
 
@@ -25,7 +27,9 @@
     focusKey = null,
     readonly = false,
     reason = null,
+    proposals = [],
     onnavigate,
+    onopen,
   }: {
     page: Page;
     pages: Page[];
@@ -39,8 +43,15 @@
     focusKey?: string | null;
     /** Show every field without editing (a hub client). */
     readonly?: boolean;
+    /** Pending settings proposals (P5): a field shows its own inline, a
+     *  review_apply page lists them all. */
+    proposals?: SettingProposal[];
     onnavigate: (pageId: string) => void;
+    /** Open a setting on its page (a review row's name). */
+    onopen?: (pageId: string, key: string) => void;
   } = $props();
+
+  const proposalOf = $derived(new Map(proposals.map((p) => [p.key, p])));
 
   const tabs = $derived((page.tabs ?? []).filter((t) => evalCondition(t.when, values)));
   let tab = $state(0);
@@ -89,6 +100,10 @@
   </header>
   {#if page.intro}<p class="intro">{page.intro}</p>{/if}
 
+  {#if page.layout === 'review_apply'}
+    <ReviewApply {proposals} {pages} {descs} {readonly} {onopen} />
+  {/if}
+
   {#if page.layout === 'master_detail'}
     {@const res = resources.find((r) => r.id === page.resource)}
     {#if res}
@@ -127,6 +142,7 @@
             widget={item.widget}
             hint={item.hint}
             highlighted={focusKey === item.key}
+            proposal={proposalOf.get(item.key)}
             {readonly} />
         {/if}
       {:else if item.type === 'notice'}

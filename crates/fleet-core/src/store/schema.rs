@@ -710,6 +710,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/071_usage_daily_backfill.sql"),
         already_applied: Some(usage_daily_has_backfill),
     },
+    // Declarative pages P5: `setting_proposals` and `setting_audit`. New
+    // tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(72, include_str!("../../migrations/072_setting_review.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

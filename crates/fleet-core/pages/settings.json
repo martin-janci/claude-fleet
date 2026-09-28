@@ -27,6 +27,10 @@
         {
           "type": "link",
           "page": "settings.control_api"
+        },
+        {
+          "type": "link",
+          "page": "settings.review"
         }
       ]
     },

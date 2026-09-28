@@ -900,6 +900,12 @@ pub struct SetSettingParams {
     pub key: String,
     /// An object or array is stored as its JSON.
     pub value: serde_json::Value,
+    /// Only propose it: a person applies or rejects it in Settings.
+    #[serde(default)]
+    pub propose: bool,
+    /// With propose: why, shown to the person (≤500 chars).
+    #[serde(default)]
+    pub why: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

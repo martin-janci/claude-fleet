@@ -29,6 +29,7 @@ mod rows;
 pub(crate) mod scale_fixture;
 mod schema;
 mod sessions;
+mod setting_review;
 mod tasks;
 #[cfg(test)]
 mod test_support;
@@ -82,6 +83,10 @@ pub use rows::*;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub use setting_review::{
+    NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
+    SETTING_AUDIT_KEEP,
+};
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{

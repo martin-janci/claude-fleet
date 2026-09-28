@@ -43,11 +43,27 @@ pub struct Page {
     /// above the list: notices and custom items only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub list_items: Vec<Item>,
+    /// A `review_apply` page's proposals: what the page lists for a person
+    /// to apply or reject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewSource>,
     /// Either `sections` or `tabs`, never both.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<Section>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<Tab>,
+}
+
+/// What a `review_apply` page reviews. Closed: each is a list of proposed
+/// changes with an apply and a reject command behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewSource {
+    /// Settings an agent proposed over the control API (`set_setting
+    /// { propose: true }`): `setting_proposals`, applied or rejected with
+    /// `decide_setting_proposals`.
+    Settings,
 }
 
 /// The prepared layouts (design §4). A layout decides spacing, saving

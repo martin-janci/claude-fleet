@@ -11,6 +11,7 @@ mod pair;
 mod peer;
 mod reports;
 mod serve;
+mod settings;
 mod tls;
 mod tracker;
 mod work;
@@ -147,6 +148,15 @@ enum Cmd {
     Decide {
         #[command(subcommand)]
         cmd: decide::DecideCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Review settings proposals an agent made over the control API, and
+    /// read a setting's history (declarative pages P5). Reads and writes
+    /// the database directly, as the person at this console.
+    Settings {
+        #[command(subcommand)]
+        cmd: settings::SettingsCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -319,6 +329,7 @@ async fn main() -> ExitCode {
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
+        Cmd::Settings { cmd, opts } => settings::run(cmd, &opts, &env),
         Cmd::Reports {
             limit,
             since,

@@ -106,3 +106,47 @@ pub fn flow_cancel(flow_id: String, backend: State<'_, Arc<FleetBackend>>) -> Re
     fleet_core::pages::flows::cancel(&flow_id);
     Ok(())
 }
+
+// ── proposals and history (declarative pages P5, layout L6) ─────────────────
+//
+// An agent proposes a setting over the control API (`set_setting { propose:
+// true }`); a person reviews it here. Local-only like the settings they
+// change: on a paired desktop the hub owns them.
+
+/// Every pending settings proposal, with each key's value now.
+#[tauri::command]
+pub fn setting_proposals(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<fleet_core::service::settings_review::ProposalView>, IpcError> {
+    backend.refuse_local_only("setting_proposals")?;
+    let s = lock(&store)?;
+    fleet_core::service::settings_review::pending(&s)
+}
+
+/// A person's review: apply `accept`, reject `reject`. Each is decided on
+/// its own; what could not be is in `failed`.
+#[tauri::command]
+pub fn decide_setting_proposals(
+    accept: Vec<i64>,
+    reject: Vec<i64>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<fleet_core::service::settings_review::Decided, IpcError> {
+    backend.refuse_local_only("decide_setting_proposals")?;
+    let s = lock(&store)?;
+    fleet_core::service::settings_review::decide(&s, &accept, &reject)
+}
+
+/// One setting's writes, newest first: who, when, before → after.
+#[tauri::command]
+pub fn setting_history(
+    key: String,
+    limit: Option<i64>,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<fleet_core::store::SettingAuditRow>, IpcError> {
+    backend.refuse_local_only("setting_history")?;
+    let s = lock(&store)?;
+    fleet_core::service::settings_review::history(&s, &key, limit)
+}

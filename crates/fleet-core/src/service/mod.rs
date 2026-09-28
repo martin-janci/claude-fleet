@@ -57,6 +57,7 @@ pub mod sessions;
 pub mod settings;
 #[cfg(test)]
 mod settings_doc_gen;
+pub mod settings_review;
 pub mod tasks;
 pub mod tick;
 pub mod trackers;
