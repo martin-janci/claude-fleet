@@ -77,6 +77,43 @@ struct SshClientInner {
     mux: bool,
 }
 
+/// Environment variable naming the `ssh` program to run, overriding the
+/// default below: a Cygwin or MSYS2 `ssh.exe`, or any other build.
+pub const SSH_BINARY_ENV: &str = "CLAUDE_FLEET_SSH";
+
+/// The `ssh` program fleet runs, for every probe, the attached terminal and
+/// the tunnels alike: `$CLAUDE_FLEET_SSH` when set, else, on Windows,
+/// `%SystemRoot%\System32\OpenSSH\ssh.exe` when it is there, else `ssh`
+/// from PATH.
+///
+/// Why Windows does not simply take the first `ssh` on PATH: a machine with
+/// Git for Windows, MSYS2 or Cygwin often has theirs ahead of the system one,
+/// and each of those reads a different home (`~/.ssh`), talks to a different
+/// agent, and knows nothing of the Windows `ssh-agent` service the user
+/// loaded their key into. Under `BatchMode=yes` that surfaces only as
+/// "Permission denied (publickey)" on some calls and not others — whichever
+/// resolved which binary. One deterministic choice, overridable, instead.
+pub fn default_ssh_binary() -> PathBuf {
+    if let Some(p) = std::env::var_os(SSH_BINARY_ENV).filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    if cfg!(windows) {
+        if let Some(p) = windows_openssh() {
+            return p;
+        }
+    }
+    PathBuf::from("ssh")
+}
+
+/// `%SystemRoot%\System32\OpenSSH\ssh.exe`, when it exists.
+pub fn windows_openssh() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var_os("SystemRoot")?)
+        .join("System32")
+        .join("OpenSSH")
+        .join("ssh.exe");
+    p.is_file().then_some(p)
+}
+
 /// Whether this platform's `ssh` can multiplex (ControlMaster over a Unix
 /// socket). Win32-OpenSSH cannot, so a Windows desktop runs every call as a
 /// fresh connection — see docs/windows.md for what that costs and why
@@ -126,7 +163,7 @@ impl SshClient {
     /// [`SshClient::new`] with multiplexing forced on or off rather than
     /// left to [`mux_supported`]: how a test pins either platform's flags.
     pub fn new_with_mux(mux: bool) -> Self {
-        Self::build_with(None, PathBuf::from("ssh"), mux)
+        Self::build_with(None, default_ssh_binary(), mux)
     }
 
     /// Whether this client shares a ControlMaster per host.
@@ -151,7 +188,7 @@ impl SshClient {
     }
 
     fn build(route: Option<Arc<crate::agent::HostRouter>>) -> Self {
-        Self::build_with(route, PathBuf::from("ssh"), mux_supported())
+        Self::build_with(route, default_ssh_binary(), mux_supported())
     }
 
     fn build_with(
@@ -190,8 +227,41 @@ impl SshClient {
     /// A fresh `Command` for the configured ssh binary (`"ssh"` in
     /// production, a fake script under test — see
     /// [`SshClient::with_ssh_binary`]).
+    ///
+    /// stdin is null unless a caller pipes it (`run_child_io` does, for an
+    /// upload): what `ssh -n` would do. The Windows release app has no stdin
+    /// to inherit, and Win32-OpenSSH duplicates its stdin handle when the
+    /// session opens.
     fn ssh_command(&self) -> tokio::process::Command {
-        tokio::process::Command::new(&self.inner.ssh_bin)
+        let mut cmd = crate::proc::command(&self.inner.ssh_bin);
+        cmd.stdin(std::process::Stdio::null());
+        cmd
+    }
+
+    /// The command that runs `args` on `host`: `ssh <opts> -- <host> <args>`,
+    /// or, for a WSL distribution found on this machine
+    /// ([`crate::wsl::distro_for`]), `wsl.exe` running the same words under
+    /// `sh -c`, where `opts` (ssh's own) do not apply.
+    fn remote_command(
+        &self,
+        host: &str,
+        opts: &[String],
+        args: &[&str],
+    ) -> tokio::process::Command {
+        if let Some(distro) = crate::wsl::distro_for(host) {
+            return crate::wsl::command(&distro, args);
+        }
+        let mut cmd = self.ssh_command();
+        cmd.args(opts);
+        // `--` ends option parsing — the host can never be read as an ssh
+        // option even if validation upstream were bypassed.
+        cmd.arg("--").arg(host).args(args);
+        cmd
+    }
+
+    /// The `ssh` program this client runs (see [`default_ssh_binary`]).
+    pub fn ssh_binary(&self) -> &Path {
+        &self.inner.ssh_bin
     }
 
     /// The registry this client routes agent hosts through, if it has one.
@@ -386,16 +456,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, connect_timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            // `--` ends option parsing — the host can never be read as an
-            // ssh option even if validation upstream were bypassed.
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", None)
             .await
     }
@@ -421,14 +482,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, connect_timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", Some(max_output))
             .await
     }
@@ -462,11 +516,7 @@ impl SshClient {
             ));
         }
         self.inner.seen.insert(host.to_string(), ());
-        let mut cmd = self.ssh_command();
-        for opt in self.mux_opts(host, connect_timeout) {
-            cmd.arg(opt);
-        }
-        cmd.arg("--").arg(host).args(args);
+        let cmd = self.remote_command(host, &self.mux_opts(host, connect_timeout), args);
         self.run_child_io(
             host,
             cmd,
@@ -503,14 +553,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, connect_timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, Some(token), "E_SSH", None)
             .await
     }
@@ -540,14 +583,7 @@ impl SshClient {
         }
         self.inner.seen.insert(host.to_string(), ());
         let mux_opts = self.mux_opts(host, timeout);
-        let build = || {
-            let mut cmd = self.ssh_command();
-            for opt in &mux_opts {
-                cmd.arg(opt);
-            }
-            cmd.arg("--").arg(host).args(args);
-            cmd
-        };
+        let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(
             host,
             build,
@@ -584,14 +620,10 @@ impl SshClient {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        let mut cmd = self.ssh_command();
-        for opt in self.mux_opts(host, timeout) {
-            cmd.arg(opt);
-        }
         // Single remote word: the remote login shell runs `cat > 'path'`,
         // reading the piped file from stdin. Path is single-quoted.
         let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
-        cmd.arg("--").arg(host).arg(&remote_cmd);
+        let mut cmd = self.remote_command(host, &self.mux_opts(host, timeout), &[&remote_cmd]);
         cmd.stdin(std::process::Stdio::from(file));
         let out = self
             .run_child(host, cmd, UPLOAD_WALL_CLOCK, None, "E_UPLOAD")
@@ -941,7 +973,7 @@ impl SshClient {
         let hosts: Vec<String> = self.inner.seen.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
             for path in [self.control_path(&host), self.control_path_for_pty(&host)] {
-                let _ = std::process::Command::new(&self.inner.ssh_bin)
+                let _ = crate::proc::std_command(&self.inner.ssh_bin)
                     .args([
                         "-o",
                         &format!("ControlPath={}", path.display()),
@@ -1154,7 +1186,7 @@ pub async fn run_shell_bounded(
 }
 
 async fn run_local_shell(script: &str, wall_clock: Duration) -> Result<Output, IpcError> {
-    let child = tokio::process::Command::new("bash")
+    let child = crate::proc::command("bash")
         .args(["-lc", script])
         .kill_on_drop(true)
         .output();
@@ -1180,7 +1212,7 @@ async fn run_local_with_stdin(
     max_output: usize,
 ) -> Result<Output, IpcError> {
     let host = crate::service::projects::LOCAL_HOST;
-    let mut child = tokio::process::Command::new("bash")
+    let mut child = crate::proc::command("bash")
         .arg("-c")
         .arg(args.join(" "))
         .stdin(std::process::Stdio::piped())
@@ -1592,7 +1624,7 @@ impl LocalExec {
     }
 
     fn command(&self, args: &[&str]) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("bash");
+        let mut cmd = crate::proc::command("bash");
         cmd.arg("-c").arg(args.join(" "));
         for k in &self.env_remove {
             cmd.env_remove(k);
@@ -1870,6 +1902,69 @@ mod tests {
         );
         let other = std::io::Error::other("boom");
         assert_eq!(spawn_error_message("h", &other), "ssh spawn h: boom");
+    }
+
+    /// A WSL host runs through wsl.exe with the same words under `sh -c`;
+    /// anything else is `ssh <opts> -- <host> <args>` with this client's
+    /// binary.
+    #[test]
+    fn remote_command_routes_a_wsl_host_through_wsl_exe() {
+        let _table = crate::wsl::TEST_TABLE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::wsl::set_for_tests(vec![("wsl-ubuntu".into(), "Ubuntu".into())]);
+        let c = SshClient::new_with_mux(false);
+        let opts = vec!["-o".to_string(), "BatchMode=yes".to_string()];
+        let argv = |cmd: &tokio::process::Command| -> (String, Vec<String>) {
+            let std = cmd.as_std();
+            (
+                std.get_program().to_string_lossy().into_owned(),
+                std.get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            )
+        };
+
+        let (prog, args) = argv(&c.remote_command("wsl-ubuntu", &opts, &["printenv", "HOME"]));
+        assert!(prog.ends_with("wsl.exe"), "{prog}");
+        assert_eq!(
+            args,
+            [
+                "--distribution",
+                "Ubuntu",
+                "--exec",
+                "sh",
+                "-c",
+                "printenv HOME"
+            ]
+        );
+
+        let (prog, args) = argv(&c.remote_command("mefistos", &opts, &["printenv", "HOME"]));
+        assert_eq!(prog, c.ssh_binary().to_string_lossy());
+        assert_eq!(
+            args,
+            ["-o", "BatchMode=yes", "--", "mefistos", "printenv", "HOME"]
+        );
+        crate::wsl::set_for_tests(Vec::new());
+    }
+
+    #[test]
+    fn the_ssh_binary_can_be_overridden_and_defaults_sensibly() {
+        // Read-only on the environment: the override itself is exercised by
+        // the doc'd env var, which a parallel test must not flip.
+        let d = default_ssh_binary();
+        if std::env::var_os(SSH_BINARY_ENV).is_none() {
+            if cfg!(windows) {
+                assert!(
+                    d == Path::new("ssh") || windows_openssh().as_deref() == Some(d.as_path()),
+                    "{}",
+                    d.display()
+                );
+            } else {
+                assert_eq!(d, PathBuf::from("ssh"));
+            }
+        }
+        assert_eq!(SshClient::new().ssh_binary(), d.as_path());
     }
 
     #[test]

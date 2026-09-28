@@ -128,6 +128,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   SSH/bash command string MUST be quoted with it. The former duplicate copies
   (`shell_quote`/`shell_quote_str`/`shell_escape`) were consolidated — do not
   reintroduce them.
+- Every child process is built by `fleet_core::proc::command` /
+  `std_command`, never `Command::new`: on Windows they set `CREATE_NO_WINDOW`,
+  without which each `ssh.exe` a probe spawns flashes a console window.
+  `no_eprintln_tests::production_code_spawns_through_proc` enforces it.
 - SQLite access goes through `Store` behind a `std::sync::Mutex`. Never hold the
   guard across an `.await`.
 - No blocking I/O under `Mutex<PtyState>` and none on a sync Tauri command (a
@@ -372,6 +376,11 @@ token in Credential Manager. Unix-only code and tests stay `#[cfg(unix)]`
 (for a test module: a `#[cfg(unix)]` line above a bare `#[cfg(test)]`, the
 form `no_eprintln_tests` recognises); `rust-windows` in CI keeps clippy and
 the tests green there. `fleet-agent` and `fleet-hub` stay Unix-only.
+On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
+`wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
+`wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`
+program is `ssh::default_ssh_binary()` everywhere (probes, PTY, tunnels):
+`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH.
 
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor

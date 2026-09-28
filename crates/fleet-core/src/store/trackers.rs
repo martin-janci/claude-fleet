@@ -793,7 +793,12 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
     }
     if let Some(path) = r.strip_prefix("file:") {
         let p = std::path::Path::new(path);
-        if !p.is_absolute()
+        // A Windows UNC path (`\\server\share`) is absolute too, but
+        // reading it opens an SMB session that hands the server the user's
+        // NTLM credentials. A credential file is local.
+        let unc = cfg!(windows) && (path.starts_with("\\\\") || path.starts_with("//"));
+        if unc
+            || !p.is_absolute()
             || p.components().any(|c| c == std::path::Component::ParentDir)
             || path.chars().any(char::is_control)
         {

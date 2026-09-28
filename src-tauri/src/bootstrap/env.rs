@@ -70,7 +70,7 @@ pub(crate) fn import_login_shell_env() -> bool {
     // Finder-launched GUI app could not find `cl`, and every tmux pane failed
     // with "cl: command not found". `-c` still runs our script and exits (no
     // interactive prompt loop), so output stays clean.
-    let Ok(output) = std::process::Command::new(&shell)
+    let Ok(output) = fleet_core::proc::std_command(&shell)
         .args(["-i", "-l", "-c", &script])
         .output()
     else {
