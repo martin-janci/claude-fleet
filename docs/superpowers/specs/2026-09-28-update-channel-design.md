@@ -2,9 +2,11 @@
 
 Status: **design. Built: S1** (the `fleet-update` crate), **S4a** (the hub
 side: `/update/*`, the `updater` token, the desired / observed tables,
-`update_status` / `update_admin`, the channel refresh tick) **and S5**
-(`fleet-hub healthcheck --ready --json`, `fleet-hub backup`). The rest is
-not built. What S4 still owes is listed under S4b in §12.
+`update_status` / `update_admin`, the channel refresh tick), **S2** (CI
+signs `release-manifest.json` and writes the `stable` / `beta` channels on
+`update-channels`) **and S5** (`fleet-hub healthcheck --ready --json`,
+`fleet-hub backup`). The rest is not built. What S2 and S4 still owe is
+listed under S2b and S4b in §12.
 
 It answers two findings of the release-process review
 (`docs/superpowers/plans/2026-09-22-release-process-unification.md`):
@@ -920,7 +922,8 @@ Each slice lands on its own, green, with its tests.
 | slice | handover step | what | where | done when |
 |---|---|---|---|---|
 | **S1** ✅ | 1, 2 | `fleet-update` crate: manifest + channel types, serde, minisign verify, `decide()`, `UpdatePhase`, `UpdateChannel` trait, the fixture `decide_cases.json` | `crates/fleet-update/` | the fixture cases pass; the verify tests cover a bad signature, a lower sequence, expiry, rotation |
-| **S2** | 3, 7 | CI emits and signs `release-manifest.json`; `fleet-hub compat --json`; `build_info` (U11); the `update-channels` branch + ruleset; `nightly.yml` for hub image + agent/hub tarballs on green `main` (desktop nightly in Open question 3); `verify-release` rule | `release.yml`, `hub-image.yml`, new `nightly.yml`, `channel-edit.yml`, `scripts/release-manifest.sh`, `scripts/release-assets.sh` | an rc tag publishes a verified manifest and moves `beta.json`; a `main` push moves `nightly.json` |
+| **S2** ✅ | 3, 7 | CI writes, signs and uploads `release-manifest.json` from 0.4.1 (`manifest` job, before `checksums`; `verify-release` requires it through the `manifest` leg of `release-assets.sh`); `fleet-hub compat` (the windows the shipped binary states); `build_info` (U11, with S5); the `update-channels` branch written only by `scripts/update-channels.sh` — `add` after `publish` (stable → stable + beta, rc → beta), `edit` and the weekly `resign` from `update-channels.yml`; every document checked by `fleet-release verify` against `keys.rs` before it leaves the runner; `scripts/release-key.sh` for the owner | `release.yml`, `update-channels.yml`, `fleet-update` `publish.rs` + `bin/fleet-release.rs`, `scripts/release-manifest.sh`, `scripts/update-channels.sh`, `scripts/release-key.sh`, `scripts/release-assets.sh` | `scripts/release-update-scripts-test.sh` (CI hub-headless): a manifest and channels signed by a throwaway key verify with the fleet's verifier, an rc moves only `beta.json`, a key `keys.rs` does not name pushes nothing |
+| **S2b** | 3 | what S2 left: `nightly.yml` (hub image + agent/hub tarballs on green `main`, `-dev.N.g<sha>`; desktop nightly in Open question 3) and `nightly.json`; the ruleset that lets only CI push `update-channels` (the owner's, in the repository settings) | `nightly.yml`, `hub-image.yml` | a `main` push moves `nightly.json` |
 | **S3** | 3 | `GitUpdateChannel` over fleet-core's HTTP client; `fleet-hub update check [--track]` prints the decision for the running hub | `fleet-update`, `crates/fleet-hub/src/` | standalone hub reports `update_available` against a fixture channel |
 | **S4a** ✅ | 4, 5 | migration 079 (desired / observed / events / the signed-document cache `update_docs`); `/update/check` + `/update/report` (`mcp/update_route.rs`); the `updater` token mode (`fleet-hub pair --mode updater`, no tool, no `/events`); `update_status` / `update_admin { pin \| unpin \| refresh }`; the `update.*` settings with `docs/updates.md`; the refresh tick in `fleet-hub serve` (records `hub:self`); `HubUpdateChannel` (S1) | `fleet-core` `mcp/update_route.rs`, `service/update/`, `store/update.rs` | unit + route tests against signed test documents; checked on a real hub |
 | **S4b** | 4, 5 | what S4a left: `X-Fleet-Client` recording; `update:decision` / `update:changed` events; the attention reasons; `update_check_for`; `update_rollouts` and the admin rollout actions (with S9); the org-scoped policy rows | `fleet-core` | `hub-e2e.sh` section U: a fake client and a fake agent see `update_available`, `update_required` and `client_too_new` from a channel signed by an e2e key (`FLEET_UPDATE_E2E_KEYS`, `e2e` builds only) |
@@ -948,6 +951,12 @@ Per the repository's rule, a decision-gated slice starts only on the owner's
    store it as the environment-protected secret `RELEASE_SIGNING_KEY`, and
    back it up in the keychain. S2 and S7 need it; S1 can be built against a
    test key. *Recommendation: yes; one key for manifests and Tauri.*
+   **Answered yes (2026-09-28).** The key is made on the owner's machine,
+   never in CI or a session: `scripts/release-key.sh` backs it up in the
+   keychain, sets the repository secret `RELEASE_SIGNING_KEY` and writes
+   the public key into `keys.rs` (`docs/RELEASING.md` → *Update manifest
+   and channels*). Moving the secret into a protected environment is the
+   owner's option; the jobs read it the same way.
 2. **Mobile in the manifest.** Either the fleet-mobile release dispatches a
    signed amendment (§4, recommended: the phone stays built in its own
    repo), or `release.yml` waits for the APK and writes one manifest. The

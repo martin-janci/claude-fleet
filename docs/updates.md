@@ -8,10 +8,14 @@ and the phones. Design and rationale:
 > reads the signed release channel, keeps what each part of the fleet
 > reports about itself, and answers `/update/check`.
 >
-> Nothing is offered yet. The release signing key does not exist yet
-> (design §13, question 1), and a hub that cannot verify a channel offers
+> CI publishes the signed documents (slice S2): each release from 0.4.1
+> carries a signed `release-manifest.json`, and the `stable` and `beta`
+> channels live on the `update-channels` branch (`docs/RELEASING.md` →
+> *Update manifest and channels*). Nothing is offered until the owner has
+> created the release key (`scripts/release-key.sh`) and a build that
+> trusts it is running: a hub that cannot verify a channel offers
 > nothing. `fleet-updater`, the desktop and the phone install nothing yet
-> either (slices S6–S8).
+> (slices S6–S8), and there is no `nightly` channel yet (S2b).
 
 ## Who decides what
 
@@ -35,8 +39,8 @@ A desktop with no hub reads the channel itself (Git mode) and applies its own
 | track | what it carries |
 |-------|-----------------|
 | `stable` | `vX.Y.Z` releases |
-| `beta` | `-rc.N` release candidates |
-| `nightly` | every green `main` commit, as `X.Y.Z-dev.N.g<sha>` |
+| `beta` | `-rc.N` release candidates, and every stable release too |
+| `nightly` | every green `main` commit, as `X.Y.Z-dev.N.g<sha>` (not published yet) |
 
 ## What the hub answers
 

@@ -888,6 +888,13 @@ pub(crate) const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].v
 /// The newest schema this build knows: the downgrade guard's bound.
 const KNOWN_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
+/// [`KNOWN_SCHEMA_VERSION`], for the release manifest's `store.schema_to`
+/// (`fleet-hub compat`): the schema this build migrates a database to, and
+/// the newest it will open.
+pub fn known_schema_version() -> i64 {
+    KNOWN_SCHEMA_VERSION
+}
+
 /// `(version, sql)` of every migration up to and including `version`, in
 /// order: the historical files, for a test that builds an older database
 /// (`store::testgen`).
