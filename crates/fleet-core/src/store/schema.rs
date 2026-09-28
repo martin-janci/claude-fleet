@@ -56,6 +56,17 @@ fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 072: `sessions` already has its
+/// `usage_backfill_until` column.
+fn sessions_has_usage_backfill_until(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'usage_backfill_until'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 025 (session usage): it adds its
 /// columns in one transaction, so its last column present means the whole
 /// migration is, and a re-run (`ALTER TABLE ... ADD COLUMN` again) would
@@ -709,6 +720,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 71,
         sql: include_str!("../../migrations/071_usage_daily_backfill.sql"),
         already_applied: Some(usage_daily_has_backfill),
+    },
+    // `sessions.usage_backfill_until`: a multi-pass first read of a large
+    // transcript books every chunk's history as backfill, not only the
+    // first. One ADD COLUMN, its own guard.
+    Migration {
+        version: 72,
+        sql: include_str!("../../migrations/072_usage_backfill_until.sql"),
+        already_applied: Some(sessions_has_usage_backfill_until),
     },
 ];
 
@@ -1607,6 +1626,7 @@ mod tests {
                 last_msg_usage: None,
                 now: 86_400,
                 by_day: Vec::new(),
+                backfill_until: None,
             },
         )
         .unwrap();
@@ -3123,10 +3143,12 @@ mod tests {
 
     /// The `sessions` columns migration 063's `sessions_row_version_bump`
     /// deliberately does NOT watch: `row_version` itself (an explicit
-    /// `row_version + 1` must not re-trigger), and the reconcile's per-pass
-    /// bookkeeping that is not a `SessionRow` field. Every other column is
+    /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
+    /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
+    /// backfill mark). Every other column is
     /// watched, so a write that changes it bumps the counter.
-    const ROW_VERSION_UNWATCHED: [&str; 2] = ["row_version", "last_reconciled_at"];
+    const ROW_VERSION_UNWATCHED: [&str; 3] =
+        ["row_version", "last_reconciled_at", "usage_backfill_until"];
 
     /// The SQL of `sessions_row_version_bump`, as the database holds it.
     fn row_version_trigger_sql(s: &Store) -> String {
@@ -3363,6 +3385,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn migration_072_adds_the_usage_backfill_mark_and_is_safe_to_rerun() {
+        let s = store_at_version(71);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('a', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        assert!(!sessions_has_usage_backfill_until(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let (until, rv): (i64, i64) = s
+            .conn
+            .query_row(
+                "SELECT usage_backfill_until, row_version FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(until, 0, "an existing cursor has no history pending");
+        s.conn
+            .execute("UPDATE sessions SET usage_backfill_until = 9", [])
+            .unwrap();
+        let rv2: i64 = s
+            .conn
+            .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rv2, rv, "the mark is bookkeeping: no row_version bump");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 72;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 }
 

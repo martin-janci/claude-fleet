@@ -3719,6 +3719,7 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
                     last_msg_usage: None,
                     now,
                     by_day: Vec::new(),
+                    backfill_until: None,
                 },
             )
             .unwrap();

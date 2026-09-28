@@ -4556,6 +4556,7 @@ mod tests {
                         last_msg_usage: Some("40,0,0,0,0".into()),
                         now: 1,
                         by_day: Vec::new(),
+                        backfill_until: None,
                     },
                 )
                 .unwrap();
