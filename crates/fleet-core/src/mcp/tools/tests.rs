@@ -4611,22 +4611,33 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
 /// Task 5 of the visible-truncation-and-describe plan: the describe cache
 /// (`work_item_descriptions`, one item's WHOLE, uncapped description) must
 /// never reach a session row, an event frame or the phone projection — only
-/// `work { action: describe }` reads it. The brief's own draft of this test
-/// (`include_str!` on `mcp/tools/views.rs` from inside
-/// `service::work::describe`) cannot resolve that relative path from there;
-/// this is the coordinator's fix, placed where the phone projection is
-/// already pinned column-by-column above. `PHONE_SESSION_FIELDS` names
-/// `work` / `work_suggested` (a key and a title only, from
-/// [`crate::store::WorkLinkSummary`]-shaped data) and nothing that could
-/// hold a whole description; this pins that so a future column addition
-/// cannot reopen the leak silently.
+/// `work { action: describe }` reads it. Checked against the actual SOURCE
+/// TEXT of all three surfaces, not a derived field-name heuristic: a later
+/// join or column that reaches into the cache table fails this test, the
+/// same day it is written, rather than needing someone to notice a leak.
+///
+/// (An earlier version of this test only checked that no
+/// `PHONE_SESSION_FIELDS` name contained `"desc"` — true today, but it would
+/// stay true even if `views.rs` joined the cache table under an unrelated
+/// column name, so it could not fail. This version greps the real files.)
 #[test]
 fn no_projection_carries_a_full_description() {
-    for f in PHONE_SESSION_FIELDS {
+    const TABLE: &str = "work_item_descriptions";
+    for (what, src) in [
+        (
+            "the phone projection (mcp/tools/views.rs)",
+            include_str!("views.rs"),
+        ),
+        (
+            "SessionRow (store/rows.rs)",
+            include_str!("../../store/rows.rs"),
+        ),
+        ("event frames (events.rs)", include_str!("../../events.rs")),
+    ] {
         assert!(
-            !f.contains("desc"),
-            "{f} looks like a description field; the phone projection must \
-             never carry the describe cache's full text"
+            !src.contains(TABLE),
+            "{what} names {TABLE:?}: the describe cache's full text must \
+             reach the wire only through work {{ action: describe }}"
         );
     }
 }
