@@ -349,6 +349,8 @@ impl FleetTools {
             // `humanize::humanize_branch`.
             friendly_name: p.friendly_name,
             resume_claude_session_id: p.resume_claude_session_id,
+            model: p.model,
+            effort: p.effort,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -394,6 +396,8 @@ impl FleetTools {
             // Let the service derive a humanised label from the branch.
             friendly_name: None,
             resume_claude_session_id: None,
+            model: None,
+            effort: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await

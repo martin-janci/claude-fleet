@@ -546,6 +546,12 @@ export interface NewSessionArgs {
    * on the host already holds that conversation.
    */
   resume_claude_session_id?: string;
+  /** `claude --model` for the first launch (an alias or a model id); null =
+   *  the host's default. Rejected for a shell session. */
+  model?: string | null;
+  /** `claude --effort` for the first launch (low … max); null = the host's
+   *  default. Rejected for a shell session. */
+  effort?: string | null;
 }
 
 export async function newSessionAbortable(

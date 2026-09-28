@@ -439,6 +439,8 @@ pub async fn rewind_conversation(
                     start_command: None,
                     friendly_name: None,
                     resume_claude_session_id: Some(new_id.clone()),
+                    model: None,
+                    effort: None,
                 },
                 store,
                 ssh,

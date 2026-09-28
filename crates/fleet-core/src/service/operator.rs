@@ -434,6 +434,8 @@ impl OperatorHost for LiveHost {
                 kind: Some("work".to_string()),
                 start_command: None,
                 friendly_name: Some("fleet operator".to_string()),
+                model: None,
+                effort: None,
             },
             &self.store,
             &self.ssh,

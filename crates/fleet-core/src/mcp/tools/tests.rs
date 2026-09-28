@@ -1367,6 +1367,8 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 start_command: None,
                 friendly_name: None,
                 resume_claude_session_id: None,
+                model: None,
+                effort: None,
                 confirm_nonce: None,
             }),
         )
@@ -1596,6 +1598,8 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 kind: Some("shell".into()),
                 start_command: Some("echo hi".into()),
                 friendly_name: Some("a".repeat(81)), // over the 80-char cap
+                model: None,
+                effort: None,
                 confirm_nonce: None,
             }),
         )
@@ -3601,7 +3605,9 @@ fn the_served_definition_budget_stays_bounded() {
     // whose every variant and field must be documented. Its own branch
     // measured +2,124 over M14.1c. Merged over reply actions and hub ops:
     // measured at 62,255 on 2026-09-28 (+2,197 over 60,058); plus 100.
-    const BUDGET_BYTES: usize = 62_355;
+    // new_session `model` / `effort` (a Claude session's launch flags), one
+    // short line each: measured at 62,417 on 2026-09-28 (+162); plus 100.
+    const BUDGET_BYTES: usize = 62_517;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

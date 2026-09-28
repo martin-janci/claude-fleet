@@ -824,6 +824,8 @@ export interface PickerOption {
  *  `/model <alias>` switches without opening the REPL's picker. */
 export const MODEL_OPTIONS: readonly PickerOption[] = [
   { value: 'default', label: 'Default' },
+  { value: 'best', label: 'Best available' },
+  { value: 'fable', label: 'Fable' },
   { value: 'opus', label: 'Opus' },
   { value: 'opus[1m]', label: 'Opus (1M context)' },
   { value: 'sonnet', label: 'Sonnet' },
@@ -832,14 +834,20 @@ export const MODEL_OPTIONS: readonly PickerOption[] = [
   { value: 'opusplan', label: 'Opus plan / Sonnet' },
 ];
 
-/** `/effort <level>` levels, lowest first. */
-export const EFFORT_OPTIONS: readonly PickerOption[] = [
-  { value: 'auto', label: 'Auto' },
+/** The levels `claude --effort` takes at launch (`validate::EFFORT_LEVELS`):
+ *  the `/effort` list without `auto`, which only the REPL command knows. */
+export const LAUNCH_EFFORT_OPTIONS: readonly PickerOption[] = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'Extra high' },
   { value: 'max', label: 'Max' },
+];
+
+/** `/effort <level>` levels. */
+export const EFFORT_OPTIONS: readonly PickerOption[] = [
+  { value: 'auto', label: 'Auto' },
+  ...LAUNCH_EFFORT_OPTIONS,
 ];
 
 /** The line a picker sends: `/model opus`, `/effort high`. `null` for an

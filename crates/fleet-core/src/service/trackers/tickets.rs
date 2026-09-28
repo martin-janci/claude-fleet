@@ -1037,6 +1037,8 @@ where
             .is_ok()
             .then(|| plan.name.clone()),
         resume_claude_session_id: None,
+        model: None,
+        effort: None,
     };
     let row = spawn(args).await?;
     match link_started(store, plan, brief, scope, &row) {
