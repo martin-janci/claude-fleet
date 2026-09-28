@@ -157,6 +157,21 @@ should gain a *separate* fleet-local status is E11, and its default is no.
 (`claude_status = 'blocked'`) that the row already shows, and adding it to the
 item's vocabulary would create a second state machine for the same word.
 
+**The stamp must not widen auto-tidy.** Tidy classifies an idle session by a
+ranked reason (`TidyReason::RANKED` puts `DoneIdle` above `PrMergedIdle`), and
+which reasons may act automatically is a user's list
+(`work.auto_tidy_reasons`, default both). Once a merged PR stamps an item
+`done`, a session that used to classify as `PrMergedIdle` classifies as
+`DoneIdle` instead — so someone who allowed `done_idle` and deliberately
+*excluded* `pr_merged_idle` would silently start getting sessions safe-killed
+on a merged PR, which is the trigger they opted out of.
+
+Therefore: when the `done` came from the stamp (`status_set_by = 'derived'`),
+tidy classifies the session as `PrMergedIdle`, not `DoneIdle`. The status stays
+truthful and the reason stays faithful to its origin, so a reason allow-list
+keeps the meaning its author chose. A person's `done` keeps classifying as
+`DoneIdle`, because that is what it is.
+
 ## 3. Epics
 
 No new entity (E2). Two changes:
