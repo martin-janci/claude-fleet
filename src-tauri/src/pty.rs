@@ -1486,19 +1486,25 @@ mod tests {
             ["-c", "exit 0"]
         });
         let child = pair.slave.spawn_command(cmd).expect("spawn");
-        // Drain the output as the real reader thread does: ConPTY blocks the
-        // child (and conhost) while nobody reads the pseudo console's output,
-        // so an undrained test child would never get to exit. What this test
-        // needs is exactly the production shape — output read, EOF never
-        // coming — minus the reader's own `exited`.
-        let mut reader = pair.master.try_clone_reader().expect("reader");
-        std::thread::spawn(move || {
-            let mut sink = [0u8; 4096];
-            while matches!(reader.read(&mut sink), Ok(n) if n > 0) {}
-        });
         let writer = pair.master.take_writer().expect("writer");
         let shared = Arc::new(PtyShared::new());
         let input_tx = spawn_writer(writer, Arc::clone(&shared));
+        // Play the terminal the way production does, minus the reader's own
+        // `exited`: read the output, and answer a cursor-position query.
+        // ConPTY (portable-pty opens it with PSEUDOCONSOLE_INHERIT_CURSOR)
+        // asks `ESC[6n` as it starts and holds the child until it gets an
+        // answer — in the app, `ansi.ts` gives it through `pty_write`; an
+        // unread pseudo console blocks the child as well.
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let reply = input_tx.clone();
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 4096];
+            while let Ok(n @ 1..) = reader.read(&mut sink) {
+                if sink[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                    let _ = reply.try_send(b"\x1b[1;1R".to_vec());
+                }
+            }
+        });
         let state = Mutex::new(PtyState::new());
         let previous =
             state
