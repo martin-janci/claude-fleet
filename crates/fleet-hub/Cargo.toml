@@ -34,6 +34,9 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 directories = "5"
 serde_json = "1"
+# The readiness file `serve` writes and `healthcheck --ready` reads
+# (`ready.rs`): already in the tree as `fleet-core`'s dependency.
+serde = { version = "1", features = ["derive"] }
 # The pairing QR, rendered as Unicode half-blocks straight into the terminal.
 # Default features OFF on purpose: they pull `image` and `svg` renderers this
 # CLI never uses (and a large transitive tree with them).

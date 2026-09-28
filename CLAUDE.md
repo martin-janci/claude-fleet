@@ -413,5 +413,15 @@ container back, including the DB restore. **S1 is landed:**
 like fleet-core) holds the manifest / channel types, `verify` (`verify_target`
 is the one check before any install), the pure `decide()` over the shared
 fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
-`GitUpdateChannel` / `HubUpdateChannel`. S2–S9 are not built; the §13
-questions wait on the owner (S2 needs the release signing key).
+`GitUpdateChannel` / `HubUpdateChannel`. **S5 is landed too:**
+- `fleet-hub backup [--prefix|--to] --json` (`store::backup`, a
+  read-only `VACUUM INTO`, never migrates);
+- `fleet-hub healthcheck --ready --json`, which reads the readiness file
+  `serve` rewrites every 5 s (`fleet-hub/src/ready.rs`, `<data
+  dir>/run/ready.json`), so `/healthz` stays unversioned;
+- the build identity from `crates/fleet-hub/build.rs` (`FLEET_GIT_SHA` /
+  `FLEET_BUILD_ID`, passed by `release.yml` and the `hub-image.yml` build
+  args).
+
+S2–S4 and S6–S9 are not built. The §13 questions wait on the owner (S2 needs
+the release signing key).

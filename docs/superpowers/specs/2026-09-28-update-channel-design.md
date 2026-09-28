@@ -1,6 +1,8 @@
 # Application updates: Update Channel, release manifest, desired state — design
 
-Status: **design; S1 (the `fleet-update` crate) is built**, the rest is not. This spec takes over the brainstorm
+Status: **design. S1 (the `fleet-update` crate) and S5 (`fleet-hub
+healthcheck --ready --json`, `fleet-hub backup`) are built**; the rest is
+not. This spec takes over the brainstorm
 handover "Cloud Fleet — Application Update Architecture" (2026-09-28). It
 does not reopen that handover's decisions; they are restated as F1–F8 below.
 What it adds is the concrete shape: the update protocol, the manifest
@@ -715,12 +717,15 @@ CREATE TABLE update_rollouts (
    did not sign.
 3. **Download.** `docker pull image@digest`, then check that the image's
    `RepoDigests` contains it.
-4. **Backup.** `docker exec fleet-hub fleet-hub backup --to
-   /var/lib/fleet-hub/backups/pre-<v>-<ts>.db`. This is a new subcommand:
-   the SQLite online backup API, `PRAGMA integrity_check`, prints
-   `{path, schema}`. It replaces `backup.sh`'s host-side `sqlite3`, so the
-   updater needs no sqlite on the host. It keeps 3 per version, like
-   `upgrade.sh`.
+4. **Backup.** `docker exec fleet-hub fleet-hub backup --prefix pre-<v>
+   --json` (`fleet_core::store::backup`):
+   - opens `state.db` read-only and never migrates it;
+   - copies it with `VACUUM INTO`, checks the copy with `PRAGMA
+     integrity_check`, and renames it out of `.part` only then;
+   - prints `{path, schema, bytes}` and never overwrites a file.
+
+   The updater needs no sqlite on the host. Pruning to 3 per version is the
+   updater's job, as `upgrade.sh` prunes through `backup.sh`.
 5. **Install.** Stop `fleet-hub` (SIGTERM, the compose
    `stop_grace_period`). Rename it `fleet-hub-prev`, replacing an older
    `-prev`. Create `fleet-hub` from the same config (env, volumes, networks,
@@ -770,18 +775,33 @@ of these hold within `ready_timeout` (default 90 s), then keep holding for
 1. **Live.** The container state is `running`, its restart count is still
    0, and the image `HEALTHCHECK` (`fleet-hub healthcheck`, `/healthz`) is
    `healthy`.
-2. **Ready.** A new `fleet-hub healthcheck --ready --json`, run through
-   `docker exec`, which exposes nothing on the network:
+2. **Ready.** `fleet-hub healthcheck --ready --json`, run through `docker
+   exec`, which exposes nothing on the network.
+   - `serve` rewrites `<data dir>/run/ready.json` every 5 s once the store
+     has migrated and the listener is bound, and removes the file when it
+     stops.
+   - The check adds liveness (the `/healthz` probe) and freshness (the
+     heartbeat is at most 20 s old and the pid is running). A killed hub's
+     leftover file is stale, and stale is not ready.
 
    ```json
-   { "ready": true, "version": "0.3.4", "commit": "a83f19d…", "build_id": "gh-run-18231-1",
-     "contract": 5, "agent_proto": [1, 1], "peer_proto": 1, "schema": 74,
-     "started_at": "…", "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok" } }
+   { "ready": true, "live": true, "fresh": true,
+     "hub": { "ready": true, "pid": 7154, "version": "0.3.4", "commit": "a83f19d…",
+              "build_id": "gh-run-18231-1", "contract": 5, "agent_proto": [1, 1],
+              "peer_proto": 1, "schema": 74, "started_at": 1790612008, "heartbeat_at": 1790612013,
+              "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok" } } }
    ```
 
-   `ready` means: the store is open and migrated, the listener is bound, and
-   the first reconcile tick has finished (or `ready_timeout/2` has passed
-   with no host configured).
+   `first_reconcile` is one of:
+   - `ok`: the first pass of this process finished clean;
+   - `pending`: no pass has finished yet;
+   - `failed`: it finished with failures, which is not ready;
+   - `disabled`: `reconcile.interval_secs=0`, which counts as ready.
+
+   The commit and build ID come from `crates/fleet-hub/build.rs`:
+   `FLEET_GIT_SHA` / `FLEET_BUILD_ID` from CI (`release.yml`, and the
+   `hub-image.yml` build args, since the Docker context has no `.git`), else
+   `git rev-parse HEAD`, else `unknown` / `local`.
 3. **Identity.** `version`, `commit` and `build_id` equal the manifest's
    `release` (U11), and the container's image ID resolves to the desired
    digest. This is what "the updater verifies it started the right build"
@@ -906,7 +926,7 @@ Each slice lands on its own, green, with its tests.
 | **S2** | 3, 7 | CI emits and signs `release-manifest.json`; `fleet-hub compat --json`; `build_info` (U11); the `update-channels` branch + ruleset; `nightly.yml` for hub image + agent/hub tarballs on green `main` (desktop nightly in Open question 3); `verify-release` rule | `release.yml`, `hub-image.yml`, new `nightly.yml`, `channel-edit.yml`, `scripts/release-manifest.sh`, `scripts/release-assets.sh` | an rc tag publishes a verified manifest and moves `beta.json`; a `main` push moves `nightly.json` |
 | **S3** | 3 | `GitUpdateChannel` over fleet-core's HTTP client; `fleet-hub update check [--track]` prints the decision for the running hub | `fleet-update`, `crates/fleet-hub/src/` | standalone hub reports `update_available` against a fixture channel |
 | **S4** | 4, 5 | migration 074; `/update/check` + `/update/report`; the `updater` token mode; `X-Fleet-Client`; `update_status` / `update_admin` / `update_check_for`; `update:decision` / `update:changed` events; attention reasons; `HubUpdateChannel` | `fleet-core` `mcp/update_route.rs`, `service/update/`, `store/update.rs` | `hub-e2e.sh` section U: a fake client and fake agent see `update_available`, `update_required` and `client_too_new` from a fixture channel |
-| **S5** | 8 | `fleet-hub healthcheck --ready --json`, `fleet-hub backup --to` | `crates/fleet-hub/src/serve.rs`, `fleet-core::store` | a test drives both against a real store |
+| **S5** ✅ | 8 | `fleet-hub healthcheck --ready --json`, `fleet-hub backup --to` | `crates/fleet-hub/src/serve.rs`, `fleet-core::store` | a test drives both against a real store |
 | **S6** | 6, 9 | `fleet-updater`: Docker adapter, the state file, the gates, rollback with and without migration; compose `auto-update` profile; image publish | `crates/fleet-updater/`, `deploy/hub/` | a docker e2e (opt-in, like `--hub-e2e`) against a local registry with three images: good, crash-on-start, and migrates-then-unready. All three end in the right state, and the third restores the backup. |
 | **S7** | 10 | desktop: `tauri-plugin-updater` wired to `Decision`; `TAURI_SIGNING_PRIVATE_KEY` = the release key; `update_check` / `update_install` commands + verdict rows; the Updates view; footer shows both versions; contract-gate exemption | `src-tauri`, `src/lib/updates.ts`, `src/components/UpdatesView.svelte` | a standalone desktop updates itself from `nightly`; a paired one from its hub |
 | **S8** | 11 | fleet-mobile: `X-Fleet-Client`, `/update/check`, the Updates row and required screen; Android `PackageInstaller` adapter; release job publishes a versioned APK + sums and dispatches the manifest amendment | fleet-mobile | see its spec |

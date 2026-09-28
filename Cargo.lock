@@ -1442,6 +1442,7 @@ dependencies = [
  "qrcode",
  "rcgen",
  "rustls-pki-types",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
