@@ -986,3 +986,31 @@ async fn a_proposal_nobody_decided_is_ignored_once_a_newer_one_arrives() {
     let stats = w.store.lock().unwrap().decision_stats(0).unwrap();
     assert_eq!(stats.iter().map(|s| s.ignored).sum::<i64>(), 1);
 }
+
+#[tokio::test]
+async fn a_shadow_answer_nobody_saw_is_never_followed_up() {
+    let w = world();
+    w.on("shadow");
+    w.run(&Fake::answering(vec![says("todo", 0.9); 5])).await;
+    let args: WorkAdminArgs = serde_json::from_value(json!({
+        "action": "update",
+        "tracker_id": w.tracker,
+        "settings": {
+            "section_map": { "backlog": "todo", "parked": "done" },
+            "section_map_confirmed": true,
+        },
+    }))
+    .unwrap();
+    admin_sync(&args, &w.store).unwrap();
+    // The person's map agrees with one shadow answer and not the other:
+    // neither is a person's confirmation or correction.
+    assert!(w.runs().iter().all(|r| r.followup.is_none()));
+    let stats = w.store.lock().unwrap().decision_stats(0).unwrap();
+    assert_eq!(
+        stats
+            .iter()
+            .map(|s| s.confirmed + s.corrected + s.rejected + s.ignored)
+            .sum::<i64>(),
+        0
+    );
+}

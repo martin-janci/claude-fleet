@@ -251,9 +251,13 @@ administration (`work_admin`, master-only), so its commands
 `E_LOCAL_ONLY` and the operator uses the CLI above.
 
 **Follow-up.** When your `settings.section_map` later holds a section, its
-latest answered run is marked `confirmed` (the answer applies as your
-category) or `corrected` (to yours) — `fleet-hub decide status` counts them,
-with the `rejected` ones. A proposal nobody decided before a newer usable
+latest answered **assist** run — the proposal you were shown — is marked
+`confirmed` (the answer applies as your category) or `corrected` (to
+yours). A `shadow` answer is never marked: nobody saw it, so your map
+neither confirmed nor corrected it, and the person counts (D34) hold only
+responses to what a person was shown; the shadow comparison is its
+baseline, next to the rule's answer. `fleet-hub decide status` counts the
+marks, with the `rejected` ones. A proposal nobody decided before a newer usable
 one for the same section arrived is marked `ignored` (only the latest is
 ever offered); a follow-up already there is never overwritten.
 

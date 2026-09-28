@@ -29,9 +29,10 @@
 //!   runs it at most once a day per tracker (sooner when its sections
 //!   change) and off the sync's path ([`StatusMapTrigger`]).
 //! * **Follow-up.** When a person's `settings.section_map` later holds a
-//!   section, its latest answered run is marked `confirmed` (same category)
-//!   or `corrected` (to theirs) — [`record_followups`], called where the
-//!   settings are updated. A proposal nobody decided before a newer one
+//!   section, its latest answered assist run — the one a person was shown —
+//!   is marked `confirmed` (same category) or `corrected` (to theirs) —
+//!   [`record_followups`], called where the settings are updated. A shadow
+//!   answer nobody saw is never marked. A proposal nobody decided before a newer one
 //!   for the same section arrived is marked `ignored`.
 //! * **Deciding one proposal** ([`decide_proposal`], by its run id):
 //!   *apply* (its category — `not_planned` applies as `done`), *apply as*
@@ -444,9 +445,14 @@ fn answered(r: &DecisionRunRow) -> bool {
 }
 
 /// After a person's `settings.section_map` changed on `row`: mark the latest
-/// answered run of every section their map now holds `confirmed` (the
-/// answer applies as their category) or `corrected` (to theirs), once.
+/// answered ASSIST run of every section their map now holds `confirmed`
+/// (the answer applies as their category) or `corrected` (to theirs), once.
 /// Returns the runs marked. Never writes a tracker.
+///
+/// A shadow answer is never marked: nobody saw it, so a person's map
+/// neither confirmed nor corrected it, and a follow-up is a person's
+/// response to what they were shown (D34: person counts come from person
+/// decisions only; D37). The shadow comparison is the run's baseline.
 pub fn record_followups(s: &Store, row: &TrackerRow, now: i64) -> Result<usize, IpcError> {
     if row.provider != PROVIDER || row.settings.section_map.is_empty() {
         return Ok(0);
@@ -461,7 +467,9 @@ pub fn record_followups(s: &Store, row: &TrackerRow, now: i64) -> Result<usize, 
         return Ok(0);
     }
     let latest = latest_per_subject(&runs, |r| {
-        answered(r) && r.answer.as_deref().and_then(applied_category).is_some()
+        r.mode == Mode::Assist.as_str()
+            && answered(r)
+            && r.answer.as_deref().and_then(applied_category).is_some()
     });
     let fp_key = s.decision_fp_key()?;
     let mut marked = 0;
@@ -1061,7 +1069,7 @@ pub struct ProposalOutcome {
 /// After an apply went through `work_admin update` (whose
 /// [`record_followups`] marks the latest answered run of the section):
 /// make sure run `p` carries its follow-up — `record_followups` leaves an
-/// `unsure` answer alone, and a newer shadow answer would take its mark.
+/// `unsure` answer alone.
 /// Returns the outcome as the record now reads.
 pub fn record_applied(
     s: &Store,
