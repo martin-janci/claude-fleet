@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::service::work::structure::{LinkDecision, ViewInput};
+use crate::store::Decider;
 
 fn set_primary(
     w: &W,
@@ -166,6 +167,32 @@ fn a_secondary_link_leaves_the_primary_where_it_is() {
     assert_eq!(row.work.unwrap().item_id, Some(w.t1));
 }
 
+/// `work_rev` moves on a secondary link's change, which `work` (the primary)
+/// never shows: it is how a client knows to re-read the session's tasks.
+/// A session with no live link carries 0, and a scoped caller never sees it.
+#[test]
+fn work_rev_moves_on_a_secondary_link_only_the_row_shows() {
+    let w = world();
+    let bare =
+        w.st.lock()
+            .unwrap()
+            .get_session_by_id(w.s2)
+            .unwrap()
+            .unwrap();
+    assert_eq!(bare.work_rev, 0, "no live link");
+    let first = link(&w, w.s1, w.t1, true);
+    assert_ne!(first.work_rev, 0);
+    let second = link(&w, w.s1, w.t2, false);
+    assert_eq!(
+        second.work.as_ref().unwrap().link_id,
+        first.work.as_ref().unwrap().link_id
+    );
+    assert_ne!(second.work_rev, first.work_rev, "a secondary link moves it");
+    let mut row = second.clone();
+    bound(w.org_a).redact_row(&mut row);
+    assert_eq!(row.work_rev, 0, "never sent to a scoped caller");
+}
+
 /// `link { expected_version }` is a compare-and-set on the session's link
 /// to that work (`0`: none): two devices adding the same link race to one.
 #[test]
@@ -302,6 +329,7 @@ fn a_stale_decision_conflicts_and_a_batch_answers_each_item() {
     let res = structure::decide_batch(
         &w.st,
         &OrgScope::All,
+        Decider::Person,
         &[
             d(a.link_id, "reject", Some(a.link_version), None),
             d(b.link_id, "confirm", Some(b.link_version), Some(false)),
@@ -337,6 +365,7 @@ fn a_stale_decision_conflicts_and_a_batch_answers_each_item() {
     let res = structure::decide_batch(
         &w.st,
         &OrgScope::All,
+        Decider::Person,
         &[
             d(a.link_id, "reconsider", None, None),
             d(b.link_id, "reconsider", None, None),
@@ -355,11 +384,93 @@ fn a_stale_decision_conflicts_and_a_batch_answers_each_item() {
         .iter()
         .all(|r| r.code.as_deref() == Some(codes::E_FORBIDDEN)));
     // Bounds.
-    let err = structure::decide_batch(&w.st, &OrgScope::All, &[], &|_| Ok(())).unwrap_err();
+    let err = structure::decide_batch(&w.st, &OrgScope::All, Decider::Person, &[], &|_| Ok(()))
+        .unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
     let many = vec![d(a.link_id, "ack", None, None); structure::BATCH_MAX + 1];
-    let err = structure::decide_batch(&w.st, &OrgScope::All, &many, &|_| Ok(())).unwrap_err();
+    let err = structure::decide_batch(&w.st, &OrgScope::All, Decider::Person, &many, &|_| Ok(()))
+        .unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
+}
+
+/// D34 through the review inbox: a batch records its caller's decider, as
+/// a single decision does, and an agent cannot undo a person's decision
+/// (undo, then confirm, would overturn a person's rejection in two steps).
+#[test]
+fn a_batch_and_an_undo_keep_the_deciders_apart() {
+    let w = world();
+    let (a, b) = two_suggestions(&w, w.s1);
+    let d = |link_id, decision: &str| LinkDecision {
+        session_id: w.s1,
+        link_id,
+        decision: decision.into(),
+        expected_version: None,
+        primary: None,
+    };
+    let res = structure::decide_batch(
+        &w.st,
+        &OrgScope::All,
+        Decider::Agent,
+        &[d(a.link_id, "confirm")],
+        &|_| Ok(()),
+    )
+    .unwrap();
+    assert!(res.results[0].ok);
+    let source = |id| {
+        w.st.lock()
+            .unwrap()
+            .get_work_link(id)
+            .unwrap()
+            .unwrap()
+            .source
+    };
+    assert_eq!(source(a.link_id), "agent", "never a person's decision");
+
+    work_link(
+        &WorkLinkArgs {
+            link_id: Some(b.link_id),
+            ..wl(&w, "reject", w.s1)
+        },
+        &w.st,
+        &OrgScope::All,
+    )
+    .unwrap();
+    let undo = WorkLinkArgs {
+        link_id: Some(b.link_id),
+        ..wl(&w, "reconsider", w.s1)
+    };
+    let err = crate::service::work::work_link_as(&undo, &w.st, &OrgScope::All, Decider::Agent)
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_FORBIDDEN);
+    let res = structure::decide_batch(
+        &w.st,
+        &OrgScope::All,
+        Decider::Agent,
+        &[d(b.link_id, "reconsider")],
+        &|_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(res.results[0].code.as_deref(), Some(codes::E_FORBIDDEN));
+    // The agent's own decision is its to undo; the person's is theirs.
+    crate::service::work::work_link_as(
+        &WorkLinkArgs {
+            link_id: Some(a.link_id),
+            ..wl(&w, "reconsider", w.s1)
+        },
+        &w.st,
+        &OrgScope::All,
+        Decider::Agent,
+    )
+    .unwrap();
+    // Nor remove it: unlink, then link, is the same overturn.
+    let unlink = WorkLinkArgs {
+        link_id: Some(b.link_id),
+        ..wl(&w, "unlink", w.s1)
+    };
+    let err = crate::service::work::work_link_as(&unlink, &w.st, &OrgScope::All, Decider::Agent)
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_FORBIDDEN);
+    work_link(&undo, &w.st, &OrgScope::All).unwrap();
 }
 
 /// Undo: a confirmed suggestion goes back to a suggestion with its

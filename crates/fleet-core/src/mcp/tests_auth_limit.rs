@@ -1,6 +1,7 @@
-//! A bad bearer is answered once per [`AUTH_FAIL_INTERVAL`] per address; the
-//! repeat gets 429 (hub-ops F3: failed bearers on `/mcp` were one warn line
-//! each, unthrottled, and the line named no peer).
+//! A bad bearer is logged at warn once per [`AUTH_FAIL_INTERVAL`] per address
+//! (hub-ops F3: failed bearers on `/mcp` were one warn line each,
+//! unthrottled, and the line named no peer); every one is answered 401, so a
+//! client never reads a dead token as a busy hub.
 
 use super::*;
 use std::net::Ipv4Addr;
@@ -53,15 +54,15 @@ async fn status_of(addr: std::net::SocketAddr, bearer: &str, forwarded: Option<&
 }
 
 #[tokio::test]
-async fn a_repeated_bad_bearer_from_one_address_is_throttled() {
+async fn a_repeated_bad_bearer_is_still_401() {
     let addr = serve_test_app().await;
     assert!(
         status_of(addr, "wrong", None).await.contains("401"),
         "the first failure is a plain 401"
     );
     assert!(
-        status_of(addr, "wrong", None).await.contains("429"),
-        "the repeat inside AUTH_FAIL_INTERVAL is throttled"
+        status_of(addr, "wrong", None).await.contains("401"),
+        "the repeat inside AUTH_FAIL_INTERVAL too: only its log line is throttled"
     );
     assert!(
         status_of(addr, "s3cret", None).await.contains("200"),

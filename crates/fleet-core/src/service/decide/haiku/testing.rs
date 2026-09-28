@@ -4,9 +4,9 @@
 //! test's function returns.
 
 use super::*;
+use crate::agent::transport::exit_status;
 use crate::ipc_error::IpcError;
-use std::os::unix::process::ExitStatusExt;
-use std::process::{ExitStatus, Output};
+use std::process::Output;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The state JSON in a prompt.
@@ -99,7 +99,7 @@ impl SshExec for ScriptedSsh {
         let text = (self.answer)(&prompt);
         self.prompts.lock().unwrap().push(prompt);
         Ok(Output {
-            status: ExitStatus::from_raw(0),
+            status: exit_status(0),
             stdout: format!("{HAIKU_TAG}run\n{}\n", envelope(&text)).into_bytes(),
             stderr: Vec::new(),
         })

@@ -262,6 +262,8 @@ Index by area (names only; see the reference for details):
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `forget_project` (drop a row a local-less hub cannot rescan away),
+  `add_project` (clone, adopt or create a repository on a host — `git` and
+  `gh` run there), `list_github_repos` (what `gh` on a host can see),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,

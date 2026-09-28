@@ -1,5 +1,7 @@
 # Live-instance fixes — the four plans and how they fit
 
+**Status:** A landed (#343, migration 065) and D landed (#344, migration 071); B and C are open, and their migration numbers below are taken — renumber from the next free one.
+
 Spec: `docs/ux/2026-09-27-live-instance-analysis/README.md` (themes T1–T7,
 the 25-row code table) and its six lens files. All four plans were written
 against `origin/main` @ `7dad1665` (0.3.1); every `file:line` is current.

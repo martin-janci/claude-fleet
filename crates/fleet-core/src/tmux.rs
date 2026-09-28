@@ -466,7 +466,7 @@ impl TmuxExec for LocalTmux {
     }
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
         local_allowed()?;
-        let output = tokio::process::Command::new("tmux")
+        let output = crate::proc::command("tmux")
             .args(["capture-pane", "-t", &exact_pane(name), "-p"])
             .output()
             .await
@@ -486,7 +486,7 @@ impl TmuxExec for LocalTmux {
         // hang it.
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            tokio::process::Command::new("tmux")
+            crate::proc::command("tmux")
                 .args(["capture-pane", "-t", &exact_pane(name), "-S", &start, "-p"])
                 .output(),
         )
@@ -501,7 +501,7 @@ impl TmuxExec for LocalTmux {
     }
     async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
         local_allowed().ok()?;
-        let output = tokio::process::Command::new("claude")
+        let output = crate::proc::command("claude")
             .args(["agents", "--json"])
             .output()
             .await
@@ -522,7 +522,7 @@ impl TmuxExec for LocalTmux {
             return Some(std::collections::HashMap::new());
         };
         // No login shell: the script needs only `$HOME`, which is inherited.
-        match tokio::process::Command::new("bash")
+        match crate::proc::command("bash")
             .args(["-c", &script])
             .output()
             .await
@@ -533,7 +533,7 @@ impl TmuxExec for LocalTmux {
     }
     async fn host_identity(&self) -> Option<HostIdentity> {
         local_allowed().ok()?;
-        let out = tokio::process::Command::new("bash")
+        let out = crate::proc::command("bash")
             .args(["-c", HOST_IDENTITY_SCRIPT])
             .output()
             .await
@@ -543,7 +543,7 @@ impl TmuxExec for LocalTmux {
     }
     async fn host_versions(&self) -> Option<HostVersions> {
         local_allowed().ok()?;
-        let out = tokio::process::Command::new("bash")
+        let out = crate::proc::command("bash")
             .args(["-c", HOST_VERSIONS_SCRIPT])
             .output()
             .await
@@ -553,7 +553,7 @@ impl TmuxExec for LocalTmux {
     }
     async fn host_health(&self) -> Option<HostHealthSample> {
         local_allowed().ok()?;
-        let out = tokio::process::Command::new("bash")
+        let out = crate::proc::command("bash")
             .args(["-c", HOST_HEALTH_SCRIPT])
             .output()
             .await
@@ -1105,7 +1105,7 @@ pub struct TmuxSession {
 /// Lists tmux sessions on the local host. Returns an empty Vec (not an error)
 /// when the tmux server isn't running.
 pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
-    let output = tokio::process::Command::new("tmux")
+    let output = crate::proc::command("tmux")
         .args([
             "list-sessions",
             "-F",
@@ -1276,7 +1276,7 @@ pub async fn new_session(
     // started before claude-fleet imported the user's locale from their
     // login shell). `-e` overrides the server env for processes started
     // in this session, so the spawned `cl`/`bash` reliably sees UTF-8.
-    let mut cmd = tokio::process::Command::new("tmux");
+    let mut cmd = crate::proc::command("tmux");
     cmd.args([
         "new-session",
         "-d",
@@ -1326,7 +1326,7 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
     if trimmed == old {
         return Ok(()); // no-op
     }
-    let output = tokio::process::Command::new("tmux")
+    let output = crate::proc::command("tmux")
         .args(["rename-session", "-t", &exact_session(old), trimmed])
         .output()
         .await
@@ -1344,7 +1344,7 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
 /// `respawn-pane -k` so we don't need to know if claude is currently running
 /// or already dropped to shell.
 pub async fn restart_session(name: &str, pane_cmd: &str) -> Result<(), IpcError> {
-    let output = tokio::process::Command::new("tmux")
+    let output = crate::proc::command("tmux")
         .args(["respawn-pane", "-k", "-t", &exact_pane(name), pane_cmd])
         .output()
         .await
@@ -1375,7 +1375,7 @@ pub async fn respawn_pane_in(
     cwd: &std::path::Path,
     pane_cmd: &str,
 ) -> Result<(), IpcError> {
-    let output = tokio::process::Command::new("tmux")
+    let output = crate::proc::command("tmux")
         .args([
             "respawn-pane",
             "-k",
@@ -1397,7 +1397,7 @@ pub async fn respawn_pane_in(
 }
 
 pub async fn kill_session(name: &str) -> Result<(), IpcError> {
-    let output = tokio::process::Command::new("tmux")
+    let output = crate::proc::command("tmux")
         .args(["kill-session", "-t", &exact_session(name)])
         .output()
         .await
@@ -1449,6 +1449,10 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 /// `claude_cli.rs`, `service/account_usage.rs`, `service/add_project.rs` and
 /// `service/move_session/carry.rs` all write their exec'd stubs through it.
 /// Any new fake the test process itself spawns belongs here too.
+///
+/// Unix only: the fakes are `sh` scripts exec'd by path, so a test that needs
+/// one is a Unix test.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod fake_exec {
     use std::path::{Path, PathBuf};
@@ -2039,6 +2043,7 @@ mod tests {
         assert!(crate::tmux::transcript_mtimes_script(&["bad".into()]).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn mtimes_script_runs_against_a_real_projects_tree() {
         // The script itself, through `bash -c` with a throwaway $HOME: finds a
@@ -2076,6 +2081,7 @@ mod tests {
         assert!(discover_transcripts_script(50).contains("head -n 50"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn discover_script_runs_under_local_bash() {
         use crate::service::sessions::parse_discover_output;
@@ -2298,6 +2304,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_identity_script_runs_under_local_bash() {
         // Real bash, real `tmux` if installed — CI's `ubuntu-24.04` runner
@@ -2346,6 +2353,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_script_is_unknown_when_tmux_is_missing_from_path() {
         // The 127 case this whole fix exists for: a login profile edit or a

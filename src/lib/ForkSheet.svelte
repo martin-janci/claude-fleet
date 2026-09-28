@@ -24,6 +24,8 @@
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { rewindConversation } from './sessions';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let {
     sessionId,
@@ -50,7 +52,9 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
 
-  const canSubmit = $derived(choice === 'same' && !busy);
+  // The hub link can drop while the sheet is open.
+  const blocked = $derived(hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection));
+  const canSubmit = $derived(choice === 'same' && !busy && !blocked);
 
   async function fork() {
     if (!canSubmit) return;
@@ -111,7 +115,7 @@
     </label>
   </fieldset>
 
-  {#if error}<p class="err">{error}</p>{/if}
+  {#if error}<p class="err">{error}</p>{:else if blocked}<p class="err">{blocked}</p>{/if}
 
   <div class="actions">
     <button type="button" onclick={onclose} disabled={busy}>Cancel</button>

@@ -997,6 +997,7 @@ mod tests {
 
     /// Callers holding only the mutex get the keys with the lock released
     /// before any path is resolved; a remote path is never resolved here.
+    #[cfg(unix)]
     #[test]
     fn fingerprint_keys_are_resolved_outside_the_store_lock() {
         let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());

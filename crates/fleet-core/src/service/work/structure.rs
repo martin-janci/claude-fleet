@@ -25,7 +25,7 @@ use super::view::{
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::OrgScope;
-use crate::store::{RuleConditions, Store, WorkRule, WorkView};
+use crate::store::{Decider, RuleConditions, Store, WorkRule, WorkView};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -774,9 +774,11 @@ pub fn assign_org(
 /// cross-org). One failing never undoes or stops the others; the answer
 /// says, per item and in order, which did what. There is no
 /// `force_cross_org` in a batch: a cross-org confirm is decided alone.
+/// `decider` is the caller's, exactly as for a single decision (D34).
 pub fn decide_batch(
     store: &Mutex<Store>,
     scope: &OrgScope,
+    decider: Decider,
     decisions: &[LinkDecision],
     gate: &dyn Fn(i64) -> Result<(), IpcError>,
 ) -> Result<BatchResult, IpcError> {
@@ -809,7 +811,7 @@ pub fn decide_batch(
                 primary: d.primary,
                 ..Default::default()
             };
-            super::work_link(&args, store, scope).map(|_| ())
+            super::work_link_as(&args, store, scope, decider).map(|_| ())
         })();
         results.push(match outcome {
             Ok(()) => DecisionResult {

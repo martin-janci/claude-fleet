@@ -481,7 +481,14 @@ pub async fn provision_host_with_token(
     // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
     // An agent host is never dialed over SSH at all, so it has no use for
     // one either — it reaches the hub over its own outbound connection.
-    if host != "local" && !base.public && !routes_to_agent(store, host)? {
+    // A WSL distribution is not dialed over SSH either: `ssh -R` cannot
+    // reach it, and where its hooks can reach this machine at all (WSL1,
+    // WSL2 mirrored networking) they do so on 127.0.0.1 directly.
+    if host != "local"
+        && !base.public
+        && !routes_to_agent(store, host)?
+        && !crate::wsl::is_wsl_host(host)
+    {
         tunnels.ensure(host, base.port, base.port);
     }
     if let Ok(s) = store.lock() {
@@ -655,7 +662,12 @@ pub fn reestablish_tunnels(
     }
     let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
-        if h.provisioned && h.alias != "local" && !h.hidden && h.transport != "agent" {
+        if h.provisioned
+            && h.alias != "local"
+            && !h.hidden
+            && h.transport != "agent"
+            && !crate::wsl::is_wsl_host(&h.alias)
+        {
             tunnels.ensure(&h.alias, base.port, base.port);
         }
     }
@@ -946,6 +958,7 @@ fn place_private_file(
         return Ok(());
     }
     std::fs::copy(tmp, target)?;
+    #[cfg(unix)]
     std::fs::set_permissions(
         target,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
@@ -1153,6 +1166,7 @@ mod tests {
     /// The local twin of the remote fallback: when the rename fails the way
     /// a bind-mounted target makes it fail, the content must still land, at
     /// 0600 even though the target was world-readable, with no tmp left.
+    #[cfg(unix)]
     #[test]
     fn place_private_file_falls_back_to_a_copy_when_the_rename_fails() {
         use std::os::unix::fs::PermissionsExt;
@@ -1270,6 +1284,11 @@ mod tests {
     #[tokio::test]
     async fn write_host_file_secret_local_failure_leaves_the_original_untouched() {
         use std::os::unix::fs::PermissionsExt;
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "mode 0500 does not stop uid 0 writing into the directory",
+        ) {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret.json");
         std::fs::write(&path, "original").unwrap();

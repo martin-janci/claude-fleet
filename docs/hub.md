@@ -297,12 +297,24 @@ version's arm64 leg failed and the tag carries an amd64-only manifest (see
 whose tag lives in `.env` (the `deploy/hub/behind-proxy` compose): it pulls
 first (a tag ghcr does not have stops it with the hub untouched), takes a
 consistent online backup (`backup.sh`, kept as `backups/pre-<version>-*.db`,
-newest three), `docker compose stop`s the hub so the 30 s grace applies,
-moves `FLEET_HUB_TAG`, starts it, waits for the image's own healthcheck,
-and checks `fleet-hub --version`. With a readonly client token in
-`readonly.token` beside the compose file (`fleet-hub pair --mode readonly
-upgrade-check`) it also asks `fleet_health` over the public URL — never the
-master token. On any failure after the stop it prints the rollback.
+the newest three *of that version*), `docker compose stop`s the hub so the
+30 s grace applies, moves `FLEET_HUB_TAG`, starts it, waits for the image's
+own healthcheck, and checks `fleet-hub --version`. With a readonly client
+token in `readonly.token` beside the compose file (`fleet-hub pair --mode
+readonly upgrade-check`) it also asks `fleet_health` over the public URL —
+never the master token, and passed to `curl` on stdin, not its command line.
+On any failure after the stop it prints the rollback.
+
+The image pulled is the compose file's own `image:` line at the new tag, and
+every `docker compose` call reads `FLEET_HUB_ENV_FILE` (default `.env`
+beside the compose file) through `--env-file`. The tag must match
+`[0-9A-Za-z._-]+`. On a fresh copy of `.env.example` (`FLEET_HUB_TAG=`
+empty) there is nothing to stop and no `state.db` to back up: the script
+says so and skips those steps, so the same command is also the first
+install. With a tag set, a missing `state.db` stops the upgrade before the
+hub is touched (point `FLEET_HUB_DATA` at the right directory) — it never
+migrates without a backup. An upgrade never prunes an older
+version's `pre-<version>-*.db` (see *Backups*).
 
 **Order across the three binaries.** Today (contract 4 on both sides,
 proto 1 on both sides) the order is a habit: hub, then desktop, then the
@@ -323,15 +335,23 @@ and a `cp` of the `state.db*` triple can be torn. Use SQLite's online backup
 API instead — one self-contained file, no stop:
 
 ```bash
-sudo deploy/hub/backup.sh          # FLEET_HUB_DATA=./data, keeps 14 dailies in ./backups
+sudo FLEET_HUB_DATA=/volume1/docker/fleet-hub/data deploy/hub/backup.sh
+# keeps 14 dailies in <FLEET_HUB_DATA>/../backups (FLEET_HUB_BACKUPS overrides)
 ```
 
+`FLEET_HUB_DATA` defaults to `/volume1/docker/fleet-hub/data` (the Synology
+layout below); point it at the compose directory's `data/` anywhere else.
+
 It runs `.backup`, then `PRAGMA integrity_check` on the copy (a failed check
-removes it and exits 1), then prunes to `KEEP` files per `PREFIX`. On a
+removes it and exits 1; a run killed mid-copy removes its `.part`), then
+prunes to the newest `KEEP` files of its own `PREFIX` — other prefixes are
+never touched. On a
 Synology: Control Panel → Task Scheduler → user `root`, daily 03:30,
 `bash /volume1/docker/fleet-hub/backup.sh`; add `backups/` to Hyper Backup
 or any off-box target. `upgrade.sh` calls the same script with
-`PREFIX=pre-<version> KEEP=3` before it stops the hub.
+`PREFIX=pre-<version> KEEP=3` before it stops the hub, so each version
+keeps its own three and older versions' `pre-*` files stay until you delete
+them.
 
 **Restore drill** (rehearse it once; a backup nobody restored is a hope):
 
@@ -364,15 +384,18 @@ The variant publishes **no** port: the hub joins your proxy's docker network
 named `caddy`) and the proxy forwards by service name:
 
 ```
-http://fleet.example.com {
+fleet.example.com {
     reverse_proxy fleet-hub:4180 {
         flush_interval -1
     }
 }
 ```
 
-The https:// public URL permits the `0.0.0.0` bind, and the hub logs at
-startup that plaintext 4180 is reachable by anything that can route to it —
+The bare site address lets your Caddy obtain the certificate and terminate
+TLS for the `https://` public URL; an `http://` prefix would switch that off
+and serve the hub in plaintext. The https:// public URL permits the
+`0.0.0.0` bind, and the hub logs at startup that plaintext 4180 is reachable
+by anything that can route to it —
 on the proxy network, that is the proxy. Publishing `4180:4180` on the host
 instead makes it the whole LAN and every VPN peer; the warning says so.
 
@@ -1582,7 +1605,11 @@ same reason: it carries the dialog a blocked session is waiting on and its
 options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
 is there for the mirror of that reason: projected away, the view would hand a
-phone the columns to re-derive the answer instead of the answer. `tags`
+phone the columns to re-derive the answer instead of the answer. Its reasons,
+most urgent first (`service/attention.rs`): `waiting`, `stuck`, `stop_failed`,
+`failed`, `context_full` (at or past `health.context_red_pct`),
+`stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
+with no activity), `ci_failing` and `lifecycle`. `tags`
 is there because the phone's tag editor starts from them and
 `set_session_tags` replaces the whole list: without them a phone that added
 one tag deleted the rest. `work` (the primary work link: key, title) is the
@@ -2105,6 +2132,10 @@ at whichever one provisioned it last.
 
 ## Point a desktop at the hub
 
+On Windows this is the recommended setup: Windows' `ssh` cannot multiplex,
+so a standalone Windows desktop pays a fresh SSH connection per command. See
+[windows.md](windows.md).
+
 Settings → **Hub**. On the hub, mint a code and paste it:
 
 ```bash
@@ -2112,8 +2143,9 @@ fleet-hub pair --name laptop     # prints a code; it dies on first use
 ```
 
 The desktop pairs as an ordinary client — the hub cannot tell it from a phone
-and should not. It stores the client token in the OS keychain (macOS) or an
-owner-only 0600 file (elsewhere), never in `state.db` and never in a log
+and should not. It stores the client token in the OS keychain (macOS),
+Windows Credential Manager, or an owner-only 0600 file (Linux), never in
+`state.db` and never in a log
 line. Off macOS that file is *not* an OS secret store: anything running as
 your user can read it, so treat that machine's account as holding a fleet
 credential. Which fleet the app is a window onto is decided **once, at startup**, so
@@ -2189,7 +2221,7 @@ standalone exactly as before.
   with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
   banner — "what you see may be out of date", the attempt number and the
   reason — until it is back. After a dropped stream the app resumes from the
-  last event it applied when the hub still has it (15 minutes / 512 events);
+  last event it applied when the hub still has it (the last 512 events, roughly thirteen minutes of a busy fleet);
   otherwise it re-lists. A stream that goes silent (not even the hub's
   15-second keep-alive) for about 40 seconds is treated as dead, which is what
   a laptop that slept and woke on another network looks like.
@@ -2197,6 +2229,11 @@ standalone exactly as before.
   embedded control API in the desktop; two brains for one fleet is the failure
   this mode exists to prevent. The footer's version, database and schema are
   the hub's too — the badge beside them says whose.
+- **Projects are added through the hub.** "＋ Add project…" clones or
+  creates the repository on the host you pick, with that host's `git` and
+  `gh`; the new row arrives like any other change. Cancel stops the desktop
+  waiting, not the run on the host. The *Existing folder* source is absent
+  here, because it would mean a folder on the hub's machine.
 - **Its errors reach the hub.** Error-level events and frontend crashes are
   queued and posted to the hub's `/report` every few seconds — see *Error
   reports*; `CLAUDE_FLEET_HUB_REPORTS=0` turns it off.
@@ -2259,14 +2296,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 205 commands, 97 route to a hub tool, 1 routes except for one argument shape, 86 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 205 commands, 99 route to a hub tool, 1 routes except for one argument shape, 84 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `add_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
@@ -2311,7 +2347,6 @@ Of the 205 commands, 97 route to a hub tool, 1 routes except for one argument sh
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
 | `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
-| `list_github_repos` | it runs `gh` over this machine's SSH connection to the host; browse repositories from the hub or a standalone app |
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
@@ -2497,12 +2532,13 @@ deliberately.
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a
   phone* and *Clients* above.
-- **Failed bearers are throttled per address.** A bad or missing token on any
-  authenticated route is answered `401` once per second per source address
-  (the peer, or the last `X-Forwarded-For` hop when the peer is a private or
-  loopback proxy — the same rule `/pair` uses); a repeat inside that second is
-  `429`. The `[mcp] rejected request` log line names the address. A valid
-  token is never throttled: successes do not touch the bucket.
+- **Failed bearers are logged once per address.** A bad or missing token on
+  any authenticated route is answered `401`, every time — a client reads
+  `401` as "pair again", never as a busy hub. The `[mcp] rejected request`
+  warn line, which names the address, is written once per second per source
+  address (the peer, or the last `X-Forwarded-For` hop when the peer is a
+  private or loopback proxy — the same rule `/pair` uses); repeats inside
+  that second are logged at debug. Successes do not touch the bucket.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there

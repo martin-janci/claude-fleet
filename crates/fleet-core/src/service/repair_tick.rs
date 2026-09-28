@@ -1298,6 +1298,7 @@ mod tests {
         assert!(check_missing(&fake, "down", &targets).await.is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn check_missing_runs_locally_against_real_directories() {
         let base = std::env::temp_dir().join(format!("fleet-dircheck-{}", std::process::id()));

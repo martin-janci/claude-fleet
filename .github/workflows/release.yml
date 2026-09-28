@@ -345,7 +345,12 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          app=$(find target src-tauri/target -maxdepth 6 -type d -path '*/bundle/macos/claude-fleet.app' 2>/dev/null | head -1)
+          # Only the target dirs that exist: `find` on a missing path exits
+          # non-zero, and under pipefail that killed this step silently
+          # (v0.3.3) before it checked anything.
+          roots=(); for d in target src-tauri/target; do if [[ -d "$d" ]]; then roots+=("$d"); fi; done
+          [[ ${#roots[@]} -gt 0 ]] || { echo "::error::no cargo target directory" >&2; exit 1; }
+          app=$(find "${roots[@]}" -maxdepth 6 -type d -path '*/bundle/macos/claude-fleet.app' | head -1 || true)
           [[ -n "$app" ]] || { echo "::error::no claude-fleet.app bundle found" >&2; exit 1; }
           info=$(codesign -dvvv "$app" 2>&1)
           codesign --verify --deep --strict "$app"
@@ -372,6 +377,8 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG: ${{ github.ref_name }}
           LEG: ${{ matrix.leg }}
+        # bash on every leg: the Windows runner's default shell is pwsh.
+        shell: bash
         run: scripts/rename-updater-asset.sh
 
   # fleet-agent and a bare fleet-hub, packaged for a Linux host with no

@@ -634,10 +634,11 @@
   /** Host to preselect in NewSessionDialog: where Add project put the project. */
   let dialogHost: string | undefined = $state(undefined);
 
-  // Both act on a checkout using this machine's SSH (and, for Add project,
-  // GitHub credentials): neither has a hub tool, so both refuse with
-  // E_LOCAL_ONLY in remote mode (`commands/projects.rs`, `commands/sessions.rs`).
-  const addProjectBlocked = $derived(hubBlock('add_project', $hubStatus));
+  // Add project ROUTES to the hub now (the clone runs on the host through the
+  // hub's transport), so it is gated on the live link like every other routed
+  // mutation. Purge still uses this machine's SSH and stays refused with
+  // E_LOCAL_ONLY in remote mode (`commands/sessions.rs`).
+  const addProjectBlocked = $derived(hubActionBlocked('add_project', $hubStatus, $hubConnection));
   const purgeProjectBlocked = $derived(hubBlock('purge_project', $hubStatus));
 
   // While the hub's wire contract is outside this build's range, every list

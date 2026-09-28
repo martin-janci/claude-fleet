@@ -1,6 +1,7 @@
 //! The field-name contract tests. See [`super`] for why they exist.
 
 use super::*;
+use fleet_core::service::add_project::GithubRepo;
 use fleet_core::service::health::{Health, HubHealth, TrackerHealth, TrackersHealth};
 use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
@@ -78,6 +79,7 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_seq: 7,
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
+        work_rev: 17,
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -244,6 +246,15 @@ fn sample_host_worktrees() -> HostWorktrees {
         project_id: 2,
         cloned: true,
         worktrees: vec![sample_worktree_row()],
+    }
+}
+
+fn sample_github_repo() -> GithubRepo {
+    GithubRepo {
+        name_with_owner: "acme/widget".into(),
+        description: Some("w".into()),
+        is_private: true,
+        updated_at: Some("2026-09-01T10:00:00Z".into()),
     }
 }
 
@@ -550,6 +561,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("WorktreeRow", wire_keys(&sample_worktree_row()));
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
     put("HostWorktrees", wire_keys(&sample_host_worktrees()));
+    put("GithubRepo", wire_keys(&sample_github_repo()));
     put(
         "WorktreeOccupant",
         wire_keys(&WorktreeOccupant {
@@ -848,11 +860,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty keys nothing else would notice losing. Its list is a literal here,
+/// sixty-one keys nothing else would notice losing. Its list is a literal here,
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty() {
+fn a_session_rows_wire_names_are_these_exact_sixty_one() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -911,12 +923,13 @@ fn a_session_rows_wire_names_are_these_exact_sixty() {
         "usage_updated_at",
         "work",
         "work_rejected",
+        "work_rev",
         "work_suggested",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 60, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 61, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

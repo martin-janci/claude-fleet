@@ -248,6 +248,9 @@ describe('triage rank', () => {
     expect(classify(row({ safe_kill_state: 'requested' }), opts)).toBe('lifecycle');
     expect(classify(row({ safe_kill_state: 'failed' }), opts)).toBe('lifecycle');
     expect(classify(row({ status: 'ghost' }), opts)).toBe('lifecycle');
+    // A dead row's last context reading or stale stamp is not actionable.
+    expect(classify(row({ status: 'ghost', context_pct: 99, stale_working_at: 5 }), opts)).toBe('lifecycle');
+    expect(classify(row({ lost_at: 5, context_pct: 99 }), opts)).toBe('lifecycle');
     expect(classify(row({ lost_at: 5 }), opts)).toBe('lifecycle');
     expect(classify(row({ idle_since: 0 }), opts)).toBe('idle_long');
     expect(classify(row({ claude_status: 'working' }), opts)).toBe('working');

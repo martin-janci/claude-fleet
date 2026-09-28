@@ -19,8 +19,9 @@ On first launch the app walks you through setup — see the **[Getting Started g
 Grab the bundle for your platform from the
 [Releases page](https://github.com/martin-janci/claude-fleet/releases) —
 `.dmg` for macOS (`aarch64` for Apple Silicon, `x86_64` for Intel),
-`.AppImage` or `.deb` for Linux. Every filename carries the version, so a
-download is always traceable to the release it came from.
+`.AppImage` or `.deb` for Linux, `_x64-setup.exe` for Windows (from 0.3.4).
+Every filename carries the version, so a download is always traceable to the
+release it came from.
 
 ### Verify what you downloaded
 
@@ -90,6 +91,14 @@ Mark the AppImage executable before running it:
 chmod +x claude-fleet_*.AppImage
 ```
 
+### Windows
+
+Windows is a desktop client for a Linux/macOS fleet, not a fleet host. The
+installer is per-user and unsigned (SmartScreen: **More info → Run anyway**),
+and it needs the OpenSSH Client that ships with Windows. What works, what does
+not, and why hub-client mode is the recommended setup:
+**[docs/windows.md](docs/windows.md)**.
+
 ## Features
 
 - **Multi-host** — attach to tmux sessions on any host in `~/.ssh/config`, plus
@@ -117,6 +126,7 @@ chmod +x claude-fleet_*.AppImage
 - [Concepts](docs/concepts.md)
 - [Work guide](docs/work-graph.md) — work items, trackers, detection, resume, Today, tidy-up
 - [Troubleshooting](docs/troubleshooting.md)
+- [Windows](docs/windows.md) — the desktop client on Windows
 - [Control API](docs/control-api.md)
 - [Docs index](docs/README.md)
 

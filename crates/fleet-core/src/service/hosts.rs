@@ -14,8 +14,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// The hosts this machine can add: every `~/.ssh/config` alias, then, on
+/// Windows, each WSL distribution [`crate::wsl::refresh`] found at startup
+/// (an alias the config already has stays the SSH host). A distribution
+/// installed since then shows up at the next launch.
 pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
-    Ok(ssh_config::load_user_config())
+    let mut hosts = ssh_config::load_user_config();
+    for (alias, distro) in crate::wsl::hosts() {
+        if hosts.iter().any(|h| h.alias == alias) {
+            continue;
+        }
+        hosts.push(SshHost {
+            alias,
+            hostname: Some(format!("WSL: {distro}")),
+            user: None,
+            port: None,
+        });
+    }
+    Ok(hosts)
 }
 
 pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
@@ -534,7 +550,7 @@ fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>)
 pub(crate) fn probe_local_in(
     home: &std::path::Path,
 ) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    let tmux = std::process::Command::new("tmux")
+    let tmux = crate::proc::std_command("tmux")
         .arg("-V")
         .output()
         .ok()
@@ -545,7 +561,7 @@ pub(crate) fn probe_local_in(
                 None
             }
         });
-    let claude = std::process::Command::new("claude")
+    let claude = crate::proc::std_command("claude")
         .arg("--version")
         .output()
         .ok()

@@ -40,7 +40,7 @@ struct CatalogFile {
 /// this directly; everything else goes through `git`, which turns a non-zero
 /// status into an `E_CATALOG_GIT`.
 fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcError> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::proc::std_command("git");
     cmd.args(args).current_dir(dir);
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the
@@ -305,11 +305,21 @@ pub fn valid_resource_rel_path(rel_path: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "..")
 }
 
+/// `p` relative to `root`, with `/` separators on every platform: these
+/// strings are resource names and keep-lists that travel to (POSIX) hosts
+/// and are checked by [`valid_resource_rel_path`], so a Windows `\` must never reach
+/// them.
 fn rel(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root)
+    let s = p
+        .strip_prefix(root)
         .unwrap_or(p)
         .to_string_lossy()
-        .to_string()
+        .to_string();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s
+    }
 }
 
 fn read_resources(dir: &Path) -> std::io::Result<Vec<Resource>> {
@@ -991,6 +1001,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_dir_skips_symlinks_in_resources_and_terminates() {
         let root = tmp("symlink");
@@ -1012,6 +1023,7 @@ mod tests {
         assert_eq!(skill.resources[0].rel_path, "resources/real.txt");
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_dir_records_problem_when_kind_dir_unreadable_and_continues() {
         use std::os::unix::fs::PermissionsExt;
@@ -1025,6 +1037,11 @@ mod tests {
         write(&root, "agents/pm/prompt.md", "prompt\n");
         let hooks_dir = root.join("hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "mode 000 does not stop uid 0 reading the directory",
+        ) {
+            return;
+        }
         fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o000)).unwrap();
 
         let result = load_dir(&root);
@@ -1236,6 +1253,7 @@ mod tests {
         assert_eq!(err.code, "E_ASSET_NOT_FOUND");
     }
 
+    #[cfg(unix)]
     #[test]
     fn remove_asset_refuses_symlinked_targets() {
         let root = tmp("remove-symlink");

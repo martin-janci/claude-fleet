@@ -1,5 +1,5 @@
 {
-  "revision": 4,
+  "revision": 5,
   "types": {
     "AccountRow": [
       "display_name",
@@ -164,6 +164,12 @@
     "GitRef": [
       "kind",
       "name"
+    ],
+    "GithubRepo": [
+      "description",
+      "is_private",
+      "name_with_owner",
+      "updated_at"
     ],
     "Health": [
       "by_status",
@@ -381,6 +387,7 @@
       "usage_updated_at",
       "work",
       "work_rejected",
+      "work_rev",
       "work_suggested",
       "worktree_id",
       "worktree_key"

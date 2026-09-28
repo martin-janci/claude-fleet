@@ -59,6 +59,7 @@ pub fn is_within(path: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use tempfile::TempDir;
 
     #[test]
@@ -70,6 +71,7 @@ mod tests {
         assert!(!is_within(Path::new("/b/x"), Path::new("")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_tail_resolves_through_the_nearest_existing_ancestor() {
         let tmp = TempDir::new().unwrap();

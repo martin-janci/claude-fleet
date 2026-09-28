@@ -1877,7 +1877,35 @@ describe('Sidebar: a hub contract skew', () => {
     const empty = await screen.findByTestId('sidebar-empty');
     expect(empty.textContent).toContain('No projects yet');
   });
+
+  it('Add project is enabled on a connected hub client', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    const addRow = screen.getByTestId('add-project-row') as HTMLButtonElement;
+    expect(addRow.disabled).toBe(false);
+    expect(addRow.title).toBe('');
+  });
+
+  it('Add project is disabled with the offline sentence while the hub is unreachable', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'reconnecting', attempt: 2, retry_in_secs: 4, reason: 'stream closed' });
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    const addRow = screen.getByTestId('add-project-row') as HTMLButtonElement;
+    expect(addRow.disabled).toBe(true);
+    expect(addRow.title).toContain('unreachable');
+    expect(addRow.title).toContain('fleet.example.com');
+  });
 });
+
 
 describe('Sidebar — group by work (roadmap M1)', () => {
   // A worktree whose branch names a ticket, on project 1.

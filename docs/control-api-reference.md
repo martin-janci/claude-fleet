@@ -13,6 +13,12 @@ Register a host. transport "ssh" (default) is probed first and persisted only if
 
 Parameters: `alias`, `ssh_alias`, `transport`
 
+### `add_project`
+
+Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local host only) or create a new repository (create_remote is refused once with a confirm token to send back). git and gh run on the host with its own credentials. Returns the project row.
+
+Parameters: `host_alias`, `source`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
@@ -130,6 +136,12 @@ The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each as
 Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
 
 Parameters: `include_revoked`
+
+### `list_github_repos`
+
+Repositories gh on the host can see, for choosing what to clone with add_project.
+
+Parameters: `host_alias`
 
 ### `list_host_worktrees`
 
@@ -373,7 +385,7 @@ Parameters: `name`
 
 ### `rewind_conversation`
 
-Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the updated row.
+Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the row (a fork's is the new session).
 
 Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 

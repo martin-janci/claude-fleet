@@ -255,8 +255,8 @@ pub struct RewindConversationParams {
     /// "rewind" restarts this session on the truncated copy; "fork" leaves
     /// it alone and starts a new session on the copy.
     pub mode: String,
-    /// fork only: name a new worktree for the new session; omit to reuse
-    /// this session's.
+    /// Not supported yet (E_UNSUPPORTED): a fork reuses this session's
+    /// worktree.
     #[serde(default)]
     pub new_worktree: Option<String>,
     /// Approved confirmation; required for "rewind".
@@ -518,6 +518,12 @@ pub struct ListHostWorktreesParams {
     pub host_alias: String,
     /// Project id.
     pub project_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListGithubReposParams {
+    /// Host whose `gh` login lists the repositories.
+    pub host_alias: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

@@ -412,6 +412,8 @@ pub(crate) struct Graph {
     pub(crate) projects: HashMap<i64, ProjectRow>,
     pub(crate) placements: HashMap<String, Placement>,
     pub(crate) rules: Vec<WorkRule>,
+    /// `health.context_red_pct`: `needs_you` agrees with `list_sessions`.
+    pub(crate) context_red_pct: f64,
 }
 
 impl Graph {
@@ -438,6 +440,7 @@ impl Graph {
                 .map(|p| (p.task_id.clone(), p))
                 .collect(),
             rules: s.work_rules()?,
+            context_red_pct: crate::service::health::context_red_pct(s),
         })
     }
 
@@ -927,7 +930,8 @@ fn task_link(
         ended_at: l.link.ended_at,
         end_reason: l.link.end_reason.clone(),
         claude_status: row.and_then(|r| r.claude_status.clone()),
-        needs_you: row.is_some_and(|r| attention::needs_attention(r).is_some()),
+        needs_you: row
+            .is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some()),
         archived: l.archived_at.is_some(),
         resumable: l.link.resumable,
         branch: l.link.snap_branch.clone().filter(|_| row.is_none()),
@@ -1023,7 +1027,9 @@ fn to_task(
             continue;
         }
         let row = g.session_of(l);
-        if *st == "active" && row.is_some_and(|r| attention::needs_attention(r).is_some()) {
+        if *st == "active"
+            && row.is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some())
+        {
             needs_you = true;
         }
         if needs_review(g, l, st) {

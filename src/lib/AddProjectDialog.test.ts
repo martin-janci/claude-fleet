@@ -13,6 +13,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import AddProjectDialog from './AddProjectDialog.svelte';
 import { hosts } from './hosts';
+import { hubStatus, STANDALONE } from './hub';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const mockedInvoke = invoke as ReturnType<typeof vi.fn>;
@@ -78,6 +79,7 @@ async function fillNew(owner: string, repo: string, remote: boolean) {
 beforeEach(() => {
   mockedInvoke.mockReset();
   mockedOpen.mockReset();
+  hubStatus.set({ ...STANDALONE });
   hosts.set([
     { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
     { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -672,5 +674,48 @@ describe('AddProjectDialog', () => {
       expect(screen.getByTestId('add-mode-new').getAttribute('aria-pressed')).toBe('true');
       expect(document.activeElement).toBe(screen.getByTestId('add-mode-new'));
     });
+  });
+});
+
+describe('on a hub client', () => {
+  const remote = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+  };
+
+  it('offers no Existing folder source (it would be a folder on the hub machine)', async () => {
+    hubStatus.set(remote);
+    mount();
+    await tick();
+    expect(screen.queryByTestId('add-mode-folder')).toBeNull();
+    for (const m of ['clone', 'github', 'new']) {
+      expect(screen.getByTestId(`add-mode-${m}`)).toBeInTheDocument();
+    }
+  });
+
+  it('offers Existing folder standalone', async () => {
+    mount();
+    await tick();
+    expect(screen.getByTestId('add-mode-folder')).toBeInTheDocument();
+  });
+
+  it('treats even the hub\'s local host as remote: Stop waiting, and the host may still finish', async () => {
+    hubStatus.set(remote);
+    const inflight = deferred();
+    route({ add_project: () => inflight.promise });
+    mount();
+    await tick();
+    await fireEvent.click(chip('local'));
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await tick();
+    expect(screen.getByTestId('cancel-create').textContent?.trim()).toBe('Stop waiting');
+    expect(screen.getByTestId('add-inflight-note').textContent).toBe(
+      'local may still finish the clone after you stop waiting.',
+    );
   });
 });

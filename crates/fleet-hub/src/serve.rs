@@ -10,7 +10,6 @@ use fleet_core::service::hub::{
     SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
 };
 use fleet_core::service::operator::{OPERATOR_HOST, SETTING_OPERATOR_HOST};
-use fleet_core::service::projects::LOCAL_HOST;
 use fleet_core::store::Store;
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -121,35 +120,11 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
     set(SETTING_TLS_CERT, &path(&r.tls_cert))?;
     set(SETTING_TLS_KEY, &path(&r.tls_key))?;
     if !r.local_host {
-        // A state.db copied from a desktop carries a `local` row. Hide it so
-        // nothing lists it, and mark it unreachable so nothing counts or polls
-        // it either (fleet_health, the account-usage tick); reconcile skips
-        // it regardless. `update_host_probe` is the only reachability setter;
-        // the row's versions and last ping are written back unchanged.
-        let hosts = s.list_hosts().map_err(|e| format!("list hosts: {e}"))?;
-        if let Some(local) = hosts.iter().find(|h| h.alias == LOCAL_HOST) {
-            s.set_host_hidden(LOCAL_HOST, true)
-                .map_err(|e| format!("hide the local host: {e}"))?;
-            if local.reachable {
-                s.update_host_probe(
-                    LOCAL_HOST,
-                    false,
-                    local.claude_version.as_deref(),
-                    local.tmux_version.as_deref(),
-                    local.last_pinged_at.unwrap_or(0),
-                )
-                .map_err(|e| format!("mark the local host unreachable: {e}"))?;
-            }
-        }
-        // Its sessions came along too. Nothing probes `local` here, so they
-        // would stay live forever and every click would hit the refusal:
-        // ghost them (dismissable, reaped by the routine prune).
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let retired = fleet_core::service::hub::retire_local_sessions(&s, now)
-            .map_err(|e| format!("retire the local host's sessions: {}", e.message))?;
+        let retired = fleet_core::service::hub::retire_local_host(&s, now)?;
         if retired > 0 {
             tracing::info!(
                 retired,

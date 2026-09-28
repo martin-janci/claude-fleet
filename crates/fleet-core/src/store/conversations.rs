@@ -370,6 +370,41 @@ impl Store {
         Ok(())
     }
 
+    /// A genuine SessionStart: the turn state the previous process left ends
+    /// with it — `failed` reads `idle`, the stale-working stamp goes — and
+    /// `last_hook_at` is stamped, so a reconcile pass already in flight keeps
+    /// this (the MCP-1 guard) and the StopFailure guard (`last_hook_at =
+    /// last_stop_at`) no longer holds. Any other status is left as it is; a
+    /// row with nothing to end is not written.
+    pub fn clear_ended_turn_state(&self, session_id: i64) -> Result<(), IpcError> {
+        let was_failed: Option<bool> = self
+            .conn
+            .query_row(
+                "SELECT claude_status = 'failed' FROM sessions \
+                 WHERE id = ?1 AND (claude_status = 'failed' OR stale_working_at IS NOT NULL)",
+                [session_id],
+                |r| r.get::<_, Option<bool>>(0).map(|b| b.unwrap_or(false)),
+            )
+            .optional()?;
+        let Some(was_failed) = was_failed else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "UPDATE sessions SET last_hook_at = ?2, stale_working_at = NULL, \
+                 claude_status = CASE WHEN claude_status = 'failed' THEN 'idle' \
+                                      ELSE claude_status END \
+             WHERE id = ?1",
+            rusqlite::params![session_id, now_unix()],
+        )?;
+        if was_failed {
+            if let Err(e) = self.insert_session_event(session_id, "status_change", Some("idle")) {
+                tracing::warn!(session_id, error = %e, "[hook] status_change not recorded");
+            }
+        }
+        self.emit_session(session_id)?;
+        Ok(())
+    }
+
     /// SessionEnd(clear|resume): the next SessionStart / UserPromptSubmit
     /// from an unknown id in this row's cwd may rebind it (spec §1.2 step 3).
     /// Stamps `last_hook_at` as well (see [`Self::record_hook_seen`]).
@@ -614,15 +649,6 @@ impl Store {
         if n == 0 {
             return Ok(None);
         }
-        Ok(self.emit_session(session_id)?)
-    }
-
-    /// Flag the session's context size as out of date (compaction, resume).
-    pub fn mark_context_stale(&self, session_id: i64) -> Result<Option<SessionRow>, IpcError> {
-        self.conn.execute(
-            "UPDATE sessions SET context_stale = 1 WHERE id = ?1",
-            [session_id],
-        )?;
         Ok(self.emit_session(session_id)?)
     }
 

@@ -198,13 +198,13 @@ pub async fn refresh_account_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::transport::exit_status;
     use crate::events::RecordingEventBus;
     use crate::service::account_usage::{
         Clock, FetchResult, UsageOutcome, UsageOutcomeKind, USAGE_POLL_FLOOR_SECS,
     };
     use crate::ssh_fake::FakeSsh;
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::{ExitStatus, Output};
+    use std::process::Output;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
@@ -347,7 +347,7 @@ mod tests {
                 tokio::time::sleep(self.delay).await;
                 self.current.fetch_sub(1, Ordering::SeqCst);
                 Ok(Output {
-                    status: ExitStatus::from_raw(0),
+                    status: exit_status(0),
                     stdout: NO_CREDENTIALS_OUTPUT.as_bytes().to_vec(),
                     stderr: Vec::new(),
                 })
