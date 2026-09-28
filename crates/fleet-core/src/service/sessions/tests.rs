@@ -2065,6 +2065,59 @@ async fn fleet_reconcile_completes_when_one_host_never_answers() {
     assert_eq!(local[0].tmux_name, "local-live");
 }
 
+/// perf-logs §3: the pass joined EVERY probe before writing any host, so one
+/// 65 s probe timeout froze the freshness of the whole fleet (63 such
+/// timeouts in the log window). A host's rows now land as its probe ends.
+#[tokio::test]
+async fn a_fast_hosts_rows_land_while_a_slow_host_is_still_being_probed() {
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("wedged").unwrap();
+    }
+    let (deps, _probes) = scripted_deps(
+        vec![tmux_session("local-live")],
+        Duration::from_millis(10),
+        Duration::from_millis(600),
+    );
+    let pass = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { reconcile_sessions_with(&store, &deps).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !pass.is_finished(),
+        "the wedged host is still inside its probe budget"
+    );
+    {
+        let s = store.lock().unwrap();
+        let local = s.list_sessions_for_host("local").unwrap();
+        assert_eq!(
+            local
+                .iter()
+                .map(|r| r.tmux_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local-live"],
+            "the healthy host's rows are written before the slow host's probe ends"
+        );
+    }
+    pass.await
+        .unwrap()
+        .expect("the pass completes once the slow host times out");
+    let s = store.lock().unwrap();
+    let wedged = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "wedged")
+        .unwrap();
+    assert!(
+        !wedged.reachable,
+        "the timed-out host is still marked unreachable"
+    );
+}
+
 #[tokio::test]
 async fn reconcile_links_the_local_account_when_it_becomes_known() {
     // The bug: `local` is auto-created by `reconcile_sessions_with`'s
@@ -6736,5 +6789,82 @@ async fn list_and_refresh_never_probe_a_resume_transcript() {
     assert!(
         commands.iter().all(|c| !c.contains(TRANSCRIPT_PROBE_TAG)),
         "{commands:?}"
+    );
+}
+
+/// perf-logs §5: a stuck transition was a `session_events` row and nothing
+/// in the log. One INFO line names host, session and kind.
+#[tokio::test]
+async fn a_stuck_transition_is_logged_with_host_session_and_kind() {
+    struct StuckTmux;
+    #[async_trait::async_trait]
+    impl TmuxExec for StuckTmux {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Ok(vec![tmux_session("dev-stuck")])
+        }
+        async fn new_session(
+            &self,
+            _n: &str,
+            _c: &std::path::Path,
+            _p: &str,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+            Ok(STUCK_PANE.to_string())
+        }
+        // The default `probe_snapshot` reads the tail through THIS call.
+        async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+            Ok(STUCK_PANE.to_string())
+        }
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
+        }
+    }
+    // The one pane shape `pane_intel` classifies as `press_enter` (its
+    // `press_enter_detected` test); the permission fixtures are `blocked`
+    // with no `stuck_kind`.
+    const STUCK_PANE: &str = "Update available.\nPress Enter to continue\n";
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let deps = ReconcileDeps::fake(|_| Box::new(StuckTmux), std::time::Duration::from_secs(5));
+    // First pass creates the row (no prior → no transition event).
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session("dev-stuck", "local").unwrap().unwrap();
+        assert!(
+            row.stuck_kind.is_some(),
+            "the pane must classify as stuck: {row:?}"
+        );
+    }
+    // Clear the flag, then let the next pass re-detect it: that is the transition.
+    {
+        let s = store.lock().unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET stuck_kind = NULL WHERE tmux_name = 'dev-stuck'",
+                [],
+            )
+            .unwrap();
+    }
+    let log = crate::logging::capture::start();
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let text = log.text();
+    assert!(
+        text.contains("INFO") && text.contains("[reconcile] stuck"),
+        "{text}"
+    );
+    assert!(
+        text.contains("host=local") && text.contains("session=dev-stuck"),
+        "{text}"
     );
 }

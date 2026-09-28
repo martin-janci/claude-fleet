@@ -202,7 +202,7 @@ impl Store {
     }
 
     /// Stamp when the host's versions were last read from the host itself
-    /// (migration 071). Written by the reconcile pass only on a pass whose
+    /// (migration 072). Written by the reconcile pass only on a pass whose
     /// probe carried a `versions` section, and by `probe_host`; the
     /// versions themselves still travel through `update_host_probe`. No
     /// event: the same transaction's `update_host_probe_in_tx` announces
@@ -215,7 +215,7 @@ impl Store {
         Ok(())
     }
 
-    /// Write one health sample (migration 072). No event: the reconcile
+    /// Write one health sample (migration 073). No event: the reconcile
     /// transaction's `update_host_probe_in_tx` announces the row and puts
     /// this sample on the ping.
     pub fn set_host_health(
@@ -450,7 +450,7 @@ impl Store {
     }
 
     /// Mark a host provisioned (or not). With `true` the content fingerprint
-    /// this build ships and the time are recorded too (migration 073), so
+    /// this build ships and the time are recorded too (migration 074), so
     /// `HostRow::provision_stale` can compare on every later read; with
     /// `false` both are cleared.
     pub fn set_host_provisioned(
@@ -541,13 +541,15 @@ impl Store {
                 [from],
             )?;
         }
+        // Keyed (day, host_alias, backfill) since plan D's migration 071: a
+        // collected day and a first-cursor backfill day sum separately.
         let usage_days_merged = tx.execute(
-            "INSERT INTO usage_daily (day, host_alias, input_tokens, output_tokens, \
+            "INSERT INTO usage_daily (day, host_alias, backfill, input_tokens, output_tokens, \
                cache_write_tokens, cache_read_tokens, cost_micros)
-             SELECT day, ?2, input_tokens, output_tokens, cache_write_tokens, \
+             SELECT day, ?2, backfill, input_tokens, output_tokens, cache_write_tokens, \
                cache_read_tokens, cost_micros
                FROM usage_daily WHERE host_alias = ?1
-             ON CONFLICT(day, host_alias) DO UPDATE SET
+             ON CONFLICT(day, host_alias, backfill) DO UPDATE SET
                input_tokens = input_tokens + excluded.input_tokens,
                output_tokens = output_tokens + excluded.output_tokens,
                cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
@@ -1157,6 +1159,7 @@ mod tests {
                     last_msg_id: None,
                     last_msg_usage: None,
                     now: 86_400,
+                    by_day: Vec::new(),
                 },
             )
             .unwrap();

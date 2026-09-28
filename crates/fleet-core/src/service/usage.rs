@@ -33,7 +33,7 @@ use crate::ipc_error::{codes, IpcError};
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
-use crate::store::{SessionRow, Store, UsageCursor, UsageDelta, UsageTotals};
+use crate::store::{DayDelta, SessionRow, Store, UsageCursor, UsageDelta, UsageTotals};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -249,7 +249,7 @@ function num(u, k,   i, r) {
   return 0
 }
 function pos(x) { return x > 0 ? x : 0 }
-function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d5) {
+function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d5, d, key) {
   if (index(line, "\"usage\":{") == 0) return
   id = ""
   if (match(line, /"id":"msg_[A-Za-z0-9_-]+"/)) id = substr(line, RSTART + 6, RLENGTH - 7)
@@ -291,11 +291,22 @@ function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d
   tw[m] += dw
   tr[m] += dr
   t5[m] += d5
+  d = ""
+  if (match(line, /"timestamp":"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) d = substr(line, RSTART + 13, 10)
+  if (d == "") d = "?"
+  key = m SUBSEP d
+  if (!(key in dseen)) { dseen[key] = 1; dorder[++nd] = key; dm[key] = m; dd[key] = d }
+  xi[key] += di
+  xo[key] += dq
+  xw[key] += dw
+  xr[key] += dr
+  x5[key] += d5
 }
 { if (have) { used += length(prev) + 1; take(prev) } prev = $0; have = 1 }
 END {
   if (have && used + length(prev) + 1 <= chunk + 0) { used += length(prev) + 1; take(prev) }
   for (k = 1; k <= nm; k++) { m = order[k]; printf "U\t%s\t%s\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\n", sid, m, ti[m], to[m], tw[m], tr[m], t5[m] }
+  for (j = 1; j <= nd; j++) { key = dorder[j]; printf "D\t%s\t%s\t%s\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\n", sid, dm[key], dd[key], xi[key], xo[key], xw[key], xr[key], x5[key] }
   printf "E\t%s\t%.0f\t%s\t%s\t%.0f,%.0f,%.0f,%.0f,%.0f\n", sid, used + 0, last, lastm, ci, co, cw, cr, c5
 }"##;
 
@@ -384,6 +395,16 @@ pub struct ModelUsage {
     pub cache_write_5m_tokens: i64,
 }
 
+/// One (model, UTC day) slice of a file's read — the `D` lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayModelUsage {
+    /// `YYYY-MM-DD` from the line's `timestamp`; `None` when the line had none.
+    pub day: Option<String>,
+    pub model: Option<String>,
+    pub totals: UsageTotals,
+    pub cache_write_5m_tokens: i64,
+}
+
 /// One file's result from the batch script.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileRead {
@@ -392,6 +413,9 @@ pub struct FileRead {
     pub chunk: i64,
     pub source: String,
     pub by_model: Vec<ModelUsage>,
+    /// `by_model`, split by the transcript line's UTC day (the `D` lines).
+    /// Empty from a reader without them.
+    pub by_day: Vec<DayModelUsage>,
     pub consumed: i64,
     pub last_msg_id: Option<String>,
     pub last_model: Option<String>,
@@ -473,6 +497,7 @@ pub fn parse_batch_output(stdout: &str) -> BTreeMap<i64, FileOutcome> {
                         chunk,
                         source,
                         by_model: Vec::new(),
+                        by_day: Vec::new(),
                         consumed: 0,
                         last_msg_id: None,
                         last_model: None,
@@ -483,6 +508,22 @@ pub fn parse_batch_output(stdout: &str) -> BTreeMap<i64, FileOutcome> {
             ["U", _, model, i, o, w, r, w5] => {
                 if let Some(read) = pending.get_mut(&sid) {
                     read.by_model.push(ModelUsage {
+                        model: clean_model(model),
+                        totals: UsageTotals {
+                            input_tokens: count(i).unwrap_or(0),
+                            output_tokens: count(o).unwrap_or(0),
+                            cache_write_tokens: count(w).unwrap_or(0),
+                            cache_read_tokens: count(r).unwrap_or(0),
+                            cost_micros: 0,
+                        },
+                        cache_write_5m_tokens: count(w5).unwrap_or(0),
+                    });
+                }
+            }
+            ["D", _, model, day, i, o, w, r, w5] => {
+                if let Some(read) = pending.get_mut(&sid) {
+                    read.by_day.push(DayModelUsage {
+                        day: (*day != "?").then(|| day.trim().to_string()),
                         model: clean_model(model),
                         totals: UsageTotals {
                             input_tokens: count(i).unwrap_or(0),
@@ -540,6 +581,34 @@ pub fn plan_delta(
     } else {
         consumed
     };
+    // Per-day slices, priced like `totals`. A read that started at byte 0 of
+    // a transcript that already existed (`new` / `shrink`) books every day
+    // before the collection day as backfill: history a takeover read in one
+    // go, not that day's spend. A `cont` read is live whatever day the line
+    // carries; a line with no timestamp books to today.
+    let today = now.div_euclid(SECS_PER_DAY);
+    let fresh = read.mode != ReadMode::Cont;
+    let mut by_day: BTreeMap<(i64, bool), UsageTotals> = BTreeMap::new();
+    for dm in &read.by_day {
+        let mut t = dm.totals;
+        t.cost_micros = dm
+            .model
+            .as_deref()
+            .and_then(|m| price_for(m, overrides))
+            .map(|p| cost_micros(&t, dm.cache_write_5m_tokens, p))
+            .unwrap_or(0);
+        let day = dm.day.as_deref().and_then(day_number).unwrap_or(today);
+        let backfill = fresh && day < today;
+        by_day.entry((day, backfill)).or_default().add(&t);
+    }
+    let by_day = by_day
+        .into_iter()
+        .map(|((day, backfill), totals)| DayDelta {
+            day,
+            totals,
+            backfill,
+        })
+        .collect();
     UsageDelta {
         reset: read.mode == ReadMode::Shrink,
         totals,
@@ -549,6 +618,7 @@ pub fn plan_delta(
         last_msg_id: read.last_msg_id.clone(),
         last_msg_usage: read.last_msg_usage.clone(),
         now,
+        by_day,
     }
 }
 
@@ -695,7 +765,12 @@ pub async fn collect_all(store: &Mutex<Store>, exec: &dyn SshExec, now: i64) -> 
     for host in hosts {
         match collect_host(store, exec, &host, &overrides, now).await {
             Ok(n) => changed += n,
-            Err(e) => tracing::debug!("usage: {host}: {} {}", e.code, e.message),
+            Err(e) => tracing::warn!(
+                host = %host,
+                code = %e.code,
+                error = %e.message,
+                "usage collection failed (retried next interval)"
+            ),
         }
     }
     changed
@@ -789,12 +864,35 @@ pub fn day_string(day: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// UTC day number of a `YYYY-MM-DD` (the inverse of [`day_string`]);
+/// `None` for anything else. Howard Hinnant's days_from_civil.
+pub fn day_number(ymd: &str) -> Option<i64> {
+    let mut it = ymd.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if it.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
 /// Totals for one UTC day.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DayUsage {
     pub day: String,
     #[serde(flatten)]
     pub totals: UsageTotals,
+    /// Cost of history a fresh cursor booked to this day (`backfill = 1`
+    /// rows) — not in `totals`.
+    #[serde(default)]
+    pub backfill_cost_micros: i64,
 }
 
 /// Usage per host over the given session rows; hosts with nothing counted
@@ -827,17 +925,24 @@ fn daily_totals_where(
     host: Option<&str>,
     keep: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<DayUsage>, IpcError> {
-    let mut by: BTreeMap<i64, UsageTotals> = BTreeMap::new();
-    for (day, h, t) in s.usage_daily_since(since_day, host)? {
-        if keep(&h) {
-            by.entry(day).or_default().add(&t);
+    let mut by: BTreeMap<i64, (UsageTotals, i64)> = BTreeMap::new();
+    for (day, h, backfill, t) in s.usage_daily_since(since_day, host)? {
+        if !keep(&h) {
+            continue;
+        }
+        let e = by.entry(day).or_default();
+        if backfill {
+            e.1 += t.cost_micros;
+        } else {
+            e.0.add(&t);
         }
     }
     Ok(by
         .into_iter()
-        .map(|(day, totals)| DayUsage {
+        .map(|(day, (totals, backfill_cost_micros))| DayUsage {
             day: day_string(day),
             totals,
+            backfill_cost_micros,
         })
         .collect())
 }
@@ -875,10 +980,23 @@ pub struct SessionUsage {
     pub updated_at: Option<i64>,
 }
 
+/// What `UsageReport::by_host_population` says: the session rows that still
+/// exist, each over its whole lifetime — ghosts included, GC'd sessions gone.
+pub const POPULATION_LIVE_ROWS: &str = "live_rows";
+/// What `UsageReport::by_day_population` says: the durable daily roll-up,
+/// killed sessions included.
+pub const POPULATION_DURABLE: &str = "durable";
+
 /// `usage_report` result.
 #[derive(Debug, serde::Serialize)]
 pub struct UsageReport {
     pub note: &'static str,
+    /// What `total` and `by_host` count: the session rows that still exist,
+    /// each over its whole lifetime — ghosts included, GC'd sessions gone.
+    pub by_host_population: &'static str,
+    /// What `by_day` counts: the durable daily roll-up, killed sessions
+    /// included; `backfill_cost_micros` is history a first read booked.
+    pub by_day_population: &'static str,
     pub host_alias: Option<String>,
     /// Unix secs the window starts at (`None` = every session, and the last
     /// [`DEFAULT_REPORT_DAYS`] days of per-day totals).
@@ -943,6 +1061,8 @@ pub fn report(
         .div_euclid(SECS_PER_DAY);
     Ok(UsageReport {
         note: ESTIMATE_NOTE,
+        by_host_population: POPULATION_LIVE_ROWS,
+        by_day_population: POPULATION_DURABLE,
         host_alias: host.map(str::to_string),
         since,
         total,
@@ -1128,6 +1248,7 @@ mod tests {
     fn line_with(
         id: &str,
         model: &str,
+        ts: &str,
         i: i64,
         o: i64,
         w: i64,
@@ -1137,12 +1258,26 @@ mod tests {
     ) -> String {
         let w1h = w - w5;
         format!(
-            r#"{{"parentUuid":"p","isSidechain":false,"type":"assistant","message":{{"model":"{model}","id":"{id}","type":"message","role":"assistant","content":[{{"type":"text","text":"{block}"}}],"stop_reason":null,"usage":{{"input_tokens":{i},"cache_creation_input_tokens":{w},"cache_read_input_tokens":{r},"output_tokens":{o},"output_tokens_details":{{"thinking_tokens":3}},"server_tool_use":{{"web_search_requests":0,"web_fetch_requests":0}},"service_tier":"standard","cache_creation":{{"ephemeral_1h_input_tokens":{w1h},"ephemeral_5m_input_tokens":{w5}}},"inference_geo":"not_available","iterations":[{{"input_tokens":999,"output_tokens":999,"cache_read_input_tokens":999,"cache_creation":{{"ephemeral_5m_input_tokens":999}}}}]}}}},"requestId":"req_1","type":"assistant","uuid":"u"}}"#
+            r#"{{"parentUuid":"p","isSidechain":false,"type":"assistant","message":{{"model":"{model}","id":"{id}","type":"message","role":"assistant","content":[{{"type":"text","text":"{block}"}}],"stop_reason":null,"usage":{{"input_tokens":{i},"cache_creation_input_tokens":{w},"cache_read_input_tokens":{r},"output_tokens":{o},"output_tokens_details":{{"thinking_tokens":3}},"server_tool_use":{{"web_search_requests":0,"web_fetch_requests":0}},"service_tier":"standard","cache_creation":{{"ephemeral_1h_input_tokens":{w1h},"ephemeral_5m_input_tokens":{w5}}},"inference_geo":"not_available","iterations":[{{"input_tokens":999,"output_tokens":999,"cache_read_input_tokens":999,"cache_creation":{{"ephemeral_5m_input_tokens":999}}}}]}}}},"requestId":"req_1","timestamp":"{ts}","type":"assistant","uuid":"u"}}"#
         )
     }
 
     fn assistant(id: &str, model: &str, i: i64, o: i64, w: i64, r: i64, block: &str) -> String {
-        line_with(id, model, i, o, w, 0, r, block)
+        line_with(id, model, "2026-01-01T00:00:00.000Z", i, o, w, 0, r, block)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assistant_at(
+        id: &str,
+        model: &str,
+        ts: &str,
+        i: i64,
+        o: i64,
+        w: i64,
+        r: i64,
+        block: &str,
+    ) -> String {
+        line_with(id, model, ts, i, o, w, 0, r, block)
     }
 
     fn user_line() -> String {
@@ -1387,7 +1522,17 @@ mod tests {
             &fx.file,
             &format!(
                 "{}\n",
-                line_with("msg_S", "claude-opus-5", 0, 0, 1_000, 400, 0, "s")
+                line_with(
+                    "msg_S",
+                    "claude-opus-5",
+                    "2026-01-01T00:00:00.000Z",
+                    0,
+                    0,
+                    1_000,
+                    400,
+                    0,
+                    "s"
+                )
             ),
         );
         let r = read(run(
@@ -1615,6 +1760,7 @@ mod tests {
                     cache_write_5m_tokens: 0,
                 },
             ],
+            by_day: Vec::new(),
             consumed: 40,
             last_msg_id: Some("msg_9".into()),
             last_model: Some("claude-haiku-4-5".into()),
@@ -2033,7 +2179,7 @@ mod tests {
             .unwrap()
             .usage_daily_since(0, Some("local"))
             .unwrap();
-        let daily_in: i64 = days.iter().map(|(_, _, t)| t.input_tokens).sum();
+        let daily_in: i64 = days.iter().map(|(_, _, _, t)| t.input_tokens).sum();
         assert_eq!(daily_in, 307);
     }
 
@@ -2066,6 +2212,7 @@ mod tests {
                     last_msg_id: None,
                     last_msg_usage: None,
                     now: at,
+                    by_day: Vec::new(),
                 },
             )
             .unwrap();
@@ -2101,5 +2248,179 @@ mod tests {
 
         assert_eq!(recent_days(&s, now, HEALTH_DAYS, None).len(), 2);
         assert_eq!(recent_days(&s, now, HEALTH_DAYS, Some("beta")).len(), 1);
+    }
+
+    /// perf-logs §6a: the reader summed a chunk into one bucket, so a first
+    /// read booked a transcript's whole history on the collection day.
+    #[test]
+    fn awk_splits_usage_by_the_lines_utc_day() {
+        let fx = fixture();
+        let head = format!(
+            "{}\n{}\n{}\n",
+            assistant_at(
+                "msg_1",
+                "claude-opus-5",
+                "2026-09-18T23:59:59.000Z",
+                10,
+                1,
+                0,
+                0,
+                "a"
+            ),
+            assistant_at(
+                "msg_2",
+                "claude-opus-5",
+                "2026-09-19T00:00:01.000Z",
+                20,
+                2,
+                0,
+                0,
+                "b"
+            ),
+            assistant_at(
+                "msg_3",
+                "claude-sonnet-5",
+                "2026-09-19T08:00:00.000Z",
+                5,
+                5,
+                0,
+                0,
+                "c"
+            ),
+        );
+        append(&fx.file, &head);
+        let r = read(run(
+            &fx.home,
+            &cursor(Some(&fx.file), 0, None, None),
+            MAX_CHUNK_BYTES,
+        ));
+        let by_day: Vec<(String, String, i64)> = r
+            .by_day
+            .iter()
+            .map(|d| {
+                (
+                    d.day.clone().unwrap(),
+                    d.model.clone().unwrap(),
+                    d.totals.input_tokens,
+                )
+            })
+            .collect();
+        assert_eq!(
+            by_day,
+            vec![
+                ("2026-09-18".into(), "claude-opus-5".into(), 10),
+                ("2026-09-19".into(), "claude-opus-5".into(), 20),
+                ("2026-09-19".into(), "claude-sonnet-5".into(), 5),
+            ]
+        );
+        assert_eq!(
+            model_totals(&r, "claude-opus-5"),
+            tokens(30, 3, 0, 0),
+            "the per-model totals are unchanged"
+        );
+    }
+
+    /// perf-logs §6b: `by_host` (live session rows over their lifetime) and
+    /// `by_day` (the durable roll-up) are different populations; the report
+    /// says which is which instead of presenting them as one.
+    #[test]
+    fn the_report_names_what_each_population_counts() {
+        let s = Store::open_in_memory().unwrap();
+        let v = serde_json::to_value(report(&s, None, None, 1_000_000).unwrap()).unwrap();
+        assert_eq!(v["by_host_population"], "live_rows");
+        assert_eq!(v["by_day_population"], "durable");
+    }
+
+    #[test]
+    fn day_number_inverts_day_string() {
+        for n in [0, 19_000, 20_714, 20_716, 25_000] {
+            assert_eq!(day_number(&day_string(n)), Some(n), "day {n}");
+        }
+        assert_eq!(day_number("2026-09-18"), Some(20_714));
+        assert_eq!(day_number("?"), None);
+        assert_eq!(day_number("2026-13-01"), None);
+    }
+
+    #[test]
+    fn plan_delta_attributes_by_transcript_day_and_flags_history_on_a_fresh_cursor() {
+        let opus = |day: &str, i: i64| DayModelUsage {
+            day: Some(day.into()),
+            model: Some("claude-opus-5".into()),
+            totals: tokens(i, 0, 0, 0),
+            cache_write_5m_tokens: 0,
+        };
+        let read = FileRead {
+            mode: ReadMode::New,
+            start: 0,
+            chunk: 100,
+            source: "x.jsonl".into(),
+            by_model: vec![ModelUsage {
+                model: Some("claude-opus-5".into()),
+                totals: tokens(3, 0, 0, 0),
+                cache_write_5m_tokens: 0,
+            }],
+            by_day: vec![opus("2026-09-18", 2), opus("2026-09-21", 1)],
+            consumed: 100,
+            last_msg_id: None,
+            last_model: None,
+            last_msg_usage: None,
+        };
+        let now = day_number("2026-09-21").unwrap() * SECS_PER_DAY + 3_600;
+        let d = plan_delta(&read, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        assert_eq!(
+            d.by_day
+                .iter()
+                .map(|x| (x.day, x.backfill, x.totals.input_tokens, x.totals.cost_micros))
+                .collect::<Vec<_>>(),
+            vec![
+                (day_number("2026-09-18").unwrap(), true, 2, 10),
+                (day_number("2026-09-21").unwrap(), false, 1, 5),
+            ],
+            "history before the collection day on a fresh cursor is backfill; today's slice is live"
+        );
+        let mut cont = read.clone();
+        cont.mode = ReadMode::Cont;
+        cont.start = 50;
+        let d = plan_delta(&cont, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        assert!(
+            d.by_day.iter().all(|x| !x.backfill),
+            "a continuing cursor is live usage whatever day the line carries"
+        );
+        let mut undated = read.clone();
+        undated.by_day[0].day = None;
+        let d = plan_delta(&undated, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        assert_eq!(
+            d.by_day[0].day,
+            now.div_euclid(SECS_PER_DAY),
+            "a line without a timestamp books to today"
+        );
+    }
+
+    /// perf-logs §5: a failed collection was DEBUG, invisible with the
+    /// default filter. One WARN per host per pass names the host and code.
+    #[tokio::test]
+    async fn a_failed_collection_is_a_warn_line_naming_the_host() {
+        let (store, _id, _path) = store_with_session("vps");
+        // `upsert_host` leaves a host unreachable, and `collect_all` only
+        // visits reachable ones (`collection_hosts`).
+        store
+            .lock()
+            .unwrap()
+            .update_host_probe("vps", true, None, None, 1)
+            .unwrap();
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script_contains("tail -c +"),
+            Reply::fail(1, "ssh: connect to host vps port 22: Connection refused"),
+        );
+        let log = crate::logging::capture::start();
+        assert_eq!(collect_all(&store, &fake, 1_000).await, 0);
+        let text = log.text();
+        assert!(text.contains("WARN"), "{text}");
+        assert!(
+            text.contains("usage collection failed") && text.contains("host=vps"),
+            "{text}"
+        );
+        assert!(text.contains("E_SHELL"), "{text}");
     }
 }

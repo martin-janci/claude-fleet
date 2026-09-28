@@ -5,4 +5,4 @@
 -- ago" about a version from provisioning day (data-sync F1, hosts F3).
 -- NULL = never probed for versions (a row copied from an older store).
 ALTER TABLE hosts ADD COLUMN claude_version_at INTEGER;
-INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+INSERT OR IGNORE INTO schema_version (version) VALUES (72);

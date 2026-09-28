@@ -630,6 +630,16 @@ pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<Usag
     })
 }
 
+/// One UTC day's slice of a [`UsageDelta`], priced. `backfill` marks history
+/// a fresh cursor read in one go (perf-logs §6a): kept apart in
+/// `usage_daily` so a takeover day never reads as a $850 day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayDelta {
+    pub day: i64,
+    pub totals: UsageTotals,
+    pub backfill: bool,
+}
+
 /// One usage pass's result for a session, applied by `Store::apply_usage`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageDelta {
@@ -642,6 +652,9 @@ pub struct UsageDelta {
     pub last_msg_id: Option<String>,
     pub last_msg_usage: Option<String>,
     pub now: i64,
+    /// Per-day slices of `totals`; empty means "book everything to the day
+    /// of `now`" (a reader without `D` lines).
+    pub by_day: Vec<DayDelta>,
 }
 
 /// `claude_status` values that mean "no turn in progress" — the states
@@ -686,11 +699,11 @@ pub struct HostRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
     /// When `claude_version` / `tmux_version` were last read from the host
-    /// (migration 071). `None`: never — the values are whatever `add_host`
+    /// (migration 072). `None`: never — the values are whatever `add_host`
     /// or an older store left. Per-field default: an older hub omits it.
     #[serde(default)]
     pub claude_version_at: Option<i64>,
-    /// Health sample from the last reachable probe (migration 072). All
+    /// Health sample from the last reachable probe (migration 073). All
     /// per-field default: an older hub omits them.
     #[serde(default)]
     pub disk_home_free_kb: Option<i64>,
@@ -713,7 +726,7 @@ pub struct HostRow {
     /// The fleet-agent version its last hello reported (agent hosts).
     #[serde(default)]
     pub agent_version: Option<String>,
-    /// When `provision_hosts` last completed on this host (migration 073).
+    /// When `provision_hosts` last completed on this host (migration 074).
     #[serde(default)]
     pub provisioned_at: Option<i64>,
     /// `provisioned` but with content older than this build ships (or
@@ -724,7 +737,7 @@ pub struct HostRow {
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
 /// identity & health, task 2): a value that moves every pass must not turn
-/// every ping into a full-row `host:probed`. Mirrors the migration-072
+/// every ping into a full-row `host:probed`. Mirrors the migration-073
 /// columns.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HostHealth {

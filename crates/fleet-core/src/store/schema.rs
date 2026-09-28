@@ -43,6 +43,19 @@ fn worktrees_has_host_alias(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 071: `usage_daily` already has its
+/// `backfill` column. 071 rebuilds the table, and running it again would
+/// collapse backfill rows into live ones, so on such a table a re-run only
+/// records the version. See [`Migration`].
+fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('usage_daily') WHERE name = 'backfill'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 025 (session usage): it adds its
 /// columns in one transaction, so its last column present means the whole
 /// migration is, and a re-run (`ALTER TABLE ... ADD COLUMN` again) would
@@ -117,7 +130,7 @@ fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 071: `hosts` already has its
+/// `already_applied` guard of migration 072: `hosts` already has its
 /// `claude_version_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
 fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -129,7 +142,7 @@ fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 072: `hosts` already has its
+/// `already_applied` guard of migration 073: `hosts` already has its
 /// `health_at` column (and the eight beside it), and `ALTER TABLE ... ADD
 /// COLUMN` would fail again. See [`Migration`].
 fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -141,7 +154,7 @@ fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 073: `hosts` already has its
+/// `already_applied` guard of migration 074: `hosts` already has its
 /// `provision_fingerprint` column (and `provisioned_at` beside it), and
 /// `ALTER TABLE ... ADD COLUMN` would fail again. See [`Migration`].
 fn hosts_has_provision_fingerprint(conn: &Connection) -> rusqlite::Result<bool> {
@@ -726,26 +739,33 @@ const MIGRATIONS: &[Migration] = &[
     // against the unchanged state signal (R9u). A new table, index and
     // trigger, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(70, include_str!("../../migrations/070_work_unlinks.sql")),
+    // usage_daily keyed by (day, host_alias, backfill): a table rebuild, so
+    // guarded — re-running the INSERT…SELECT would collapse backfill rows.
+    Migration {
+        version: 71,
+        sql: include_str!("../../migrations/071_usage_daily_backfill.sql"),
+        already_applied: Some(usage_daily_has_backfill),
+    },
     // Host identity & health, task 1: `hosts.claude_version_at`. Guarded:
     // ADD COLUMN. (Numbered at merge time — `migrations_are_contiguous_from_one`
     // allows no gap — so a sibling plan merged first shifts these.)
     Migration {
-        version: 71,
-        sql: include_str!("../../migrations/071_host_claude_version_at.sql"),
+        version: 72,
+        sql: include_str!("../../migrations/072_host_claude_version_at.sql"),
         already_applied: Some(hosts_has_claude_version_at),
     },
     // Host identity & health, task 2: the per-pass health sample, the last
     // accepted hook and the agent version on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 72,
-        sql: include_str!("../../migrations/072_host_health.sql"),
+        version: 73,
+        sql: include_str!("../../migrations/073_host_health.sql"),
         already_applied: Some(hosts_has_health_at),
     },
     // Host identity & health, task 6: the provisioning content fingerprint
     // and its stamp on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 73,
-        sql: include_str!("../../migrations/073_host_provision_fingerprint.sql"),
+        version: 74,
+        sql: include_str!("../../migrations/074_host_provision_fingerprint.sql"),
         already_applied: Some(hosts_has_provision_fingerprint),
     },
 ];
@@ -1644,6 +1664,7 @@ mod tests {
                 last_msg_id: None,
                 last_msg_usage: None,
                 now: 86_400,
+                by_day: Vec::new(),
             },
         )
         .unwrap();
@@ -3359,6 +3380,47 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_071_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
+        const SEED_AT: i64 = 70;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT INTO usage_daily (day, host_alias, input_tokens, output_tokens, \
+                 cache_write_tokens, cache_read_tokens, cost_micros) VALUES (20714, 'trn', 1, 2, 3, 4, 5);",
+            )
+            .unwrap();
+        assert!(!usage_daily_has_backfill(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(usage_daily_has_backfill(&s.conn).unwrap());
+        let (backfill, cost): (i64, i64) = s
+            .conn
+            .query_row(
+                "SELECT backfill, cost_micros FROM usage_daily WHERE day = 20714 AND host_alias = 'trn'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((backfill, cost), (0, 5), "existing rows are live rows");
+        // The new key admits a backfill row beside the live one for the same day.
+        s.conn
+            .execute(
+                "INSERT INTO usage_daily (day, host_alias, backfill, cost_micros) VALUES (20714, 'trn', 1, 7)",
+                [],
+            )
+            .unwrap();
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily WHERE day = 20714",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
     }
 }
 

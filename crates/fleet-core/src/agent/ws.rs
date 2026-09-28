@@ -1369,6 +1369,10 @@ mod tests {
     async fn an_upgrade_without_a_bearer_token_is_401() {
         let hub = hub().await;
         assert_eq!(dial(hub.addr, None).await.unwrap_err(), 401);
+        // Both dials come from loopback, one auth-failure bucket: a second
+        // bad bearer inside `AUTH_FAIL_INTERVAL` is 429 (`mcp::tests_auth_limit`),
+        // and this asserts the 401 itself.
+        tokio::time::sleep(crate::mcp::AUTH_FAIL_INTERVAL + Duration::from_millis(50)).await;
         assert_eq!(dial(hub.addr, Some("nonsense")).await.unwrap_err(), 401);
         assert!(hub.registry.snapshot().is_empty());
     }

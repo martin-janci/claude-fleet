@@ -14,6 +14,7 @@ import {
   hubConnection,
   startHubConnection,
   connectionBanner,
+  setGapHandler,
   type HubConnection,
 } from './hub_connection';
 import HubConnectionBanner from './HubConnectionBanner.svelte';
@@ -71,6 +72,23 @@ describe('the hub connection store', () => {
     hubConnection.set({ state: 'connecting' });
     await startHubConnection();
     expect(get(hubConnection)).toEqual({ state: 'connecting' });
+  });
+
+  it('a hub:resynced event runs the gap handler the app installed', async () => {
+    const handlers = new Map<string, (e: { payload: unknown }) => void>();
+    lis().mockImplementation(async (name: string, cb: (e: { payload: unknown }) => void) => {
+      handlers.set(name, cb);
+      return () => {};
+    });
+    inv().mockResolvedValue({ state: 'connected' });
+    const gap = vi.fn();
+    setGapHandler(gap);
+    await startHubConnection();
+    handlers.get('hub:resynced')?.({ payload: { projects: true, work: true } });
+    expect(gap).toHaveBeenCalledTimes(1);
+    setGapHandler(null);
+    handlers.get('hub:resynced')?.({ payload: { projects: true, work: true } });
+    expect(gap).toHaveBeenCalledTimes(1);
   });
 });
 
