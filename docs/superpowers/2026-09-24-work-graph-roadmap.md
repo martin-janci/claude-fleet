@@ -344,7 +344,10 @@ acceptance on a real fleet is still to do.
 - **M4.2 + M4.3** (d5f28a9): migration 049; the live branch from the
   transcript, PR fields and commit trailers from the probe, prompt matches
   behind the loop and dump guards; the pure resolver (R1–R9), applied only
-  on a real change; `SessionRow.work_suggested`.
+  on a real change; `SessionRow.work_suggested`. (Label hygiene, D34, later
+  added R9u: a person's *Clear work* holds against the unchanged branch /
+  PR that named the target — migration 070 `work_unlinks`, applied when
+  `detect` builds the resolver's input; see the design's rule table.)
 - **M4.4** (ea1dc5e): `work_link` confirm / reject by `link_id` /
   `trust_project` (+172 B), two Routed commands; chip states, the evidence
   popover, `y` / `n` / `l`, the batch review sheet, the Undo toast.
@@ -912,6 +915,7 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D34 | Placement rules only, or also link rules? (M14) | placement only · also link rules | **Answered 2026-09-27: the default, placement only.** Link rules would bypass detection's evidence and R9 |
 | D35 | Saved views: shared on the hub, or per device? (M14) | shared on the hub · per device | **Answered 2026-09-27: the default, shared on the hub.** A bound client's views are its org's |
 | D36 | M14 as a milestone, despite D26? Who drives it? (M14 plan) | yes · issues only | **Answered 2026-09-27: yes, M14 is the last work-graph milestone** (D26 applies after it); one driver session. The backend branch's session does not continue it |
+| D31–D47 (Jev) | The Jev (decision model) evaluation, fleet-wide rather than work graph only | — | Its own numbering in `specs/2026-09-27-jev-language-census-design.md`; it collides with M14's D31–D36 above (both were numbered after D30 on the same day), so a bare `D3x` in code or docs must say which table it means |
 
 ## Risks to watch
 

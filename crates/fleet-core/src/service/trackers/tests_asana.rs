@@ -274,6 +274,23 @@ async fn the_probe_finds_the_workspace_projects_sections_and_premium() {
         ],
         "backlog and untitled sections stay unmapped (todo)"
     );
+    assert_eq!(
+        c.unmapped_sections,
+        vec!["backlog".to_string()],
+        "the names the rule left to todo, once each; never the untitled placeholder"
+    );
+    let order = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        c.project_sections,
+        vec![
+            (
+                P1.to_string(),
+                order(&["backlog", "in progress", "in review", "done"])
+            ),
+            (P2.to_string(), order(&["backlog", "shipped"])),
+        ],
+        "each board's sections in order"
+    );
     let ids: Vec<String> = a
         .views(&c)
         .await

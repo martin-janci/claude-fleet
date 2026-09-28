@@ -109,7 +109,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 201
+  verdict is written down once, in `backend/verdicts.rs`, for all 204
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -295,6 +295,42 @@ and `work:changed`) and M14.2–M14.4 (the desktop Work view — `WorkTree`,
 desktop re-reads on `onWorkChanged` and the `workChanged` tick in
 `work.ts`. `scripts/hub-e2e.sh` hub W section 10 runs the contract on a
 real hub. M14.5, the acceptance run (Part R), waits on the owner.
+
+The Jev evaluation (TypeSafe's decision model as an optional reader for
+closed-set decisions) has started with a local language census: `fleet-hub
+census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
+only in fleet-hub — the models add ~45 MB, kept there by D47). The decision
+envelope is built and OFF (D35–D37): `service::decide` (`gate` / `decide`,
+`DecisionBackend`, `jev.rs` fenced to api.typesafe.ai), `decide.*` settings,
+per-org consent `orgs.jev_allowed` (migration 068), the record
+`decision_runs` + key `decision_secrets` (069; the key is read ONLY by
+`Store::resolve_decision_credential`, never raw text in a run), `fleet-hub
+decide`; guide `docs/decisions.md` (every `decide.*` setting must be in its
+table). The first use case, J3 `status_map`, is built (shadow / assist
+only, off): the Asana probe keeps `config.unmapped_sections` /
+`project_sections`, `service/decide/status_map.rs` asks one Choice per
+unclassified section after a clean sync (`StatusMapTrigger`, daily), and
+`fleet-hub decide proposals` lists what a person applies with `fleet-hub
+tracker section-map`; follow-ups are recorded in `work_admin update`.
+Assist is usable one proposal at a time (`status_map::decide_proposal`,
+by run id: apply / apply_as through `work_admin update`, reject → the
+follow-up only, hidden until a new answer): Settings → Work on a
+standalone desktop (`status_map_proposals` / `decide_status_map_proposal`,
+`LocalOnly` when paired) and `fleet-hub decide proposals apply|reject`.
+Phase 0 (offline) is built for J1 `work_link` and J3: `fleet-hub decide bench
+work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
+split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
+/ `--labels`) with the `claude -p haiku` baseline (D33,
+`service/decide/haiku.rs`: a named host of the SAME org only, prompt on
+stdin). J1 has no live adapter: it waits on its acceptance lines. Label
+hygiene (D34) is built: an agent never overturns a person's rejection,
+`store::Decider` records `agent` / `agent_started` vs `manual` / `started`
+(`PERSON_SOURCES` gate write-back, auto-trust and person counts), and a
+person's Clear work holds against the unchanged branch / PR (R9u, migration
+070 `work_unlinks`). The test map is
+`docs/superpowers/specs/2026-09-27-jev-test-map.md`.
+Decisions D31–D47 and what is still open
+are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

@@ -76,6 +76,11 @@ pub enum OrgCmd {
         /// `work.auto_tidy` for its sessions, inherit follows it.
         #[arg(long, value_enum)]
         auto_tidy: Option<AutoTidy>,
+        /// Let this org's redacted texts go to the decision model (Jev
+        /// evaluation, docs/decisions.md) when `decide.jev.enabled` and a
+        /// feature's mode allow it. Off by default.
+        #[arg(long, value_enum)]
+        jev: Option<OnOff>,
         /// Devices bound to this org (`pair --org`) also see unassigned work
         /// and sessions, as a host does (on, the default); off: only the
         /// org's own (decision D31).
@@ -158,16 +163,18 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             color,
             isolate_sessions,
             auto_tidy,
+            jev,
             bound_sees_unassigned,
         } => {
             if name.is_none()
                 && color.is_none()
                 && isolate_sessions.is_none()
                 && auto_tidy.is_none()
+                && jev.is_none()
                 && bound_sees_unassigned.is_none()
             {
                 return Err("nothing to set: pass --name, --color, --isolate-sessions, \
-                     --auto-tidy or --bound-sees-unassigned"
+                     --auto-tidy, --jev or --bound-sees-unassigned"
                     .into());
             }
             let mut a = json!({ "action": "update_org", "org_id": id });
@@ -182,6 +189,9 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             }
             if let Some(t) = auto_tidy {
                 a["auto_tidy"] = json!(t.as_str());
+            }
+            if let Some(j) = jev {
+                a["jev"] = json!(if j.on() { "on" } else { "off" });
             }
             if let Some(b) = bound_sees_unassigned {
                 a["bound_sees_unassigned"] = json!(b.on());
@@ -281,7 +291,11 @@ fn org_lines(o: &Value) -> Vec<String> {
                 } else {
                     ""
                 }
-            )
+            ) + if o["jev_allowed"].as_bool().unwrap_or(false) {
+                "  [sends to Jev]"
+            } else {
+                ""
+            }
         ),
         format!("      rules:    {}", names("rules", &rule_chip)),
         format!(
@@ -401,6 +415,14 @@ mod tests {
             json!({ "action": "update_org", "org_id": 2, "auto_tidy": "inherit" })
         );
         assert_eq!(
+            args(&["set", "2", "--jev", "on"]),
+            json!({ "action": "update_org", "org_id": 2, "jev": "on" })
+        );
+        assert_eq!(
+            args(&["set", "2", "--jev", "off"]),
+            json!({ "action": "update_org", "org_id": 2, "jev": "off" })
+        );
+        assert_eq!(
             args(&["set", "2", "--bound-sees-unassigned", "off"]),
             json!({ "action": "update_org", "org_id": 2, "bound_sees_unassigned": false })
         );
@@ -462,6 +484,13 @@ mod tests {
             "hosts": ["hetzner-a"], "trackers": [ { "id": 2, "name": "acme" } ]
         }));
         assert!(lines[0].contains("Company A") && lines[0].contains("isolates"));
+        assert!(!lines[0].contains("Jev"));
+        let consenting = org_lines(&json!({ "id": 2, "name": "B", "jev_allowed": true }));
+        assert!(
+            consenting[0].contains("[sends to Jev]"),
+            "{}",
+            consenting[0]
+        );
         assert!(lines[1].contains("#3 acme/*"));
         assert!(lines[1].contains("#4 acme/api · host: h"));
         assert!(lines[1].contains("#5 path: /w/acme"));

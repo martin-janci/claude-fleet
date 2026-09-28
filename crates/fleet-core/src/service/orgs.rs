@@ -599,6 +599,22 @@ fn parse_auto_tidy(v: Option<&str>) -> Result<Option<Option<bool>>, IpcError> {
     }
 }
 
+/// `jev` of `add_org` / `update_org` (Jev evaluation, D31 / D36): `on`
+/// lets this org's redacted texts go to the decision model when the global
+/// flag and a feature's mode allow it; `off` (the default) never. `None`
+/// (absent) leaves it as it is.
+fn parse_jev(v: Option<&str>) -> Result<Option<bool>, IpcError> {
+    match v.map(str::trim) {
+        None => Ok(None),
+        Some("on") => Ok(Some(true)),
+        Some("off") => Ok(Some(false)),
+        Some(other) => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("jev is on or off, not {other:?}"),
+        )),
+    }
+}
+
 fn need<T: Clone>(v: &Option<T>, action: &str, field: &str) -> Result<T, IpcError> {
     v.clone()
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("{action} needs {field}")))
@@ -624,39 +640,46 @@ pub fn admin(
         }
         OrgAction::AddOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
-            let org = s.add_org(
+            let jev = parse_jev(args.jev.as_deref())?;
+            let mut org = s.add_org(
                 &need(&args.name, name, "name")?,
                 args.color.as_deref(),
                 args.isolate_sessions.unwrap_or(false),
             )?;
-            let org = match auto {
-                Some(a) => s.set_org_auto_tidy(org.id, a)?,
-                None => org,
-            };
-            to_json(&match args.bound_sees_unassigned {
-                Some(on) => s.set_org_bound_sees_unassigned(org.id, on)?,
-                None => org,
-            })?
+            if let Some(a) = auto {
+                org = s.set_org_auto_tidy(org.id, a)?;
+            }
+            if let Some(j) = jev {
+                org = s.set_org_jev_allowed(org.id, j)?;
+            }
+            if let Some(on) = args.bound_sees_unassigned {
+                org = s.set_org_bound_sees_unassigned(org.id, on)?;
+            }
+            to_json(&org)?
         }
         OrgAction::UpdateOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
+            let jev = parse_jev(args.jev.as_deref())?;
             let id = need(&args.org_id, name, "org_id")?;
-            let org = s.update_org(
+            let mut org = s.update_org(
                 id,
                 args.name.as_deref(),
                 args.color.as_deref(),
                 args.isolate_sessions,
             )?;
-            let org = match auto {
-                Some(a) => s.set_org_auto_tidy(id, a)?,
-                None => org,
-            };
+            if let Some(a) = auto {
+                org = s.set_org_auto_tidy(id, a)?;
+            }
+            if let Some(j) = jev {
+                org = s.set_org_jev_allowed(id, j)?;
+                tracing::info!(org_id = id, jev = j, "[decide] org consent changed");
+            }
             // D31 (work graph M14.1b): what the org's bound clients see of
             // unassigned work and sessions.
-            to_json(&match args.bound_sees_unassigned {
-                Some(on) => s.set_org_bound_sees_unassigned(id, on)?,
-                None => org,
-            })?
+            if let Some(on) = args.bound_sees_unassigned {
+                org = s.set_org_bound_sees_unassigned(id, on)?;
+            }
+            to_json(&org)?
         }
         OrgAction::RemoveOrg => {
             let id = need(&args.org_id, name, "org_id")?;

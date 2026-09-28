@@ -110,6 +110,18 @@ describe('Settings → Organisations', () => {
     expect(upd.args).toEqual({ org_id: 1, auto_tidy: 'on' });
   });
 
+  it('standalone: an org opts in to Jev with its own checkbox, off by default (Jev D31)', async () => {
+    const inv = route({ update_org: { ...acme, jev_allowed: true } });
+    render(OrgSettings);
+    const box = (await screen.findByTestId('org-jev')) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(screen.queryByTestId('org-jev-badge')).toBeNull();
+    await fireEvent.click(box);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_org')).toBe(true));
+    const upd = inv.mock.calls.find((c) => c[0] === 'update_org')![1] as { args: unknown };
+    expect(upd.args).toEqual({ org_id: 1, jev: 'on' });
+  });
+
   it('standalone: what bound devices see of unassigned work is a per-org toggle, on by default (D31)', async () => {
     const inv = route({ update_org: { ...acme, bound_sees_unassigned: false } });
     render(OrgSettings);

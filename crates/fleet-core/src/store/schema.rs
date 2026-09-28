@@ -43,8 +43,8 @@ fn worktrees_has_host_alias(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 068: `usage_daily` already has its
-/// `backfill` column. 068 rebuilds the table, and running it again would
+/// `already_applied` guard of migration 071: `usage_daily` already has its
+/// `backfill` column. 071 rebuilds the table, and running it again would
 /// collapse backfill rows into live ones, so on such a table a re-run only
 /// records the version. See [`Migration`].
 fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
@@ -240,6 +240,17 @@ fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
 fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'auto_tidy'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 068: `orgs` already has its
+/// `jev_allowed` column.
+fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'jev_allowed'",
         [],
         |r| r.get(0),
     )?;
@@ -678,11 +689,25 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/067_org_bound_sees_unassigned.sql"),
         already_applied: Some(orgs_has_bound_sees_unassigned),
     },
+    // Jev evaluation (D31 / D36): `orgs.jev_allowed`, an org's consent to
+    // decision-model calls. One ADD COLUMN, its own guard.
+    Migration {
+        version: 68,
+        sql: include_str!("../../migrations/068_org_jev_allowed.sql"),
+        already_applied: Some(orgs_has_jev_allowed),
+    },
+    // Jev evaluation (D35 / D37): `decision_runs` and `decision_secrets`.
+    // New tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(69, include_str!("../../migrations/069_decision_runs.sql")),
+    // D34 label hygiene: `work_unlinks`, a person's "Clear work" held
+    // against the unchanged state signal (R9u). A new table, index and
+    // trigger, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(70, include_str!("../../migrations/070_work_unlinks.sql")),
     // usage_daily keyed by (day, host_alias, backfill): a table rebuild, so
     // guarded — re-running the INSERT…SELECT would collapse backfill rows.
     Migration {
-        version: 68,
-        sql: include_str!("../../migrations/068_usage_daily_backfill.sql"),
+        version: 71,
+        sql: include_str!("../../migrations/071_usage_daily_backfill.sql"),
         already_applied: Some(usage_daily_has_backfill),
     },
 ];
@@ -3300,8 +3325,8 @@ mod tests {
     }
 
     #[test]
-    fn migration_068_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
-        const SEED_AT: i64 = 67;
+    fn migration_071_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
+        const SEED_AT: i64 = 70;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch(
