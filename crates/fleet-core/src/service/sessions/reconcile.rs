@@ -2040,3 +2040,24 @@ pub fn age_out_stale_working(store: &Mutex<Store>) -> usize {
         }
     }
 }
+
+/// The tick's companion to [`age_out_stale_working`]: reads
+/// `reconcile.stale_working_ttl_secs` and lifts every stamp that no longer
+/// asks anything (`Store::expire_stale_working`). Best-effort; returns how
+/// many rows were lifted.
+pub fn expire_stale_working(store: &Mutex<Store>) -> usize {
+    let Ok(s) = store.lock() else {
+        return 0;
+    };
+    let ttl = crate::service::settings::get_secs(
+        &s,
+        crate::service::settings::RECONCILE_STALE_WORKING_TTL_SECS,
+    ) as i64;
+    match s.expire_stale_working(now_unix(), ttl) {
+        Ok(rows) => rows.len(),
+        Err(e) => {
+            tracing::warn!(error = %e, "[reconcile] stale-working expiry failed");
+            0
+        }
+    }
+}

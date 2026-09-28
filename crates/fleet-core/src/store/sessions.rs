@@ -1413,6 +1413,41 @@ impl Store {
         Ok(out)
     }
 
+    /// Lift `stale_working_at` where it no longer asks anything of a person:
+    /// the row is `working` or `blocked` again (a pane read lifted the
+    /// demotion without a hook — `stale_working_veto`), or the stamp is
+    /// older than `ttl_secs` (nobody looked; `0` = never by age). An attach
+    /// clears it too (`touch_session`), and every hook does. Returns the
+    /// rows it changed; each gets `session_updated`.
+    pub fn expire_stale_working(
+        &self,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        let cutoff = if ttl_secs > 0 {
+            now - ttl_secs
+        } else {
+            i64::MIN
+        };
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "UPDATE sessions SET stale_working_at = NULL \
+                 WHERE stale_working_at IS NOT NULL \
+                   AND (claude_status IN ('working', 'blocked') OR stale_working_at < ?1) \
+                 RETURNING id",
+            )?
+            .query_map(rusqlite::params![cutoff], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(row) = self.emit_session(id)? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
     /// The Notification hook's write. `status` is the mapped status;
     /// `stuck` is `Some(Some(kind))` to set (restarting `stuck_since` when
     /// the kind changes, keeping it when equal), `Some(None)` to clear,
@@ -3575,6 +3610,67 @@ mod tests {
                 .unwrap()
                 .stale_working_at,
             None
+        );
+    }
+
+    /// 2026-09-28: the stamp outlived its point. It lifts when the row is
+    /// working or blocked again (a pane read lifted the demotion without a
+    /// hook) and after `ttl_secs`; a fresh stamp on an idle row stays.
+    #[test]
+    fn expire_stale_working_lifts_a_resumed_or_old_stamp_and_keeps_a_fresh_one() {
+        let s = store();
+        let mk = |name: &str, status: &str, at: i64| -> i64 {
+            let id = s
+                .upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2, stale_working_at = ?3 WHERE id = ?1",
+                    rusqlite::params![id, status, at],
+                )
+                .unwrap();
+            id
+        };
+        let fresh = mk("fresh", "idle", 9_000);
+        let old = mk("old", "idle", 1_000);
+        let resumed = mk("resumed", "working", 9_000);
+        let asking = mk("asking", "blocked", 9_000);
+
+        let mut lifted: Vec<i64> = s
+            .expire_stale_working(10_000, 3_600)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        lifted.sort();
+        let mut want = vec![old, resumed, asking];
+        want.sort();
+        assert_eq!(lifted, want);
+        assert_eq!(
+            s.get_session_by_id(fresh)
+                .unwrap()
+                .unwrap()
+                .stale_working_at,
+            Some(9_000),
+            "a fresh stamp on an idle row still asks for a look"
+        );
+
+        // `0`: never by age — but a resumed row still lifts.
+        let ancient = mk("ancient", "idle", 1);
+        let back = mk("back", "working", 1);
+        let lifted: Vec<i64> = s
+            .expire_stale_working(10_000, 0)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(lifted, vec![back]);
+        assert_eq!(
+            s.get_session_by_id(ancient)
+                .unwrap()
+                .unwrap()
+                .stale_working_at,
+            Some(1)
         );
     }
 
