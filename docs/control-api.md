@@ -642,6 +642,30 @@ for the raw screen).
 
 ### Status vocabulary
 
+The values below live in enums (`service/pane_intel.rs`,
+`service/attention.rs`); the tool descriptions and the generated reference
+derive from them.
+
+- **`claude_status`**: `working | blocked | completed | failed | stopped |
+  idle`. `idle`, `completed`, `stopped` and `failed` mean the turn is over
+  (what `wait_for_session { until: "idle" }` and `run_prompt` wait for);
+  `blocked` is a dialog inside a turn. A row the tick demoted from `working`
+  after `reconcile.stale_working_secs` with no sign of life carries
+  `stale_working_at` and reads `idle`, but that is only a guess (one long tool
+  call looks the same): `run_prompt`, `move_session` and `wait_for_session`
+  ask its pane first and count it as mid-turn unless the pane shows the idle
+  prompt.
+- **`stuck_kind`**: `auth_menu | reconnect | trust_prompt | oom |
+  press_enter`.
+- **`needs_attention.reason`** (on session rows and `/events` frames), most
+  urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
+  which), `stop_failed` (the last turn ended in an API error; re-prompt),
+  `failed` (a pane-less agent reported failure), `context_full` (context at or
+  past `health.context_red_pct`), `stale_working` (the demotion above),
+  `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
+  pending safe kill, a ghost, a lost row). `since` is when the session
+  entered that state.
+
 ### Errors and limits
 
 A tool that fails in fleet's service layer answers with a **tool result**

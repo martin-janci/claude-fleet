@@ -1148,6 +1148,35 @@ fn docs_track_background_runs_with_session_transcript() {
     );
 }
 
+/// Every `needs_attention.reason` a row can carry is named in the guide's
+/// status vocabulary, next to the `claude_status` values.
+#[test]
+fn the_control_api_guide_names_every_attention_reason_and_status() {
+    use crate::service::attention::Reason;
+    for r in [
+        Reason::Waiting,
+        Reason::Stuck,
+        Reason::StopFailed,
+        Reason::Failed,
+        Reason::ContextFull,
+        Reason::StaleWorking,
+        Reason::CiFailing,
+        Reason::Lifecycle,
+    ] {
+        assert!(
+            CONTROL_API_GUIDE.contains(&format!("`{}`", r.as_str())),
+            "docs/control-api.md does not name the attention reason {}",
+            r.as_str()
+        );
+    }
+    for k in ClaudeStatus::ALL {
+        assert!(CONTROL_API_GUIDE.contains(k.as_str()), "{k}");
+    }
+    for k in StuckKind::ALL {
+        assert!(CONTROL_API_GUIDE.contains(k.as_str()), "{k}");
+    }
+}
+
 // ---- handler-level gates (review of #50) ----
 
 fn test_tools(store: Store) -> FleetTools {
