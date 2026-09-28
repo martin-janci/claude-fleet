@@ -80,11 +80,22 @@ fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
     let item = s.create_local_work_item(Some(&key), name).unwrap();
     s.link_session_work(id, crate::store::WorkTarget::Item(item.id), "manual")
         .unwrap();
+    // Through the real API, not a raw UPDATE to `status_category`: the only
+    // writers of a local item's status are creation ('todo'), this
+    // (`set_item_status`, 'person') and the merged-PR stamp ('derived'). A
+    // raw UPDATE leaves `status_set_by` NULL — a stored status with no
+    // owner that no production path can ever produce — which once
+    // manufactured an unreachable "in_progress, unowned" fixture and masked
+    // a real classification bug (task 3 fix round 2). Keep this going
+    // through the API even if it looks like it could be simplified back.
+    s.set_item_status(item.id, status).unwrap();
     s.conn_ref()
         .execute_batch(&format!(
+            // `status_changed_at` has no local-item setter at all — only
+            // tracker sync writes it — so it stays a direct UPDATE, forced
+            // old enough for the `done_idle` / `pr_merged_idle` thresholds.
             "UPDATE sessions SET idle_since = 0, worktree_key = '{name}' WHERE id = {id}; \
-             UPDATE work_items SET status_category = '{status}', status_changed_at = 0 \
-               WHERE id = {};",
+             UPDATE work_items SET status_changed_at = 0 WHERE id = {};",
             item.id
         ))
         .unwrap();
