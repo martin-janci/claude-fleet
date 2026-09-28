@@ -65,7 +65,11 @@ pub fn backup_to(src: &Path, dest: &Path) -> Result<BackupInfo, String> {
         }
         let schema = schema_of(&copy)?;
         drop(copy);
-        std::fs::File::open(&part)
+        // Opened for write, not read: on Windows sync_all is FlushFileBuffers,
+        // which refuses a read-only handle with "Access is denied".
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part)
             .and_then(|f| f.sync_all())
             .map_err(|e| format!("sync the copy: {e}"))?;
         Ok(schema)
