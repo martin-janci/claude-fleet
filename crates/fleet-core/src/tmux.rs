@@ -1277,7 +1277,8 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 ///
 /// Unix only: the fakes are `sh` scripts exec'd by path, so a test that needs
 /// one is a Unix test.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) mod fake_exec {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
