@@ -44,8 +44,10 @@
 //! adapter's floor). It is by board, never by case: a case's board key is
 //! its normalised board joined with `\n` ([`board_key`]), and a board is dev
 //! when the first 8 bytes of the SHA-256 of that key, read as a big-endian
-//! `u64`, are even ([`is_dev_board`]) — about half of the boards, the same
-//! on every run, machine and Rust version.
+//! `u64`, are 0, 1 or 2 modulo 10 ([`is_dev_board`]) — about 30% of the
+//! boards, the same on every run, machine and Rust version. Dev is kept
+//! small so the test side keeps the 200 paired rule-abstained cases the
+//! haiku line needs.
 //!
 //! The report holds counts and rates only: no section name.
 
@@ -257,15 +259,19 @@ pub fn board_key(c: &SectionCase) -> String {
 }
 
 /// PURE: whether the board with `key` is in the dev split: the first 8
-/// bytes of the SHA-256 of the key, read as a big-endian `u64`, are even.
-/// A fixed hash (never `std`'s randomly seeded one), so a board's side is
+/// bytes of the SHA-256 of the key, read as a big-endian `u64`, are under
+/// [`DEV_BOARD_TENTHS`] modulo 10 (about 30% of the boards). A fixed hash (never `std`'s randomly seeded one), so a board's side is
 /// the same on every run, machine and Rust version.
 pub fn is_dev_board(key: &str) -> bool {
     let d = Sha256::digest(key.as_bytes());
     let mut b = [0u8; 8];
     b.copy_from_slice(&d[..8]);
-    u64::from_be_bytes(b) % 2 == 0
+    u64::from_be_bytes(b) % 10 < DEV_BOARD_TENTHS
 }
+
+/// Tenths of the boards in the dev split (the rest are test): small, so the
+/// test side can judge the haiku line.
+pub const DEV_BOARD_TENTHS: u64 = 3;
 
 /// How the whole set divides into the dev and test boards.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]

@@ -749,21 +749,23 @@ fn label(section: &str, board: &[&str]) -> SectionLabel {
 /// test.
 #[test]
 fn the_split_is_by_board_and_pinned() {
-    assert!(is_dev_board("nové\nv riešení\nhotovo"));
+    // Dev: the u64 % 10 is 0 and 2; test: 3, 6, 7 and 7.
+    assert!(is_dev_board("inbox\ndone"));
     assert!(is_dev_board(""));
     assert!(!is_dev_board("to do\nin progress\ndone"));
+    assert!(!is_dev_board("nové\nv riešení\nhotovo"));
     assert!(!is_dev_board("backlog\ndoing\nreview\nshipped"));
     assert!(!is_dev_board("ideas\nnext\ndone"));
     // The key is the normalised, de-duplicated board: every section of a
     // board has it, whatever its own name's case or spacing.
-    let board = ["Nové", "V riešení", "Hotovo", "nové"];
+    let board = ["Inbox", "Done", "inbox"];
     let (cs, _) = cases(&[
-        label("Hotovo", &board),
-        label("  V riešení ", &board),
-        label("NOVÉ", &board),
+        label("Done", &board),
+        label("  INBOX ", &board),
+        label("inbox", &board),
         label("Done", &["To do", "In progress", "Done"]),
     ]);
-    assert_eq!(board_key(&cs[0]), "nové\nv riešení\nhotovo");
+    assert_eq!(board_key(&cs[0]), "inbox\ndone");
     assert!(cs[..3].iter().all(|c| board_key(c) == board_key(&cs[0])));
     let (dev, sizes) = split_cases(cs.clone(), Split::Dev);
     assert_eq!(
@@ -813,10 +815,20 @@ fn the_split_partitions_the_fixture_by_board() {
         (ds.dev_boards as usize, ds.test_boards as usize),
         (dev_boards.len(), test_boards.len())
     );
-    // Roughly half of the boards each.
+    // About 30% of the boards are dev, and neither side is empty.
     let boards = dev_boards.len() + test_boards.len();
-    assert!(dev_boards.len() * 5 >= boards && test_boards.len() * 5 >= boards);
+    assert!(dev_boards.len() * 5 >= boards && dev_boards.len() * 5 <= 2 * boards);
     assert!(!dev.is_empty() && !test.is_empty());
+}
+
+/// Dev is kept small so the test side keeps enough rule-abstained cases
+/// for the haiku line (it needs 200 paired ones on the owner's set).
+#[test]
+fn the_fixtures_test_side_is_the_larger() {
+    let (_, all) = fixture();
+    let (_, sizes) = split_cases(all, Split::All);
+    assert!(sizes.test_cases > sizes.dev_cases, "{sizes:?}");
+    assert!(sizes.test_boards > sizes.dev_boards, "{sizes:?}");
 }
 
 #[tokio::test]

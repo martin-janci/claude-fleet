@@ -139,7 +139,7 @@ pub enum BenchCmd {
         max_calls: Option<usize>,
         /// Which boards' sections to report: dev, test or all. By board,
         /// never by case: a board is dev when the SHA-256 of its normalised
-        /// section names is even (about half). Reword a question on dev,
+        /// section names is under 3 modulo 10 (about 30%). Reword a question on dev,
         /// judge it once on test. [default: all]
         #[arg(long, value_parser = ["dev", "test", "all"])]
         split: Option<String>,

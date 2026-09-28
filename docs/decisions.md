@@ -512,20 +512,21 @@ flag nothing changes.
 reworded question honest. It is by **board**, never by case: a case's
 board is its normalised section names in order (after the de-duplication
 above) joined with a newline, and the board is *dev* when the first 8 bytes
-of that key's SHA-256, read as a big-endian integer, are even — about half
-of the boards, the same on every run and machine. All sections of a board
-land on the same side, so a wording cannot learn a board's layout on dev
-and be scored on it in test. The report states the split and both sides'
-board and case counts; with `all` that line (and a note naming the
-split's purpose) is the only difference. The
-intended workflow: iterate the wording with `--split dev --question FILE`;
-when it is settled, run it **once** with `--split test` and read that
-verdict; then a code change adopts the wording in the adapter
-(`status_map::INSTRUCTIONS` / `OPTIONS`) as `status_map.v2`. On the
-built-in set dev is 44 boards with 206 sections and test 47 boards with
-185: the test side is under the 200 cases a verdict needs, and the haiku
-line (paired where the rule abstains) is NOT JUDGED on either side, so the
-split is meant for the owner's hand set.
+of that key's SHA-256, read as a big-endian integer, are 0, 1 or 2 modulo
+10 — about 30% of the boards, the same on every run and machine. All
+sections of a board land on the same side, so a wording cannot learn a
+board's layout on dev and be scored on it in test. The report states the
+split and both sides' board and case counts; with `all` that line (and a
+note naming the split's purpose) is the only difference. The intended
+workflow: iterate the wording with `--split dev --question FILE`; when it
+is settled, run it **once** with `--split test` and read that verdict;
+then a code change adopts the wording in the adapter
+(`status_map::INSTRUCTIONS` / `OPTIONS`) as `status_map.v2`. Dev is kept
+small so the test side stays above the 200 cases the haiku line needs (it
+is judged over paired cases where the rule abstains). On the built-in set
+dev is 28 boards with 129 sections and test 63 boards with 262, 211 of
+them where the rule abstains; the owner's hand set is the built-in set
+plus the real rows.
 
 **Metrics** per provider: accuracy on answered and coverage over every case,
 and the same **where the rule abstains** (the sections that today silently
