@@ -1,6 +1,6 @@
 # Windows Desktop Client Implementation Plan
 
-> **For agentic workers:** Steps use checkbox (`- [ ]`) syntax for tracking. Land the phases in order; each phase is one PR.
+> **For agentic workers:** Steps use checkbox (`- [ ]`) syntax for tracking. Phases 1–3, 5 and 6 landed together, one commit per phase, on `claude/windows-desktop-audit-61f1w8`.
 
 **Goal:** Ship `claude-fleet` as a Windows desktop client for an existing Linux/macOS fleet: the local UI, the database, the MCP control API, hub-client mode, and SSH + remote tmux attach from a Windows machine. Windows is a *client* here, never a host.
 
@@ -9,6 +9,20 @@
 **Architecture:** No architectural change. Everything Unix-only stays `#[cfg(unix)]`; Windows gets the smallest parallel branch that keeps behaviour correct. The `local` host is turned off on Windows through the switch a hub already uses (`hub.local_host=false`), so every local spawn (`tmux`, `bash -lc`, `claude`) is refused with `E_NOTFOUND` before it runs. The terminal stays `portable-pty`, which is ConPTY on Windows, running `ssh.exe -tt … tmux attach`.
 
 **Baseline:** `main @ ae97d01b`. File:line references are from there.
+
+## Status (2026-09-28)
+
+| Phase | State |
+|---|---|
+| 1 compile | done — plus a print-guard fix: the Unix gate on a test module is its own `#[cfg(unix)]` line above a bare `#[cfg(test)]`, which is the only form `no_eprintln_tests` recognises |
+| 2 CI | done — `rust-windows` job (clippy, tests, `tauri build --debug --bundles nsis`), `windows-latest` in the frontend matrix |
+| 3 runtime basics | done in code — the Windows reconcile timing is still to be taken on a Windows box |
+| 4 ConPTY matrix | open: manual, needs Windows 11 and a Linux host |
+| 5 token store | done |
+| 6 package | done — no updater exists on any platform, so the `latest.json` item is void; `release-assets.sh` gained a `since` column so the new leg does not fail every earlier release in `verify-release` and the drift check |
+| 7 later | not started |
+
+Owner decision still open: Authenticode signing (the first Windows release ships unsigned; `docs/windows.md` says so).
 
 ## 0. Evidence: what actually fails today
 
@@ -50,7 +64,7 @@ From `CLAUDE.md`:
 
 **PR:** `fix(windows): cfg-guard the unix-only calls so the desktop compiles on Windows`
 
-- [ ] `crates/fleet-core/src/service/move_session/mod.rs:1042` — `TempFile::create`: gate the `OpenOptionsExt` import and the `.mode(0o600)` call on `#[cfg(unix)]`. The file lives in `std::env::temp_dir()`, which on Windows is already per-user (`%LOCALAPPDATA%\Temp`) — note that in the doc comment rather than adding an ACL.
+- [x] `crates/fleet-core/src/service/move_session/mod.rs:1042` — `TempFile::create`: gate the `OpenOptionsExt` import and the `.mode(0o600)` call on `#[cfg(unix)]`. The file lives in `std::env::temp_dir()`, which on Windows is already per-user (`%LOCALAPPDATA%\Temp`) — note that in the doc comment rather than adding an ACL.
   ```rust
   let mut o = std::fs::OpenOptions::new();
   o.write(true).create_new(true);
@@ -58,8 +72,8 @@ From `CLAUDE.md`:
   o.mode(0o600);
   let f = o.open(&path)?;
   ```
-- [ ] `crates/fleet-core/src/service/provision.rs:745` — `place_private_file`: `#[cfg(unix)]` on the `set_permissions` statement.
-- [ ] `src-tauri/src/pty.rs:193` — platform-split the teardown kill, keeping the Unix comment and behaviour byte for byte:
+- [x] `crates/fleet-core/src/service/provision.rs:745` — `place_private_file`: `#[cfg(unix)]` on the `set_permissions` statement.
+- [x] `src-tauri/src/pty.rs:193` — platform-split the teardown kill, keeping the Unix comment and behaviour byte for byte:
   ```rust
   if let Some(mut child) = self.child {
       kill_hard(&mut child);
@@ -76,11 +90,11 @@ From `CLAUDE.md`:
   fn kill_hard(child: &mut Box<dyn portable_pty::Child + Send + Sync>) { let _ = child.kill(); }
   ```
   Move `libc` in `src-tauri/Cargo.toml:45` under `[target.'cfg(unix)'.dependencies]`, like fleet-core does.
-- [ ] Make fleet-core's **test** code compile on Windows. Two mechanical rules, no test deleted or skipped on Unix:
+- [x] Make fleet-core's **test** code compile on Windows. Two mechanical rules, no test deleted or skipped on Unix:
   - a test that exercises a Unix-only behaviour (permissions, symlinks, `ExitStatus::from_raw`, process groups, real `tmux`/`bash`) gets `#[cfg(unix)]` on the test (or on its `mod`);
   - a shared helper used by portable tests (`ssh_fake.rs:25` `ExitStatusExt`) gets a small `exit_status(code)` shim with a `#[cfg(windows)]` arm (`std::os::windows::process::ExitStatusExt::from_raw(code as u32)`).
   Files, from the measurement: `move_session/claude_state.rs`, `add_project.rs`, `catalog/repo.rs`, `examples/carry_e2e.rs` (whole example `#[cfg(unix)]` via `required-features` or a `fn main` stub), `ssh_fake.rs`, `tmux.rs`, `provision.rs`, `catalog/import.rs`, `agent/e2e.rs`, `ssh.rs`, `trackers/tests_github.rs`, `move_session/mod.rs`, `account_usage_poll.rs`, `net/via_host.rs`, `transcript.rs`, `catalog/author.rs`, `account_usage.rs`.
-- [ ] `.gitattributes`: `* text=auto eol=lf` plus the existing fixture line, so a Windows checkout reproduces the generated files byte for byte.
+- [x] `.gitattributes`: `* text=auto eol=lf` plus the existing fixture line, so a Windows checkout reproduces the generated files byte for byte.
 
 **Verify:** `scripts/ci-local.sh --rust-only` on Linux/macOS unchanged; `cargo clippy --workspace --exclude fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings` clean (from Phase 2 on, in CI).
 
@@ -88,27 +102,27 @@ From `CLAUDE.md`:
 
 **PR:** `ci: add a windows-latest leg for the desktop crates`
 
-- [ ] `.github/workflows/ci.yml` `rust` job: add `windows-latest` to the matrix with `--workspace --exclude fleet-agent` on that leg only (`fleet-agent` is Unix-only by design; say so in a comment). `cargo fmt` and `cargo deny` stay Linux-only as today.
-- [ ] Set `git config --global core.autocrlf false` before checkout on the Windows leg (belt and braces with `.gitattributes`).
-- [ ] Tests that need `tmux`, `bash` or `ssh` on PATH already skip when the binary is missing (check each guard; any that assume `/bin/sh` get `#[cfg(unix)]` in Phase 1 instead).
-- [ ] Frontend job: add `windows-latest` to the `pnpm test` / `pnpm check` matrix at line 182 — cheap, and it catches path-separator assumptions in tests.
-- [ ] A `tauri build --debug --no-bundle` step on the Windows leg, so the WebView2 / `tauri-build` resource path is exercised on every PR, not first at release.
+- [x] `.github/workflows/ci.yml` `rust` job: add `windows-latest` to the matrix with `--workspace --exclude fleet-agent` on that leg only (`fleet-agent` is Unix-only by design; say so in a comment). `cargo fmt` and `cargo deny` stay Linux-only as today.
+- [x] Set `git config --global core.autocrlf false` before checkout on the Windows leg (belt and braces with `.gitattributes`).
+- [x] Tests that need `tmux`, `bash` or `ssh` on PATH already skip when the binary is missing (check each guard; any that assume `/bin/sh` get `#[cfg(unix)]` in Phase 1 instead).
+- [x] Frontend job: add `windows-latest` to the `pnpm test` / `pnpm check` matrix at line 182 — cheap, and it catches path-separator assumptions in tests.
+- [x] A `tauri build --debug --no-bundle` step on the Windows leg, so the WebView2 / `tauri-build` resource path is exercised on every PR, not first at release.
 
 ## Phase 3 — Windows runtime basics (P0)
 
 **PR:** `fix(windows): home dir, no local host, no ssh mux`
 
-- [ ] **Home directory.** Replace the three `HOME` reads in library code (`ssh_config.rs:126`, `ssh.rs:1723`, `catalog/mod.rs:59`) with one `crate::paths::home_dir()` that returns `std::env::home_dir()` (fixed for Windows in Rust 1.86 — `USERPROFILE`; the workspace sets no `rust-version` and CI runs stable). Tests keep setting `HOME`; on Windows they set `USERPROFILE` too through the same helper.
-- [ ] **`cache_dir`** on Windows: `%LOCALAPPDATA%\claude-fleet` (the ControlPath directory is moot there, see next item, but logs and other callers still use it).
-- [ ] **No SSH multiplexing on Windows.** One switch in `SshClient`: `fn mux_supported() -> bool { cfg!(unix) }`.
+- [x] **Home directory.** Replace the three `HOME` reads in library code (`ssh_config.rs:126`, `ssh.rs:1723`, `catalog/mod.rs:59`) with one `crate::paths::home_dir()` that returns `std::env::home_dir()` (fixed for Windows in Rust 1.86 — `USERPROFILE`; the workspace sets no `rust-version` and CI runs stable). Tests keep setting `HOME`; on Windows they set `USERPROFILE` too through the same helper.
+- [x] **`cache_dir`** on Windows: `%LOCALAPPDATA%\claude-fleet` (the ControlPath directory is moot there, see next item, but logs and other callers still use it).
+- [x] **No SSH multiplexing on Windows.** One switch in `SshClient`: `fn mux_supported() -> bool { cfg!(unix) }`.
   - `mux_opts` (`ssh.rs:230`) returns only the non-mux flags (`ConnectTimeout`, `BatchMode`, `ServerAlive*`) when it is false;
   - `control_path_for_pty` / `attach_mux_opts` (`pty.rs:388`) give the attach no `ControlPath`;
   - the app-exit `-O exit` sweep (`ssh.rs:858`, `:893`) is a no-op;
   - `is_mux_failure` is never consulted, so a plain exit 255 is not retried as a dead master.
   Unit tests pin each of the four under both values of the switch (inject it, don't `cfg` the test).
 - [ ] **Cost of no mux, measured and bounded.** Every reconcile / list / pane capture now pays a full SSH handshake. Before this PR merges: time one reconcile pass over 3 hosts from a Windows box, with and without the hub. If the tick is too slow, raise the reconcile staleness on Windows (it is a setting) and say in `docs/windows.md` that **hub-client mode is the recommended Windows setup** — the hub does the SSH from Linux with mux, the desktop only opens the one attach connection per terminal.
-- [ ] **No `local` host.** At desktop startup on Windows, call the same switch a hub with `hub.local_host=false` uses (`service::hub` `LOCAL_HOST_DISABLED`), so `ensure_local_allowed` refuses every local spawn with `E_NOTFOUND` and the existing self-heal ghosts stale `local` rows. The UI already copes with a hub that has no local host; confirm Hosts / New session / Add project hide `local`.
-- [ ] **`ssh.exe`.** Resolve `ssh` from PATH as today; if it is not found, the Hosts view says "Install the OpenSSH Client (Settings → Optional features)" instead of a raw spawn error. `E_SHELL` with that message, from one place in `ssh.rs`.
+- [x] **No `local` host.** At desktop startup on Windows, call the same switch a hub with `hub.local_host=false` uses (`service::hub` `LOCAL_HOST_DISABLED`), so `ensure_local_allowed` refuses every local spawn with `E_NOTFOUND` and the existing self-heal ghosts stale `local` rows. The UI already copes with a hub that has no local host; confirm Hosts / New session / Add project hide `local`.
+- [x] **`ssh.exe`.** Resolve `ssh` from PATH as today; if it is not found, the Hosts view says "Install the OpenSSH Client (Settings → Optional features)" instead of a raw spawn error. `E_SHELL` with that message, from one place in `ssh.rs`.
 
 ## Phase 4 — Terminal on ConPTY (P1)
 
@@ -125,19 +139,19 @@ Manual test matrix, run on Windows 11 against a Linux host, standalone *and* hub
 
 **PR:** `feat(windows): keep the hub client token in Credential Manager`
 
-- [ ] `backend/token_store.rs`: a `#[cfg(windows)]` `impl TokenStore for OsTokenStore` over Windows Credential Manager (`CredWriteW` / `CredReadW` / `CredDeleteW`, `CRED_TYPE_GENERIC`, persist `LOCAL_MACHINE`), target name from the existing `SERVICE`/`ACCOUNT` pair. Same shape as the macOS impl: no child process, token never on an argv.
-- [ ] Dependency: `windows-sys` with only `Win32_Security_Credentials` + `Win32_Foundation`, under `[target.'cfg(windows)'.dependencies]` — the same reasoning that put `security-framework` under macOS only and rejected `keyring` (`src-tauri/Cargo.toml:58`). `cargo deny check` must stay clean.
-- [ ] `ERROR_NOT_FOUND` → `Ok(None)` / idempotent clear, mirroring `errSecItemNotFound`.
-- [ ] Migration from the file fallback: on first `get`, if the file exists and the credential does not, move it in and delete the file.
-- [ ] Tests: the existing file-store tests stay for Linux (`cfg(all(test, not(any(target_os = "macos", windows))))`); a Windows-only round-trip test under a random target name, cleaned up.
+- [x] `backend/token_store.rs`: a `#[cfg(windows)]` `impl TokenStore for OsTokenStore` over Windows Credential Manager (`CredWriteW` / `CredReadW` / `CredDeleteW`, `CRED_TYPE_GENERIC`, persist `LOCAL_MACHINE`), target name from the existing `SERVICE`/`ACCOUNT` pair. Same shape as the macOS impl: no child process, token never on an argv.
+- [x] Dependency: `windows-sys` with only `Win32_Security_Credentials` + `Win32_Foundation`, under `[target.'cfg(windows)'.dependencies]` — the same reasoning that put `security-framework` under macOS only and rejected `keyring` (`src-tauri/Cargo.toml:58`). `cargo deny check` must stay clean.
+- [x] `ERROR_NOT_FOUND` → `Ok(None)` / idempotent clear, mirroring `errSecItemNotFound`.
+- [x] Migration from the file fallback: on first `get`, if the file exists and the credential does not, move it in and delete the file.
+- [x] Tests: the existing file-store tests stay for Linux (`cfg(all(test, not(any(target_os = "macos", windows))))`); a Windows-only round-trip test under a random target name, cleaned up.
 
 ## Phase 6 — Package and release (P1)
 
-- [ ] `scripts/release-assets.sh`: a `desktop-x86_64-windows` leg on `windows-latest`, `--bundles nsis` (MSI optional), asset names `claude-fleet_{v}_x64-setup.exe` (+ `.nsis.zip` / `.sig` for the updater); teach `rename-updater-asset.sh` the name.
-- [ ] `tauri.conf.json`: `bundle.windows` — WebView2 `downloadBootstrapper`, an icon `.ico`, `nsis.installMode: currentUser` (no admin needed).
-- [ ] Updater: the `latest.json` gains a `windows-x86_64` platform entry; the release-drift check covers it.
+- [x] `scripts/release-assets.sh`: a `desktop-x86_64-windows` leg on `windows-latest`, `--bundles nsis` (MSI optional), asset names `claude-fleet_{v}_x64-setup.exe` (+ `.nsis.zip` / `.sig` for the updater); teach `rename-updater-asset.sh` the name.
+- [x] `tauri.conf.json`: `bundle.windows` — WebView2 `downloadBootstrapper`, an icon `.ico`, `nsis.installMode: currentUser` (no admin needed).
+- [ ] ~~Updater: the `latest.json` gains a `windows-x86_64` platform entry~~ — void: no platform has an updater.
 - [ ] **Decision for the owner:** Authenticode code signing (certificate cost, SmartScreen warnings without it). The first release can ship unsigned and say so in the release notes.
-- [ ] `docs/windows.md`: install, OpenSSH Client prerequisite, "hub-client mode recommended", what does not exist on Windows (local host, agent, hub). Link it from README and `docs/hub.md`.
+- [x] `docs/windows.md`: install, OpenSSH Client prerequisite, "hub-client mode recommended", what does not exist on Windows (local host, agent, hub). Link it from README and `docs/hub.md`.
 
 ## Phase 7 — Later (separate plans, not started here)
 
