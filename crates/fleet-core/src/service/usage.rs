@@ -558,12 +558,14 @@ pub fn parse_batch_output(stdout: &str) -> BTreeMap<i64, FileOutcome> {
 /// Turn one file's read into the store update: price each model's tokens,
 /// and advance the offset by the complete lines consumed. A single line
 /// longer than the whole `cap` would pin the offset forever, so a chunk that
-/// reached the cap with nothing consumed skips the chunk instead.
+/// reached the cap with nothing consumed skips the chunk instead. `read_at`
+/// is when this cursor last booked usage (`UsageCursor::read_at`).
 pub fn plan_delta(
     read: &FileRead,
     overrides: &BTreeMap<String, Price>,
     cap: i64,
     now: i64,
+    read_at: Option<i64>,
 ) -> UsageDelta {
     let mut totals = UsageTotals::default();
     for mu in &read.by_model {
@@ -583,12 +585,20 @@ pub fn plan_delta(
         consumed
     };
     // Per-day slices, priced like `totals`. A read that started at byte 0 of
-    // a transcript that already existed (`new` / `shrink`) books every day
-    // before the collection day as backfill: history a takeover read in one
-    // go, not that day's spend. A `cont` read is live whatever day the line
-    // carries; a line with no timestamp books to today.
+    // a transcript that already existed (`new`) books every day before the
+    // collection day as backfill: history a takeover read, not that day's
+    // spend. (A `shrink` marks them the same way, but the store books a
+    // rewritten file's growth to the day of `now` whole: it has no per-day
+    // split to trust.) A takeover larger than one chunk goes on in `cont`
+    // reads, which are still history: a transcript only grows at its end,
+    // so a continued read that meets a day before the cursor's last booking
+    // is catching up, while a live one only sees that day or later (a
+    // midnight crossing included). A line with no timestamp books to today.
     let today = now.div_euclid(SECS_PER_DAY);
-    let fresh = read.mode != ReadMode::Cont;
+    let backfill_before = match read.mode {
+        ReadMode::Cont => read_at.map_or(i64::MIN, |t| t.div_euclid(SECS_PER_DAY).min(today)),
+        ReadMode::New | ReadMode::Shrink => today,
+    };
     let mut by_day: BTreeMap<(i64, bool), UsageTotals> = BTreeMap::new();
     for dm in &read.by_day {
         let mut t = dm.totals;
@@ -599,7 +609,7 @@ pub fn plan_delta(
             .map(|p| cost_micros(&t, dm.cache_write_5m_tokens, p))
             .unwrap_or(0);
         let day = dm.day.as_deref().and_then(day_number).unwrap_or(today);
-        let backfill = fresh && day < today;
+        let backfill = day < backfill_before;
         by_day.entry((day, backfill)).or_default().add(&t);
     }
     let by_day = by_day
@@ -712,7 +722,7 @@ pub async fn collect_host(
         let mut changed = 0;
         for c in &cursors {
             if let Some(FileOutcome::Read(read)) = results.get(&c.session_id) {
-                let delta = plan_delta(read, overrides, MAX_CHUNK_BYTES, now);
+                let delta = plan_delta(read, overrides, MAX_CHUNK_BYTES, now, c.read_at);
                 if s.apply_usage_in_tx(c.session_id, host, &delta)? {
                     changed += 1;
                 }
@@ -1341,6 +1351,7 @@ mod tests {
             source: source.map(str::to_string),
             last_msg_id: last.map(str::to_string),
             last_msg_usage: None,
+            read_at: None,
         }
     }
 
@@ -1392,12 +1403,13 @@ mod tests {
     /// The cursor the store would hold after applying `r`.
     #[cfg(unix)]
     fn advance(c: &UsageCursor, r: &FileRead, cap: i64) -> UsageCursor {
-        let d = plan_delta(r, &BTreeMap::new(), cap, 0);
+        let d = plan_delta(r, &BTreeMap::new(), cap, 0, None);
         UsageCursor {
             offset_bytes: d.offset,
             source: Some(d.source),
             last_msg_id: d.last_msg_id,
             last_msg_usage: d.last_msg_usage,
+            read_at: None,
             ..c.clone()
         }
     }
@@ -1563,7 +1575,7 @@ mod tests {
             r.by_model[0].cache_write_5m_tokens, 400,
             "the top-level split, not the one inside iterations"
         );
-        let d = plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0);
+        let d = plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0, None);
         assert_eq!(d.totals.cache_write_tokens, 1_000);
         assert_eq!(d.totals.cost_micros, 600 * 10 + 400 * 25 / 4);
     }
@@ -1587,13 +1599,13 @@ mod tests {
             tokens(7, 7, 0, 0),
             "last id reset too"
         );
-        assert!(plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0).reset);
+        assert!(plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0, None).reset);
         // The offset refers to another file (e.g. after /clear): new → from 0.
         let c = cursor(Some(&fx.file), 3, Some("other.jsonl"), Some("msg_1"));
         let r = read(run(&fx.home, &c, MAX_CHUNK_BYTES));
         assert_eq!(r.mode, ReadMode::New);
         assert_eq!(model_totals(&r, "claude-opus-5"), tokens(7, 7, 0, 0));
-        assert!(!plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0).reset);
+        assert!(!plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 0, None).reset);
     }
 
     #[cfg(unix)]
@@ -1720,6 +1732,7 @@ mod tests {
             source: Some("x.jsonl".into()),
             last_msg_id: Some("msg_1".into()),
             last_msg_usage: Some("1,2,3,4,0".into()),
+            read_at: None,
         };
         let s = batch_script(&[c], 1024, 4096);
         assert!(s.contains("cap='1024'"));
@@ -1752,7 +1765,7 @@ mod tests {
         assert_eq!(r.last_model, None);
         assert_eq!(r.last_msg_usage.as_deref(), Some("5,0,0,0,0"));
         // Unknown model: tokens counted, zero cost.
-        let d = plan_delta(r, &BTreeMap::new(), MAX_CHUNK_BYTES, 9);
+        let d = plan_delta(r, &BTreeMap::new(), MAX_CHUNK_BYTES, 9, None);
         assert_eq!(d.totals, tokens(5, 0, 0, 0));
         assert_eq!(d.offset, 9);
         let FileOutcome::Read(r) = &all[&5] else {
@@ -1789,7 +1802,7 @@ mod tests {
             last_model: Some("claude-haiku-4-5".into()),
             last_msg_usage: Some("0,1,0,0,0".into()),
         };
-        let d = plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 77);
+        let d = plan_delta(&r, &BTreeMap::new(), MAX_CHUNK_BYTES, 77, None);
         assert_eq!(d.totals.input_tokens, 1_000_000);
         assert_eq!(d.totals.output_tokens, 1_000_000);
         assert_eq!(d.totals.cost_micros, 5_000_000 + 5_000_000);
@@ -1804,6 +1817,7 @@ mod tests {
             &BTreeMap::new(),
             MAX_CHUNK_BYTES,
             0,
+            None,
         );
         assert_eq!(d.offset, 150);
     }
@@ -2393,7 +2407,7 @@ mod tests {
             last_msg_usage: None,
         };
         let now = day_number("2026-09-21").unwrap() * SECS_PER_DAY + 3_600;
-        let d = plan_delta(&read, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        let d = plan_delta(&read, &BTreeMap::new(), MAX_CHUNK_BYTES, now, None);
         assert_eq!(
             d.by_day
                 .iter()
@@ -2408,14 +2422,44 @@ mod tests {
         let mut cont = read.clone();
         cont.mode = ReadMode::Cont;
         cont.start = 50;
-        let d = plan_delta(&cont, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        let d = plan_delta(&cont, &BTreeMap::new(), MAX_CHUNK_BYTES, now, None);
         assert!(
             d.by_day.iter().all(|x| !x.backfill),
-            "a continuing cursor is live usage whatever day the line carries"
+            "a continuing cursor with no booking yet is live usage"
+        );
+        // A takeover larger than one chunk: its next chunk, read after the
+        // first was booked today, still meets 09-18 — history, not spend.
+        let d = plan_delta(
+            &cont,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            now,
+            Some(now - 60),
+        );
+        assert_eq!(
+            d.by_day.iter().map(|x| x.backfill).collect::<Vec<_>>(),
+            vec![true, false],
+            "a continued read that meets a day before its last booking is catching up"
+        );
+        // A live read across midnight: booked on 09-20, lines of 09-20 and
+        // 09-21 are both live.
+        let mut midnight = cont.clone();
+        midnight.by_day = vec![opus("2026-09-20", 2), opus("2026-09-21", 1)];
+        let last_night = day_number("2026-09-20").unwrap() * SECS_PER_DAY + 86_000;
+        let d = plan_delta(
+            &midnight,
+            &BTreeMap::new(),
+            MAX_CHUNK_BYTES,
+            now,
+            Some(last_night),
+        );
+        assert!(
+            d.by_day.iter().all(|x| !x.backfill),
+            "the last booking's own day is live"
         );
         let mut undated = read.clone();
         undated.by_day[0].day = None;
-        let d = plan_delta(&undated, &BTreeMap::new(), MAX_CHUNK_BYTES, now);
+        let d = plan_delta(&undated, &BTreeMap::new(), MAX_CHUNK_BYTES, now, None);
         assert_eq!(
             d.by_day[0].day,
             now.div_euclid(SECS_PER_DAY),

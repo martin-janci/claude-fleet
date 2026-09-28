@@ -631,13 +631,16 @@ pub struct UsageCursor {
     pub last_msg_id: Option<String>,
     /// What was counted for `last_msg_id`: `in,out,cache_write,cache_read,cache_write_5m`.
     pub last_msg_usage: Option<String>,
+    /// When usage was last booked (`usage_updated_at`): a continued read
+    /// that meets lines from before that day is still reading history.
+    pub read_at: Option<i64>,
 }
 
 /// The `sessions` columns every `UsageCursor` read selects, in
 /// [`map_usage_cursor`] order.
 pub(super) const USAGE_CURSOR_COLUMNS: &str =
     "id, transcript_path, claude_session_id, usage_offset_bytes, usage_source, \
-     usage_last_msg_id, usage_last_msg_usage";
+     usage_last_msg_id, usage_last_msg_usage, usage_updated_at";
 
 /// Map a row selected with [`USAGE_CURSOR_COLUMNS`].
 pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageCursor> {
@@ -649,6 +652,7 @@ pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<Usag
         source: row.get(4)?,
         last_msg_id: row.get(5)?,
         last_msg_usage: row.get(6)?,
+        read_at: row.get(7)?,
     })
 }
 

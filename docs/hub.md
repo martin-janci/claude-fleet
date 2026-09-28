@@ -153,7 +153,8 @@ peers configured".
 `usage_by_day` books each token to the UTC day of the transcript line that
 produced it. The first time a transcript is read (a new host, a hub takeover)
 its history before that day lands in `backfill_cost_micros`, apart from the
-day's live `cost_micros`, so a takeover never reads as an $850 day.
+day's live `cost_micros` — however many 8 MiB passes that first read takes —
+so a takeover never reads as an $850 day.
 `usage_report` says what each figure counts: `by_host_population: live_rows`
 (session rows that still exist, over their lifetime — ghosts included) and
 `by_day_population: durable` (the daily roll-up, killed sessions included);
