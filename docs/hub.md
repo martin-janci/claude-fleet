@@ -309,9 +309,11 @@ The image pulled is the compose file's own `image:` line at the new tag, and
 every `docker compose` call reads `FLEET_HUB_ENV_FILE` (default `.env`
 beside the compose file) through `--env-file`. The tag must match
 `[0-9A-Za-z._-]+`. On a fresh copy of `.env.example` (`FLEET_HUB_TAG=`
-empty) there is nothing to stop, and before the first start there is no
-`state.db` to back up: the script says so and skips those steps, so the
-same command is also the first install. An upgrade never prunes an older
+empty) there is nothing to stop and no `state.db` to back up: the script
+says so and skips those steps, so the same command is also the first
+install. With a tag set, a missing `state.db` stops the upgrade before the
+hub is touched (point `FLEET_HUB_DATA` at the right directory) — it never
+migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
 **Order across the three binaries.** Today (contract 4 on both sides,

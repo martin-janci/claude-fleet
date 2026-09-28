@@ -852,7 +852,10 @@ fn apply_session_start_hook(
         // that earned them, until someone prompts it. (A SessionStart that
         // loses the race to its own first prompt finds `working` and a
         // cleared stamp: nothing to undo.)
-        s.clear_ended_turn_state(row.id)?;
+        // A stale id is the row's own earlier conversation, not a new start.
+        if binding != Binding::Stale {
+            s.clear_ended_turn_state(row.id)?;
+        }
         if binding == Binding::Current {
             // A turn already began on this conversation (its
             // UserPromptSubmit won the race and rebound the row): turns and

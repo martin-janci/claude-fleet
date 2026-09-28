@@ -60,11 +60,14 @@ echo "upgrade: ${OLD:-<unset>} -> $NEW in $DIR"
 FLEET_HUB_TAG="$NEW" dc pull fleet-hub
 # 2. A consistent copy of the database while the hub is still serving — when
 #    there is one: a first run has no state.db yet.
-if [ -f "$DATA/state.db" ]; then
+#    Skipped only on a first install (no FLEET_HUB_TAG yet): a running hub
+#    whose state.db is not where FLEET_HUB_DATA says stops here, untouched,
+#    rather than migrating with no backup.
+if [ -z "$OLD" ] && [ ! -f "$DATA/state.db" ]; then
+  echo "upgrade: first install (no FLEET_HUB_TAG, no $DATA/state.db) — no backup to take"
+else
   PREFIX="pre-$NEW" KEEP="$KEEP" FLEET_HUB_DATA="$DATA" FLEET_HUB_BACKUPS="$DIR/backups" bash "$DIR/backup.sh"
   BACKED_UP=1
-else
-  echo "upgrade: no $DATA/state.db yet — skipping the pre-upgrade backup"
 fi
 # 3. SIGTERM under the compose stop_grace_period (drain + tick shutdown); `stop`, not `down`.
 #    An empty FLEET_HUB_TAG (a fresh .env.example) means nothing of this

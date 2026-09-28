@@ -971,7 +971,8 @@ pub fn work_link_as<'a>(
             // agent's next link — or detection — make it again: unlink, then
             // link, is the two-step overturn `confirm` already refuses.
             if decider == Decider::Agent {
-                if let Some(l) = s.get_work_link(link_id)? {
+                let own = s.session_work_links(session_id)?;
+                if let Some(l) = own.iter().find(|l| l.id == link_id) {
                     if l.state == "rejected" && PERSON_SOURCES.contains(&l.source.as_str()) {
                         return Err(IpcError::new(
                             codes::E_FORBIDDEN,

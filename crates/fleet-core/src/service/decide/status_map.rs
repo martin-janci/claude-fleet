@@ -1207,8 +1207,11 @@ impl StatusMapTrigger {
                 self.0.store(false, Ordering::Release);
             }
         }
+        // Built before the spawn: a task dropped before its first poll (a
+        // runtime shutting down) still releases the flag.
+        let reset = Reset(running);
         Some(crate::rt::spawn(async move {
-            let _reset = Reset(running);
+            let _reset = reset;
             for id in due_ids {
                 match propose_for_tracker(&ctx, id).await {
                     Ok(r) => tracing::debug!(
