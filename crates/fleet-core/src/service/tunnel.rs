@@ -102,7 +102,7 @@ fn tail_stderr(s: &str) -> String {
 fn ssh_spawner() -> TunnelSpawner {
     Arc::new(|argv: Vec<String>| {
         Box::pin(async move {
-            let out = crate::proc::command("ssh")
+            let out = crate::proc::command(crate::ssh::default_ssh_binary())
                 .args(&argv)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

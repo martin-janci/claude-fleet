@@ -353,6 +353,11 @@ token in Credential Manager. Unix-only code and tests stay `#[cfg(unix)]`
 (for a test module: a `#[cfg(unix)]` line above a bare `#[cfg(test)]`, the
 form `no_eprintln_tests` recognises); `rust-windows` in CI keeps clippy and
 the tests green there. `fleet-agent` and `fleet-hub` stay Unix-only.
+On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
+`wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
+`wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`
+program is `ssh::default_ssh_binary()` everywhere (probes, PTY, tunnels):
+`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH.
 
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor

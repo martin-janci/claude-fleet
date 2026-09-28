@@ -396,10 +396,16 @@ pub(crate) fn remote_attach_script(session_name: &str) -> String {
 /// word; otherwise the remote bash receives `LANG=...` as its -c argument and
 /// never runs tmux attach. (Same fix shape as RemoteTmux::remote_bash.)
 pub(crate) fn attach_argv(
+    ssh_bin: &str,
     host_alias: &str,
     session_name: &str,
     mux_opts: &[String],
 ) -> Vec<String> {
+    // A WSL distribution on this machine: the same attach script, run by
+    // `wsl.exe` instead of carried by `ssh -tt` (see `fleet_core::wsl`).
+    if let Some(distro) = fleet_core::wsl::distro_for(host_alias) {
+        return fleet_core::wsl::attach_argv(&distro, &remote_attach_script(session_name));
+    }
     if host_alias == "local" {
         return vec![
             "tmux".into(),
@@ -409,7 +415,10 @@ pub(crate) fn attach_argv(
         ];
     }
     let mut argv: Vec<String> = vec![
-        "ssh".into(),
+        // The same program every probe runs (`SshClient::ssh_binary`): on
+        // Windows the system OpenSSH, not whichever of Git's, MSYS2's or
+        // Cygwin's comes first on PATH.
+        ssh_bin.into(),
         "-tt".into(),
         // `-tt` allocates a tty, which turns ON ssh's own `~` escape
         // character. A `~` typed as the first character of a line (or in a
@@ -587,7 +596,12 @@ pub fn pty_open(
         .map_err(|e| IpcError::new(codes::E_PTY, format!("openpty: {e}")))?;
 
     let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
-    let argv = attach_argv(&args.host_alias, &args.session_name, &mux_opts);
+    let argv = attach_argv(
+        &ssh.ssh_binary().to_string_lossy(),
+        &args.host_alias,
+        &args.session_name,
+        &mux_opts,
+    );
     let mut cmd = CommandBuilder::new(&argv[0]);
     cmd.args(&argv[1..]);
     for (k, v) in attach_env(|k| std::env::var(k).ok()) {
@@ -863,14 +877,24 @@ mod tests {
         // `=` disables tmux's prefix / fnmatch lookup: attaching to a dead
         // `dev-foo` must fail, not land in `dev-foo--feat-x`.
         assert_eq!(
-            attach_argv("local", "dev-foo", &mux()),
+            attach_argv("ssh", "local", "dev-foo", &mux()),
             vec!["tmux", "attach", "-t", "=dev-foo"]
         );
     }
 
+    /// The attach runs the program every probe runs, not a bare `ssh` a
+    /// Windows PATH may resolve to Git's or Cygwin's.
+    #[test]
+    fn remote_attach_runs_the_configured_ssh_binary() {
+        let bin = r"C:\Windows\System32\OpenSSH\ssh.exe";
+        let argv = attach_argv(bin, "hetzner", "dev-foo", &[]);
+        assert_eq!(argv[0], bin);
+        assert_eq!(argv[1], "-tt");
+    }
+
     #[test]
     fn remote_attach_reuses_mux_opts_and_ends_option_parsing_before_the_host() {
-        let argv = attach_argv("hetzner", "dev-foo", &mux());
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &mux());
         assert_eq!(
             &argv[..6],
             [
@@ -893,7 +917,7 @@ mod tests {
         // (~75s) with a blank pane before the UI can explain itself. It
         // bounds only the INITIAL connect, never the attached session, and a
         // reused ControlMaster connection skips it entirely.
-        let argv = attach_argv("hetzner", "dev-foo", &[]);
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &[]);
         let at = argv
             .iter()
             .position(|a| a == "ConnectTimeout=10")
@@ -901,7 +925,7 @@ mod tests {
         assert_eq!(argv[at - 1], "-o");
         assert!(at < argv.iter().position(|a| a == "--").unwrap());
         // A local attach runs tmux directly — no ssh, nothing to bound.
-        assert!(!attach_argv("local", "dev-foo", &[])
+        assert!(!attach_argv("ssh", "local", "dev-foo", &[])
             .iter()
             .any(|a| a.contains("ConnectTimeout")));
     }
@@ -911,12 +935,12 @@ mod tests {
         // With a tty (`-tt`) ssh enables its `~` escape: a `~` typed first on
         // a line is eaten by the LOCAL ssh client, and `~.` tears the attach
         // down. The pane must see both characters instead.
-        let argv = attach_argv("hetzner", "dev-foo", &[]);
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &[]);
         let esc = argv.iter().position(|a| a == "EscapeChar=none").unwrap();
         assert_eq!(argv[esc - 1], "-o");
         assert!(esc < argv.iter().position(|a| a == "--").unwrap());
         // Local attaches run tmux directly — no ssh, nothing to disable.
-        assert!(!attach_argv("local", "dev-foo", &[])
+        assert!(!attach_argv("ssh", "local", "dev-foo", &[])
             .iter()
             .any(|a| a.contains("EscapeChar")));
     }
@@ -930,7 +954,7 @@ mod tests {
             eprintln!("SKIP remote_script_is_one_quoted_word_that_unquotes_to_the_attach_command: bash not on PATH");
             return;
         }
-        let argv = attach_argv("hetzner", "dev-foo", &mux());
+        let argv = attach_argv("ssh", "hetzner", "dev-foo", &mux());
         let script = argv.last().unwrap();
         let out = std::process::Command::new("bash")
             .args(["-c", &format!("printf %s {script}")])
@@ -961,7 +985,7 @@ mod tests {
             eprintln!("SKIP remote_script_neutralises_a_hostile_session_name: bash not on PATH");
             return;
         }
-        let argv = attach_argv("h", "x'; rm -rf / #", &[]);
+        let argv = attach_argv("ssh", "h", "x'; rm -rf / #", &[]);
         let out = std::process::Command::new("bash")
             .args(["-c", &format!("printf %s {}", argv.last().unwrap())])
             .output()

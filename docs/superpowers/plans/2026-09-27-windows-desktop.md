@@ -31,6 +31,13 @@ missing local host; `ssh` gets a null stdin; the terminal reports a gone
 credential paths refused. Still open from that review: shipping
 `conpty.dll`/`OpenConsole.exe` (bracketed paste and mouse on Windows 10).
 
+Compatibility round (2026-09-28): WSL distributions are hosts
+(`fleet_core::wsl`, `wsl-<name>`, run through `wsl.exe` — this replaces the
+Phase 7 "WSL spike"); the `ssh` program is chosen once
+(`ssh::default_ssh_binary`: `CLAUDE_FLEET_SSH`, else the Windows OpenSSH,
+else PATH) and used by probes, the terminal and the tunnels alike; a
+non-system `ssh` also gets its own `$HOME/.ssh/config` read.
+
 Owner decision still open: Authenticode signing (the first Windows release ships unsigned; `docs/windows.md` says so).
 
 ## 0. Evidence: what actually fails today

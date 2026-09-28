@@ -73,17 +73,69 @@ pub fn parse(input: &str) -> Vec<SshHost> {
     hosts
 }
 
-/// Convenience wrapper: load and parse the user's `~/.ssh/config`. Returns
-/// an empty list if the file does not exist or cannot be read.
+/// Convenience wrapper: load and parse the user's `~/.ssh/config` — every
+/// file [`config_paths`] names, the first one's hosts first. A file that does
+/// not exist or cannot be read contributes nothing.
 pub fn load_user_config() -> Vec<SshHost> {
+    let parsed = config_paths()
+        .into_iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .map(|c| parse(&c))
+        .collect();
+    merge_hosts(parsed)
+}
+
+/// The config files host discovery reads: `<home>/.ssh/config`, plus, on
+/// Windows, the one under `$HOME` when fleet runs an `ssh` other than the
+/// system OpenSSH ([`crate::ssh::default_ssh_binary`]): a Cygwin or MSYS2
+/// `ssh.exe` reads its own `HOME`, which Cygwin sets to its own home tree,
+/// not the Windows profile.
+pub fn config_paths() -> Vec<std::path::PathBuf> {
     let Some(home) = dirs_home() else {
         return Vec::new();
     };
-    let path = home.join(".ssh").join("config");
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => parse(&contents),
-        Err(_) => Vec::new(),
+    let mut out = vec![home.join(".ssh").join("config")];
+    if cfg!(windows) {
+        let system_ssh = crate::ssh::windows_openssh() == Some(crate::ssh::default_ssh_binary());
+        if let Some(extra) = extra_home_config(
+            &home,
+            std::env::var_os("HOME").map(std::path::PathBuf::from),
+            system_ssh,
+        ) {
+            out.push(extra);
+        }
     }
+    out
+}
+
+/// `$HOME/.ssh/config` as a second config file, when it applies: a non-system
+/// `ssh` is in use, `HOME` is set to an absolute path of this platform
+/// (Cygwin converts it for a native child, `C:\cygwin64\home\me`; a
+/// POSIX-form value is skipped), and it is not the profile itself.
+fn extra_home_config(
+    profile: &std::path::Path,
+    home_env: Option<std::path::PathBuf>,
+    system_ssh: bool,
+) -> Option<std::path::PathBuf> {
+    if system_ssh {
+        return None;
+    }
+    let home = home_env?;
+    if !home.is_absolute() || home == profile {
+        return None;
+    }
+    Some(home.join(".ssh").join("config"))
+}
+
+/// Concatenate host lists, keeping the first definition of each alias.
+fn merge_hosts(lists: Vec<Vec<SshHost>>) -> Vec<SshHost> {
+    let mut out: Vec<SshHost> = Vec::new();
+    for h in lists.into_iter().flatten() {
+        if !out.iter().any(|o| o.alias == h.alias) {
+            out.push(h);
+        }
+    }
+    out
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -143,6 +195,40 @@ Host alpha
 Host beta
     Hostname beta.lan
 ";
+
+    #[test]
+    fn a_second_config_adds_only_aliases_the_first_lacks() {
+        let first = parse(SIMPLE);
+        let second = parse("Host beta\n    Hostname elsewhere\nHost gamma\n    Hostname g\n");
+        let merged = merge_hosts(vec![first, second]);
+        let aliases: Vec<&str> = merged.iter().map(|h| h.alias.as_str()).collect();
+        assert_eq!(aliases, ["alpha", "beta", "gamma"]);
+        assert_eq!(
+            merged[1].hostname.as_deref(),
+            Some("beta.lan"),
+            "the first wins"
+        );
+    }
+
+    #[test]
+    fn home_config_is_read_only_for_a_non_system_ssh_with_its_own_home() {
+        let profile = std::env::temp_dir().join("profile");
+        let other = std::env::temp_dir().join("cygwin-home");
+        assert_eq!(
+            extra_home_config(&profile, Some(other.clone()), false),
+            Some(other.join(".ssh").join("config"))
+        );
+        assert_eq!(extra_home_config(&profile, Some(other), true), None);
+        assert_eq!(
+            extra_home_config(&profile, Some(profile.clone()), false),
+            None
+        );
+        assert_eq!(extra_home_config(&profile, None, false), None);
+        assert_eq!(
+            extra_home_config(&profile, Some("relative/home".into()), false),
+            None
+        );
+    }
 
     /// A Windows-edited config: a byte-order mark and CRLF line ends.
     #[test]
