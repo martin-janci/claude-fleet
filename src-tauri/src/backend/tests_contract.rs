@@ -1,6 +1,7 @@
 //! The field-name contract tests. See [`super`] for why they exist.
 
 use super::*;
+use fleet_core::service::add_project::GithubRepo;
 use fleet_core::service::health::{Health, HubHealth, TrackerHealth, TrackersHealth};
 use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
@@ -232,6 +233,15 @@ fn sample_host_worktrees() -> HostWorktrees {
         project_id: 2,
         cloned: true,
         worktrees: vec![sample_worktree_row()],
+    }
+}
+
+fn sample_github_repo() -> GithubRepo {
+    GithubRepo {
+        name_with_owner: "acme/widget".into(),
+        description: Some("w".into()),
+        is_private: true,
+        updated_at: Some("2026-09-01T10:00:00Z".into()),
     }
 }
 
@@ -524,6 +534,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("WorktreeRow", wire_keys(&sample_worktree_row()));
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
     put("HostWorktrees", wire_keys(&sample_host_worktrees()));
+    put("GithubRepo", wire_keys(&sample_github_repo()));
     put(
         "WorktreeOccupant",
         wire_keys(&WorktreeOccupant {

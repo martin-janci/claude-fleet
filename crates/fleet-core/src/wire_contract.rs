@@ -87,4 +87,10 @@
 //!   to drive silently never appears while the app retries every two
 //!   seconds. A version skew this build cannot see is exactly what this
 //!   number is for.
-pub const CONTRACT_REVISION: u32 = 4;
+//! - **5** — *a brand-new tool the desktop routes to.* `add_project` and
+//!   `list_github_repos` become hub tools, and the desktop routes both to
+//!   them instead of refusing them as local-only. A revision-4 hub serves
+//!   neither: the sidebar's "Add project" would be enabled and every attempt
+//!   would fail with an unknown-tool error. `GithubRepo` also joins the
+//!   report types the desktop deserialises.
+pub const CONTRACT_REVISION: u32 = 5;

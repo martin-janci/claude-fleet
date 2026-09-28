@@ -154,6 +154,9 @@ const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias
 /// it does not parse.
 const HOST_PAYLOAD: &str =
     r#"{"alias":"trn","reachable":true,"hidden":false,"provisioned":true,"transport":"ssh"}"#;
+/// A `ProjectTreeRow` as the hub answers `add_project`. `last_session_at` is
+/// `None` and stripped, the way `ok_json_compact` sends it.
+const PROJECT_TREE_PAYLOAD: &str = r#"{"project":{"id":7,"owner":"o","repo":"r","base_path":"/p/o/r","adopted":false,"system":false},"worktrees":[]}"#;
 /// A `work_link { summarize }` answer (work graph M13.4c).
 const SUMMARY_PAYLOAD: &str = r#"{"key":"ABC-1","link_id":4,"host_alias":"hetzner","claude_session_id":"0f8fad5b-d9cb-469f-a165-70867728950e","model":"haiku","journal_id":9,"at":1,"summary":"fenced"}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
@@ -392,6 +395,23 @@ fn routed_read_cases() -> Vec<Case> {
             "[]",
             Box::new(|b, s, _| {
                 block_on(commands::projects::routed::refresh_projects(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "list_github_repos",
+            "list_github_repos",
+            json!({ "host_alias": "trn" }),
+            r#"[{"name_with_owner":"acme/widget","is_private":true}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::list_github_repos(
+                    b,
+                    commands::projects::ListGithubReposArgs {
+                        host_alias: "trn".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -1171,6 +1191,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
 /// launch cannot use, which must refuse every row.
 fn routed_mutation_cases() -> Vec<Case> {
     use commands::sessions::RepairSessionArgs;
+    use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     use fleet_core::service::bg_sessions::NewBgSessionArgs;
     use fleet_core::service::hosts::HostAliasArgs;
     use fleet_core::service::move_session::resolve::{ResolveMoveAction, ResolveMoveArgs};
@@ -2042,6 +2063,42 @@ fn routed_mutation_cases() -> Vec<Case> {
         // one-to-one onto the tool's `NewSessionParams`, so `new_session`
         // routes unconditionally (`call_id` is this process's own
         // cancellation-registry key and has no counterpart — never sent).
+        (
+            // The `new` source with every field set proves the tagged enum
+            // crosses the wire; `call_id: Some(123)` proves it does not.
+            "add_project",
+            "add_project",
+            json!({
+                "host_alias": "trn",
+                "source": {
+                    "kind": "new",
+                    "owner": "o",
+                    "repo": "r",
+                    "create_remote": true,
+                    "confirm": "tok"
+                }
+            }),
+            PROJECT_TREE_PAYLOAD,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::add_project(
+                    b,
+                    AddProjectArgs {
+                        host_alias: "trn".into(),
+                        source: AddProjectSource::New {
+                            owner: "o".into(),
+                            repo: "r".into(),
+                            create_remote: true,
+                            confirm: Some("tok".into()),
+                        },
+                        call_id: Some(123),
+                    },
+                    s,
+                    h,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "new_session",
             "new_session",
