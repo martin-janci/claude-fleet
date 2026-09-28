@@ -136,41 +136,9 @@ pub const APPROXIMATIONS: &[&str] = &[
     "links of deleted sessions are not read (their conversations went with them)",
 ];
 
-/// Which cases are reported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Split {
-    Dev,
-    Test,
-    All,
-}
-
-impl Split {
-    pub fn parse(s: &str) -> Option<Split> {
-        match s {
-            "dev" => Some(Split::Dev),
-            "test" => Some(Split::Test),
-            "all" => Some(Split::All),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Split::Dev => "dev",
-            Split::Test => "test",
-            Split::All => "all",
-        }
-    }
-
-    fn keeps(self, dev: bool) -> bool {
-        match self {
-            Split::Dev => dev,
-            Split::Test => !dev,
-            Split::All => true,
-        }
-    }
-}
+/// Which cases are reported (dev: the oldest [`DEV_SHARE_PCT`]% of A by
+/// decision time).
+pub use super::Split;
 
 /// A provider the benchmark asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

@@ -40,6 +40,13 @@ use std::time::Duration;
 /// takes the store lock a busy hub may hold for a moment.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// For a call that waits on the network rather than the store: `tracker
+/// test` probes the provider and lists its views, several HTTPS requests
+/// each allowed `net::https::DEFAULT_TIMEOUT` (20 s) on the hub. An Asana
+/// test at ~5 s a request took 17.5 s, and under [`CALL_TIMEOUT`] the CLI
+/// reported a failure for a test the hub went on to pass.
+pub(crate) const SLOW_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// What a caller sees when nothing is listening. The hub must be RUNNING:
 /// these commands do not (and must not) reach around it into state.db.
 const NOT_RUNNING: &str = "start fleet-hub serve first";
@@ -128,11 +135,28 @@ pub(crate) fn hub_conn(
     })
 }
 
-/// Call one MCP tool on the running hub and return its JSON result.
+/// Call one MCP tool on the running hub and return its JSON result, within
+/// the fast admin limit ([`CALL_TIMEOUT`]).
 pub(crate) async fn call_tool(
     conn: &HubConn,
     tool: &str,
     arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    call_tool_within(conn, tool, arguments, CALL_TIMEOUT).await
+}
+
+/// [`call_tool`] with its own limit, for a tool that waits on something
+/// slower than the hub's store ([`SLOW_CALL_TIMEOUT`]).
+///
+/// Giving up here does not stop the hub: the transport runs the tool in a
+/// task of its own (stateless rmcp), so it finishes and records its outcome
+/// after the CLI has stopped listening. The error says so rather than
+/// reading as the call's failure.
+pub(crate) async fn call_tool_within(
+    conn: &HubConn,
+    tool: &str,
+    arguments: serde_json::Value,
+    limit: Duration,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -151,15 +175,16 @@ pub(crate) async fn call_tool(
         conn.token,
         body.len()
     );
-    let raw = match tokio::time::timeout(
-        CALL_TIMEOUT,
-        exchange(addr, conn.tls, &request, MAX_RESPONSE),
-    )
-    .await
-    {
-        Ok(r) => r?,
-        Err(_) => return Err(format!("{addr} did not answer within {CALL_TIMEOUT:.0?}")),
-    };
+    let raw =
+        match tokio::time::timeout(limit, exchange(addr, conn.tls, &request, MAX_RESPONSE)).await {
+            Ok(r) => r?,
+            Err(_) => {
+                return Err(format!(
+                    "{addr} did not answer within {limit:.0?}; the hub may still be finishing \
+                 the call — check its outcome before retrying"
+                ))
+            }
+        };
     parse_tool_response(&raw)
 }
 
@@ -894,6 +919,58 @@ mod tests {
         assert_eq!(display_width("e\u{301}"), 1);
         assert_eq!(display_width("📱"), 2);
         assert_eq!(display_width("👍\u{fe0f}"), 2);
+    }
+
+    /// A hub that accepts and then says nothing: the call gives up after
+    /// the limit IT was given — not the fast admin default — and says the
+    /// hub may still be working, since the hub never saw the CLI give up.
+    #[tokio::test]
+    async fn a_silent_hub_times_out_at_the_callers_limit_and_says_it_may_be_finishing() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hold = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            // Keep the socket open and never answer.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(sock);
+        });
+        let conn = HubConn {
+            addr,
+            token: "t".repeat(64),
+            tls: false,
+        };
+        let started = std::time::Instant::now();
+        let err = call_tool_within(
+            &conn,
+            "work_admin",
+            serde_json::json!({}),
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            started.elapsed() < CALL_TIMEOUT,
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(err.contains("did not answer within 200ms"), "{err}");
+        assert!(err.contains("may still be finishing"), "{err}");
+        hold.abort();
+    }
+
+    /// `tracker test` makes several provider requests, each allowed the
+    /// hub's own HTTPS timeout; the CLI must outwait a few of them, while
+    /// the fast admin calls keep their short limit.
+    #[test]
+    fn the_slow_limit_outlasts_several_provider_requests() {
+        let per_request = fleet_core::net::https::DEFAULT_TIMEOUT;
+        assert!(
+            SLOW_CALL_TIMEOUT >= per_request * 5,
+            "{SLOW_CALL_TIMEOUT:?}"
+        );
+        assert!(CALL_TIMEOUT < SLOW_CALL_TIMEOUT);
     }
 
     /// A minimal, real hub: a `state.db` with a master token, and a

@@ -1451,6 +1451,10 @@ retention, how to turn it off — is [`decisions.md`](decisions.md).
 ```bash
 fleet-hub decide set-key < jev-key.txt          # or --from-env NAME / --ref file:/run/secrets/jev
 fleet-hub org set 2 --jev on                    # this org consents
+fleet-hub decide enable                         # the kill switch on (disable: every call stops)
+fleet-hub decide mode status_map shadow         # off | shadow | assist, per feature
+fleet-hub decide unassigned on                  # rows with no org may be sent too
+fleet-hub decide set decide.jev.daily_token_budget 500000   # any other decide.* setting
 fleet-hub decide status                         # read-only: flag, modes, consent, breaker, spend
 fleet-hub decide runs --feature work_link --limit 20
 fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]   # status_map: section → category (confidence)
@@ -1459,8 +1463,9 @@ fleet-hub decide proposals apply 812 [--as in_progress]   # or one at a time, by
 fleet-hub decide proposals reject 814                    # "not this": stays unmapped
 ```
 
-The `decide.*` settings are set like the `work.*` ones, with `set_setting`
-(master token). `set-key` and `clear-key` write `state.db` directly, like
+`enable`, `disable`, `mode`, `unassigned` and `set` change the `decide.*`
+settings over the running hub's `set_setting` (loopback, master token),
+like `org set`: the hub checks the value and audits the change. `set-key` and `clear-key` write `state.db` directly, like
 `fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
@@ -1499,6 +1504,8 @@ labeled Asana sections — the owner's file, or the built-in synthetic set
 fleet-hub decide bench status-map --fixture                      # todo + rule, offline
 fleet-hub decide bench status-map --labels sections.jsonl --provider rule --provider jev
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1 \
+    --split dev --question q.json   # try a reworded question on the dev boards
 ```
 
 Without `--provider jev` or `--provider haiku` neither sends anything
