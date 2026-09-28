@@ -920,6 +920,15 @@
       </div>
       <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
 
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.provisionForceGitTree)}
+          disabled={automationBusy}
+          data-testid="provision-force-git-tree"
+          onchange={() => toggleSetting(SETTING_KEYS.provisionForceGitTree)} />
+        Write fleet's two skill dirs even when ~/.claude/skills is a git checkout
+      </label>
       <label class="toggle gc-toggle">
         <input
           type="checkbox"
@@ -1075,6 +1084,46 @@
           data-testid="health-context-red-pct"
           onchange={(e) => onLimitIntChange(SETTING_KEYS.healthContextRedPct, 'Context red threshold (%)', e)} />
         <span class="hook-desc" id="limit-context-red-pct-desc">percent of the context window at which a session needs you (the chip turns red here, amber 15 points below)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-version-max-age-hours">version badge</label>
+        <input class="port" id="health-version-max-age-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-version-max-age-hours-desc"
+          data-testid="health-version-max-age-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthVersionMaxAgeSecs, e)} />
+        <span class="hook-desc" id="health-version-max-age-hours-desc">hours a probed Claude version stays trusted for the "older than the fleet" mark</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-disk-low-pct">disk low</label>
+        <input class="port" id="health-disk-low-pct" type="number" min="50" max="100" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct)}
+          disabled={limitsBusy}
+          aria-describedby="health-disk-low-pct-desc"
+          data-testid="health-disk-low-pct"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthDiskLowPct, 'Disk low threshold (%)', e)} />
+        <span class="hook-desc" id="health-disk-low-pct-desc">percent of a host's home filesystem in use at which it is marked low on disk</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-claude-max-behind">claude behind</label>
+        <input class="port" id="health-claude-max-behind" type="number" min="0" max="1000" step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.healthClaudeMaxBehind)}
+          disabled={limitsBusy}
+          aria-describedby="health-claude-max-behind-desc"
+          data-testid="health-claude-max-behind"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthClaudeMaxBehind, 'Claude patch releases behind', e)} />
+        <span class="hook-desc" id="health-claude-max-behind-desc">patch releases a host's Claude may trail the fleet's newest before fleet_health flags it</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="health-hooks-silent-hours">hooks silent</label>
+        <input class="port" id="health-hooks-silent-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthHooksSilentSecs))}
+          disabled={limitsBusy}
+          aria-describedby="health-hooks-silent-hours-desc"
+          data-testid="health-hooks-silent-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.healthHooksSilentSecs, e)} />
+        <span class="hook-desc" id="health-hooks-silent-hours-desc">hours a reachable host with live sessions may go without an accepted hook before fleet_health flags it</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="limit-move-mb">move</label>

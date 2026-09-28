@@ -2314,6 +2314,236 @@ async fn reconcile_relinks_a_remote_host_after_an_account_switch() {
     );
 }
 
+/// A `TmuxExec` whose remote host `h` answers `host_versions` and
+/// `host_health`.
+struct VersionsTmux {
+    inner: ScriptedTmux,
+    versions: Option<crate::tmux::HostVersions>,
+    health: Option<crate::tmux::HostHealthSample>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for VersionsTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        self.inner.list_sessions().await
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(vec![])
+    }
+    async fn host_versions(&self) -> Option<crate::tmux::HostVersions> {
+        self.versions.clone()
+    }
+    async fn host_health(&self) -> Option<crate::tmux::HostHealthSample> {
+        self.health.clone()
+    }
+}
+
+/// Deps whose remote host `h` answers `versions` when asked; every other
+/// alias answers nothing.
+fn versions_deps(versions: Option<crate::tmux::HostVersions>) -> Arc<ReconcileDeps> {
+    versions_health_deps(versions, None)
+}
+
+/// [`versions_deps`] whose host `h` also answers `health` every pass.
+fn versions_health_deps(
+    versions: Option<crate::tmux::HostVersions>,
+    health: Option<crate::tmux::HostHealthSample>,
+) -> Arc<ReconcileDeps> {
+    ReconcileDeps::fake(
+        move |alias| {
+            let is_h = alias == "h";
+            Box::new(VersionsTmux {
+                inner: ScriptedTmux {
+                    sessions: Vec::new(),
+                    delay: std::time::Duration::from_millis(0),
+                    hang: false,
+                    probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                },
+                versions: if is_h { versions.clone() } else { None },
+                health: if is_h { health.clone() } else { None },
+            })
+        },
+        std::time::Duration::from_secs(5),
+    )
+}
+
+/// data-sync F2/F5, hub-ops F6: a hidden host's rows were immortal because
+/// the reaper only ran inside a probed host's write.
+#[tokio::test]
+async fn reconcile_reaps_the_rows_of_a_hidden_host_without_probing_it() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let (on_old, on_h) = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_host("old").unwrap();
+        s.set_host_hidden("old", true).unwrap();
+        (
+            s.upsert_session("dev-old", "old", None, None, 1, 1, "running", None)
+                .unwrap(),
+            s.upsert_session("dev-h", "h", None, None, 1, 1, "running", None)
+                .unwrap(),
+        )
+    };
+    let deps = || {
+        ReconcileDeps::fake_without_local(
+            |alias| {
+                Box::new(IdentityTmux {
+                    sessions: if alias == "h" {
+                        vec![tmux_session("dev-h")]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                })
+            },
+            std::time::Duration::from_secs(5),
+        )
+    };
+    // Pass 1 ghosts, pass 2 deletes; `h` is probed and its row lives on.
+    reconcile_sessions_with(&store, &deps()).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_session_by_id(on_old).unwrap().unwrap().status,
+            "ghost"
+        );
+    }
+    reconcile_sessions_with(&store, &deps()).await.unwrap();
+    let s = store.lock().unwrap();
+    assert!(s.get_session_by_id(on_old).unwrap().is_none());
+    assert_eq!(
+        s.get_session_by_id(on_h).unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
+    // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let sample = crate::tmux::HostHealthSample {
+        disk_home_free_kb: Some(14_000_000),
+        disk_home_total_kb: Some(480_000_000),
+        disk_tmp_free_kb: Some(9_300_000),
+        load_1m: Some(5.9),
+        mem_avail_kb: Some(2_000_000),
+        uptime_secs: Some(57 * 86400),
+    };
+    reconcile_sessions_with(&store, &versions_health_deps(None, Some(sample.clone())))
+        .await
+        .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.disk_home_free_kb, Some(14_000_000));
+    assert_eq!(row.disk_home_total_kb, Some(480_000_000));
+    assert_eq!(row.load_1m, Some(5.9));
+    assert_eq!(row.uptime_secs, Some(57 * 86400));
+    assert!(row.health_at.is_some());
+
+    // A second identical pass changes only the stamps and the sample,
+    // which is a ping (carrying the sample), not a full-row probe event.
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let dyn_bus: std::sync::Arc<dyn crate::events::EventBus> = bus.clone();
+    let store2 = Mutex::new(Store::open_with_bus_in_memory(dyn_bus).unwrap());
+    store2.lock().unwrap().upsert_host("h").unwrap();
+    reconcile_sessions_with(&store2, &versions_health_deps(None, Some(sample.clone())))
+        .await
+        .unwrap();
+    bus.take();
+    reconcile_sessions_with(&store2, &versions_health_deps(None, Some(sample)))
+        .await
+        .unwrap();
+    let seen = bus.take();
+    assert!(seen.iter().any(|e| e == "host:pinged:h"), "{seen:?}");
+    assert!(!seen.iter().any(|e| e == "host:probed:h"), "{seen:?}");
+}
+
+fn host_row_of(store: &Mutex<Store>, alias: &str) -> HostRow {
+    store
+        .lock()
+        .unwrap()
+        .get_host_row(alias)
+        .unwrap()
+        .expect("host row exists")
+}
+
+#[tokio::test]
+async fn reconcile_writes_the_probed_versions_and_stamps_them_only_when_due() {
+    // data-sync F1: the pass used to pass the STORED version back through
+    // `update_host_probe`, so `list_hosts` showed provisioning-day numbers
+    // under a minutes-old `last_pinged_at`.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.update_host_probe("h", true, Some("2.1.235"), Some("3.5a"), 1)
+            .unwrap();
+    }
+    let fresh = crate::tmux::HostVersions {
+        claude_version: Some("2.1.282".into()),
+        tmux_version: Some("3.6a".into()),
+    };
+    // Never stamped ⇒ due: the pass asks, writes, stamps.
+    reconcile_sessions_with(&store, &versions_deps(Some(fresh.clone())))
+        .await
+        .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.claude_version.as_deref(), Some("2.1.282"));
+    assert_eq!(row.tmux_version.as_deref(), Some("3.6a"));
+    let stamped = row.claude_version_at.expect("stamped");
+    assert!(stamped >= now_unix() - 5);
+
+    // Stamped a moment ago ⇒ not due: the executor is not asked, the row
+    // keeps what it has, the stamp does not move.
+    reconcile_sessions_with(
+        &store,
+        &versions_deps(Some(crate::tmux::HostVersions {
+            claude_version: Some("9.9.9".into()),
+            tmux_version: None,
+        })),
+    )
+    .await
+    .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.claude_version.as_deref(), Some("2.1.282"));
+    assert_eq!(row.claude_version_at, Some(stamped));
+
+    // Due again but the binary answered nothing: keep the stored value,
+    // do NOT stamp (a stamp means "read from the host").
+    let old_stamp = now_unix() - VERSIONS_REFRESH_SECS - 1;
+    {
+        let s = store.lock().unwrap();
+        s.set_host_versions_at("h", old_stamp).unwrap();
+    }
+    reconcile_sessions_with(
+        &store,
+        &versions_deps(Some(crate::tmux::HostVersions::default())),
+    )
+    .await
+    .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.claude_version.as_deref(), Some("2.1.282"));
+    assert_eq!(row.claude_version_at, Some(old_stamp));
+}
+
 #[tokio::test]
 async fn reconcile_keeps_the_remote_link_when_the_account_read_yields_nothing() {
     // A failed read (ssh hiccup, mid-rewrite ~/.claude.json) or a logout
@@ -2668,6 +2898,8 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     };
     // 2. `new_session` creates the tmux session and runs its own
@@ -2715,6 +2947,8 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix() + 5,
     };
     let mut s = store.lock().unwrap();
@@ -3291,6 +3525,8 @@ fn reconcile_linking(
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     };
     // Two ticks: the second must keep the link, not null it.
@@ -5409,6 +5645,8 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
             boot_id: Some("a".into()),
             tmux_server_pid: None,
         }),
+        versions: None,
+        health: None,
         started_at: 1000,
     };
     let mut s = store.lock().unwrap();
@@ -5883,6 +6121,8 @@ fn pair_pass(
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     };
     let projects = s.list_projects().unwrap();
@@ -6052,6 +6292,8 @@ fn vps_probe(
         account: None,
         pr_info,
         identity,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     }
 }

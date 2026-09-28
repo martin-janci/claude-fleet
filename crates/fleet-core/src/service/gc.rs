@@ -301,13 +301,16 @@ pub async fn sweep_with(
             if let Ok(s) = store.lock() {
                 let rows = s.list_all_sessions().unwrap_or_default();
                 let controller = s.get_controller().ok().flatten();
-                let reachable: HashSet<String> = s
-                    .list_hosts()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|h| h.reachable)
-                    .map(|h| h.alias)
-                    .collect();
+                // One hidden/local rule for every host loop (hub-ops F6):
+                // a hidden row's sessions are never a kill target.
+                let reachable: HashSet<String> = crate::service::hosts::active_hosts(
+                    s.list_hosts().unwrap_or_default(),
+                    crate::service::hub::local_host_enabled(),
+                )
+                .into_iter()
+                .filter(|h| h.reachable)
+                .map(|h| h.alias)
+                .collect();
                 (rows, controller, reachable)
             } else {
                 (Vec::new(), None, HashSet::new())

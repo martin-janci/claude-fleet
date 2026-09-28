@@ -799,10 +799,14 @@ pub async fn collect_all(store: &Mutex<Store>, exec: &dyn SshExec, now: i64) -> 
     let (hosts, overrides) = match store.lock() {
         Ok(s) => (
             collection_hosts(
-                s.list_hosts()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|h| (h.alias, h.reachable)),
+                // `active_hosts` is the one hidden/local rule (hub-ops F6);
+                // `collection_hosts` keeps the reachability test.
+                crate::service::hosts::active_hosts(
+                    s.list_hosts().unwrap_or_default(),
+                    crate::service::hub::local_host_enabled(),
+                )
+                .into_iter()
+                .map(|h| (h.alias, h.reachable)),
                 crate::service::hub::local_host_enabled(),
             ),
             price_overrides(&s),
@@ -1178,6 +1182,24 @@ mod tests {
             collection_hosts(vec![("local".to_string(), true)], false),
             Vec::<String>::new()
         );
+        // A hidden reachable row never reaches `collection_hosts`: the
+        // caller feeds it through `active_hosts` (hub-ops F6).
+        let mut hidden = crate::store::Store::open_in_memory()
+            .unwrap()
+            .list_hosts()
+            .unwrap();
+        assert!(hidden.is_empty());
+        hidden.push({
+            let s = crate::store::Store::open_in_memory().unwrap();
+            s.insert_host("parked", Some("parked")).unwrap();
+            s.update_host_probe("parked", true, None, None, 1).unwrap();
+            s.set_host_hidden("parked", true).unwrap();
+            s.get_host_row("parked").unwrap().unwrap()
+        });
+        let fed = crate::service::hosts::active_hosts(hidden, true)
+            .into_iter()
+            .map(|h| (h.alias, h.reachable));
+        assert_eq!(collection_hosts(fed, true), Vec::<String>::new());
     }
 
     fn tokens(i: i64, o: i64, w: i64, r: i64) -> UsageTotals {

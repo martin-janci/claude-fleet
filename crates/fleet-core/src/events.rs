@@ -54,6 +54,13 @@ pub enum RowChange {
         alias: String,
         last_pinged_at: i64,
         reachable: bool,
+        /// Host identity & health, task 1: the versions stamp, so a
+        /// stamp-only refresh needs no full-row event. `to_value` writes it
+        /// as a nullable field; a client that predates it ignores it.
+        claude_version_at: Option<i64>,
+        /// Task 2: the health sample of this pass, for the same reason —
+        /// disk and load move every pass and must not cost a full row.
+        health: Option<crate::store::HostHealth>,
     },
     HostRemoved(String),
     AccountUpserted(AccountRow),
@@ -300,10 +307,14 @@ impl RowChange {
                 alias,
                 last_pinged_at,
                 reachable,
+                claude_version_at,
+                health,
             } => serde_json::json!({
                 "alias": alias,
                 "last_pinged_at": last_pinged_at,
                 "reachable": reachable,
+                "claude_version_at": claude_version_at,
+                "health": health,
             }),
             RowChange::HostRemoved(alias) => to_value(&HostRemovedPayload {
                 alias: alias.clone(),

@@ -21,6 +21,7 @@
     "list_host_tokens",
     "mcp_configure",
     "mcp_status",
+    "merge_host",
     "probe_ssh_alias",
     "provision_hosts",
     "purge_project",

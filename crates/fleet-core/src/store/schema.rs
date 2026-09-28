@@ -150,6 +150,42 @@ fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 072: `hosts` already has its
+/// `claude_version_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
+/// again. See [`Migration`].
+fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'claude_version_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 073: `hosts` already has its
+/// `health_at` column (and the eight beside it), and `ALTER TABLE ... ADD
+/// COLUMN` would fail again. See [`Migration`].
+fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'health_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 074: `hosts` already has its
+/// `provision_fingerprint` column (and `provisioned_at` beside it), and
+/// `ALTER TABLE ... ADD COLUMN` would fail again. See [`Migration`].
+fn hosts_has_provision_fingerprint(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'provision_fingerprint'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 043: `session_messages` already has
 /// its `to_participant_id` column, and `ALTER TABLE ... ADD COLUMN` would
 /// fail again. See [`Migration`].
@@ -767,6 +803,28 @@ const MIGRATIONS: &[Migration] = &[
         version: 75,
         sql: include_str!("../../migrations/075_session_launch_model.sql"),
         already_applied: Some(sessions_has_launch_model),
+    },
+    // Host identity & health, task 1: `hosts.claude_version_at`. Guarded:
+    // ADD COLUMN. (Numbered at merge time — `migrations_are_contiguous_from_one`
+    // allows no gap — so a sibling plan merged first shifts these.)
+    Migration {
+        version: 76,
+        sql: include_str!("../../migrations/076_host_claude_version_at.sql"),
+        already_applied: Some(hosts_has_claude_version_at),
+    },
+    // Host identity & health, task 2: the per-pass health sample, the last
+    // accepted hook and the agent version on `hosts`. Guarded: ADD COLUMN.
+    Migration {
+        version: 77,
+        sql: include_str!("../../migrations/077_host_health.sql"),
+        already_applied: Some(hosts_has_health_at),
+    },
+    // Host identity & health, task 6: the provisioning content fingerprint
+    // and its stamp on `hosts`. Guarded: ADD COLUMN.
+    Migration {
+        version: 78,
+        sql: include_str!("../../migrations/078_host_provision_fingerprint.sql"),
+        already_applied: Some(hosts_has_provision_fingerprint),
     },
 ];
 

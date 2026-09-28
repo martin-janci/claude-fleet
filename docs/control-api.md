@@ -64,7 +64,7 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
-`hide_host` — are **master-token only** in either mode: a token lifted from
+`merge_host`, `hide_host`, `forget_project` — are **master-token only** in either mode: a token lifted from
 one host must not be able to rotate, re-provision or remove the others.
 
 **Rotate** next to a host mints a fresh token and re-provisions that host with
@@ -256,10 +256,12 @@ Index by area (names only; see the reference for details):
   health and the detection backlog, from cached sync state; a per-host token
   sees its own org's trackers), `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
-  `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
+  `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
+  `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
+  `forget_project` (drop a row a local-less hub cannot rescan away),
   `add_project` (clone, adopt or create a repository on a host — `git` and
   `gh` run there; a per-host token acts on its own host only, and
   `create_remote` — publishing on GitHub — needs a person's approval from
@@ -1037,6 +1039,8 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
 
+`provision_hosts` takes `host` (one alias; every active host when omitted) and `content_only` (steps 1, 2 and 5 only — skills, the CLAUDE.md block and hooks, with the host's existing token; no token minted, no `~/.claude.json` rewrite, no tunnel, no restart needed; a host without a token answers `E_NO_TOKEN`). Each provisioning records a fingerprint of the content it shipped, and `list_hosts` reports `provisioned_at` and `provision_stale` (provisioned with content other than this build's). Each managed skill dir carries a `.fleet-managed` marker; a skills dir inside a git work tree is refused (`E_INVALID`) unless `provision.force_git_tree` is on.
+
 **After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — the master token is still accepted in that query form on `/hook` (only there, and only the master token) for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv. **The `?token=` form is removed in 0.4.**
 
 ### Host-alias mismatch (`set_friendly_name` / `register_self` return `E_NOTFOUND`)
@@ -1054,6 +1058,32 @@ Each call returns a status for every non-hidden host:
 | `failed` | One of the steps returned an error (see `detail`). |
 
 Per-host failures do not abort provisioning of other hosts.
+
+### Host health
+
+Every reconcile pass reads one health sample from each reachable host in the
+same batched probe script (`df -Pk` of `$HOME` and `${TMPDIR:-/tmp}`, the
+1-minute load, `MemAvailable` on Linux, the uptime) and, every 6 h, `tmux -V`
+and `claude --version`. `list_hosts` carries the sample on each row
+(`disk_home_free_kb`, `disk_home_total_kb`, `disk_tmp_free_kb`, `load_1m`,
+`mem_avail_kb`, `uptime_secs`, `health_at`), the versions stamp
+(`claude_version_at`), the last accepted hook from the host's own token
+(`last_hook_at`) and, for an agent host, the `agent_version` its last hello
+reported. `fleet_health.hosts[]` judges them per host:
+
+| Field | Meaning |
+|---|---|
+| `disk_home_pct` | Used percent of `$HOME`'s filesystem, when sampled. |
+| `disk_low` | `disk_home_pct >= health.disk_low_pct` (default 90). |
+| `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
+| `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
+| `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+
+The desktop's "older than the fleet" mark trusts a `claude_version_at`
+younger than `health.version_max_age_secs` (default 24 h). `move_session`
+refuses (`E_INVALID`, `reason: target_disk_low`) a target whose last sample
+cannot take the source worktree plus 1 GiB of headroom; an unsampled target
+proceeds.
 
 ### Notes
 
