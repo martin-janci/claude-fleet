@@ -227,7 +227,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
 
 Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
 
@@ -502,6 +502,16 @@ Parameters: `key`, `value`
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
+
+### `update_admin`
+
+Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
+
+Parameters: `action`, `component`, `mandatory`, `reason`, `target`, `version`
+
+### `update_status`
+
+Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins. A per-host or org-bound token sees itself only.
 
 ### `usage_report`
 

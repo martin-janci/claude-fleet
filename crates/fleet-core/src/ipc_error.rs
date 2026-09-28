@@ -257,6 +257,11 @@ pub mod codes {
     /// the banner does; `details` carries the hub's revision and the bound it
     /// missed.
     pub const E_HUB_CONTRACT: &str = "E_HUB_CONTRACT";
+    /// A release channel or manifest whose signature does not verify under
+    /// the compiled-in release keys, or a decision its signed evidence does
+    /// not support (update-channel design U1). Nothing unverified is ever
+    /// offered or installed.
+    pub const E_UPDATE_UNVERIFIED: &str = "E_UPDATE_UNVERIFIED";
     /// Remote (hub-client) mode: the hub answered the call with a JSON-RPC
     /// *protocol* error rather than a tool result — it serves no tool by that
     /// name, or could not bind the arguments. That is the two sides

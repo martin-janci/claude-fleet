@@ -437,5 +437,21 @@ fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
   `FLEET_BUILD_ID`, passed by `release.yml` and the `hub-image.yml` build
   args).
 
-S2–S4 and S6–S9 are not built. The §13 questions wait on the owner (S2 needs
-the release signing key).
+**S4a (the hub side) is landed:**
+- migration 079 (`update_desired`, `update_observed`, `update_events`, and
+  `update_docs`, the signed-document cache, re-verified on every read);
+- `service/update/` (`check` / `report` / `status` / `pin` / `refresh`,
+  plus the refresh tick in `fleet-hub serve`, which records `hub:self`);
+- `POST /update/check` and `POST /update/report` (`mcp/update_route.rs`,
+  behind `authorize`; the caller's identity comes from its token);
+- `TokenMode::Updater` (`fleet-hub pair --mode updater`): `/update/*` only,
+  refused by every tool, `/events` and `/report`;
+- the tools `update_status` (client, read-only; a scoped caller sees only
+  itself) and `update_admin` (master only);
+- the `update.*` settings, with their Settings → Updates rows, and the user
+  guide `docs/updates.md` (every `update.*` setting must be in its table).
+
+Trusted keys are `fleet_update::keys::RELEASE_KEYS`, which is empty until
+S2, so nothing is offered yet; an `e2e` build also reads
+`FLEET_UPDATE_E2E_KEYS`. S2, S3, S4b and S6–S9 are not built. The §13
+questions wait on the owner (S2 needs the release signing key).

@@ -150,6 +150,19 @@ fn sessions_has_stale_working_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 080: `sessions` already has its
+/// `stale_demoted_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
+/// again (the backfill is `backfill_stale_demoted`, idempotent, outside the
+/// migration). See [`Migration`].
+fn sessions_has_stale_demoted_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'stale_demoted_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 072: `hosts` already has its
 /// `claude_version_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
@@ -826,6 +839,19 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/078_host_provision_fingerprint.sql"),
         already_applied: Some(hosts_has_provision_fingerprint),
     },
+    // Application updates (S4): desired / observed / events / the signed
+    // document cache. `CREATE TABLE IF NOT EXISTS` only.
+    Migration::plain(79, include_str!("../../migrations/079_update_state.sql")),
+    // Stale-working acknowledgement: `sessions.stale_demoted_at`, the
+    // reconcile veto's memory apart from the attention stamp (one ADD
+    // COLUMN, its own guard; the backfill is `backfill_stale_demoted`,
+    // after the collision repair). Not a `SessionRow` field, so 065's
+    // row_version trigger does not watch it.
+    Migration {
+        version: 80,
+        sql: include_str!("../../migrations/080_stale_demoted.sql"),
+        already_applied: Some(sessions_has_stale_demoted_at),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -949,8 +975,27 @@ impl Store {
             restored?;
         }
         self.repair_skipped_main_migrations()?;
+        self.backfill_stale_demoted()?;
         self.reap_orphan_session_events()?;
         Ok(())
+    }
+
+    /// Migration 072's backfill: a row the tick demoted before the veto had
+    /// its own column (`stale_working_at` set, `stale_demoted_at` not) keeps
+    /// its veto. Runs on every open, after the collision repair, because an
+    /// UPDATE of `sessions` compiles 065's row_version trigger, which names
+    /// `lost_reason` — a column a conversation-branch database only has once
+    /// the repair has added it. Idempotent: every write that sets
+    /// `stale_working_at` sets `stale_demoted_at` with it, and nothing clears
+    /// the veto while the stamp stays, so after the first run this matches
+    /// no row. The column is not watched by the trigger, so no
+    /// `row_version` moves.
+    fn backfill_stale_demoted(&self) -> Result<usize> {
+        self.conn.execute(
+            "UPDATE sessions SET stale_demoted_at = stale_working_at \
+             WHERE stale_working_at IS NOT NULL AND stale_demoted_at IS NULL",
+            [],
+        )
     }
 
     /// Repair for the conversations-migration collision. The
@@ -3287,13 +3332,14 @@ mod tests {
     /// deliberately does NOT watch: `row_version` itself (an explicit
     /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
     /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
-    /// backfill mark). Every other column is
+    /// backfill mark, 080's stale-working veto memory). Every other column is
     /// watched, so a write that changes it bumps the counter.
-    const ROW_VERSION_UNWATCHED: [&str; 4] = [
+    const ROW_VERSION_UNWATCHED: [&str; 5] = [
         "row_version",
         "last_reconciled_at",
         "usage_backfill_until",
         "launch_model",
+        "stale_demoted_at",
     ];
 
     /// The SQL of `sessions_row_version_bump`, as the database holds it.
@@ -3490,6 +3536,75 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Migration 080 on a populated v79 database: a row already demoted
+    /// keeps its veto (backfilled from `stale_working_at`), an unstamped row
+    /// stays unarmed, no `row_version` moves (the column is not watched),
+    /// and re-running it (the tests' roll back and re-migrate, or any later
+    /// open) neither fails nor overwrites a veto already set.
+    #[test]
+    fn migration_080_backfills_stale_demoted_at_and_is_safe_to_rerun() {
+        let s = store_at_version(79);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('a', 'h', 1, 1, 'running'), ('b', 'h', 1, 1, 'running');
+                 UPDATE sessions SET stale_working_at = 40 WHERE tmux_name = 'a';",
+            )
+            .unwrap();
+        let versions = |s: &Store| -> Vec<i64> {
+            let mut st = s
+                .conn
+                .prepare("SELECT row_version FROM sessions ORDER BY tmux_name")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let demoted = |s: &Store| -> Vec<Option<i64>> {
+            let mut st = s
+                .conn
+                .prepare("SELECT stale_demoted_at FROM sessions ORDER BY tmux_name")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let before = versions(&s);
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(sessions_has_stale_demoted_at(&s.conn).unwrap());
+        assert_eq!(
+            demoted(&s),
+            vec![Some(40), None],
+            "the demoted row keeps its veto"
+        );
+        assert_eq!(versions(&s), before, "the backfill moved no row_version");
+        s.conn
+            .execute(
+                "UPDATE sessions SET stale_demoted_at = 99 WHERE tmux_name = 'a'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            versions(&s),
+            before,
+            "a stale_demoted_at change is not visible"
+        );
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 80;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            demoted(&s),
+            vec![Some(99), None],
+            "the re-run neither fails nor overwrites a set veto"
+        );
     }
 
     #[test]
