@@ -742,10 +742,11 @@ impl Pool {
                         out.insert(it.id);
                     }
                 }
-                None if it.source == "local" => {
-                    if it.key.is_some() && it.updated_at >= at - RECENT_DAYS * 86_400 {
-                        out.insert(it.id);
-                    }
+                None if it.source == "local"
+                    && it.key.is_some()
+                    && it.updated_at >= at - RECENT_DAYS * 86_400 =>
+                {
+                    out.insert(it.id);
                 }
                 None => {}
             }
