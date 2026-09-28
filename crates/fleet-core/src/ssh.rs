@@ -94,8 +94,8 @@ pub const SSH_BINARY_ENV: &str = "CLAUDE_FLEET_SSH";
 /// "Permission denied (publickey)" on some calls and not others — whichever
 /// resolved which binary. One deterministic choice, overridable, instead.
 pub fn default_ssh_binary() -> PathBuf {
-    if let Some(p) = std::env::var_os(SSH_BINARY_ENV).filter(|v| !v.is_empty()) {
-        return PathBuf::from(p);
+    if let Some(p) = std::env::var_os(SSH_BINARY_ENV).and_then(|v| ssh_override(&v)) {
+        return p;
     }
     if cfg!(windows) {
         if let Some(p) = windows_openssh() {
@@ -103,6 +103,22 @@ pub fn default_ssh_binary() -> PathBuf {
         }
     }
     PathBuf::from("ssh")
+}
+
+/// A `CLAUDE_FLEET_SSH` value as a path: blanks around it and one pair of
+/// surrounding quotes dropped. Windows' "Copy as path" puts quotes around a
+/// path, and a value set as `"C:\Program Files\…\ssh.exe"` otherwise
+/// names a program that cannot exist. `None` for a value that is empty
+/// once trimmed, which leaves the default in place.
+fn ssh_override(value: &std::ffi::OsStr) -> Option<PathBuf> {
+    let s = value.to_string_lossy();
+    let s = s.trim();
+    let s = ['"', '\'']
+        .iter()
+        .find_map(|q| s.strip_prefix(*q).and_then(|r| r.strip_suffix(*q)))
+        .unwrap_or(s)
+        .trim();
+    (!s.is_empty()).then(|| PathBuf::from(s))
 }
 
 /// `%SystemRoot%\System32\OpenSSH\ssh.exe`, when it exists.
@@ -455,6 +471,7 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
+        crate::wsl::settled_for(host).await;
         let mux_opts = self.mux_opts(host, connect_timeout);
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", None)
@@ -481,6 +498,7 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
+        crate::wsl::settled_for(host).await;
         let mux_opts = self.mux_opts(host, connect_timeout);
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", Some(max_output))
@@ -516,6 +534,7 @@ impl SshClient {
             ));
         }
         self.inner.seen.insert(host.to_string(), ());
+        crate::wsl::settled_for(host).await;
         let cmd = self.remote_command(host, &self.mux_opts(host, connect_timeout), args);
         self.run_child_io(
             host,
@@ -552,6 +571,7 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
+        crate::wsl::settled_for(host).await;
         let mux_opts = self.mux_opts(host, connect_timeout);
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, Some(token), "E_SSH", None)
@@ -582,6 +602,7 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
+        crate::wsl::settled_for(host).await;
         let mux_opts = self.mux_opts(host, timeout);
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(
@@ -614,6 +635,7 @@ impl SshClient {
                 .await;
         }
         self.inner.seen.insert(host.to_string(), ());
+        crate::wsl::settled_for(host).await;
         let file = std::fs::File::open(local_path).map_err(|e| {
             IpcError::new(
                 codes::E_UPLOAD,
@@ -1946,6 +1968,24 @@ mod tests {
             ["-o", "BatchMode=yes", "--", "mefistos", "printenv", "HOME"]
         );
         crate::wsl::set_for_tests(Vec::new());
+    }
+
+    #[test]
+    fn an_override_loses_its_quotes_and_blanks_and_an_empty_one_is_ignored() {
+        let o = |v: &str| ssh_override(std::ffi::OsStr::new(v));
+        assert_eq!(
+            o(r#" "C:\Program Files\Git\usr\bin\ssh.exe" "#),
+            Some(PathBuf::from(r"C:\Program Files\Git\usr\bin\ssh.exe"))
+        );
+        assert_eq!(o("'/opt/ssh'"), Some(PathBuf::from("/opt/ssh")));
+        assert_eq!(o("/usr/bin/ssh"), Some(PathBuf::from("/usr/bin/ssh")));
+        assert_eq!(
+            o(r#""/a"b""#),
+            Some(PathBuf::from(r#"/a"b"#)),
+            "one pair only"
+        );
+        assert_eq!(o("   "), None);
+        assert_eq!(o(r#""""#), None);
     }
 
     #[test]

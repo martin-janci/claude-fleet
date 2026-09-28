@@ -553,19 +553,27 @@ export function saveWorkView(view: {
   });
 }
 
-export function deleteWorkView(viewId: number): Promise<Result<{ deleted: boolean }>> {
-  return write<{ deleted: boolean }>('delete_work_view', { view_id: viewId });
+/** Delete a saved view if it is still at `expectedVersion` (the version the
+ *  person saw; absent: any). */
+export function deleteWorkView(viewId: number, expectedVersion?: number): Promise<Result<{ deleted: boolean }>> {
+  return write<{ deleted: boolean }>('delete_work_view', clean({ view_id: viewId, expected_version: expectedVersion }));
 }
 
 // ---------------------------------------------------------------------------
 // Errors
 
-/** What an `E_CONFLICT` carries: the current value. */
+/** What an `E_CONFLICT` carries: the current value. A link's (`link_id`,
+ *  `version`, `state`, `primary`, `ended`), a session's primary
+ *  (`session_id`, `primary_link_id`), a placement's (`task_id`, `version`,
+ *  `group`), a rule's or a view's (`rule_id` / `view_id`, `version`). */
 export interface Conflict {
-  link_id?: number;
+  link_id?: number | null;
   version?: number;
   state?: string;
   primary?: number | boolean | null;
+  ended?: boolean;
+  primary_link_id?: number | null;
+  group?: string | null;
   [k: string]: unknown;
 }
 
@@ -579,6 +587,54 @@ export function conflictOf(e: IpcError | null | undefined): Conflict | null {
 /** The sentence a conflict shows before the reload. */
 export function conflictSentence(what: string): string {
   return `${what} changed elsewhere (another window or device) — reloaded, so check it and try again.`;
+}
+
+/** The current value a conflict names, as one line ("Now: rejected ·
+ *  version 4"), or null when it names none. `linkName` names a link id (a
+ *  session's primary) when the caller knows it. */
+export function conflictCurrent(
+  c: Conflict | null | undefined,
+  linkName?: (linkId: number) => string | null | undefined,
+): string | null {
+  if (!c) return null;
+  const parts: string[] = [];
+  if (typeof c.state === 'string' && c.state) {
+    parts.push(c.ended ? 'ended' : c.primary === true ? `${c.state} · primary` : c.state);
+  }
+  if ('link_id' in c && c.link_id == null) parts.push('no link');
+  if ('primary_link_id' in c) {
+    const id = c.primary_link_id;
+    parts.push(typeof id === 'number' ? `primary is ${linkName?.(id) ?? `link ${id}`}` : 'no primary');
+  }
+  if ('group' in c) parts.push(typeof c.group === 'string' && c.group ? `placed in “${c.group}”` : 'not placed');
+  if (typeof c.version === 'number' && c.version > 0) parts.push(`version ${c.version}`);
+  return parts.length > 0 ? `Now: ${parts.join(' · ')}` : null;
+}
+
+/** A conflict as a notice shows it: the sentence, the current value, and
+ *  (`WorkConflictNotice`) a Reload action. */
+export interface ConflictNotice {
+  conflict: true;
+  text: string;
+  current: string | null;
+}
+
+/** The notice for an error when it is a conflict (null otherwise). */
+export function conflictNotice(
+  e: IpcError | null | undefined,
+  what: string,
+  linkName?: (linkId: number) => string | null | undefined,
+): ConflictNotice | null {
+  const c = conflictOf(e);
+  if (!c) return null;
+  return { conflict: true, text: conflictSentence(what), current: conflictCurrent(c, linkName) };
+}
+
+/** A notice that may be a conflict, as plain text (tests, titles). */
+export function noticeText(n: string | ConflictNotice | null | undefined): string {
+  if (!n) return '';
+  if (typeof n === 'string') return n;
+  return n.current ? `${n.text} ${n.current}` : n.text;
 }
 
 /** "Needs a newer hub": the hub (or this build's backend) has no Work view. */

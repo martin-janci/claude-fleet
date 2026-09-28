@@ -14,6 +14,8 @@ import {
   activeFilterCount,
   assignWorkOrg,
   buildSections,
+  conflictCurrent,
+  conflictNotice,
   conflictOf,
   decideWorkBatch,
   deleteWorkRule,
@@ -37,6 +39,7 @@ import {
   placeWork,
   readErrorText,
   NEWER_HUB,
+  noticeText,
   reconsiderWorkLink,
   sameFilters,
   saveWorkRule,
@@ -210,6 +213,8 @@ describe('commands: every one takes { args: { … } } with the action’s fields
     ]);
     await deleteWorkView(1);
     expect(lastCall()).toEqual(['delete_work_view', { args: { view_id: 1 } }]);
+    await deleteWorkView(1, 3);
+    expect(lastCall()).toEqual(['delete_work_view', { args: { view_id: 1, expected_version: 3 } }]);
   });
 });
 
@@ -374,6 +379,32 @@ describe('errors and undo', () => {
     expect(conflictOf(e)).toEqual({ link_id: 42, version: 5, state: 'confirmed', primary: 43 });
     expect(conflictOf({ code: 'E_CONFLICT', message: 'x' })).toEqual({});
     expect(conflictOf({ code: 'E_INVALID', message: 'x' })).toBeNull();
+  });
+
+  it('says what a conflict’s current value is, for every kind the backend sends', () => {
+    // A link.
+    expect(conflictCurrent({ link_id: 42, version: 5, state: 'confirmed', primary: true, ended: false })).toBe(
+      'Now: confirmed · primary · version 5',
+    );
+    expect(conflictCurrent({ link_id: 42, version: 6, state: 'confirmed', primary: false, ended: true })).toBe(
+      'Now: ended · version 6',
+    );
+    expect(conflictCurrent({ link_id: null, version: 0 })).toBe('Now: no link');
+    // A session's primary, named by the caller when it can.
+    expect(conflictCurrent({ session_id: 7, primary_link_id: 44 }, (id) => (id === 44 ? 'ABC-14 Refunds' : null))).toBe(
+      'Now: primary is ABC-14 Refunds',
+    );
+    expect(conflictCurrent({ session_id: 7, primary_link_id: 45 })).toBe('Now: primary is link 45');
+    expect(conflictCurrent({ session_id: 7, primary_link_id: null })).toBe('Now: no primary');
+    // A placement, a rule, a view.
+    expect(conflictCurrent({ task_id: 'item:1', version: 2, group: 'Infra' })).toBe('Now: placed in “Infra” · version 2');
+    expect(conflictCurrent({ task_id: 'item:1', version: 0, group: null })).toBe('Now: not placed');
+    expect(conflictCurrent({ view_id: 1, version: 4 })).toBe('Now: version 4');
+    expect(conflictCurrent({})).toBeNull();
+    const n = conflictNotice({ code: 'E_CONFLICT', message: 'x', details: { view_id: 1, version: 4 } }, 'The view “A”');
+    expect(n).toEqual({ conflict: true, text: expect.stringContaining('The view “A” changed elsewhere'), current: 'Now: version 4' });
+    expect(noticeText(n)).toContain('Now: version 4');
+    expect(conflictNotice({ code: 'E_INVALID', message: 'x' }, 'it')).toBeNull();
   });
 
   it('an unknown work action is "Needs a newer hub"; other refusals are the hub’s sentence', () => {

@@ -20,8 +20,7 @@
   import {
     activeFilterCount,
     activeWorkViewId,
-    conflictOf,
-    conflictSentence,
+    conflictNotice,
     deleteWorkView,
     HAS_FILTER_LABELS,
     HAS_FILTERS,
@@ -32,11 +31,13 @@
     STATUS_FILTERS,
     workViewFilters,
     workViews,
+    type ConflictNotice,
     type WorkTreeFilters,
     type WorkTreeOrg,
     type WorkTreeTracker,
     type WorkView,
   } from './work_view';
+  import WorkConflictNotice from './WorkConflictNotice.svelte';
 
   let {
     orgs,
@@ -118,7 +119,7 @@
   // ── saved views ──
   let views = $state<WorkView[]>([]);
   let viewsError = $state<string | null>(null);
-  let notice = $state<string | null>(null);
+  let notice = $state<string | ConflictNotice | null>(null);
   let naming = $state(false);
   let newName = $state('');
   let busy = $state(false);
@@ -157,8 +158,9 @@
   }
 
   async function onConflictOr(e: { code: string; message: string; details?: unknown }, what: string) {
-    if (conflictOf(e)) {
-      notice = conflictSentence(what);
+    const c = conflictNotice(e, what);
+    if (c) {
+      notice = c;
       await loadViews();
     } else {
       notice = e.message;
@@ -201,7 +203,7 @@
     const v = active;
     if (!v || busy) return;
     busy = true;
-    const r = await deleteWorkView(v.id);
+    const r = await deleteWorkView(v.id, v.version);
     busy = false;
     if (!r.ok) {
       await onConflictOr(r.error, `The view “${v.name}”`);
@@ -282,7 +284,9 @@
     </form>
   {/if}
   {#if notice}
-    <p class="notice" role="status" data-testid="work-view-notice">{notice}</p>
+    <p class="notice" role="status" data-testid="work-view-notice">
+      {#if typeof notice === 'string'}{notice}{:else}<WorkConflictNotice notice={notice} onreload={() => void loadViews()} />{/if}
+    </p>
   {:else if viewsError}
     <p class="notice muted" data-testid="work-views-error">Saved views: {viewsError}</p>
   {/if}

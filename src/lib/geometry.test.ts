@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pointInRect, type Rect } from './geometry';
+import { detectWindows, dropPointToLogical, pointInRect, type Rect } from './geometry';
 
 describe('pointInRect', () => {
   // A terminal grid sitting to the right of the sidebar, in logical px.
@@ -33,5 +33,33 @@ describe('pointInRect', () => {
     expect(pointInRect(trueDrop.x, trueDrop.y, grid)).toBe(true);
     // The halved point lands outside the grid (left of and above) — the bug.
     expect(pointInRect(halved.x, halved.y, grid)).toBe(false);
+  });
+});
+
+describe('dropPointToLogical', () => {
+  const rect = { left: 100, top: 100, right: 500, bottom: 400 };
+  it('leaves macOS and Linux points alone, even on a 2x display', () => {
+    expect(dropPointToLogical({ x: 450, y: 350 }, false, 2)).toEqual({ x: 450, y: 350 });
+  });
+  it('turns Windows physical pixels into logical ones', () => {
+    // 150% scaling: a drop on the lower right of the rect arrives as 675x525.
+    const p = dropPointToLogical({ x: 675, y: 525 }, true, 1.5);
+    expect(p).toEqual({ x: 450, y: 350 });
+    expect(pointInRect(p.x, p.y, rect)).toBe(true);
+    expect(pointInRect(675, 525, rect)).toBe(false);
+  });
+  it('ignores a nonsense scale factor', () => {
+    expect(dropPointToLogical({ x: 10, y: 20 }, true, 0)).toEqual({ x: 10, y: 20 });
+    expect(dropPointToLogical({ x: 10, y: 20 }, true, Number.NaN)).toEqual({ x: 10, y: 20 });
+  });
+});
+
+describe('detectWindows', () => {
+  it('reads WebView2 and nothing else as Windows', () => {
+    expect(detectWindows({ platform: 'Win32', userAgent: '' })).toBe(true);
+    expect(detectWindows({ platform: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/140' })).toBe(true);
+    expect(detectWindows({ platform: 'MacIntel', userAgent: 'Macintosh' })).toBe(false);
+    expect(detectWindows({ platform: 'Linux x86_64', userAgent: 'X11; Linux' })).toBe(false);
+    expect(detectWindows(undefined)).toBe(false);
   });
 });

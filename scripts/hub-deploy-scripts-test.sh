@@ -45,15 +45,19 @@ check "…and leaves no half-written copy behind" test "$(count "$B"/state-*.db)
 FAKE="$ROOT/bin"; mkdir -p "$FAKE"
 cat >"$FAKE/docker" <<'EOF'
 #!/usr/bin/env bash
-# Records every call. `pull` of a `:missing` tag fails like ghcr does;
-# `compose stop` refuses when no pre-upgrade backup exists yet (that is the
-# order under test); `exec … healthcheck` is healthy; `exec … --version`
-# answers whatever tag .env pins.
+# Records every call. upgrade.sh speaks only `docker compose --env-file <f>
+# <sub> …`, so the pair is dropped before dispatching on <sub>. `pull` of a
+# `missing` FLEET_HUB_TAG fails like ghcr does; `stop` refuses when no
+# pre-upgrade backup exists yet (that is the order under test); `exec …
+# healthcheck` is healthy; `exec … --version` answers whatever tag .env pins.
 echo "docker $*" >>"$FAKE_LOG"
-case "$1 $2" in
-  "pull "*) case "$2" in *:missing) echo "manifest unknown" >&2; exit 1;; esac ;;
-  "compose stop") ls "$FAKE_DIR"/backups/pre-*.db >/dev/null 2>&1 || { echo "stop before backup" >&2; exit 9; } ;;
-  "compose exec")
+[ "${1:-}" = compose ] || exit 0
+shift
+[ "${1:-}" = --env-file ] && shift 2
+case "${1:-}" in
+  pull) [ "${FLEET_HUB_TAG:-}" = missing ] && { echo "manifest unknown" >&2; exit 1; } ;;
+  stop) ls "$FAKE_DIR"/backups/pre-*.db >/dev/null 2>&1 || { echo "stop before backup" >&2; exit 9; } ;;
+  exec)
     case "${@: -1}" in
       healthcheck) exit 0 ;;
       --version) echo "fleet-hub $(sed -n 's/^FLEET_HUB_TAG=//p' "$FAKE_DIR/.env")" ;;
@@ -63,7 +67,9 @@ exit 0
 EOF
 cat >"$FAKE/curl" <<'EOF'
 #!/usr/bin/env bash
+# upgrade.sh hands the Authorization header over on stdin (`-H @-`).
 echo "curl $*" >>"$FAKE_LOG"
+case " $* " in *" @- "*) sed 's/^/curl-stdin: /' >>"$FAKE_LOG" ;; esac
 tag="$(sed -n 's/^FLEET_HUB_TAG=//p' "$FAKE_DIR/.env")"
 printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\\"version\\":\\"%s\\",\\"db_ready\\":true}"}]}}' "$tag"
 EOF
@@ -83,11 +89,13 @@ PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.1 >"$ROOT/upgrade
 check "upgrade exits 0" test $? = 0
 check ".env now pins 0.3.1" grep -qx 'FLEET_HUB_TAG=0.3.1' "$U/.env"
 check "one pre-upgrade backup was taken" test "$(count "$U"/backups/pre-0.3.1-*.db)" = 1
-check "pull precedes stop" test "$(ord 'docker pull')" -lt "$(ord 'docker compose stop')"
-check "stop precedes up" test "$(ord 'docker compose stop')" -lt "$(ord 'docker compose up')"
-check "up precedes the healthcheck" test "$(ord 'docker compose up')" -lt "$(ord 'healthcheck')"
+check "every compose call reads .env through --env-file" test -z "$(grep '^docker ' "$FAKE_LOG" | grep -v -- "^docker compose --env-file $U/.env ")"
+check "pull precedes stop" test "$(ord ' pull fleet-hub')" -lt "$(ord ' stop fleet-hub')"
+check "stop precedes up" test "$(ord ' stop fleet-hub')" -lt "$(ord ' up -d fleet-hub')"
+check "up precedes the healthcheck" test "$(ord ' up -d fleet-hub')" -lt "$(ord 'healthcheck')"
 check "the healthcheck precedes --version" test "$(ord 'healthcheck')" -lt "$(ord '--version')"
-check "fleet_health is asked with the readonly token" grep -q 'Bearer cl_readonly' "$FAKE_LOG"
+check "fleet_health is asked with the readonly token" grep -q '^curl-stdin: Authorization: Bearer cl_readonly' "$FAKE_LOG"
+check "…which never reaches curl's command line" test -z "$(grep '^curl .*cl_readonly' "$FAKE_LOG")"
 check "…against /mcp/json on the public URL" grep -q 'https://fleet.example.com/mcp/json' "$FAKE_LOG"
 check "…and the version is confirmed" grep -q 'fleet_health.version = 0.3.1' "$ROOT/upgrade1.log"
 
@@ -95,7 +103,7 @@ check "…and the version is confirmed" grep -q 'fleet_health.version = 0.3.1' "
 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" missing >"$ROOT/upgrade2.log" 2>&1
 check "a tag ghcr does not have fails" test $? != 0
 check "…before the pin moved" grep -qx 'FLEET_HUB_TAG=0.3.1' "$U/.env"
-check "…and before the hub was stopped" test -z "$(grep 'compose stop' "$FAKE_LOG")"
+check "…and before the hub was stopped" test -z "$(grep ' stop fleet-hub' "$FAKE_LOG")"
 
 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" v0.3.2 >/dev/null 2>&1
 check "a v-prefixed tag is refused with exit 2" test $? = 2

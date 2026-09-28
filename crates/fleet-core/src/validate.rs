@@ -285,6 +285,41 @@ pub fn friendly_name(value: &str) -> Result<(), IpcError> {
     no_control("friendly name", value)
 }
 
+/// Validate a `claude --model` value: an alias (`opus`, `sonnet[1m]`) or a
+/// full model id (`claude-opus-5-5`). ASCII letters, digits, `.`, `_`, `-`,
+/// `[` and `]` only, at most 64 characters, and never a leading `-` (an
+/// option parser would read it as a flag).
+pub fn claude_model(value: &str) -> Result<(), IpcError> {
+    let ok = !value.is_empty()
+        && value.len() <= 64
+        && !value.starts_with('-')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '[' | ']'));
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(
+            "model must be a Claude model alias or id (letters, digits, . _ - [ ])",
+        ))
+    }
+}
+
+/// The levels `claude --effort` takes at launch.
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Validate a `claude --effort` value: one of [`EFFORT_LEVELS`].
+pub fn effort_level(value: &str) -> Result<(), IpcError> {
+    if EFFORT_LEVELS.contains(&value) {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "effort must be one of {}",
+            EFFORT_LEVELS.join(", ")
+        )))
+    }
+}
+
 /// Validate that a free-form value (a `claude` prompt) is not empty or
 /// whitespace-only. Use this alone for a positional that the call site places
 /// after `--`: such a value may legitimately begin with `-` (a markdown list).

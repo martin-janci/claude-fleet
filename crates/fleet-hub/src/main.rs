@@ -507,6 +507,18 @@ mod tests {
             assert!(matches!(cmd, TokenCmd::Show), "{argv:?}");
             assert_eq!(opts.data_dir, Some("/tmp/x".into()), "{argv:?}");
         }
+        // `decide set-key --data-dir`: how a standalone desktop's key is set
+        // (docs/decisions.md, "The key on a standalone desktop").
+        for argv in [
+            ["fleet-hub", "decide", "set-key", "--data-dir", "/tmp/x"],
+            ["fleet-hub", "decide", "--data-dir", "/tmp/x", "set-key"],
+        ] {
+            let Cmd::Decide { cmd, opts } = Cli::try_parse_from(argv).unwrap().cmd else {
+                panic!("{argv:?} did not parse as decide");
+            };
+            assert!(matches!(cmd, decide::DecideCmd::SetKey { .. }), "{argv:?}");
+            assert_eq!(opts.data_dir, Some("/tmp/x".into()), "{argv:?}");
+        }
         // `host-token-mode`, the headless way back to a `full` token — with
         // HubOptions accepted in either position, `--port` included, exactly
         // as `token` and `client` take them.

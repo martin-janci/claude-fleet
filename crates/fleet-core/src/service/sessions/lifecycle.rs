@@ -40,6 +40,16 @@ pub struct NewSessionArgs {
     /// (see `LostCandidate::resumable`).
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
+    /// Claude model for the new session (`claude --model`): an alias such as
+    /// `opus` / `sonnet[1m]` or a full model id. `None` / empty = the host's
+    /// default. Rejected for a `"shell"` session.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Reasoning effort for the new session (one of
+    /// [`crate::validate::EFFORT_LEVELS`]). `None` / empty = the host's
+    /// default. Rejected for a `"shell"` session.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -270,10 +280,7 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          cd {root}\n\
          name={name}\n\
          basebr={basebr}\n\
-         if [ -d .worktrees ]; then base=.worktrees\n\
-         elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
-         else base=.worktrees\n\
-         fi\n\
+         {WORKTREE_BASE_SNIPPET}\
          wt=\"$base/$name\"\n\
          if [ ! -e \"$wt\" ]; then\n\
          def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
@@ -292,6 +299,30 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
         root = quote(root),
         name = quote(name),
     )
+}
+
+/// Where a new worktree goes under a repo root (the script's cwd): the
+/// repo's `.worktrees/` unless it already uses `.claude/worktrees/`. Sets
+/// `$base`. Shared by [`worktree_add_script`] and the fork's own
+/// `service::rewind::fork_worktree_script`, so a forked checkout lands
+/// exactly where a `new_session { new_worktree }` one would.
+pub(crate) const WORKTREE_BASE_SNIPPET: &str = "if [ -d .worktrees ]; then base=.worktrees\n\
+     elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
+     else base=.worktrees\n\
+     fi\n";
+
+/// The name rule for a NEW worktree (and so its branch): a valid git ref,
+/// never `main` / `master`. `new_session { new_worktree }` and a fork into
+/// a new worktree both apply it.
+pub(crate) fn validate_new_worktree_name(name: &str) -> Result<(), IpcError> {
+    crate::validate::git_ref(name)?;
+    if name == "main" || name == "master" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "worktree name must not be 'main' or 'master'",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn create_worktree_local(
@@ -344,16 +375,11 @@ pub async fn new_session(
         }
         reject_held_conversation(&*lock(store)?, &args.host_alias, id)?;
     }
+    normalize_launch(&mut args)?;
     reject_lost_session_name(&*lock(store)?, &args.host_alias, &args.name)?;
 
     if let Some(name) = args.new_worktree.as_deref() {
-        crate::validate::git_ref(name)?;
-        if name == "main" || name == "master" {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                "worktree name must not be 'main' or 'master'",
-            ));
-        }
+        validate_new_worktree_name(name)?;
     }
 
     // Mint / bind a cancellation token for the duration of this command.
@@ -417,6 +443,32 @@ pub(crate) fn reject_held_conversation(
     }
 }
 
+/// Blank `model` / `effort` mean the host's default (`None`); anything else
+/// must be a valid value, and neither applies to a shell session.
+pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError> {
+    let trim = |v: &mut Option<String>| {
+        *v = v
+            .take()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty());
+    };
+    trim(&mut args.model);
+    trim(&mut args.effort);
+    if args.kind.as_deref() == Some("shell") && (args.model.is_some() || args.effort.is_some()) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "model and effort apply to Claude sessions, not shell sessions",
+        ));
+    }
+    if let Some(m) = args.model.as_deref() {
+        crate::validate::claude_model(m)?;
+    }
+    if let Some(e) = args.effort.as_deref() {
+        crate::validate::effort_level(e)?;
+    }
+    Ok(())
+}
+
 /// The Claude conversation id a new session runs under, and its pane command.
 /// Work/review sessions get an app-minted id so a later recreate/restart
 /// resumes THIS conversation, not "most recent for the cwd" — or, with
@@ -429,14 +481,24 @@ pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, 
             crate::tmux::shell_pane_command(args.start_command.as_deref()),
         );
     }
+    // `model` / `effort` ride on the first launch only: a later recreate or
+    // restart runs `recreate_pane_command`, i.e. the host's defaults.
+    let launch = crate::tmux::ClaudeLaunch {
+        model: args.model.clone(),
+        effort: args.effort.clone(),
+    };
     match args.resume_claude_session_id.as_deref() {
         Some(id) => (
             Some(id.to_string()),
-            recreate_pane_command("work", Some(id), &args.name),
+            crate::tmux::pane_command_with(
+                Some(id).filter(|id| crate::validate::claude_session_id(id).is_ok()),
+                &args.name,
+                &launch,
+            ),
         ),
         None => {
             let id = uuid::Uuid::new_v4().to_string();
-            let pane = crate::tmux::pane_command_for(Some(&id), &args.name);
+            let pane = crate::tmux::pane_command_with(Some(&id), &args.name, &launch);
             (Some(id), pane)
         }
     }

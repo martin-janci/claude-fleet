@@ -246,6 +246,52 @@ fn only_links_a_person_decided_become_cases() {
         .all(|c| c.truth.as_deref() == Some(option_id(i).as_str())));
 }
 
+/// Shaped like the six of 25 `--export-unlinked` rows on the production hub
+/// (2026-09-28) that were Claude Code's, as the store keeps them: the first
+/// 200 characters, so the block is never closed.
+fn task_notification() -> String {
+    "<task-notification>\n<task-id>afb11347d54b0e640</task-id>\n\
+     <tool-use-id>toolu_01B2ZchuQiWa4VttKoDRjQUd</tool-use-id>\n\
+     <output-file>/tmp/claude-1000/-home-dev-projects-github-com-acme-api/tasks/\
+     afb11347d54b0e640.output</output-file>\n<status>completed</status>\n\
+     <summary>Agent \"Fix the login redirect\" completed</summary>\n</task-notification>"
+        .chars()
+        .take(200)
+        .collect()
+}
+
+#[test]
+fn what_claude_code_submitted_itself_is_left_out_of_both_datasets() {
+    let mut w = world();
+    let i = w.item("PAY-1", "Login redirect loops", *NOW - 10 * DAY);
+    w.case("fix the login thing please", i, "manual", *NOW - 5 * DAY);
+    w.case(&task_notification(), i, "manual", *NOW - 5 * DAY);
+    w.case(
+        "<system-reminder>Plan mode is on.</system-reminder>\nthe login keeps looping on mobile",
+        i,
+        "manual",
+        *NOW - 4 * DAY,
+    );
+    let got = load(&w.s, &Words, &opts(Split::All, vec![]), None).unwrap();
+    assert_eq!(got.sizes.a_links_read.0, 3);
+    assert_eq!(got.sizes.a_fleet_typed.0, 1);
+    let states: Vec<&str> = a_truths(&got).iter().map(|c| c.state.as_str()).collect();
+    assert_eq!(states.len(), 2);
+    assert!(
+        states.iter().all(|s| !s.contains('<')),
+        "the harness head is not part of a state: {states:?}"
+    );
+
+    for n in 0..3 {
+        w.unlinked(&format!("look at the search page number {n}"), *NOW - DAY);
+    }
+    let harness = w.unlinked(&task_notification(), *NOW - DAY);
+    let o = opts(Split::All, vec![]);
+    let rows = export_unlinked(&w.s, &o, 10).unwrap();
+    assert!(rows.iter().all(|r| r.session_id != harness));
+    assert!(rows.iter().all(|r| !r.prompt.starts_with('<')), "{rows:?}");
+}
+
 #[test]
 fn the_org_filter_keeps_one_org() {
     let mut w = world();
@@ -938,6 +984,54 @@ async fn export_then_labels_round_trip_into_dataset_h() {
         .expect("H is reported");
     assert_eq!((h.cases.0, h.none_cases.0), (1, 1));
     assert_eq!(h.scope, "all labeled");
+}
+
+/// A hand-label row's org is its session's, read from the database: an
+/// org the file names differently is refused, a session that is gone is
+/// left out, and neither is ever trusted from the file.
+#[tokio::test]
+async fn a_labels_org_comes_from_the_database_not_the_file() {
+    let mut w = seeded();
+    for i in 0..3 {
+        w.unlinked(
+            &format!("something unlinked number {i} for PAY-3"),
+            *NOW - (20 - i) * DAY,
+        );
+    }
+    let o = opts(Split::All, vec![Provider::None, Provider::Bm25]);
+    let mut rows = export_unlinked(&w.s, &o, 3).unwrap();
+    assert_eq!(rows.len(), 3);
+    for r in &mut rows {
+        r.label = Some("none".into());
+    }
+    let org =
+        w.s.get_session_by_id(rows[0].session_id)
+            .unwrap()
+            .unwrap()
+            .org_id;
+
+    // A file that claims another org for a row is refused, naming it.
+    let mut claimed = rows.clone();
+    claimed[1].org_id = Some(org.map_or(4242, |o| o + 4242));
+    let e = load(&w.s, &Words, &o, Some(&claimed)).unwrap_err();
+    assert_eq!(e.code, crate::ipc_error::codes::E_INVALID);
+    assert!(e.message.starts_with("row 2: org_id"), "{}", e.message);
+
+    // A row whose session is gone cannot be vouched for: left out.
+    w.s.conn_for_test()
+        .execute("DELETE FROM sessions WHERE id = ?1", [rows[2].session_id])
+        .unwrap();
+    let loaded = load(&w.s, &Words, &o, Some(&rows)).unwrap();
+    let s = &loaded.sizes;
+    assert_eq!(
+        (s.h_records.0, s.h_session_gone.0, s.h_none_cases.0),
+        (3, 1, 2)
+    );
+    assert!(loaded
+        .cases
+        .iter()
+        .filter(|c| c.dataset == Dataset::H)
+        .all(|c| c.org_id == org));
 }
 
 #[test]

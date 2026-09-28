@@ -76,8 +76,14 @@ the terminal, move and transfer. There are two differences:
   or later). Under WSL2's default NAT networking, sessions still run, but
   turn events and the Control API's per-host features do not arrive.
 
-The distributions are detected when the app starts. Restart the app after
-installing a new one.
+The distributions are detected when the app starts, in the background: the
+first `wsl.exe` after a reboot starts the WSL service, which can take several
+seconds, and the window does not wait for it. A command for a `wsl-` host
+that comes in before detection has finished waits for it, up to 20 seconds.
+Restart the app after installing a new distribution.
+
+Each distribution needs `bash`, `tmux` and Claude Code. Alpine's default
+image has no `bash`: `apk add bash tmux` first.
 
 An alias you already defined in `~/.ssh/config` (for example a `wsl-ubuntu`
 that reaches an sshd inside WSL) stays an SSH host; fleet does not shadow it.
@@ -95,9 +101,16 @@ ssh-agent, so the first `ssh` on `PATH` is not a safe choice.
   terminal, every probe and the tunnels all use this same program.
 - **To use another build,** set `CLAUDE_FLEET_SSH` to its full path, for
   example `C:\cygwin64\bin\ssh.exe` or `C:\Program
-  Files\Git\usr\bin\ssh.exe`, and restart the app. fleet then also reads
+  Files\Git\usr\bin\ssh.exe`, and restart the app. Quotes around the
+  value, as Explorer's *Copy as path* adds them, are fine. If the path does
+  not exist, the app logs a warning at startup. fleet then also reads
   the `~/.ssh/config` under that environment's `HOME` (Cygwin's
   `C:\cygwin64\home\<you>`), besides the one in your Windows profile.
+
+Host discovery reads your ssh config the way `ssh` does. Every alias on a
+`Host a b` line is offered. `Include` files are followed, relative to
+`.ssh`, with `*` globs. For a host defined more than once, the first value
+wins. `Match` blocks give their values to no host.
 
 Whichever `ssh` you use must be able to log in without a prompt
 (`BatchMode=yes`), with its own agent or with an unencrypted key.

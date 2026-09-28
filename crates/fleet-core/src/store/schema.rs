@@ -56,6 +56,17 @@ fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 072: `sessions` already has its
+/// `usage_backfill_until` column.
+fn sessions_has_usage_backfill_until(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'usage_backfill_until'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 025 (session usage): it adds its
 /// columns in one transaction, so its last column present means the whole
 /// migration is, and a re-run (`ALTER TABLE ... ADD COLUMN` again) would
@@ -746,26 +757,39 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/071_usage_daily_backfill.sql"),
         already_applied: Some(usage_daily_has_backfill),
     },
+    // `sessions.usage_backfill_until`: a multi-pass first read of a large
+    // transcript books every chunk's history as backfill, not only the
+    // first. One ADD COLUMN, its own guard.
+    Migration {
+        version: 72,
+        sql: include_str!("../../migrations/072_usage_backfill_until.sql"),
+        already_applied: Some(sessions_has_usage_backfill_until),
+    },
+    // Task 5: the describe cache (`work_item_descriptions`) — one item's
+    // whole description, held for `work.describe_cache_secs`. `CREATE TABLE
+    // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` are idempotent on their
+    // own, so this needs no `already_applied` guard.
+    Migration::plain(73, include_str!("../../migrations/073_describe_cache.sql")),
     // Host identity & health, task 1: `hosts.claude_version_at`. Guarded:
     // ADD COLUMN. (Numbered at merge time — `migrations_are_contiguous_from_one`
     // allows no gap — so a sibling plan merged first shifts these.)
     Migration {
-        version: 72,
-        sql: include_str!("../../migrations/072_host_claude_version_at.sql"),
+        version: 74,
+        sql: include_str!("../../migrations/074_host_claude_version_at.sql"),
         already_applied: Some(hosts_has_claude_version_at),
     },
     // Host identity & health, task 2: the per-pass health sample, the last
     // accepted hook and the agent version on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 73,
-        sql: include_str!("../../migrations/073_host_health.sql"),
+        version: 75,
+        sql: include_str!("../../migrations/075_host_health.sql"),
         already_applied: Some(hosts_has_health_at),
     },
     // Host identity & health, task 6: the provisioning content fingerprint
     // and its stamp on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 74,
-        sql: include_str!("../../migrations/074_host_provision_fingerprint.sql"),
+        version: 76,
+        sql: include_str!("../../migrations/076_host_provision_fingerprint.sql"),
         already_applied: Some(hosts_has_provision_fingerprint),
     },
 ];
@@ -909,6 +933,19 @@ impl Store {
     /// `IF NOT EXISTS` DDL is re-run. Every step is idempotent, in one
     /// transaction; a no-op on any database that went through the numbered
     /// migrations.
+    ///
+    /// The same collision, a second time: the hub-ops-accounting branch
+    /// (PR #344) numbered its `usage_daily` rebuild 064, 065, 066 and then
+    /// 068 before it landed as 071, while `main` shipped 064–068. A database
+    /// a build of that branch opened recorded the branch's number, so
+    /// `main`'s migrations at or below it never ran (071's own guard then
+    /// only records it). Each of 064–068 is detected by its artefact —
+    /// 065–068 by their `already_applied` guards, 064 by
+    /// `tracker_webhooks` still existing — and run here when the recorded
+    /// version is past it and the artefact is missing. Their scripts are
+    /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, and 065's
+    /// trigger rebuild is still the latest one, so running them late is
+    /// what running them in order would have left.
     fn repair_skipped_main_migrations(&self) -> Result<()> {
         /// `(table, column, column definition)` added by `main`'s 034 and 036.
         const COLUMNS: &[(&str, &str, &str)] = &[
@@ -934,6 +971,35 @@ impl Store {
         // 035 is `IF NOT EXISTS` throughout; re-running it is a no-op when
         // its tables are there.
         tx.execute_batch(include_str!("../../migrations/035_host_layers_repair.sql"))?;
+        let recorded: i64 = tx
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        for m in MIGRATIONS
+            .iter()
+            .filter(|m| (64..=68).contains(&m.version) && m.version <= recorded)
+        {
+            let missing = match m.already_applied {
+                Some(applied) => !applied(&tx)?,
+                None => {
+                    // 064 drops `tracker_webhooks`.
+                    let n: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master \
+                         WHERE type = 'table' AND name = 'tracker_webhooks'",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    n > 0
+                }
+            };
+            if missing {
+                tracing::warn!(
+                    "migration {} missing despite schema version {recorded}; running it \
+                     (usage_daily numbering collision repair)",
+                    m.version
+                );
+                tx.execute_batch(m.sql)?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1665,6 +1731,7 @@ mod tests {
                 last_msg_usage: None,
                 now: 86_400,
                 by_day: Vec::new(),
+                backfill_until: None,
             },
         )
         .unwrap();
@@ -3181,10 +3248,12 @@ mod tests {
 
     /// The `sessions` columns migration 063's `sessions_row_version_bump`
     /// deliberately does NOT watch: `row_version` itself (an explicit
-    /// `row_version + 1` must not re-trigger), and the reconcile's per-pass
-    /// bookkeeping that is not a `SessionRow` field. Every other column is
+    /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
+    /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
+    /// backfill mark). Every other column is
     /// watched, so a write that changes it bumps the counter.
-    const ROW_VERSION_UNWATCHED: [&str; 2] = ["row_version", "last_reconciled_at"];
+    const ROW_VERSION_UNWATCHED: [&str; 3] =
+        ["row_version", "last_reconciled_at", "usage_backfill_until"];
 
     /// The SQL of `sessions_row_version_bump`, as the database holds it.
     fn row_version_trigger_sql(s: &Store) -> String {
@@ -3421,6 +3490,130 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    /// 071 once stamped version 68, not 71 (fixed in b75d596). A database
+    /// that ran that script holds the rebuilt `usage_daily` but no 71 row:
+    /// the next launch offers 071 again, and its guard must only record it
+    /// — re-running the rebuild would collapse backfill rows into live ones.
+    #[test]
+    fn a_database_that_ran_the_misstamped_071_keeps_its_backfill_rows() {
+        let s = store_at_version(71);
+        s.conn
+            .execute_batch(
+                "INSERT INTO usage_daily (day, host_alias, backfill, cost_micros) \
+                 VALUES (20714, 'trn', 1, 850000000), (20714, 'trn', 0, 5);
+                 DELETE FROM schema_version WHERE version = 71;",
+            )
+            .unwrap();
+        assert_eq!(s.schema_version().unwrap(), 70);
+        s.migrate().unwrap();
+        let has_71: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version = 71",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_71, 1, "071 is recorded");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let rows: Vec<(i64, i64)> = s
+            .conn
+            .prepare("SELECT backfill, cost_micros FROM usage_daily ORDER BY backfill")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(0, 5), (1, 850_000_000)],
+            "the backfill row survives"
+        );
+    }
+
+    #[test]
+    fn migration_072_adds_the_usage_backfill_mark_and_is_safe_to_rerun() {
+        let s = store_at_version(71);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('a', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        assert!(!sessions_has_usage_backfill_until(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let (until, rv): (i64, i64) = s
+            .conn
+            .query_row(
+                "SELECT usage_backfill_until, row_version FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(until, 0, "an existing cursor has no history pending");
+        s.conn
+            .execute("UPDATE sessions SET usage_backfill_until = 9", [])
+            .unwrap();
+        let rv2: i64 = s
+            .conn
+            .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rv2, rv, "the mark is bookkeeping: no row_version bump");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 72;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// The hub-ops-accounting branch numbered its `usage_daily` rebuild
+    /// 064–068 before it landed as 071. A database that branch's build
+    /// opened at `main`'s 063 recorded (say) 68 for it, so `main`'s 064–068
+    /// never ran. `repair_skipped_main_migrations` finds each by its
+    /// artefact and runs it.
+    #[test]
+    fn a_branch_numbered_usage_migration_does_not_leave_main_064_to_068_unapplied() {
+        let s = store_at_version(63);
+        let branch_071 = include_str!("../../migrations/071_usage_daily_backfill.sql").replace(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (71);",
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (68);",
+        );
+        s.conn.execute_batch(&branch_071).unwrap();
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('a', 'h', 1, 1, 'running');
+                 INSERT INTO usage_daily (day, host_alias, backfill, cost_micros) VALUES (1, 'h', 1, 7);",
+            )
+            .unwrap();
+        assert_eq!(s.schema_version().unwrap(), 68);
+        assert!(!sessions_has_stale_working_at(&s.conn).unwrap());
+        assert!(s.has_table("tracker_webhooks").unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(sessions_has_stale_working_at(&s.conn).unwrap(), "065");
+        assert!(client_tokens_has_org(&s.conn).unwrap(), "066");
+        assert!(orgs_has_bound_sees_unassigned(&s.conn).unwrap(), "067");
+        assert!(orgs_has_jev_allowed(&s.conn).unwrap(), "068");
+        assert!(!s.has_table("tracker_webhooks").unwrap(), "064");
+        assert!(
+            row_version_trigger_sql(&s)
+                .contains("NEW.stale_working_at IS NOT OLD.stale_working_at"),
+            "065's trigger rebuild ran"
+        );
+        let backfill: i64 = s
+            .conn
+            .query_row("SELECT backfill FROM usage_daily", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(backfill, 1, "071 was only recorded, not re-run");
+        // A second open is a no-op.
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 }
 

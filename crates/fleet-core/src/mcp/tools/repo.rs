@@ -11,6 +11,28 @@ pub(super) fn repo_diff_resource_key(session_id: i64, path: &str) -> String {
     format!("{session_id}:{path}")
 }
 
+/// What `add_project`'s audit line says about its source. A clone URL is
+/// logged only as the `owner/repo` the service's own parser reads from it —
+/// never raw, so a `https://user:TOKEN@github.com/o/r` never reaches the
+/// hub log — and `<invalid>` when it does not parse.
+pub(super) fn add_project_audit_target(source: &add_project::AddProjectSource) -> String {
+    match source {
+        add_project::AddProjectSource::Clone { url } => {
+            match crate::repo_url::parse_repo_url(url) {
+                Some((owner, repo)) => format!("kind=clone repo={owner}/{repo}"),
+                None => "kind=clone repo=<invalid>".to_string(),
+            }
+        }
+        add_project::AddProjectSource::Folder { path } => format!("kind=folder path={path}"),
+        add_project::AddProjectSource::New {
+            owner,
+            repo,
+            create_remote,
+            ..
+        } => format!("kind=new repo={owner}/{repo} create_remote={create_remote}"),
+    }
+}
+
 #[tool_router(router = repo_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Discovered projects (repos fleet can spawn \
@@ -76,19 +98,59 @@ impl FleetTools {
         project row.")]
     pub(super) async fn add_project(
         &self,
-        Parameters(args): Parameters<add_project::AddProjectArgs>,
+        Extension(caller): Extension<Caller>,
+        Parameters(AddProjectParams {
+            args,
+            confirm_nonce,
+        }): Parameters<AddProjectParams>,
     ) -> Result<CallToolResult, McpError> {
-        let target = match &args.source {
-            add_project::AddProjectSource::Clone { url } => format!("kind=clone url={url}"),
-            add_project::AddProjectSource::Folder { path } => format!("kind=folder path={path}"),
-            add_project::AddProjectSource::New {
-                owner,
-                repo,
-                create_remote,
-                ..
-            } => format!("kind=new repo={owner}/{repo} create_remote={create_remote}"),
-        };
-        audit("add_project", &format!("host={} {target}", args.host_alias));
+        audit(
+            "add_project",
+            &format!(
+                "host={} {}",
+                args.host_alias,
+                add_project_audit_target(&args.source)
+            ),
+        );
+        // The same fences as `new_session`: a per-host token acts on its own
+        // host only (B1), and an org-bound client only on its org's hosts.
+        require_host(&caller, &args.host_alias, "the project's host")?;
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            require_bound_client_sees_host(&s, &caller, &args.host_alias)?;
+        }
+        // Publishing a repository on GitHub needs a person. A paired
+        // client (a phone, a paired desktop) is a person at a UI, and the
+        // service's single-use token is their confirmation. Every other
+        // caller — the operator (D12, see `guard::OPERATOR_CONFIRMS`), a
+        // per-host token, the master token an agent may hold — could send
+        // that token straight back, so it waits for a person's approval
+        // (refused outright where there is no approver, a hub). Only the
+        // call that can actually create — `create_remote` WITH the token —
+        // is gated: the call without one is refused by the service before
+        // anything runs, and gating it too would spend the person's
+        // approval on a call that could never create.
+        if let add_project::AddProjectSource::New {
+            owner,
+            repo,
+            create_remote: true,
+            confirm: Some(_),
+        } = &args.source
+        {
+            let person = !caller.is_client() || caller.is_operator();
+            self.confirm_gate_with(
+                "add_project",
+                confirm_nonce.as_deref(),
+                &format!(
+                    "host={} repo={}/{} create_remote=true",
+                    bound_text(Some(&args.host_alias)),
+                    bound_text(Some(owner)),
+                    bound_text(Some(repo))
+                ),
+                &caller,
+                person,
+            )?;
+        }
         // `call_id` is never set here (it is `#[schemars(skip)]`): the
         // registry mints an anonymous token and `CancelGuard` releases it.
         let row = add_project::add_project(args, &self.store, &*self.ssh, &self.reg)
@@ -101,9 +163,18 @@ impl FleetTools {
         what to clone with add_project.")]
     pub(super) async fn list_github_repos(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListGithubReposParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("list_github_repos", &format!("host={}", p.host_alias));
+        // `gh repo list` runs with the host's own GitHub login: a per-host
+        // token reads only its own host's, an org-bound client only its
+        // org's hosts'.
+        require_host(&caller, &p.host_alias, "the host to list")?;
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            require_bound_client_sees_host(&s, &caller, &p.host_alias)?;
+        }
         let repos = add_project::list_github_repos_with(&p.host_alias, &self.store, &*self.ssh)
             .await
             .map_err(to_mcp_err)?;

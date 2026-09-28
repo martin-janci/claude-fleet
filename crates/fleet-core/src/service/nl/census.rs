@@ -11,8 +11,10 @@
 //! - `prompt` — a conversation's first prompt (the first 200 characters the
 //!   UserPromptSubmit hook keeps): the input of work-link decisions (J1).
 //!   Prompts fleet typed itself (start, resume, handover and safe-kill
-//!   requests, quick-reply chips, anything `[claude-fleet`-marked) are
-//!   counted as `fleet_typed` and left out of the buckets.
+//!   requests, quick-reply chips, anything `[claude-fleet`-marked) and
+//!   prompts Claude Code submitted itself (a `<task-notification>`, a slash
+//!   command's echo: `prompt_origin`) are counted as `fleet_typed` and left
+//!   out of the buckets.
 //! - `title:<provider>` / `description:<provider>` — work items' titles and
 //!   cached descriptions: J1's candidates.
 //! - `journal:<kind>` — journal bodies written by a person or by Claude,
@@ -42,6 +44,7 @@ pub const SUPPRESS_BELOW: u64 = 5;
 /// What the store does not hold, so the census cannot read it.
 pub const NOT_COUNTED: &[&str] = &[
     "prompts after a conversation's first (only the first 200 characters of the first are stored)",
+    "what Claude Code submits itself (a <task-notification>, a slash command's echo): never a person's prompt; rows stored before fleet skipped it at capture are counted as fleet-typed",
     "conversations of deleted sessions (they go with the session row)",
     "Claude's replies as such (not stored; the journal stands in for them)",
     "commit subjects and PR titles (they live on the hosts)",
@@ -271,11 +274,22 @@ impl FleetPrompts {
         Ok(Self::new(&chips))
     }
 
+    /// Fleet typed `prompt`, or Claude Code did (a `<task-notification>`, a
+    /// slash command's echo: `prompt_origin`, through the loop guard).
     pub fn is_fleet(&self, prompt: &str, last_prompt: Option<&str>) -> bool {
         let p = prompt.trim();
         crate::service::work::detect::loop_guard(p, last_prompt, &[]).is_some()
             || self.templates.iter().any(|t| t.matches(p))
             || self.chips.iter().any(|c| c == p)
+    }
+
+    /// The words a person typed in `prompt`: `None` when fleet or Claude
+    /// Code typed it ([`Self::is_fleet`]), else the prompt without the
+    /// harness blocks at its head (rows stored before the hook took them
+    /// off).
+    pub fn person_text<'a>(&self, prompt: &'a str, last_prompt: Option<&str>) -> Option<&'a str> {
+        let p = crate::service::prompt_origin::human_part(prompt)?;
+        (!self.is_fleet(p, last_prompt)).then_some(p)
     }
 }
 
@@ -339,11 +353,11 @@ pub fn census(
     }
     for p in prompts.iter().filter(|p| wanted(p.org_id)) {
         let s = by_org.entry(p.org_id).or_default().source("prompt");
-        if fleet.is_fleet(&p.text, p.last_prompt.as_deref()) {
+        let Some(text) = fleet.person_text(&p.text, p.last_prompt.as_deref()) else {
             s.fleet_typed.bump();
             continue;
-        }
-        count(s, super::read_with(detector, &p.text));
+        };
+        count(s, super::read_with(detector, text));
     }
 
     let items = store.nl_census_items(since, max)?;
@@ -382,11 +396,11 @@ pub fn census(
     for pr in pairs.iter().filter(|p| wanted(p.org_id)) {
         let acc = by_org.entry(pr.org_id).or_default();
         acc.pairs.read.bump();
-        if fleet.is_fleet(&pr.prompt, pr.last_prompt.as_deref()) {
+        let Some(prompt) = fleet.person_text(&pr.prompt, pr.last_prompt.as_deref()) else {
             acc.pairs.fleet_typed.bump();
             continue;
-        }
-        let a = super::read_with(detector, &pr.prompt).bucket;
+        };
+        let a = super::read_with(detector, prompt).bucket;
         let b = super::read_with(detector, &pr.title).bucket;
         if is_language(a) && is_language(b) {
             if a == b {
@@ -553,12 +567,16 @@ pub fn sample_prompts(
     let fleet = FleetPrompts::from_store(store)?;
     // One case per distinct text: a repeated prompt is labeled once.
     let mut seen = std::collections::HashSet::new();
-    let mine: Vec<_> = store
+    let mine: Vec<String> = store
         .nl_census_prompts(opts.since(), opts.max_per_source)?
         .into_iter()
         .filter(|p| opts.org.is_none() || opts.org == p.org_id)
-        .filter(|p| !fleet.is_fleet(&p.text, p.last_prompt.as_deref()))
-        .filter(|p| seen.insert(p.text.trim().to_string()))
+        .filter_map(|p| {
+            fleet
+                .person_text(&p.text, p.last_prompt.as_deref())
+                .map(str::to_string)
+        })
+        .filter(|t| seen.insert(t.clone()))
         .collect();
     if n == 0 || mine.is_empty() {
         return Ok(Vec::new());
@@ -567,10 +585,10 @@ pub fn sample_prompts(
     let mut out = Vec::new();
     let mut at = 0.0;
     while (at as usize) < mine.len() && out.len() < n {
-        let p = &mine[at as usize];
-        let r = super::read_with(detector, &p.text);
+        let text = &mine[at as usize];
+        let r = super::read_with(detector, text);
         out.push(LabeledCase {
-            text: p.text.clone(),
+            text: text.clone(),
             expect: r.bucket,
             folded: r.folded,
             kind: "prompt".into(),
@@ -860,6 +878,51 @@ mod tests {
         }
         assert!(!f.is_fleet("Start on the login bug, it is urgent", None));
         assert!(!f.is_fleet("Pozri sa na ten build", None));
+    }
+
+    /// Shaped like the six of 25 exported on the production hub
+    /// (2026-09-28), as the store keeps them: cut at 200 characters.
+    const TASK_NOTIFICATION: &str = "<task-notification>\n<task-type>artifact-watch-lifecycle\
+        </task-type>\n<summary>Stopped watching Artifact \"Release notes\": the artifact was \
+        deleted.</summary>\n<status>stopped</status>\n<note>Nothing to do.</note>\n\
+        </task-notification>";
+
+    #[test]
+    fn what_claude_code_submits_itself_is_left_out_like_fleets_own() {
+        let f = FleetPrompts::new(&quick_replies::defaults());
+        let stored: String = TASK_NOTIFICATION.chars().take(FIRST_PROMPT_CHARS).collect();
+        assert!(f.is_fleet(&stored, None));
+        assert_eq!(f.person_text(&stored, None), None);
+        assert_eq!(
+            f.person_text(
+                "<system-reminder>Plan mode.</system-reminder>\nfix PAY-7 on mobile",
+                None
+            ),
+            Some("fix PAY-7 on mobile"),
+            "a row stored with a harness head is read without it"
+        );
+        assert_eq!(
+            f.person_text("  Pozri sa na ten build ", None),
+            Some("Pozri sa na ten build")
+        );
+
+        let s = Store::open_in_memory().unwrap();
+        let a = session(&s, "a", "h1");
+        conversation(&s, a, "c0", *NOW - 10, "Look at the build on main");
+        conversation(&s, a, "c1", *NOW - 10, &stored);
+        conversation(
+            &s,
+            a,
+            "c2",
+            *NOW - 10,
+            "<command-message>review</command-message>\n<command-name>/review</command-name>",
+        );
+        let r = census(&s, &Words, &opts()).unwrap();
+        let p = source(&r, None, "prompt");
+        assert_eq!(p.fleet_typed, Shown(2));
+        assert_eq!(p.languages.get("en"), Some(&Shown(1)));
+        let got = sample_prompts(&s, &Words, &opts(), 10).unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
     }
 
     #[test]

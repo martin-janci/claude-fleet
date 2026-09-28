@@ -30,9 +30,9 @@
 //!   `opt_expand`.
 
 use super::{
-    check_http, map_transport, CallKind, Caps, Changes, Fetched, Incremental, ItemRef, Page,
-    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
-    DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
+    check_http, description_and_len, map_transport, CallKind, Caps, Changes, Fetched, Incremental,
+    ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef,
+    WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerCredential, TrackerSettings};
@@ -228,6 +228,8 @@ impl Asana {
                 }
             }
         }
+        let (description, description_chars) =
+            description_and_len(t["notes"].as_str().map(str::trim).unwrap_or_default());
         Some(WorkItemSnapshot {
             key: Some(format!("asana:{gid}")),
             aliases: Vec::new(),
@@ -259,11 +261,8 @@ impl Asana {
             iteration: None,
             iteration_active: false,
             updated: t["modified_at"].as_str().and_then(super::parse_timestamp),
-            description: t["notes"]
-                .as_str()
-                .map(str::trim)
-                .filter(|n| !n.is_empty())
-                .map(|n| n.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+            description,
+            description_chars,
             external_id: gid,
         })
     }
@@ -387,6 +386,9 @@ impl TrackerProvider for Asana {
             multi_container: true,
             incremental: Incremental::SyncToken,
             write: false,
+            // Asana keeps the default here: it degrades to "open the
+            // ticket", which is what the capability is for.
+            describe: false,
         }
     }
 

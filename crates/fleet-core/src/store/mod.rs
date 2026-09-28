@@ -40,6 +40,7 @@ mod tracker_writes;
 mod trackers;
 mod usage;
 mod work;
+mod work_describe;
 mod work_detect;
 mod work_journal;
 mod work_local;
@@ -57,8 +58,9 @@ pub use clients::{
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
-    NewDecisionRun, DECISION_CALL_FAILURES, DECISION_FALLBACKS, DECISION_FOLLOWUPS,
-    DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
+    NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
+    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_PERSON_FOLLOWUPS,
+    DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
 pub use layers::HostLayerRow;
 pub use nl_census::{

@@ -218,6 +218,11 @@ pub const WORK_RECENT_DAYS: &str = "work.recent_days";
 /// Seconds between tracker sync passes (work graph M3); `0` turns the sync
 /// off. Values under a minute are raised to one.
 pub const WORK_SYNC_INTERVAL_SECS: &str = "work.sync_interval_secs";
+/// How long `work { action: describe }` serves a description it already
+/// fetched. `0` turns the cache off — every ask is one tracker call. Swept
+/// with the tracker items (`service::work::retention`), at a fixed 30-day
+/// floor when `work.retention.tracker_items_days` is `0`.
+pub const WORK_DESCRIBE_CACHE_SECS: &str = "work.describe_cache_secs";
 
 /// Project ids whose branch keys are trusted (work graph M4, rule R3): a
 /// sole branch key there links automatically, with Undo; elsewhere it is a
@@ -520,6 +525,11 @@ pub const SPECS: &[Spec] = &[
     },
     Spec {
         key: WORK_SYNC_INTERVAL_SECS,
+        default: "300",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: WORK_DESCRIBE_CACHE_SECS,
         default: "300",
         kind: Kind::Secs,
     },

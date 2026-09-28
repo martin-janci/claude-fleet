@@ -631,13 +631,17 @@ pub struct UsageCursor {
     pub last_msg_id: Option<String>,
     /// What was counted for `last_msg_id`: `in,out,cache_write,cache_read,cache_write_5m`.
     pub last_msg_usage: Option<String>,
+    /// The file's size when this cursor last started it from byte 0
+    /// (migration 072): a read starting below it is still that file's
+    /// history. 0 = none pending.
+    pub backfill_until: i64,
 }
 
 /// The `sessions` columns every `UsageCursor` read selects, in
 /// [`map_usage_cursor`] order.
 pub(super) const USAGE_CURSOR_COLUMNS: &str =
     "id, transcript_path, claude_session_id, usage_offset_bytes, usage_source, \
-     usage_last_msg_id, usage_last_msg_usage";
+     usage_last_msg_id, usage_last_msg_usage, usage_backfill_until";
 
 /// Map a row selected with [`USAGE_CURSOR_COLUMNS`].
 pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageCursor> {
@@ -649,6 +653,7 @@ pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<Usag
         source: row.get(4)?,
         last_msg_id: row.get(5)?,
         last_msg_usage: row.get(6)?,
+        backfill_until: row.get(7)?,
     })
 }
 
@@ -677,6 +682,9 @@ pub struct UsageDelta {
     /// Per-day slices of `totals`; empty means "book everything to the day
     /// of `now`" (a reader without `D` lines).
     pub by_day: Vec<DayDelta>,
+    /// A read from byte 0 sets the cursor's backfill mark (the file size it
+    /// saw); `None` keeps the stored one.
+    pub backfill_until: Option<i64>,
 }
 
 /// `claude_status` values that mean "no turn in progress" — the states

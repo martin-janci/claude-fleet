@@ -22,13 +22,24 @@
 //! Everywhere but Windows this module finds no distributions and every lookup
 //! answers `None`, so nothing else changes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 /// Host aliases this module owns start with this.
 pub const ALIAS_PREFIX: &str = "wsl-";
 
 /// The distributions found by the last [`refresh`]: `(alias, distribution)`.
 static DISTROS: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
+
+/// A detection started by [`refresh_in_background`] has not finished yet.
+/// Until it does, a `wsl-` alias cannot be told apart from an SSH host, so
+/// the callers that route by alias wait for it ([`settled_for`]).
+static PENDING: AtomicBool = AtomicBool::new(false);
+
+/// How long a command for a `wsl-` host waits on a detection still running.
+/// Past it the command goes ahead with whatever the table holds.
+pub const SETTLE_WAIT: Duration = Duration::from_secs(20);
 
 /// The fleet alias for a distribution name: `wsl-` plus the name
 /// lower-cased, every character outside `[a-z0-9._-]` turned into `-`.
@@ -60,10 +71,10 @@ pub fn alias_for(distro: &str) -> Option<String> {
 /// Docker Desktop's internal distributions are not hosts anyone runs
 /// sessions on and are left out.
 pub fn parse_list(raw: &[u8]) -> Vec<String> {
-    let looks_utf16 = raw.starts_with(&[0xFF, 0xFE])
-        || (raw.len() >= 2
-            && raw.len().is_multiple_of(2)
-            && raw.iter().skip(1).step_by(2).all(|&b| b == 0));
+    // UTF-8 text never holds a NUL; UTF-16LE of anything but CJK does, in
+    // every other byte. A non-ASCII name breaks the strict every-odd-byte
+    // test, so any NUL at all decides it.
+    let looks_utf16 = raw.starts_with(&[0xFF, 0xFE]) || raw.contains(&0);
     let text = if looks_utf16 {
         let units: Vec<u16> = (0..raw.len() / 2)
             .map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]]))
@@ -124,14 +135,67 @@ pub fn hosts() -> Vec<(String, String)> {
 /// Re-detect the distributions (blocking, bounded by `timeout`) and replace
 /// the table. Aliases in `taken` stay SSH hosts. A failed or timed-out
 /// `wsl.exe` keeps the previous table rather than dropping hosts in use.
-pub fn refresh(taken: &[String], timeout: std::time::Duration) {
+pub fn refresh(taken: &[String], timeout: Duration) {
     let Some(found) = detect(timeout) else {
+        tracing::warn!(
+            timeout_ms = timeout.as_millis() as u64,
+            "[wsl] wsl.exe --list did not answer; keeping the previous host table"
+        );
         return;
     };
     let table = assign_aliases(&found, taken);
+    tracing::info!(hosts = ?table, "[wsl] distributions found");
     *DISTROS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = table;
+}
+
+/// [`refresh`] on a thread of its own, so a WSL service that takes seconds
+/// to start (the first `wsl.exe` after a boot does) never holds up the app's
+/// startup. Until it finishes, [`settled_for`] holds back commands for
+/// `wsl-` aliases, which could otherwise go to `ssh` as an unknown host.
+///
+/// `taken` is called on that thread too: reading `~/.ssh/config` (and what it
+/// `Include`s) can itself stall on a redirected profile that is offline.
+pub fn refresh_in_background(
+    taken: impl FnOnce() -> Vec<String> + Send + 'static,
+    timeout: Duration,
+) {
+    PENDING.store(true, Ordering::Release);
+    std::thread::spawn(move || {
+        refresh(&taken(), timeout);
+        PENDING.store(false, Ordering::Release);
+    });
+}
+
+/// Whether a background detection is still running.
+pub fn pending() -> bool {
+    PENDING.load(Ordering::Acquire)
+}
+
+/// Wait, at most [`SETTLE_WAIT`], for a running detection when `alias` could
+/// be one of its hosts; return at once for any other alias, or when nothing
+/// is running.
+pub async fn settled_for(alias: &str) {
+    if !alias.starts_with(ALIAS_PREFIX) {
+        return;
+    }
+    let deadline = Instant::now() + SETTLE_WAIT;
+    while pending() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// [`settled_for`] for a caller already off the async runtime (the PTY
+/// attach runs on a blocking thread).
+pub fn settled_for_blocking(alias: &str) {
+    if !alias.starts_with(ALIAS_PREFIX) {
+        return;
+    }
+    let deadline = Instant::now() + SETTLE_WAIT;
+    while pending() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// `wsl.exe`: `%SystemRoot%\System32\wsl.exe` when it is there, else the
@@ -144,29 +208,58 @@ pub fn wsl_binary() -> std::path::PathBuf {
 }
 
 /// Run `wsl.exe --list --quiet` with a deadline. `None` when it could not be
-/// run, failed, or overran (a WSL service still starting can take seconds);
-/// `Some(empty)` when WSL is there with no distribution.
+/// run or overran (a WSL service still starting can take seconds), and then
+/// the process is killed rather than left behind; `Some(empty)` when WSL is
+/// there with no distribution (that exits non-zero).
 #[cfg(windows)]
-fn detect(timeout: std::time::Duration) -> Option<Vec<String>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = crate::proc::std_command(wsl_binary())
-            .args(["--list", "--quiet"])
-            .stdin(std::process::Stdio::null())
-            .output();
-        let _ = tx.send(out);
-    });
-    let out = rx.recv_timeout(timeout).ok()?.ok()?;
-    if !out.status.success() {
-        // "no installed distributions" exits non-zero: there are none.
-        return Some(Vec::new());
-    }
-    Some(parse_list(&out.stdout))
+fn detect(timeout: Duration) -> Option<Vec<String>> {
+    let mut cmd = crate::proc::std_command(wsl_binary());
+    cmd.args(["--list", "--quiet"]);
+    list_with_deadline(cmd, timeout)
 }
 
 #[cfg(not(windows))]
-fn detect(_timeout: std::time::Duration) -> Option<Vec<String>> {
+fn detect(_timeout: Duration) -> Option<Vec<String>> {
     None
+}
+
+/// Run a `--list`-shaped command with a deadline and parse what it printed.
+/// stdout is read on its own thread so a full pipe never stalls the child.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn list_with_deadline(mut cmd: std::process::Command, timeout: Duration) -> Option<Vec<String>> {
+    use std::io::Read;
+    let mut child = cmd
+        .env("WSL_UTF8", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let out = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Some(Vec::new());
+    }
+    Some(parse_list(&out))
 }
 
 /// The `wsl.exe` arguments that run `args` in `distro` the way `ssh` would
@@ -183,9 +276,13 @@ pub fn exec_args(distro: &str, args: &[&str]) -> Vec<String> {
 }
 
 /// A `tokio` command running `args` in `distro` (see [`exec_args`]).
+/// `WSL_UTF8=1` makes wsl.exe's own messages (a distribution that no longer
+/// exists, a WSL service that failed) UTF-8 instead of UTF-16, so they read
+/// as text in an error rather than as NUL-riddled bytes.
 pub fn command(distro: &str, args: &[&str]) -> tokio::process::Command {
     let mut cmd = crate::proc::command(wsl_binary());
     cmd.args(exec_args(distro, args));
+    cmd.env("WSL_UTF8", "1");
     cmd.stdin(std::process::Stdio::null());
     cmd
 }
@@ -238,6 +335,57 @@ mod tests {
         assert_eq!(parse_list(&utf16le(listing, false)), want);
         assert_eq!(parse_list(listing.as_bytes()), want);
         assert!(parse_list(b"").is_empty());
+    }
+
+    #[test]
+    fn a_non_ascii_name_in_utf16_without_a_bom_is_still_utf16() {
+        let listing = "Übuntu\r\nDebian\r\n";
+        assert_eq!(
+            parse_list(&utf16le(listing, false)),
+            vec!["Übuntu".to_string(), "Debian".to_string()]
+        );
+    }
+
+    /// The deadline kills an overrunning `wsl.exe` instead of leaving it
+    /// behind; a non-zero exit is "no distributions", not a failure.
+    #[cfg(unix)]
+    #[test]
+    fn listing_has_a_deadline_and_reads_a_failure_as_none_installed() {
+        let run = |script: &str, ms: u64| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", script]);
+            list_with_deadline(cmd, Duration::from_millis(ms))
+        };
+        assert_eq!(
+            run("printf 'Ubuntu\\nDebian\\n'", 5_000),
+            Some(vec!["Ubuntu".to_string(), "Debian".to_string()])
+        );
+        assert_eq!(run("echo 'no distributions'; exit 1", 5_000), Some(vec![]));
+        let started = Instant::now();
+        assert_eq!(run("sleep 30", 200), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "killed, not waited out"
+        );
+    }
+
+    #[test]
+    fn only_a_wsl_alias_waits_on_a_running_detection() {
+        let _table = TEST_TABLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        PENDING.store(true, Ordering::Release);
+        let started = Instant::now();
+        settled_for_blocking("mefistos");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let waiter = std::thread::spawn(|| {
+            let started = Instant::now();
+            settled_for_blocking("wsl-ubuntu");
+            started.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        PENDING.store(false, Ordering::Release);
+        let waited = waiter.join().unwrap();
+        assert!(waited >= Duration::from_millis(100), "{waited:?}");
+        assert!(waited < SETTLE_WAIT, "{waited:?}");
     }
 
     #[test]

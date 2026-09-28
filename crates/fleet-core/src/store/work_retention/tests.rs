@@ -421,9 +421,21 @@ fn zero_days_keeps_every_table_forever() {
     let s = Store::open_in_memory().unwrap();
     let (sid, _) = session(&s, "a");
     journal(&s, Some("gone"), None, "progress", OLD, None);
-    item(&s, Some(1), "A-1", "done", OLD);
+    let i = item(&s, Some(1), "A-1", "done", OLD);
     event(&s, sid, "gc_tidied", OLD);
     event(&s, sid, "gc_tidied", OLD + 1);
+    // The describe cache is a swept table like the rest (its own row, by
+    // age). At the STORE layer `0` keeps it forever too; the 30-day floor
+    // that makes "forever" impossible for a full-text cache belongs to
+    // `service::work::retention::describe_effective_days`, which never hands
+    // this function a `0` for it.
+    s.put_description(i, "the whole thing", 15).unwrap();
+    s.conn
+        .execute(
+            "UPDATE work_item_descriptions SET fetched_at = ?1",
+            rusqlite::params![OLD],
+        )
+        .unwrap();
     for t in RetentionTable::ALL {
         assert!(s.retention_eligible(t, NOW, 1).unwrap() > 0, "{t:?}");
         assert_eq!(s.retention_eligible(t, NOW, 0).unwrap(), 0, "{t:?}");
