@@ -153,7 +153,15 @@ peers configured".
 `usage_by_day` books each token to the UTC day of the transcript line that
 produced it. The first time a transcript is read (a new host, a hub takeover)
 its history before that day lands in `backfill_cost_micros`, apart from the
-day's live `cost_micros`, so a takeover never reads as an $850 day.
+day's live `cost_micros`, so a takeover never reads as an $850 day — however
+many passes a large transcript takes, and likewise when a transcript is
+rewritten. Yesterday's lines stay live for two collection intervals after
+midnight UTC, so a session that started just before midnight is not history.
+The split applies from the upgrade that introduced it on: rows booked before
+it (migration 071) all became live rows, so a takeover spike that is already
+in the roll-up stays one. `usage_daily` is kept for as long as its host is
+configured (removing the host deletes its rows) and has no retention window:
+it is at most two rows (live and backfill) per host per day, a few KB a year.
 `usage_report` says what each figure counts: `by_host_population: live_rows`
 (session rows that still exist, over their lifetime — ghosts included) and
 `by_day_population: durable` (the daily roll-up, killed sessions included);
@@ -2182,7 +2190,8 @@ standalone exactly as before.
   creates the repository on the host you pick, with that host's `git` and
   `gh`; the new row arrives like any other change. Cancel stops the desktop
   waiting, not the run on the host. The *Existing folder* source is absent
-  here, because it would mean a folder on the hub's machine.
+  here, because it would mean a folder on the hub's machine, and so is the
+  "into …" destination preview: the project roots are the hub's settings.
 - **Its errors reach the hub.** Error-level events and frontend crashes are
   queued and posted to the hub's `/report` every few seconds — see *Error
   reports*; `CLAUDE_FLEET_HUB_REPORTS=0` turns it off.

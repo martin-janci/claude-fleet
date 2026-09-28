@@ -32,17 +32,37 @@ pub const NO_TURNS: &str = "__CF_NO_TURNS__";
 /// What this adds is one `awk` pass:
 ///
 /// - lines are copied from the start and stop **before** the line whose
-///   `uuid` is `anchor_uuid`; `None` copies the whole file, which is what
-///   forking the newest turn means;
+///   TOP-LEVEL `uuid` is `anchor_uuid`; `None` copies the whole file, which
+///   is what forking the newest turn means (Fork only — `rewind_conversation`
+///   refuses a Rewind without an anchor);
 /// - `sessionId` is rewritten to `new_id` on every copied line;
 /// - `cwd` is rewritten when `cwd_rewrite` is set (a fork into a different
-///   worktree, whose pane must start where the transcript says it did);
+///   worktree, whose pane must start where the transcript says it did): the
+///   exact old value and any subdirectory of it (`"cwd":"<old>/…"`). An
+///   EMPTY old value means "the first `cwd` the transcript records" — the
+///   spelling Claude Code actually saw, which a stored path (a symlinked
+///   root) need not match. The new value must already be JSON-escaped;
 /// - the result lands in `dest_dir` (else beside the source), named
 ///   `<new_id>.jsonl`, and its path is the only thing on stdout.
 ///
+/// Finding the anchor is `top_uuid_is()`: only a line that contains the
+/// anchor text at all (a cheap `index` prefilter, so the scan runs on a
+/// handful of lines, not the whole file) is walked character by character,
+/// tracking string / escape state and brace depth, and it matches only a
+/// `"uuid"` KEY at depth 1 whose value is the anchor, whitespace allowed
+/// around the `:`. A `"uuid"` nested inside `message` or a tool result, or
+/// the anchor appearing as some other key's value (the next entry's
+/// `parentUuid`), does not stop the copy. `LC_ALL=C` keeps `substr` a byte
+/// operation, so that walk is linear. Limitation: it is a lexer, not a JSON
+/// parser — it trusts the line to be one well-formed JSON object, which is
+/// what Claude Code writes.
+///
 /// Both replacements go through the script's own `rep()`, which is
 /// `index`-based and therefore LITERAL. `gsub` would treat the search text as
-/// a regex, and a cwd is full of `.` and `+`.
+/// a regex, and a cwd is full of `.` and `+`. They match the COMPACT form
+/// (`"sessionId":"…"`, no whitespace), which is how Claude Code serialises
+/// every entry (`JSON.stringify`); a hand-edited, pretty-printed line would
+/// keep its old id.
 ///
 /// Copying a prefix rather than filtering by turn is deliberate: it keeps the
 /// header entries that carry no uuid (`custom-title`, `mode`, `agent-name`,
@@ -90,7 +110,7 @@ tmp="$dest.part.$$"
 # Whole lines only: a Claude still appending (a fork mid-turn) leaves an
 # unterminated last line, which copied would be broken JSON.
 n=$(wc -l < "$f") || exit 1
-awk -v anchor="$anchor" -v oldid={id_q} -v newid="$newid" \
+LC_ALL=C awk -v anchor="$anchor" -v oldid={id_q} -v newid="$newid" \
     -v oldcwd="$oldcwd" -v newcwd="$newcwd" -v n="$n" '
 NR > n + 0 {{ exit }}
 function rep(s, from, to,    out, p) {{
@@ -102,10 +122,40 @@ function rep(s, from, to,    out, p) {{
   }}
   return out s
 }}
-anchor != "" && index($0, "\"uuid\":\"" anchor "\"") > 0 {{ found = 1; exit }}
+function top_uuid_is(s, want,    n, i, c, depth, instr, esc, j) {{
+  n = length(s); depth = 0; instr = 0; esc = 0
+  for (i = 1; i <= n; i++) {{
+    c = substr(s, i, 1)
+    if (instr) {{
+      if (esc) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == "\"") instr = 0
+      continue
+    }}
+    if (c == "{{" || c == "[") {{ depth++; continue }}
+    if (c == "}}" || c == "]") {{ depth--; continue }}
+    if (c != "\"") continue
+    if (depth == 1 && substr(s, i, 6) == "\"uuid\"") {{
+      j = i + 6
+      while (substr(s, j, 1) == " " || substr(s, j, 1) == "\t") j++
+      if (substr(s, j, 1) == ":") {{
+        j++
+        while (substr(s, j, 1) == " " || substr(s, j, 1) == "\t") j++
+        if (substr(s, j, length(want) + 2) == "\"" want "\"") return 1
+      }}
+    }}
+    instr = 1
+  }}
+  return 0
+}}
+anchor != "" && index($0, anchor) > 0 && top_uuid_is($0, anchor) {{ found = 1; exit }}
 {{
   line = rep($0, "\"sessionId\":\"" oldid "\"", "\"sessionId\":\"" newid "\"")
-  if (newcwd != "") line = rep(line, "\"cwd\":\"" oldcwd "\"", "\"cwd\":\"" newcwd "\"")
+  if (newcwd != "" && oldcwd == "" && match(line, /"cwd":"[^"]*"/)) oldcwd = substr(line, RSTART + 7, RLENGTH - 8)
+  if (newcwd != "" && oldcwd != "") {{
+    line = rep(line, "\"cwd\":\"" oldcwd "\"", "\"cwd\":\"" newcwd "\"")
+    line = rep(line, "\"cwd\":\"" oldcwd "/", "\"cwd\":\"" newcwd "/")
+  }}
   print line
 }}
 END {{ if (anchor != "" && found != 1) exit 3 }}
@@ -116,7 +166,7 @@ if [ "$rc" -ne 0 ]; then
   if [ "$rc" -eq 3 ]; then printf '{NO_ANCHOR} %s\n' "$anchor" >&2; fi
   exit "$rc"
 fi
-if ! grep -q -F -e '"uuid":"' -- "$tmp"; then
+if ! grep -q -E -e '"uuid"[[:space:]]*:[[:space:]]*"' -- "$tmp"; then
   rm -f -- "$tmp"
   printf '{NO_TURNS}\n' >&2
   exit 5
@@ -149,6 +199,85 @@ async fn run_shell(
     .await
 }
 
+/// Sentinel [`fork_worktree_script`] prints (on stderr) when the worktree's
+/// directory or branch already exists: a fork only ever creates a fresh
+/// pair, so the cleanup after a failure can never remove someone's own.
+pub const WT_EXISTS: &str = "__CF_WT_EXISTS__";
+
+/// The bash script that creates a fork's NEW worktree, before anything else
+/// happens (see `RewindArgs::new_worktree`).
+///
+/// The source checkout is the pane's live cwd, else `src_dir` (the stored
+/// worktree / project path) — the same order `locate_script` uses. From it:
+/// the commit to branch off (`HEAD`, so the new branch starts at the source
+/// branch's tip, or at a detached source's commit) and the repo root (the
+/// first entry of `git worktree list`, the main checkout, so the new tree is
+/// never nested inside the source's). The directory convention is
+/// `new_session`'s own ([`crate::service::sessions::WORKTREE_BASE_SNIPPET`]).
+/// Unlike `worktree_add_script` it never adopts an existing directory or
+/// branch: either one exits 6 with [`WT_EXISTS`]. The only stdout is the
+/// new tree's physical path (`pwd -P`) — the cwd Claude Code will see.
+pub fn fork_worktree_script(src_tmux: Option<&str>, src_dir: Option<&str>, name: &str) -> String {
+    let tmux_q = quote(src_tmux.unwrap_or(""));
+    let target_q = quote(&crate::tmux::exact_pane(src_tmux.unwrap_or("")));
+    format!(
+        r#"set -e
+name={name_q}
+src=''
+if [ -n {tmux_q} ]; then
+  src=$(tmux display-message -p -t {target_q} '#{{pane_current_path}}' 2>/dev/null) || src=''
+fi
+if [ -z "$src" ] || [ ! -d "$src" ]; then src={dir_q}; fi
+if [ -z "$src" ]; then echo "no checkout to fork from" >&2; exit 1; fi
+head=$(git -C "$src" rev-parse --verify HEAD)
+root=$(git -C "$src" worktree list --porcelain | sed -n '1s/^worktree //p')
+cd -- "$root"
+{snippet}wt="$base/$name"
+if [ -e "$wt" ] || git show-ref --verify --quiet "refs/heads/$name"; then
+  printf '{WT_EXISTS} %s
+' "$name" >&2
+  exit 6
+fi
+git worktree add "$wt" -b "$name" "$head" 1>&2
+( cd "$wt" && pwd -P )
+"#,
+        name_q = quote(name),
+        dir_q = quote(src_dir.unwrap_or("")),
+        snippet = crate::service::sessions::WORKTREE_BASE_SNIPPET,
+    )
+}
+
+/// Undo [`fork_worktree_script`] after a later step failed: `git worktree
+/// remove` WITHOUT `--force` (a tree with changes in it stays), and only
+/// then the branch. Never touches the source: both values are the ones the
+/// creation just produced. A tree a live tmux pane is working in stays too
+/// (exit 3, `{TREE_IN_USE}`): `new_session` can fail after its pane started.
+pub fn remove_fork_worktree_script(path: &str, name: &str) -> String {
+    format!(
+        r#"set -e
+wt={path_q}
+name={name_q}
+phys=$(cd -- "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")
+if tmux list-panes -a -F '#{{pane_current_path}}' 2>/dev/null \
+  | awk -v a="$wt" -v b="$phys" '$0==a || $0==b || index($0, a "/")==1 || index($0, b "/")==1 {{ f=1 }} END {{ exit !f }}'; then
+  printf '{TREE_IN_USE} %s\n' "$wt" >&2
+  exit 3
+fi
+root=$(git -C "$wt" worktree list --porcelain | sed -n '1s/^worktree //p')
+cd -- "$root"
+git worktree remove "$wt"
+git update-ref -d "refs/heads/$name"
+"#,
+        path_q = quote(path),
+        name_q = quote(name),
+        TREE_IN_USE = TREE_IN_USE,
+    )
+}
+
+/// Sentinel [`remove_fork_worktree_script`] prints when a live pane is in
+/// the tree it was asked to remove.
+pub const TREE_IN_USE: &str = "FLEET_FORK_TREE_IN_USE";
+
 /// What happens after the truncated transcript exists.
 ///
 /// `snake_case` so the serialised form IS the wire vocabulary — `"rewind"` /
@@ -174,24 +303,17 @@ pub struct RewindArgs {
     /// which is what forking the newest turn means.
     pub anchor_uuid: Option<String>,
     pub mode: RewindMode,
-    /// Fork only: `Some(name)` would put the new session in a NEW worktree
-    /// of that name; `None` reuses the source session's, the only mode
-    /// implemented. Task 7 investigated `Some(name)` and found it not
-    /// implementable without either duplicating worktree creation outside
-    /// `new_session` or guessing a path: a not-yet-created worktree's
-    /// physical path is only known AFTER `git worktree add` runs (`pwd -P`,
-    /// inside `service::sessions::lifecycle::worktree_add_script` /
-    /// `create_worktree_local`), and that call happens exclusively inside
-    /// `new_session` — by design, per `RemoteWorktree`'s own doc: a
-    /// checkout's path is "the one the host scan RECORDED... NOT re-derived
-    /// from `name`". `rewind_script` (which writes the truncated transcript
-    /// into the NEW cwd's encoded project dir) has to run BEFORE
-    /// `new_session` creates the pane, so it cannot wait for a path only
-    /// `new_session` can produce. `Some(name)` is therefore refused with
-    /// `E_UNSUPPORTED` at the top of `rewind_conversation`, rather than
-    /// silently reusing the source worktree (a different action from the
-    /// one asked for) or writing the transcript at a guessed path (a fork
-    /// that silently starts with no history).
+    /// Fork only: `Some(name)` puts the new session in a NEW worktree, and
+    /// branch, of that name, cut from the source's current commit
+    /// ([`fork_worktree_script`]); `None` reuses the source's worktree.
+    ///
+    /// The ordering is the whole design: the transcript copy must land in the
+    /// NEW cwd's encoded project dir, and that cwd's physical path exists
+    /// only once `git worktree add` has run. So the fork creates the worktree
+    /// FIRST, writes the copy under its `pwd -P`, records the worktree row,
+    /// and only then asks `new_session` to start in that existing worktree.
+    /// The source's uncommitted changes stay with the source: the new tree is
+    /// the committed HEAD.
     pub new_worktree: Option<String>,
 }
 
@@ -213,6 +335,151 @@ fn project_id_for_fork(project_id: Option<i64>) -> Result<i64, IpcError> {
             "this session has no project to fork",
         )
     })
+}
+
+/// What `rewind_conversation` does to the world after the transcript copy:
+/// read the pane, restart it, spawn a session. A seam so the service's own
+/// sequencing — each mode's follow-up called exactly once, and what is undone
+/// when the restart fails — is testable without a live tmux or a host
+/// (spec §7). Production is [`LiveOps`]; the script and the cleanup `rm`
+/// still go through `run_shell` either way.
+#[async_trait::async_trait]
+trait ReplyOps: Send + Sync {
+    /// The pane's live `claude_status` (a `session_activity` probe), or
+    /// `None` when it cannot tell — an unreachable host, a blank pane.
+    async fn pane_status(&self, session_id: i64) -> Option<String>;
+    async fn restart(
+        &self,
+        args: crate::service::sessions::RestartSessionArgs,
+    ) -> Result<SessionRow, IpcError>;
+    async fn spawn(
+        &self,
+        args: crate::service::sessions::NewSessionArgs,
+    ) -> Result<SessionRow, IpcError>;
+    /// Create a fork's new worktree ([`fork_worktree_script`]); returns its
+    /// physical path.
+    async fn add_worktree(
+        &self,
+        host_alias: &str,
+        src_tmux: Option<&str>,
+        src_dir: Option<&str>,
+        name: &str,
+    ) -> Result<String, IpcError>;
+    /// Undo [`ReplyOps::add_worktree`] ([`remove_fork_worktree_script`]).
+    async fn remove_worktree(
+        &self,
+        host_alias: &str,
+        path: &str,
+        name: &str,
+    ) -> Result<(), IpcError>;
+    /// `~/.claude/projects` on the host, where a transcript for a new cwd goes.
+    async fn claude_projects_dir(&self, host_alias: &str) -> Result<String, IpcError>;
+}
+
+/// The real follow-ups: `session_activity`, `restart_session`, `new_session`.
+struct LiveOps<'a> {
+    store: &'a Mutex<Store>,
+    ssh: &'a Arc<SshClient>,
+    reg: &'a Arc<CancellationRegistry>,
+}
+
+#[async_trait::async_trait]
+impl ReplyOps for LiveOps<'_> {
+    async fn pane_status(&self, session_id: i64) -> Option<String> {
+        crate::service::sessions::session_activity(self.store, self.ssh, session_id)
+            .await
+            .ok()
+            .and_then(|p| p.claude_status)
+    }
+    async fn restart(
+        &self,
+        args: crate::service::sessions::RestartSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        crate::service::sessions::restart_session(args, self.store, self.ssh).await
+    }
+    async fn spawn(
+        &self,
+        args: crate::service::sessions::NewSessionArgs,
+    ) -> Result<SessionRow, IpcError> {
+        crate::service::sessions::new_session(args, self.store, self.ssh, self.reg).await
+    }
+    async fn add_worktree(
+        &self,
+        host_alias: &str,
+        src_tmux: Option<&str>,
+        src_dir: Option<&str>,
+        name: &str,
+    ) -> Result<String, IpcError> {
+        let script = fork_worktree_script(src_tmux, src_dir, name);
+        let out = crate::ssh::run_shell(
+            self.ssh.as_ref(),
+            host_alias,
+            &script,
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            if stderr.contains(WT_EXISTS) {
+                return Err(IpcError::new(
+                    codes::E_CONFLICT,
+                    format!(
+                        "a worktree or branch named {name:?} already exists; pick another name"
+                    ),
+                ));
+            }
+            return Err(IpcError::new(codes::E_GIT_SETUP, stderr.trim().to_string()));
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !path.starts_with('/') {
+            return Err(IpcError::new(
+                codes::E_GIT_SETUP,
+                format!("git worktree add reported no path: {}", stderr.trim()),
+            ));
+        }
+        Ok(path)
+    }
+    async fn remove_worktree(
+        &self,
+        host_alias: &str,
+        path: &str,
+        name: &str,
+    ) -> Result<(), IpcError> {
+        let out = run_shell(
+            self.ssh,
+            host_alias,
+            &remove_fork_worktree_script(path, name),
+        )
+        .await?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                codes::E_GIT_SETUP,
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ))
+        }
+    }
+    async fn claude_projects_dir(&self, host_alias: &str) -> Result<String, IpcError> {
+        let home = if host_alias == crate::service::projects::LOCAL_HOST {
+            crate::service::hosts::local_home_dir()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            self.ssh.remote_home(host_alias).await?
+        };
+        Ok(format!("{}/.claude/projects", home.trim_end_matches('/')))
+    }
+}
+
+/// Whether a `claude_status` value means the session is between turns — the
+/// same set as the frontend's `isQuietStatus`. `None` and anything this
+/// build cannot parse are NOT quiet: an unknown state is not evidence that a
+/// restart throws nothing away.
+fn status_is_quiet(status: Option<&str>) -> bool {
+    status
+        .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok())
+        .is_some_and(crate::service::pane_intel::ClaudeStatus::is_quiet)
 }
 
 /// Truncate a session's transcript into a new conversation and act on it.
@@ -237,19 +504,40 @@ pub async fn rewind_conversation(
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<SessionRow, IpcError> {
+    rewind_conversation_with(args, store, ssh, &LiveOps { store, ssh, reg }).await
+}
+
+async fn rewind_conversation_with(
+    args: RewindArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    ops: &dyn ReplyOps,
+) -> Result<SessionRow, IpcError> {
     if let Some(a) = args.anchor_uuid.as_deref() {
         crate::validate::claude_session_id(a)
             .map_err(|_| IpcError::new(codes::E_INVALID, "anchor_uuid must be a lowercase UUID"))?;
     }
-    // Forking into a NEW worktree is not implemented — see `RewindArgs::
-    // new_worktree`'s doc for the full reasoning. Refuse up front, before
-    // any I/O, rather than silently reusing the source worktree or writing
-    // the transcript at a guessed path.
-    if args.mode == RewindMode::Fork && args.new_worktree.is_some() {
+    // A rewind with no anchor would copy the WHOLE transcript and restart
+    // the pane on it: the same conversation under a new id, reported as a
+    // success — a silent no-op. Spec §3 gives "no anchor ⇒ keep the whole
+    // file" to Fork alone (forking the newest turn); Rewind and Retry always
+    // name their own turn's prompt.
+    if args.mode == RewindMode::Rewind && args.anchor_uuid.is_none() {
         return Err(IpcError::new(
-            codes::E_UNSUPPORTED,
-            "forking into a new worktree isn't implemented yet; fork without a worktree name to reuse this session's worktree",
+            codes::E_INVALID,
+            "rewind needs anchor_uuid: the prompt to rewind to before",
         ));
+    }
+    // A new worktree is a Fork-only shape, and its name becomes a branch:
+    // checked here, before any I/O, by the rule `new_session` applies.
+    if let Some(name) = args.new_worktree.as_deref() {
+        if args.mode != RewindMode::Fork {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "new_worktree applies to a fork, not a rewind",
+            ));
+        }
+        crate::service::sessions::validate_new_worktree_name(name)?;
     }
     // Snapshot under one short lock; every I/O below happens with it released.
     let (sess, claude_id, stored_transcript_path, fallback_cwd) = {
@@ -319,65 +607,92 @@ pub async fn rewind_conversation(
             "a shell session has no Claude conversation to rewind or fork",
         ));
     }
-    // Rewind respawns the pane, so doing it mid-turn — working, or waiting
-    // on a dialog the turn raised — throws the turn away. Fork is exempt: it
-    // touches nothing live.
-    if args.mode == RewindMode::Rewind
-        && matches!(sess.claude_status.as_deref(), Some("working" | "blocked"))
-    {
-        return Err(IpcError::new(
-            codes::E_INVALID,
-            "this session is mid-turn; interrupt it first, then rewind",
-        ));
+    // Rewind respawns the pane, so doing it mid-turn throws the turn away —
+    // and "mid-turn" is not only `working`: a `blocked` session is waiting
+    // on a permission prompt or a question INSIDE its turn. So the rule is
+    // the positive one, quiet or refused (`ClaudeStatus::is_quiet`, the
+    // frontend's `isQuietStatus`). The stored status can lag the pane by a
+    // whole reconcile tick, so the pane is asked first, live; only when it
+    // cannot say (unreachable, blank) does the stored value decide. Fork is
+    // exempt: it touches nothing live.
+    if args.mode == RewindMode::Rewind {
+        let live = ops.pane_status(sess.id).await;
+        let status = live.as_deref().or(sess.claude_status.as_deref());
+        if !status_is_quiet(status) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                match status {
+                    Some(s) => format!(
+                        "this session is mid-turn ({s}); interrupt it or answer its prompt first, then rewind"
+                    ),
+                    None => "can't tell whether this session is mid-turn (no status yet); interrupt it first, then rewind".to_string(),
+                },
+            ));
+        }
     }
 
     let new_id = mint_conversation_id();
     // Same rule as `resolve_args`: a row with no pane (`bg` / `external`) has
     // no `tmux display-message` to ask, so do not pretend it has one.
     let no_pane = crate::store::has_no_pane(&sess.kind) || sess.tmux_name.starts_with("bg:");
+    let src_tmux = (!no_pane).then_some(sess.tmux_name.as_str());
+
+    // A fork into a new worktree creates that worktree FIRST: its physical
+    // path is what the copy's project dir and `cwd` must name (spec §5.2),
+    // and nothing else can say what it is (`RewindArgs::new_worktree`).
+    let new_wt: Option<NewWorktree> = match args.new_worktree.as_deref() {
+        Some(name) => {
+            let project_id = project_id_for_fork(sess.project_id)?;
+            let path = ops
+                .add_worktree(&sess.host_alias, src_tmux, fallback_cwd.as_deref(), name)
+                .await?;
+            let mut wt = NewWorktree {
+                name: name.to_string(),
+                path,
+                project_id,
+                projects_dir: String::new(),
+            };
+            match ops.claude_projects_dir(&sess.host_alias).await {
+                Ok(dir) => wt.projects_dir = dir,
+                Err(e) => {
+                    undo_new_worktree(ops, store, &sess.host_alias, &wt, None).await;
+                    return Err(e);
+                }
+            }
+            Some(wt)
+        }
+        None => None,
+    };
+    let dest_dir = new_wt.as_ref().map(|wt| {
+        format!(
+            "{}/{}",
+            wt.projects_dir,
+            crate::service::transcript::encode_project_dir(&wt.path)
+        )
+    });
+    // The value goes into JSON text as-is, so it is escaped the way the
+    // transcript's own strings are; the old value is the transcript's first
+    // `cwd` (the `""`), whatever spelling of the source that was.
+    let json_cwd = new_wt.as_ref().map(|wt| json_string_body(&wt.path));
     let script = rewind_script(
-        (!no_pane).then_some(sess.tmux_name.as_str()),
+        src_tmux,
         stored_transcript_path.as_deref(),
         fallback_cwd.as_deref(),
         &claude_id,
         &new_id,
         args.anchor_uuid.as_deref(),
-        None,
-        None,
+        dest_dir.as_deref(),
+        json_cwd.as_deref().map(|c| ("", c)),
     );
-    // `run_shell` above is this module's copy of the same thin wrapper every
-    // transcript script already goes through (`transcript::read_tail`), so
-    // the SSH quoting round-trip is handled inside `rewind_script` and needs
-    // nothing extra here.
-    let out = run_shell(ssh, &sess.host_alias, &script).await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // Map the script's sentinels to codes rather than letting prose leak
-        // out, exactly as `read_tail` maps NO_TRANSCRIPT.
-        if stderr.contains(NO_ANCHOR) {
-            return Err(IpcError::new(
-                codes::E_NOTFOUND,
-                "that reply is no longer in the transcript",
-            ));
+    let new_path = match copy_transcript(ssh, &sess.host_alias, &script).await {
+        Ok(p) => p,
+        Err(e) => {
+            if let Some(wt) = &new_wt {
+                undo_new_worktree(ops, store, &sess.host_alias, wt, None).await;
+            }
+            return Err(e);
         }
-        if stderr.contains(NO_TURNS) {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                "there is nothing before this turn to rewind to; use /clear to start fresh",
-            ));
-        }
-        if stderr.contains(crate::service::transcript::NO_TRANSCRIPT) {
-            return Err(IpcError::new(
-                codes::E_NO_TRANSCRIPT,
-                format!("no transcript for this session on {}", sess.host_alias),
-            ));
-        }
-        return Err(IpcError::new(
-            codes::E_SHELL,
-            format!("rewind failed: {}", stderr.trim()),
-        ));
-    }
-    let new_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    };
 
     match args.mode {
         RewindMode::Rewind => {
@@ -391,40 +706,43 @@ pub async fn rewind_conversation(
                     sess.context.model.as_deref(),
                 )?;
             }
-            let restarted = crate::service::sessions::restart_session(
-                crate::service::sessions::RestartSessionArgs {
+            let restarted = ops
+                .restart(crate::service::sessions::RestartSessionArgs {
                     host_alias: sess.host_alias.clone(),
                     name: sess.tmux_name.clone(),
                     force: false,
-                },
-                store,
-                ssh,
-            )
-            .await;
+                })
+                .await;
             // The rebind is committed before the restart can be attempted at
             // all, and the restart can still fail for something only it can
             // know (`E_REPAIR_REQUIRED` from `ensure_session_workspace`, an
-            // unreachable host). Put the row back on the conversation it was
-            // on, so it never reads a frozen copy while the live Claude keeps
-            // writing the original — the same restore-on-failure shape
-            // `send_prompt_inner` uses for `last_prompt`. Best-effort: the
-            // restart's error is what the caller must see.
+            // unreachable host). Undo both halves of what this call did, so
+            // the failure leaves nothing behind: the row goes back on the
+            // conversation it was on (it must never read a frozen copy while
+            // the live Claude keeps writing the original), the new
+            // conversation's row is dropped rather than left listed as a
+            // conversation that never ran, and the new `.jsonl` is removed
+            // from the host rather than left as an orphan. `revert_rebind`
+            // is not a second rebind: a `Resume` rebind would write a
+            // conversation row of its own and mark the context stale.
+            // Best-effort: the restart's error is what the caller must see.
             if let Err(e) = &restarted {
-                if let Ok(s) = lock(store) {
-                    if let Err(re) = s.rebind_conversation(
+                match lock(store).and_then(|s| {
+                    s.revert_rebind(
                         sess.id,
+                        &new_id,
                         &claude_id,
-                        StartSource::Resume,
                         stored_transcript_path.as_deref(),
-                        sess.context.model.as_deref(),
-                    ) {
-                        tracing::warn!(
-                            session_id = sess.id,
-                            error = %re.message,
-                            "[rewind] restoring the previous conversation failed"
-                        );
-                    }
+                    )
+                }) {
+                    Ok(_) => {}
+                    Err(re) => tracing::warn!(
+                        session_id = sess.id,
+                        error = %re.message,
+                        "[rewind] restoring the previous conversation failed"
+                    ),
                 }
+                remove_copy(ssh, &sess.host_alias, &new_path, &new_id, sess.id).await;
                 tracing::warn!(
                     session_id = sess.id,
                     error = %e.message,
@@ -434,18 +752,36 @@ pub async fn rewind_conversation(
             restarted
         }
         RewindMode::Fork => {
-            // `args.new_worktree` is guaranteed `None` here (the early
-            // refusal above sends any `Some(_)` back as `E_UNSUPPORTED`),
-            // so this arm only ever reuses the source's worktree — the
-            // shape that needs no git and no cwd rewrite, since the pane
-            // starts exactly where `rewind_script` already wrote the
-            // transcript above.
+            // Same worktree: the pane starts exactly where the copy was
+            // written, beside the source's transcript. New worktree: its row
+            // is recorded now, so `new_session` starts in an EXISTING
+            // worktree — the path above, which the copy already names.
             let project_id = project_id_for_fork(sess.project_id)?;
-            let row = crate::service::sessions::new_session(
-                crate::service::sessions::NewSessionArgs {
+            let worktree_id = match &new_wt {
+                None => sess.worktree_id,
+                Some(wt) => match lock(store).and_then(|s| {
+                    s.upsert_worktree_on(
+                        &sess.host_alias,
+                        wt.project_id,
+                        &wt.name,
+                        &wt.path,
+                        Some(&wt.name),
+                    )
+                    .map_err(IpcError::from)
+                }) {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        remove_copy(ssh, &sess.host_alias, &new_path, &new_id, sess.id).await;
+                        undo_new_worktree(ops, store, &sess.host_alias, wt, None).await;
+                        return Err(e);
+                    }
+                },
+            };
+            let spawned = ops
+                .spawn(crate::service::sessions::NewSessionArgs {
                     host_alias: sess.host_alias.clone(),
                     project_id,
-                    worktree_id: sess.worktree_id,
+                    worktree_id,
                     name: String::new(),
                     call_id: None,
                     new_worktree: None,
@@ -454,12 +790,27 @@ pub async fn rewind_conversation(
                     start_command: None,
                     friendly_name: None,
                     resume_claude_session_id: Some(new_id.clone()),
-                },
-                store,
-                ssh,
-                reg,
-            )
-            .await?;
+                })
+                .await;
+            // A failed start leaves nothing a new-worktree fork made: the
+            // copy, the tree and its branch, and the row (only if no session
+            // row came to point at it). A same-worktree fork made only the
+            // copy, which stays as it always has — beside the source, where
+            // its conversation id alone names it.
+            let row = match spawned {
+                Ok(row) => row,
+                Err(e) => {
+                    // The tree goes first: a start can fail after its pane
+                    // came up, and a pane still working in the tree keeps
+                    // the tree AND the copy it resumed.
+                    if let Some(wt) = &new_wt {
+                        if undo_new_worktree(ops, store, &sess.host_alias, wt, worktree_id).await {
+                            remove_copy(ssh, &sess.host_alias, &new_path, &new_id, sess.id).await;
+                        }
+                    }
+                    return Err(e);
+                }
+            };
             // `new_session` records the resumed id through
             // `set_claude_session_id`, which is `rebind_conversation(...,
             // StartSource::Fleet, ...)`: the forked conversation would be
@@ -495,6 +846,128 @@ pub async fn rewind_conversation(
             }
         }
     }
+}
+
+/// A fork's freshly created worktree, carried through the steps after it so
+/// any failure can undo it ([`undo_new_worktree`]).
+struct NewWorktree {
+    name: String,
+    /// Physical path on the host (`pwd -P`).
+    path: String,
+    project_id: i64,
+    /// `~/.claude/projects` on the host.
+    projects_dir: String,
+}
+
+/// A string's JSON-escaped body, without the surrounding quotes: how a value
+/// is spelled inside a transcript line.
+fn json_string_body(v: &str) -> String {
+    let q = serde_json::to_string(v).unwrap_or_default();
+    q.get(1..q.len().saturating_sub(1))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Run [`rewind_script`] and return the copy's path, mapping the script's
+/// sentinels to codes rather than letting prose leak out, exactly as
+/// `read_tail` maps NO_TRANSCRIPT. `run_shell` handles the SSH quoting
+/// round-trip.
+async fn copy_transcript(
+    ssh: &Arc<SshClient>,
+    host_alias: &str,
+    script: &str,
+) -> Result<String, IpcError> {
+    let out = run_shell(ssh, host_alias, script).await?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains(NO_ANCHOR) {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                "that turn is no longer in this conversation's transcript — the conversation was rewound (or compacted) past it since it was loaded; reload the conversation and try again",
+            ));
+        }
+        if stderr.contains(NO_TURNS) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "there is nothing before this turn to rewind to; use /clear to start fresh",
+            ));
+        }
+        if stderr.contains(crate::service::transcript::NO_TRANSCRIPT) {
+            return Err(IpcError::new(
+                codes::E_NO_TRANSCRIPT,
+                format!("no transcript for this session on {host_alias}"),
+            ));
+        }
+        return Err(IpcError::new(
+            codes::E_SHELL,
+            format!("rewind failed: {}", stderr.trim()),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Remove the transcript copy this call wrote, after a later step failed.
+/// Only ever that file: the script prints `<dest dir>/<new id>.jsonl`, and
+/// anything else on stdout is not a path this code is willing to delete.
+/// Best-effort: the step's own error is what the caller must see.
+async fn remove_copy(
+    ssh: &Arc<SshClient>,
+    host_alias: &str,
+    new_path: &str,
+    new_id: &str,
+    session_id: i64,
+) {
+    if !new_path.ends_with(&format!("/{new_id}.jsonl")) {
+        return;
+    }
+    let rm = format!("rm -f -- {}", quote(new_path));
+    match run_shell(ssh, host_alias, &rm).await {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::warn!(
+            session_id,
+            stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+            "[rewind] removing the unused transcript copy failed"
+        ),
+        Err(re) => tracing::warn!(
+            session_id,
+            error = %re.message,
+            "[rewind] removing the unused transcript copy failed"
+        ),
+    }
+}
+
+/// Undo a fork's new worktree after a later step failed: the tree and its
+/// branch (safe removal only, [`remove_fork_worktree_script`]), then its row
+/// when one was recorded and no session row points at it. The row goes only
+/// once the tree has; a tree that refused to go keeps the row that names it.
+/// Best-effort, like [`remove_copy`]; true when the tree went.
+async fn undo_new_worktree(
+    ops: &dyn ReplyOps,
+    store: &Mutex<Store>,
+    host_alias: &str,
+    wt: &NewWorktree,
+    worktree_id: Option<i64>,
+) -> bool {
+    if let Err(e) = ops.remove_worktree(host_alias, &wt.path, &wt.name).await {
+        tracing::warn!(
+            path = %wt.path,
+            error = %e.message,
+            "[rewind] removing the fork's new worktree failed"
+        );
+        return false;
+    }
+    if let Some(id) = worktree_id {
+        if let Err(e) =
+            lock(store).and_then(|s| s.delete_worktree_if_unused(id).map_err(IpcError::from))
+        {
+            tracing::warn!(
+                worktree_id = id,
+                error = %e.message,
+                "[rewind] dropping the fork's worktree row failed"
+            );
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -914,19 +1387,22 @@ mod tests {
     #[tokio::test]
     async fn rewinding_a_working_session_is_refused_before_anything_runs() {
         let (s, id) = store_with_session("running", Some("working"));
-        let err = rewind_conversation(
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, None);
+        let err = rewind_conversation_with(
             RewindArgs {
                 session_id: id,
                 anchor_uuid: Some(A2.into()),
                 mode: RewindMode::Rewind,
                 new_worktree: None,
             },
-            &std::sync::Mutex::new(s),
+            &store,
             &std::sync::Arc::new(SshClient::new()),
-            &CancellationRegistry::new(),
+            &ops,
         )
         .await
         .expect_err("a mid-turn restart throws the turn away");
+        assert_eq!(ops.restarts(), 0);
         assert_eq!(err.code, codes::E_INVALID);
         assert!(
             err.message.contains("interrupt"),
@@ -967,7 +1443,7 @@ mod tests {
         let err = rewind_conversation(
             RewindArgs {
                 session_id: 9999,
-                anchor_uuid: None,
+                anchor_uuid: Some(A2.into()),
                 mode: RewindMode::Rewind,
                 new_worktree: None,
             },
@@ -995,7 +1471,7 @@ mod tests {
         let err = rewind_conversation(
             RewindArgs {
                 session_id: id,
-                anchor_uuid: None,
+                anchor_uuid: Some(A2.into()),
                 mode: RewindMode::Rewind,
                 new_worktree: None,
             },
@@ -1163,21 +1639,45 @@ mod tests {
         assert!(s.contains("'/src/app-fork'"));
     }
 
-    // ── forking into a NEW worktree: refused, not implemented ──────────
-    //
-    // See `RewindArgs::new_worktree`'s doc for the full reasoning: the
-    // script test above proves `rewind_script` itself is fully capable of
-    // writing into a different cwd's project dir (Task 2/3 already shipped
-    // `dest_dir` / `cwd_rewrite`). What Task 7 could not do is find that new
-    // cwd's PHYSICAL path before `new_session` creates it — `git worktree
-    // add`'s `pwd -P` is the only thing that produces it
-    // (`service::sessions::lifecycle::worktree_add_script`), and that call
-    // is reachable only from inside `new_session`. So `rewind_conversation`
-    // refuses `mode: Fork` + `new_worktree: Some(_)` outright, rather than
-    // silently reusing the source worktree or guessing a path.
+    // ── forking into a NEW worktree: the checks before any I/O ─────────
+
     #[tokio::test]
-    async fn forking_into_a_new_worktree_is_refused_before_anything_runs() {
-        let (s, id) = store_with_session("running", Some("working"));
+    async fn a_new_worktree_is_a_fork_only_shape_with_a_valid_name() {
+        for (mode, name) in [
+            (RewindMode::Rewind, "fork-of-canopus"),
+            (RewindMode::Fork, "main"),
+            (RewindMode::Fork, "-x"),
+            (RewindMode::Fork, ""),
+        ] {
+            let (s, id) = store_with_session("running", Some("idle"));
+            let err = rewind_conversation(
+                RewindArgs {
+                    session_id: id,
+                    anchor_uuid: Some(A2.into()),
+                    mode,
+                    new_worktree: Some(name.into()),
+                },
+                &std::sync::Mutex::new(s),
+                &std::sync::Arc::new(SshClient::new()),
+                &CancellationRegistry::new(),
+            )
+            .await
+            .expect_err("refused before any I/O");
+            assert_eq!(
+                err.code,
+                codes::E_INVALID,
+                "{mode:?} {name:?}: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Before this build a new-worktree fork answered `E_UNSUPPORTED`; now
+    /// it reaches the engine, whose first check (a project to create the
+    /// worktree in) refuses this row before any I/O.
+    #[tokio::test]
+    async fn forking_into_a_new_worktree_is_no_longer_unsupported() {
+        let (s, id) = store_with_session("running", Some("idle"));
         let err = rewind_conversation(
             RewindArgs {
                 session_id: id,
@@ -1190,34 +1690,919 @@ mod tests {
             &CancellationRegistry::new(),
         )
         .await
-        .expect_err("new-worktree fork is not implemented");
-        assert_eq!(err.code, codes::E_UNSUPPORTED);
-        assert!(
-            err.message.contains("isn't implemented"),
-            "the refusal must say why, not just that it failed: {}",
-            err.message
-        );
+        .expect_err("this row has no project");
+        assert_eq!(err.code, codes::E_INVALID_STATE, "{}", err.message);
     }
 
-    #[tokio::test]
-    async fn forking_without_a_new_worktree_is_unaffected_by_the_refusal() {
-        // `new_worktree: None` must keep taking the existing, fully-working
-        // same-worktree path — asserted on the refusal being a DIFFERENT
-        // one (an unreachable host), never `E_UNSUPPORTED`.
-        let (s, id) = store_with_session("running", Some("idle"));
-        let err = rewind_conversation(
-            RewindArgs {
-                session_id: id,
-                anchor_uuid: Some(A2.into()),
-                mode: RewindMode::Fork,
-                new_worktree: None,
-            },
-            &std::sync::Mutex::new(s),
-            &std::sync::Arc::new(SshClient::new()),
-            &CancellationRegistry::new(),
+    // ── the anchor is the TOP-LEVEL uuid ───────────────────────────────
+
+    /// A tool result (or any nested object) can carry a `"uuid"` of its own,
+    /// and the anchor also appears as the NEXT entry's `parentUuid`. Neither
+    /// may stop the copy: only the entry whose own `uuid` is the anchor does.
+    /// And the key is found with whitespace around its `:`.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_top_level_uuid_is_the_anchor_and_whitespace_is_tolerated() {
+        let d = tmp();
+        let body = format!(
+            concat!(
+                r#"{{"type":"mode","sessionId":"{old}"}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"{a1}","sessionId":"{old}","message":{{"role":"user","content":"one"}}}}"#,
+                "\n",
+                // A nested object whose "uuid" IS the anchor: not the entry.
+                r#"{{"type":"user","uuid":"bbbb","sessionId":"{old}","toolUseResult":{{"uuid":"{a2}","s":"a \"quoted\" {{ brace"}},"message":{{"role":"user","content":[{{"type":"tool_result"}}]}}}}"#,
+                "\n",
+                // A string VALUE equal to "uuid" followed by the anchor text.
+                r#"{{"type":"assistant","uuid":"cccc","note":"uuid","parentUuid":"{a2}","sessionId":"{old}","message":{{"role":"assistant","content":[]}}}}"#,
+                "\n",
+                // The real anchor, pretty-spaced.
+                r#"{{"type": "user", "uuid" : "{a2}", "sessionId":"{old}","message":{{"role":"user","content":"two"}}}}"#,
+                "\n",
+                r#"{{"type":"assistant","uuid":"dddd","sessionId":"{old}","message":{{"role":"assistant","content":[]}}}}"#,
+                "\n",
+            ),
+            old = OLD,
+            a1 = A1,
+            a2 = A2
+        );
+        let src = d.join(format!("{OLD}.jsonl"));
+        std::fs::write(&src, body).unwrap();
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            Some(A2),
+            None,
+            None,
+        ));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let written = std::fs::read_to_string(d.join(format!("{NEW}.jsonl"))).unwrap();
+        assert_eq!(
+            written.lines().count(),
+            4,
+            "header, turn one, the nested-uuid line and the parentUuid line are \
+             all BEFORE the real anchor: {written}"
+        );
+        assert!(written.contains("toolUseResult"));
+        assert!(written.contains("cccc"));
+        assert!(
+            !written.contains("dddd"),
+            "nothing after the anchor survives"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A nested `"uuid"` alone is not the anchor: the script must report it
+    /// missing rather than cut there.
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_uuid_alone_is_not_found() {
+        let d = tmp();
+        let body = format!(
+            concat!(
+                r#"{{"type":"user","uuid":"{a1}","sessionId":"{old}","message":{{"role":"user","content":"one"}}}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"bbbb","sessionId":"{old}","toolUseResult":{{"uuid":"{a2}"}}}}"#,
+                "\n",
+            ),
+            old = OLD,
+            a1 = A1,
+            a2 = A2
+        );
+        let src = d.join(format!("{OLD}.jsonl"));
+        std::fs::write(&src, body).unwrap();
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            Some(A2),
+            None,
+            None,
+        ));
+        assert_eq!(out.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&out.stderr).contains(NO_ANCHOR));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    // ── the service, over a fake for its follow-ups (spec §7) ──────────
+
+    /// Records every follow-up `rewind_conversation` makes; answers the pane
+    /// probe with `status`, the restart with `restart_err` (else the row),
+    /// and a spawn by creating a real row the way `new_session` would
+    /// (`set_claude_session_id` = a `Fleet` rebind), so the relabel after it
+    /// has something to act on.
+    struct FakeOps<'a> {
+        store: &'a std::sync::Mutex<Store>,
+        status: Option<String>,
+        restart_err: Option<IpcError>,
+        restarts: std::sync::Mutex<Vec<(String, String)>>,
+        spawns: std::sync::Mutex<Vec<Option<String>>>,
+        /// Where `add_worktree` makes its tree (`<root>/wt/<name>`) and
+        /// `claude_projects_dir` points (`<root>/projects`).
+        root: Option<std::path::PathBuf>,
+        add_err: Option<IpcError>,
+        spawn_err: Option<IpcError>,
+        /// `remove_worktree` refuses (as the script does for a tree a live
+        /// pane is in) and leaves the tree.
+        remove_err: Option<IpcError>,
+        /// Every worktree step and spawn, in order: `add:<name>`,
+        /// `spawn:<worktree_id>`, `remove:<path>`.
+        log: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl<'a> FakeOps<'a> {
+        fn new(store: &'a std::sync::Mutex<Store>, status: Option<&str>) -> Self {
+            Self {
+                store,
+                status: status.map(String::from),
+                restart_err: None,
+                restarts: Default::default(),
+                spawns: Default::default(),
+                root: None,
+                add_err: None,
+                remove_err: None,
+                spawn_err: None,
+                log: Default::default(),
+            }
+        }
+        #[cfg(unix)]
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+        fn restarts(&self) -> usize {
+            self.restarts.lock().unwrap().len()
+        }
+        #[cfg(unix)]
+        fn spawns(&self) -> usize {
+            self.spawns.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ReplyOps for FakeOps<'_> {
+        async fn pane_status(&self, _session_id: i64) -> Option<String> {
+            self.status.clone()
+        }
+        async fn restart(
+            &self,
+            args: crate::service::sessions::RestartSessionArgs,
+        ) -> Result<SessionRow, IpcError> {
+            self.restarts
+                .lock()
+                .unwrap()
+                .push((args.host_alias.clone(), args.name.clone()));
+            if let Some(e) = &self.restart_err {
+                return Err(IpcError::new(&e.code, e.message.clone()));
+            }
+            let s = self.store.lock().unwrap();
+            Ok(s.get_session(&args.name, &args.host_alias)
+                .unwrap()
+                .unwrap())
+        }
+        async fn spawn(
+            &self,
+            args: crate::service::sessions::NewSessionArgs,
+        ) -> Result<SessionRow, IpcError> {
+            self.spawns
+                .lock()
+                .unwrap()
+                .push(args.resume_claude_session_id.clone());
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("spawn:{:?}", args.worktree_id));
+            if let Some(e) = &self.spawn_err {
+                return Err(IpcError::new(&e.code, e.message.clone()));
+            }
+            let s = self.store.lock().unwrap();
+            let id = s
+                .upsert_session(
+                    "forked",
+                    &args.host_alias,
+                    Some(args.project_id),
+                    args.worktree_id,
+                    0,
+                    0,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            s.set_claude_session_id(id, args.resume_claude_session_id.as_deref().unwrap())
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        }
+        async fn add_worktree(
+            &self,
+            _host_alias: &str,
+            _src_tmux: Option<&str>,
+            _src_dir: Option<&str>,
+            name: &str,
+        ) -> Result<String, IpcError> {
+            self.log.lock().unwrap().push(format!("add:{name}"));
+            if let Some(e) = &self.add_err {
+                return Err(IpcError::new(&e.code, e.message.clone()));
+            }
+            let wt = self.root.as_ref().unwrap().join("wt").join(name);
+            std::fs::create_dir_all(&wt).unwrap();
+            Ok(wt.canonicalize().unwrap().to_string_lossy().into_owned())
+        }
+        async fn remove_worktree(
+            &self,
+            _host_alias: &str,
+            path: &str,
+            _name: &str,
+        ) -> Result<(), IpcError> {
+            self.log.lock().unwrap().push(format!("remove:{path}"));
+            if let Some(e) = &self.remove_err {
+                return Err(IpcError::new(&e.code, e.message.clone()));
+            }
+            std::fs::remove_dir_all(path).ok();
+            Ok(())
+        }
+        async fn claude_projects_dir(&self, _host_alias: &str) -> Result<String, IpcError> {
+            let p = self.root.as_ref().unwrap().join("projects");
+            Ok(p.to_string_lossy().into_owned())
+        }
+    }
+
+    /// A `local` session (so the script and the cleanup `rm` run here, for
+    /// real) bound to the fixture transcript, with a project to fork into.
+    #[cfg(unix)]
+    fn local_session(claude_status: &str) -> (std::path::PathBuf, std::path::PathBuf, Store, i64) {
+        let d = tmp();
+        let src = fixture(&d);
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", d.to_str().unwrap()).unwrap();
+        let id = s
+            .upsert_session("sess", "local", Some(pid), None, 0, 0, "running", None)
+            .unwrap();
+        s.rebind_conversation(
+            id,
+            OLD,
+            StartSource::Fleet,
+            Some(src.to_str().unwrap()),
+            None,
         )
-        .await
-        .expect_err("unreachable host");
-        assert_ne!(err.code, codes::E_UNSUPPORTED);
+        .unwrap();
+        s.set_session_claude_status_for_test(id, claude_status);
+        (d, src, s, id)
+    }
+
+    #[cfg(unix)]
+    fn args(id: i64, mode: RewindMode, anchor: Option<&str>) -> RewindArgs {
+        RewindArgs {
+            session_id: id,
+            anchor_uuid: anchor.map(String::from),
+            mode,
+            new_worktree: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn jsonl_files(d: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jsonl"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rewind_rebinds_to_the_copy_and_restarts_exactly_once() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let row =
+            rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect("an idle session rewinds");
+        assert_eq!(ops.restarts(), 1, "the pane is restarted once");
+        assert_eq!(ops.spawns(), 0, "a rewind spawns nothing");
+        assert_eq!(
+            ops.restarts.lock().unwrap()[0],
+            ("local".to_string(), "sess".to_string())
+        );
+        let new_id = row.claude_session_id.clone().unwrap();
+        assert_ne!(new_id, OLD, "the session is on a NEW conversation");
+        assert!(d.join(format!("{new_id}.jsonl")).exists());
+        let convs = store.lock().unwrap().list_conversations(id, 10).unwrap();
+        let fresh = convs
+            .iter()
+            .find(|c| c.claude_session_id == new_id)
+            .unwrap();
+        assert_eq!(fresh.start_source, "fork");
+        assert!(
+            convs.iter().any(|c| c.claude_session_id == OLD),
+            "the pre-rewind conversation stays listed"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fork_spawns_once_on_the_copy_and_labels_it_fork() {
+        let (d, _src, s, id) = local_session("working");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("working"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let row =
+            rewind_conversation_with(args(id, RewindMode::Fork, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect("fork is allowed mid-turn");
+        assert_eq!(ops.spawns(), 1, "one new session");
+        assert_eq!(ops.restarts(), 0, "the source pane is left alone");
+        assert_ne!(row.id, id);
+        let new_id = ops.spawns.lock().unwrap()[0].clone().unwrap();
+        assert_eq!(row.claude_session_id.as_deref(), Some(new_id.as_str()));
+        let convs = store
+            .lock()
+            .unwrap()
+            .list_conversations(row.id, 10)
+            .unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].start_source, "fork",
+            "relabelled from new_session's `fleet`"
+        );
+        let expected = d.join(format!("{new_id}.jsonl"));
+        assert_eq!(
+            convs[0].transcript_path.as_deref(),
+            Some(expected.to_str().unwrap())
+        );
+        // The source session is untouched.
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some(OLD)
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Item 4: a restart that fails leaves NOTHING behind — the row is back
+    /// on the old conversation with its old path, no conversation row names
+    /// the copy, and the copy itself is gone from the host.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_restart_restores_the_old_binding_and_removes_the_copy() {
+        let (d, src, s, id) = local_session("idle");
+        let before = s.list_conversations(id, 10).unwrap();
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("idle"));
+        ops.restart_err = Some(IpcError::new(codes::E_REPAIR_REQUIRED, "worktree gone"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err =
+            rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect_err("the restart failed");
+        assert_eq!(
+            err.code,
+            codes::E_REPAIR_REQUIRED,
+            "the restart's own error"
+        );
+        assert_eq!(ops.restarts(), 1);
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_session_id.as_deref(), Some(OLD));
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some(src.to_str().unwrap()),
+            "the old transcript path is back"
+        );
+        let after = s.list_conversations(id, 10).unwrap();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "no stray conversation row: {after:?}"
+        );
+        assert!(after.iter().all(|c| c.claude_session_id == OLD));
+        assert!(
+            after[0].ended_at.is_none(),
+            "the old conversation is current again"
+        );
+        assert_eq!(
+            jsonl_files(&d),
+            vec![format!("{OLD}.jsonl")],
+            "the unused copy is removed from the host"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Item 2: `blocked` is mid-turn too (a permission prompt waits INSIDE
+    /// the turn), and the live pane beats a stale stored status.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_blocked_or_live_busy_session_is_refused_and_live_quiet_wins() {
+        for (stored, live, ok) in [
+            ("blocked", None, false),
+            ("idle", Some("working"), false),
+            ("idle", Some("blocked"), false),
+            ("working", Some("idle"), true),
+            ("idle", None, true),
+        ] {
+            let (d, _src, s, id) = local_session(stored);
+            let store = std::sync::Mutex::new(s);
+            let ops = FakeOps::new(&store, live);
+            let ssh = std::sync::Arc::new(SshClient::new());
+            let r = rewind_conversation_with(
+                args(id, RewindMode::Rewind, Some(A2)),
+                &store,
+                &ssh,
+                &ops,
+            )
+            .await;
+            if ok {
+                assert!(r.is_ok(), "stored {stored}, live {live:?}: {r:?}");
+            } else {
+                let e = r.expect_err("mid-turn");
+                assert_eq!(e.code, codes::E_INVALID, "stored {stored}, live {live:?}");
+                assert_eq!(ops.restarts(), 0);
+                assert_eq!(
+                    jsonl_files(&d),
+                    vec![format!("{OLD}.jsonl")],
+                    "refused before the copy is written"
+                );
+            }
+            std::fs::remove_dir_all(&d).ok();
+        }
+    }
+
+    /// Item 3: a rewind with no anchor would copy the whole file and restart
+    /// on it — a silent no-op. Fork with none keeps the whole file (spec §3).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rewind_without_an_anchor_is_refused_but_a_fork_is_not() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err = rewind_conversation_with(args(id, RewindMode::Rewind, None), &store, &ssh, &ops)
+            .await
+            .expect_err("no anchor");
+        assert_eq!(err.code, codes::E_INVALID);
+        assert_eq!(ops.restarts(), 0);
+        rewind_conversation_with(args(id, RewindMode::Fork, None), &store, &ssh, &ops)
+            .await
+            .expect("forking the newest turn keeps the whole file");
+        assert_eq!(ops.spawns(), 1);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Item 6: acting on a turn past a rewind point (a stale window) names
+    /// what happened, not just "not found".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_past_the_rewind_point_says_the_conversation_was_rewound() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+            .await
+            .unwrap();
+        // The old window still shows turn two; its anchor is not in the copy.
+        let err =
+            rewind_conversation_with(args(id, RewindMode::Rewind, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect_err("the turn is gone from the current conversation");
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(err.message.contains("rewound"), "{}", err.message);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    // ── forking into a NEW worktree (spec §5.2) ────────────────────────
+
+    #[cfg(unix)]
+    fn fork_new(id: i64, anchor: Option<&str>, name: &str) -> RewindArgs {
+        RewindArgs {
+            new_worktree: Some(name.into()),
+            ..args(id, RewindMode::Fork, anchor)
+        }
+    }
+
+    /// The ordering the feature exists for: the worktree first, then the
+    /// copy under ITS physical path's project dir with `cwd` rewritten, then
+    /// the session started in that existing worktree (its row recorded).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_worktree_fork_creates_the_tree_first_and_starts_there() {
+        let (d, _src, s, id) = local_session("working");
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("working"));
+        ops.root = Some(d.clone());
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let row = rewind_conversation_with(fork_new(id, Some(A2), "fork-x"), &store, &ssh, &ops)
+            .await
+            .expect("forks into a new worktree");
+        let log = ops.log();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[0], "add:fork-x", "the tree comes first");
+        assert!(log[1].starts_with("spawn:Some("), "{log:?}");
+
+        let wt_path = d.join("wt/fork-x").canonicalize().unwrap();
+        let wt_path = wt_path.to_str().unwrap();
+        let s = store.lock().unwrap();
+        let wid = row.worktree_id.expect("the fork's row names its worktree");
+        let wt = s.get_worktree_row(wid).unwrap().unwrap();
+        assert_eq!(wt.path, wt_path);
+        assert_eq!(wt.name, "fork-x");
+        assert_eq!(wt.branch.as_deref(), Some("fork-x"));
+        assert_eq!(log[1], format!("spawn:Some({wid})"));
+
+        let new_id = row.claude_session_id.clone().unwrap();
+        let copy = d
+            .join("projects")
+            .join(crate::service::transcript::encode_project_dir(wt_path))
+            .join(format!("{new_id}.jsonl"));
+        let written = std::fs::read_to_string(&copy).expect("the copy is under the new cwd");
+        assert!(
+            written.contains(&format!(r#""cwd":"{wt_path}""#)),
+            "cwd rewritten to the new tree: {written}"
+        );
+        assert!(!written.contains(r#""cwd":"/src/app""#), "{written}");
+        assert_eq!(
+            jsonl_files(&d),
+            vec![format!("{OLD}.jsonl")],
+            "nothing is written beside the source"
+        );
+        let convs = s.list_conversations(row.id, 10).unwrap();
+        assert_eq!(convs[0].start_source, "fork");
+        assert_eq!(convs[0].transcript_path.as_deref(), copy.to_str());
+        drop(s);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The copy fails (a stale anchor): the tree just made is removed, and
+    /// nothing was started or recorded.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_copy_removes_the_new_worktree() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("idle"));
+        ops.root = Some(d.clone());
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let stale = "aaaaaaaa-0000-0000-0000-00000000dead";
+        let err = rewind_conversation_with(fork_new(id, Some(stale), "fork-x"), &store, &ssh, &ops)
+            .await
+            .expect_err("the anchor is not in the transcript");
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        let log = ops.log();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[0], "add:fork-x");
+        assert!(log[1].starts_with("remove:"), "{log:?}");
+        assert!(!d.join("wt/fork-x").exists());
+        assert_eq!(ops.spawns(), 0);
+        assert!(
+            !d.join("projects").exists()
+                || std::fs::read_dir(d.join("projects"))
+                    .unwrap()
+                    .all(|e| jsonl_files(&e.unwrap().path()).is_empty()),
+            "no copy is left behind"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The start fails: the copy, the tree (and branch) and the row all go.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_start_removes_the_copy_the_tree_and_the_row() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("idle"));
+        ops.root = Some(d.clone());
+        ops.spawn_err = Some(IpcError::new(codes::E_SHELL, "tmux refused"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err = rewind_conversation_with(fork_new(id, Some(A2), "fork-x"), &store, &ssh, &ops)
+            .await
+            .expect_err("the start failed");
+        assert_eq!(err.code, codes::E_SHELL, "the start's own error");
+        let log = ops.log();
+        assert_eq!(log.len(), 3, "{log:?}");
+        assert!(log[1].starts_with("spawn:Some("));
+        assert!(log[2].starts_with("remove:"));
+        assert!(!d.join("wt/fork-x").exists());
+        let wt_path = d.canonicalize().unwrap().join("wt/fork-x");
+        let enc = crate::service::transcript::encode_project_dir(wt_path.to_str().unwrap());
+        assert!(
+            jsonl_files(&d.join("projects").join(enc)).is_empty(),
+            "the copy is removed"
+        );
+        let s = store.lock().unwrap();
+        assert!(
+            s.list_worktrees_on_host("local")
+                .unwrap()
+                .iter()
+                .all(|w| w.name != "fork-x"),
+            "the row is dropped"
+        );
+        drop(s);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The start fails AFTER its pane came up: the removal refuses a tree
+    /// a live pane is in, and the copy that pane resumed stays with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_start_whose_pane_is_live_keeps_the_tree_and_the_copy() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("idle"));
+        ops.root = Some(d.clone());
+        ops.spawn_err = Some(IpcError::new(codes::E_INTERNAL, "reconcile failed"));
+        ops.remove_err = Some(IpcError::new(codes::E_GIT_SETUP, TREE_IN_USE));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err = rewind_conversation_with(fork_new(id, Some(A2), "fork-x"), &store, &ssh, &ops)
+            .await
+            .expect_err("the start failed");
+        assert_eq!(err.code, codes::E_INTERNAL, "the start's own error");
+        assert!(d.join("wt/fork-x").exists(), "the tree stays");
+        let wt_path = d.canonicalize().unwrap().join("wt/fork-x");
+        let enc = crate::service::transcript::encode_project_dir(wt_path.to_str().unwrap());
+        assert_eq!(
+            jsonl_files(&d.join("projects").join(enc)).len(),
+            1,
+            "the copy the pane resumed stays"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Creating the tree fails (a name already taken): nothing else runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktree_that_cannot_be_made_stops_the_fork_before_the_copy() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("idle"));
+        ops.root = Some(d.clone());
+        ops.add_err = Some(IpcError::new(codes::E_CONFLICT, "taken"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err = rewind_conversation_with(fork_new(id, Some(A2), "fork-x"), &store, &ssh, &ops)
+            .await
+            .expect_err("the name is taken");
+        assert_eq!(err.code, codes::E_CONFLICT);
+        assert_eq!(
+            ops.log(),
+            vec!["add:fork-x".to_string()],
+            "no undo of what was never made"
+        );
+        assert_eq!(jsonl_files(&d), vec![format!("{OLD}.jsonl")]);
+        assert!(!d.join("projects").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The copy's `cwd` is the transcript's own first `cwd` when no old
+    /// value is given, and a subdirectory of it follows along.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_old_cwd_rewrites_the_transcripts_own_and_its_subdirectories() {
+        let d = tmp();
+        let body = format!(
+            concat!(
+                r#"{{"type":"mode","sessionId":"{old}"}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"{a1}","cwd":"/src/app","sessionId":"{old}"}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"bbbb","cwd":"/src/app/sub","sessionId":"{old}"}}"#,
+                "\n",
+                r#"{{"type":"user","uuid":"cccc","cwd":"/src/apple","sessionId":"{old}"}}"#,
+                "\n",
+            ),
+            old = OLD,
+            a1 = A1
+        );
+        let src = d.join(format!("{OLD}.jsonl"));
+        std::fs::write(&src, body).unwrap();
+        let dest = d.join("dest");
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            None,
+            Some(dest.to_str().unwrap()),
+            Some(("", "/w/fork")),
+        ));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let written = std::fs::read_to_string(dest.join(format!("{NEW}.jsonl"))).unwrap();
+        assert!(written.contains(r#""cwd":"/w/fork","#), "{written}");
+        assert!(written.contains(r#""cwd":"/w/fork/sub""#), "{written}");
+        assert!(
+            written.contains(r#""cwd":"/src/apple""#),
+            "a sibling that merely shares the prefix is not the tree: {written}"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_path_is_json_escaped_for_the_transcript() {
+        assert_eq!(json_string_body("/a/b"), "/a/b");
+        assert_eq!(json_string_body(r#"/a/"q"\b"#), r#"/a/\"q\"\\b"#);
+    }
+
+    #[test]
+    fn the_worktree_scripts_quote_every_value() {
+        let hostile = "x'; rm -rf / #";
+        let add = fork_worktree_script(Some(hostile), Some(hostile), hostile);
+        let rm = remove_fork_worktree_script(hostile, hostile);
+        for s in [&add, &rm] {
+            assert!(s.contains(&quote(hostile)), "{s}");
+            assert!(!s.contains(&format!("={hostile}")), "{s}");
+        }
+    }
+
+    /// A real repo: the fork's tree lands where `new_session`'s would, on a
+    /// new branch at the source's HEAD (not the default branch), never
+    /// adopting an existing name; the undo removes both tree and branch.
+    #[cfg(unix)]
+    #[test]
+    fn the_fork_worktree_scripts_create_and_remove_a_fresh_tree_and_branch() {
+        let d = tmp();
+        let repo = d.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(
+            &repo,
+            &["worktree", "add", "-q", ".worktrees/feat", "-b", "feat"],
+        );
+        let src = repo.join(".worktrees/feat");
+        git(&src, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        let head = git(&src, &["rev-parse", "HEAD"]);
+
+        let out = run(&fork_worktree_script(
+            None,
+            Some(src.to_str().unwrap()),
+            "fork-x",
+        ));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let expected = repo.canonicalize().unwrap().join(".worktrees/fork-x");
+        assert_eq!(
+            path,
+            expected.to_str().unwrap(),
+            "beside the others, not nested"
+        );
+        assert_eq!(
+            git(&expected, &["rev-parse", "HEAD"]),
+            head,
+            "off the source's HEAD"
+        );
+        assert_eq!(
+            git(&expected, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "fork-x"
+        );
+
+        let again = run(&fork_worktree_script(
+            None,
+            Some(src.to_str().unwrap()),
+            "fork-x",
+        ));
+        assert_eq!(again.status.code(), Some(6));
+        assert!(String::from_utf8_lossy(&again.stderr).contains(WT_EXISTS));
+        let branch_only = run(&fork_worktree_script(
+            None,
+            Some(src.to_str().unwrap()),
+            "feat",
+        ));
+        assert_eq!(
+            branch_only.status.code(),
+            Some(6),
+            "an existing branch is never adopted"
+        );
+
+        let rm = run(&remove_fork_worktree_script(&path, "fork-x"));
+        assert!(
+            rm.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rm.stderr)
+        );
+        assert!(!expected.exists());
+        assert!(git(&repo, &["branch", "--list", "fork-x"]).is_empty());
+        assert!(src.exists(), "the source is untouched");
+        assert_eq!(git(&src, &["rev-parse", "HEAD"]), head);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The removal script refuses a tree a live tmux pane is working in
+    /// (below its root too) and leaves tree and branch; with no pane there
+    /// it removes both. Skipped where tmux is not installed.
+    #[cfg(unix)]
+    #[test]
+    fn the_removal_script_leaves_a_tree_a_live_pane_is_in() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let d = tmp();
+        let sock = d.join("tmux");
+        std::fs::create_dir_all(&sock).unwrap();
+        let repo = d.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sh = |script: &str| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TMUX_TMPDIR", &sock)
+                .env_remove("TMUX")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+                .env("GIT_CONFIG_VALUE_0", "false")
+                .output()
+                .unwrap()
+        };
+        let r = quote(repo.to_str().unwrap());
+        let wt = repo.join("wt-live");
+        let w = quote(wt.to_str().unwrap());
+        let setup = sh(&format!(
+            "set -e; cd {r}; git init -q; git -c user.email=a@b -c user.name=a \
+             commit -q --allow-empty -m init; git worktree add -q {w} -b fork-live; \
+             mkdir -p {w}/sub; tmux new-session -d -s live -c {w}/sub 'sleep 60'"
+        ));
+        assert!(
+            setup.status.success(),
+            "{}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+
+        let rm = sh(&remove_fork_worktree_script(
+            wt.to_str().unwrap(),
+            "fork-live",
+        ));
+        assert_eq!(
+            rm.status.code(),
+            Some(3),
+            "{}",
+            String::from_utf8_lossy(&rm.stderr)
+        );
+        assert!(String::from_utf8_lossy(&rm.stderr).contains(TREE_IN_USE));
+        assert!(wt.exists(), "the tree stays");
+
+        sh("tmux kill-server");
+        let rm = sh(&remove_fork_worktree_script(
+            wt.to_str().unwrap(),
+            "fork-live",
+        ));
+        assert!(
+            rm.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rm.stderr)
+        );
+        assert!(!wt.exists(), "no pane: the tree goes");
+        std::fs::remove_dir_all(&d).ok();
     }
 }

@@ -1202,7 +1202,8 @@ async fn a_master_caller_is_not_confirm_gated_for_a_rewind() {
             Extension(Caller::master()),
             Parameters(RewindConversationParams {
                 session_id: id,
-                anchor_uuid: None,
+                // A rewind needs its anchor, or it is refused for that first.
+                anchor_uuid: Some("aaaaaaaa-0000-0000-0000-000000000002".into()),
                 mode: "rewind".into(),
                 new_worktree: None,
                 confirm_nonce: None,
@@ -3253,10 +3254,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 62,269 on 2026-09-28
-    /// (#352's `add_project` / `list_github_repos` over #348, plan D, reply
-    /// actions and M14).
-    const BUDGET_BYTES: usize = 62_369;
+    /// comment conflicted on every merge. Measured at 62,445 on 2026-09-28
+    /// (#359's `confirm_nonce` / `new_worktree` over main's quick-reply and
+    /// Work-tree filter changes).
+    const BUDGET_BYTES: usize = 62_545;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -6846,6 +6847,7 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "rewind_conversation",
         "safe_kill_session",
         "work_link",
+        "add_project",
         "kill_session",
         "delete_worktree",
         "broadcast_prompt",
@@ -7771,20 +7773,25 @@ fn a_readonly_client_may_browse_repos_but_not_add_a_project() {
 async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
     let t = test_tools(Store::open_in_memory().unwrap());
     let err = t
-        .add_project(Parameters(AddProjectArgs {
-            host_alias: "-oProxyCommand=x".into(),
-            source: AddProjectSource::Clone {
-                url: "https://github.com/o/r".into(),
-            },
-            call_id: None,
-        }))
+        .add_project(
+            Extension(Caller::master()),
+            Parameters(add_params(
+                "-oProxyCommand=x",
+                AddProjectSource::Clone {
+                    url: "https://github.com/o/r".into(),
+                },
+            )),
+        )
         .await
         .unwrap_err();
     assert!(err.message.starts_with("E_"), "{}", err.message);
     let err = t
-        .list_github_repos(Parameters(ListGithubReposParams {
-            host_alias: "-oProxyCommand=x".into(),
-        }))
+        .list_github_repos(
+            Extension(Caller::master()),
+            Parameters(ListGithubReposParams {
+                host_alias: "-oProxyCommand=x".into(),
+            }),
+        )
         .await
         .unwrap_err();
     assert!(err.message.starts_with("E_"), "{}", err.message);
@@ -7808,4 +7815,463 @@ fn add_project_serves_the_source_variants_and_no_call_id() {
             "source kind {kind} missing: {text}"
         );
     }
+}
+
+// ---- add_project / list_github_repos: fences, confirmation, audit ---------
+
+fn add_params(host: &str, source: AddProjectSource) -> AddProjectParams {
+    AddProjectParams {
+        args: AddProjectArgs {
+            host_alias: host.into(),
+            source,
+            call_id: None,
+        },
+        confirm_nonce: None,
+    }
+}
+
+#[cfg(unix)]
+fn clone_src() -> AddProjectSource {
+    AddProjectSource::Clone {
+        url: "https://github.com/acme/widget".into(),
+    }
+}
+
+#[cfg(unix)]
+fn create_remote_src(confirm: Option<&str>) -> AddProjectSource {
+    AddProjectSource::New {
+        owner: "acme".into(),
+        repo: "fresh".into(),
+        create_remote: true,
+        confirm: confirm.map(str::to_string),
+    }
+}
+
+#[cfg(unix)]
+/// `FleetTools` over a fake `ssh` binary: `printenv HOME` answers `/home/u`,
+/// `gh repo list` answers one repository, a clone succeeds, and every call
+/// is appended to `calls.log` so a test can prove nothing ran.
+fn tools_over_fake_ssh(s: Store, dir: &std::path::Path) -> FleetTools {
+    use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+    let log = dir.join("calls.log");
+    let bin = write_exec(
+        dir,
+        "ssh",
+        &format!(
+            "#!/bin/sh\n{PROBE_GUARD}\
+             case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
+             echo \"$*\" >> '{log}'\n\
+             case \"$*\" in\n\
+             *printenv*) echo /home/u;;\n\
+             *'gh repo list'*) echo '[{{\"nameWithOwner\":\"acme/widget\",\"description\":null,\"isPrivate\":false,\"updatedAt\":\"2026-09-01T10:00:00Z\"}}]';;\n\
+             *) exit 0;;\n\
+             esac\n",
+            log = log.display()
+        ),
+    );
+    FleetTools::new(
+        Arc::new(Mutex::new(s)),
+        Arc::new(SshClient::with_ssh_binary(bin)),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    )
+}
+
+#[cfg(unix)]
+fn ssh_calls(dir: &std::path::Path) -> String {
+    std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn add_project_clones_on_a_registered_host_and_returns_the_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let r = t
+        .add_project(
+            Extension(Caller::master()),
+            Parameters(add_params("hostb", clone_src())),
+        )
+        .await
+        .expect("the clone succeeds on the fake host");
+    let body = text_of(&r.content[0]);
+    assert!(body.contains("\"widget\""), "{body}");
+    assert!(ssh_calls(dir.path()).contains("git clone"));
+    let s = t.store.lock().unwrap();
+    assert!(s
+        .list_projects()
+        .unwrap()
+        .iter()
+        .any(|p| p.owner == "acme" && p.repo == "widget"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn list_github_repos_returns_what_gh_lists_on_the_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let r = t
+        .list_github_repos(
+            Extension(Caller::master()),
+            Parameters(ListGithubReposParams {
+                host_alias: "hostb".into(),
+            }),
+        )
+        .await
+        .expect("gh answers on the fake host");
+    let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
+    assert_eq!(v[0]["name_with_owner"], "acme/widget", "{v}");
+    assert_eq!(v[0]["is_private"], false, "{v}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_remote_without_the_token_answers_one_in_the_structured_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let err = t
+        .add_project(
+            Extension(Caller::master()),
+            Parameters(add_params("hostb", create_remote_src(None))),
+        )
+        .await
+        .unwrap_err();
+    let r = tool_error_result(err).expect("a coded error is a tool result");
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["code"], "E_CONFIRM_REQUIRED", "{sc}");
+    assert!(
+        sc["details"]["confirm"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "{sc}"
+    );
+    assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
+}
+
+#[cfg(unix)]
+/// A per-host token for host A reached host B's `gh` login and could clone
+/// or create repositories there; an org-bound phone reached another org's
+/// hosts. Both tools now fence like `new_session`, before any ssh.
+#[tokio::test]
+async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_org() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let org_a = s.add_org("Company A", None, false).unwrap().id;
+    let org_b = s.add_org("Company B", None, false).unwrap().id;
+    s.set_host_org("hosta", Some(org_a)).unwrap();
+    s.set_host_org("hostb", Some(org_b)).unwrap();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let bound_a = Caller {
+        host_alias: None,
+        client: Some(crate::mcp::auth::ClientRef {
+            id: 7,
+            name: "phone".into(),
+            trusted: false,
+            org_id: Some(org_a),
+        }),
+        mode: TokenMode::Full,
+    };
+    for who in [host_caller("hosta", TokenMode::Full), bound_a] {
+        forbidden(
+            t.add_project(
+                Extension(who.clone()),
+                Parameters(add_params("hostb", clone_src())),
+            )
+            .await
+            .unwrap_err(),
+        );
+        forbidden(
+            t.add_project(
+                Extension(who.clone()),
+                Parameters(add_params("hostb", create_remote_src(None))),
+            )
+            .await
+            .unwrap_err(),
+        );
+        forbidden(
+            t.list_github_repos(
+                Extension(who.clone()),
+                Parameters(ListGithubReposParams {
+                    host_alias: "hostb".into(),
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        // Its own host still answers.
+        t.list_github_repos(
+            Extension(who),
+            Parameters(ListGithubReposParams {
+                host_alias: "hosta".into(),
+            }),
+        )
+        .await
+        .expect("its own host");
+    }
+    assert!(
+        !ssh_calls(dir.path()).contains("hostb"),
+        "nothing ran on host B: {}",
+        ssh_calls(dir.path())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn add_project_and_list_github_repos_refuse_an_unregistered_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let err = t
+        .add_project(
+            Extension(Caller::master()),
+            Parameters(add_params("not-a-fleet-host", clone_src())),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+    let err = t
+        .list_github_repos(
+            Extension(Caller::master()),
+            Parameters(ListGithubReposParams {
+                host_alias: "not-a-fleet-host".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+    assert!(
+        ssh_calls(dir.path()).is_empty(),
+        "{}",
+        ssh_calls(dir.path())
+    );
+}
+
+#[cfg(unix)]
+/// Publishing a GitHub repository is one of the operator's starts (D12):
+/// the call that carries the service's token waits for a person, and the
+/// approval is bound to the host and repository.
+#[tokio::test]
+async fn the_operators_create_remote_waits_for_a_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    // Without the token: the service's own refusal, nothing to approve yet.
+    let first = t
+        .add_project(
+            Extension(op.clone()),
+            Parameters(add_params("hostb", create_remote_src(None))),
+        )
+        .await
+        .unwrap_err();
+    let token = first.data.as_ref().unwrap()["details"]["confirm"]
+        .as_str()
+        .expect("the service's token")
+        .to_string();
+    // With it: the operator is stopped for a person's approval.
+    let asked = t
+        .add_project(
+            Extension(op.clone()),
+            Parameters(add_params("hostb", create_remote_src(Some(&token)))),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&asked);
+    assert!(
+        asked
+            .message
+            .contains("the operator's starts and kills always do"),
+        "{}",
+        asked.message
+    );
+    assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
+    // A plain clone is not a start on GitHub: never gated.
+    t.add_project(Extension(op), Parameters(add_params("hostb", clone_src())))
+        .await
+        .expect("a clone is not confirm-gated");
+}
+
+#[cfg(unix)]
+/// A per-host token or the master token could send the service's
+/// create_remote token straight back and publish a GitHub repository with
+/// no person involved. Like the operator, they now wait for an approval;
+/// a paired client (a person at a UI) is confirmed by the token alone.
+#[tokio::test]
+async fn create_remote_from_a_token_that_is_not_a_person_waits_for_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    for who in [host_caller("hostb", TokenMode::Full), Caller::master()] {
+        let first = t
+            .add_project(
+                Extension(who.clone()),
+                Parameters(add_params("hostb", create_remote_src(None))),
+            )
+            .await
+            .unwrap_err();
+        let token = first.data.as_ref().unwrap()["details"]["confirm"]
+            .as_str()
+            .expect("the service's token")
+            .to_string();
+        let asked = t
+            .add_project(
+                Extension(who.clone()),
+                Parameters(add_params("hostb", create_remote_src(Some(&token)))),
+            )
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&asked);
+        assert!(
+            asked
+                .message
+                .contains("a person approves this call whoever makes it"),
+            "{}",
+            asked.message
+        );
+    }
+    assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
+}
+
+#[cfg(unix)]
+/// Where there is no approver (a hub), a token that is not a person cannot
+/// publish a repository at all; a paired phone still can, with the token.
+#[tokio::test]
+async fn without_an_approver_only_a_paired_client_creates_a_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let mut t = tools_over_fake_ssh(s, dir.path());
+    t.guards = t.guards.clone().without_approver();
+    let first = t
+        .add_project(
+            Extension(host_caller("hostb", TokenMode::Full)),
+            Parameters(add_params("hostb", create_remote_src(None))),
+        )
+        .await
+        .unwrap_err();
+    let token = first.data.as_ref().unwrap()["details"]["confirm"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let err = t
+        .add_project(
+            Extension(host_caller("hostb", TokenMode::Full)),
+            Parameters(add_params("hostb", create_remote_src(Some(&token)))),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_FORBIDDEN") && err.message.contains("this caller"),
+        "{}",
+        err.message
+    );
+    assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
+
+    let phone = client_caller("phone", TokenMode::Full);
+    let first = t
+        .add_project(
+            Extension(phone.clone()),
+            Parameters(add_params("hostb", create_remote_src(None))),
+        )
+        .await
+        .unwrap_err();
+    let token = first.data.as_ref().unwrap()["details"]["confirm"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = t
+        .add_project(
+            Extension(phone),
+            Parameters(add_params("hostb", create_remote_src(Some(&token)))),
+        )
+        .await;
+    assert!(
+        r.as_ref()
+            .err()
+            .is_none_or(|e| !e.message.starts_with("E_CONFIRM_REQUIRED")
+                && !e.message.starts_with("E_FORBIDDEN")),
+        "a paired phone is not gated: {:?}",
+        r.err().map(|e| e.message)
+    );
+}
+
+#[tokio::test]
+async fn an_operator_fork_needs_a_person_too() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.set_claude_session_id(id, "11111111-1111-1111-1111-111111111111")
+        .unwrap();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    for mode in ["fork", "rewind"] {
+        let err = t
+            .rewind_conversation(
+                Extension(op.clone()),
+                Parameters(RewindConversationParams {
+                    session_id: id,
+                    anchor_uuid: None,
+                    mode: mode.into(),
+                    new_worktree: None,
+                    confirm_nonce: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&err);
+    }
+    // The approval names the mode: an approved fork is not a rewind.
+    let asked = t
+        .rewind_conversation(
+            Extension(op.clone()),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "fork".into(),
+                new_worktree: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    let nonce = confirm_nonce_of(&asked);
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let replay = t
+        .rewind_conversation(
+            Extension(op),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "rewind".into(),
+                new_worktree: None,
+                confirm_nonce: Some(nonce),
+            }),
+        )
+        .await
+        .unwrap_err();
+    confirm_nonce_of(&replay);
+}
+
+#[test]
+fn add_projects_audit_line_never_carries_a_raw_clone_url() {
+    let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
+        url: "https://user:ghp_SECRET@github.com/acme/widget".into(),
+    });
+    assert!(!line.contains("SECRET"), "{line}");
+    assert_eq!(line, "kind=clone repo=<invalid>");
+    let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
+        url: "https://github.com/acme/widget.git".into(),
+    });
+    assert_eq!(line, "kind=clone repo=acme/widget");
 }

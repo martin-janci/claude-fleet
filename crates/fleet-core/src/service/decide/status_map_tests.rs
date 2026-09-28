@@ -932,3 +932,85 @@ async fn the_sync_hook_runs_a_clean_asana_pass_once_a_day() {
     trigger.after_pass(&[pass(None)]).unwrap().await.unwrap();
     assert_eq!(fake.calls(), 3, "due again, but nothing new to ask");
 }
+
+#[tokio::test]
+async fn a_tracker_due_while_a_run_is_going_stays_due() {
+    let w = world();
+    w.on("assist");
+    let fake = Fake::answering(vec![says("todo", 0.9); 3]);
+    let trigger = StatusMapTrigger::new(w.ctx(fake.clone()));
+    let pass = TrackerPass {
+        tracker_id: w.tracker,
+        ..Default::default()
+    };
+    // Another run holds the single flight: nothing starts, and nothing is
+    // marked as run.
+    trigger.running.store(true, Ordering::SeqCst);
+    assert!(trigger.after_pass(std::slice::from_ref(&pass)).is_none());
+    assert!(trigger.last.lock().unwrap().is_empty());
+    // It ends: the next pass runs the tracker, not a day later.
+    trigger.running.store(false, Ordering::SeqCst);
+    trigger
+        .after_pass(std::slice::from_ref(&pass))
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), 3);
+}
+
+#[tokio::test]
+async fn a_proposal_nobody_decided_is_ignored_once_a_newer_one_arrives() {
+    let w = world();
+    let runs = w.three_proposals().await;
+    w.decide(runs["backlog"], ProposalAction::Reject).unwrap();
+    // After the re-ask window: ideas gets a proposal under the floor (not
+    // one that is shown), parked a new usable one.
+    w.advance(REASK_DAYS * 86_400 + 1);
+    let fake = Fake::answering(vec![says("todo", 0.3), says("done", 0.9)]);
+    let r = w.run(&fake).await;
+    assert_eq!((r.asked, r.skipped_rejected), (2, 1));
+    // The superseded proposal is `ignored`; the one still shown is not;
+    // a person's rejection is never overwritten.
+    assert_eq!(
+        w.run_row(runs["parked"]).followup.as_deref(),
+        Some("ignored")
+    );
+    assert!(w.run_row(runs["ideas"]).followup.is_none());
+    assert_eq!(
+        w.run_row(runs["backlog"]).followup.as_deref(),
+        Some("rejected")
+    );
+    let p = w.proposals();
+    let parked = p.proposals.iter().find(|x| x.section == "parked").unwrap();
+    assert!(parked.pending() && parked.run_id != runs["parked"]);
+    let stats = w.store.lock().unwrap().decision_stats(0).unwrap();
+    assert_eq!(stats.iter().map(|s| s.ignored).sum::<i64>(), 1);
+}
+
+#[tokio::test]
+async fn a_shadow_answer_nobody_saw_is_never_followed_up() {
+    let w = world();
+    w.on("shadow");
+    w.run(&Fake::answering(vec![says("todo", 0.9); 5])).await;
+    let args: WorkAdminArgs = serde_json::from_value(json!({
+        "action": "update",
+        "tracker_id": w.tracker,
+        "settings": {
+            "section_map": { "backlog": "todo", "parked": "done" },
+            "section_map_confirmed": true,
+        },
+    }))
+    .unwrap();
+    admin_sync(&args, &w.store).unwrap();
+    // The person's map agrees with one shadow answer and not the other:
+    // neither is a person's confirmation or correction.
+    assert!(w.runs().iter().all(|r| r.followup.is_none()));
+    let stats = w.store.lock().unwrap().decision_stats(0).unwrap();
+    assert_eq!(
+        stats
+            .iter()
+            .map(|s| s.confirmed + s.corrected + s.rejected + s.ignored)
+            .sum::<i64>(),
+        0
+    );
+}

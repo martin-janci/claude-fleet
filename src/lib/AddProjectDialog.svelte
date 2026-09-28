@@ -102,15 +102,20 @@
   const canCreate = $derived(source() !== null);
 
   // ── Destination preview ──────────────────────────────────────────────
+  // The preview needs the backend's per-host roots, and on a hub client
+  // those are the hub's: `get_fleet_settings` is local-only there, so this
+  // machine would preview its own (default) roots. No preview beats a wrong
+  // one — the hub answers with the real path.
   onMount(() => {
-    // The preview needs the backend's per-host roots; best effort.
-    void loadFleetSettings();
+    // Best effort.
+    if (!$hubStatus.remote) void loadFleetSettings();
   });
   const layout = $derived(settingLayout($fleetSettings));
   const hostRoot = $derived(
     settingPathMap($fleetSettings, PROJECTS_RESOLVED_KEY)[host] ?? projectsDefaultRoot(layout),
   );
   const pathPreview = $derived.by((): string | null => {
+    if ($hubStatus.remote) return null;
     if (mode === 'folder') return folderPath;
     const target = mode === 'clone' ? parsed : mode === 'new' && ownerOk && repoOk ? { owner, repo } : null;
     return target ? projectDir(hostRoot, layout, target.owner, target.repo) : null;

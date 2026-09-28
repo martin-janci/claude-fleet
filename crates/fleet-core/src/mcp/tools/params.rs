@@ -236,14 +236,14 @@ pub struct RewindConversationParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,
     /// Keep the transcript strictly before this turn's prompt_uuid (from
-    /// session_conversation). Omit to keep all of it.
+    /// session_conversation). Required to rewind; omit to fork keeping all
+    /// of it.
     #[serde(default)]
     pub anchor_uuid: Option<String>,
     /// "rewind" restarts this session on the truncated copy; "fork" leaves
     /// it alone and starts a new session on the copy.
     pub mode: String,
-    /// Not supported yet (E_UNSUPPORTED): a fork reuses this session's
-    /// worktree.
+    /// Fork into a new worktree+branch of this name, off HEAD.
     #[serde(default)]
     pub new_worktree: Option<String>,
     /// Approved confirmation; required for "rewind".
@@ -505,6 +505,17 @@ pub struct ListHostWorktreesParams {
     pub host_alias: String,
     /// Project id.
     pub project_id: i64,
+}
+
+// `add_project`'s arguments plus the operator's confirmation (M9.7; only a
+// `create_remote` carrying the service's token ever needs one).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AddProjectParams {
+    #[serde(flatten)]
+    pub args: crate::service::add_project::AddProjectArgs,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

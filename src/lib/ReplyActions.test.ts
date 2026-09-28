@@ -145,8 +145,29 @@ describe('ReplyActions', () => {
         turns: [turns[0], { ...turns[1], prompt: null }],
       },
     });
-    expect(screen.queryByTestId('reply-retry')).toBeNull();
+    const retry = screen.getByTestId('reply-retry') as HTMLButtonElement;
+    expect(retry.disabled).toBe(true);
+    expect(retry.title).toMatch(/unavailable/i);
     expect(screen.getByTestId('reply-rewind')).toBeTruthy();
+  });
+
+  it('disables Retry, with the reason, when the prompt shown is not the whole prompt', async () => {
+    // `prompt_partial`: the prompt was cut to fit the read budget or carried
+    // an image. Re-sending `prompt` would send something else.
+    render(ReplyActions, {
+      props: {
+        ...base,
+        index: 1,
+        turns: [turns[0], { ...turns[1], prompt_partial: true }],
+      },
+    });
+    const retry = screen.getByTestId('reply-retry') as HTMLButtonElement;
+    expect(retry.disabled).toBe(true);
+    expect(retry.title).toMatch(/not the whole prompt/);
+    await fireEvent.click(retry);
+    await settle();
+    expect(screen.queryByTestId('confirm-ok')).toBeNull();
+    expect(mockedRewind).not.toHaveBeenCalled();
   });
 
   it('offers only copy and quote while an earlier conversation is on screen', async () => {
