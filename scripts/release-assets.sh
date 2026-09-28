@@ -61,7 +61,7 @@ read_legs() {
 desktop-aarch64-apple-darwin|desktop|macos-latest|aarch64-apple-darwin|--target aarch64-apple-darwin|claude-fleet_{v}_aarch64.dmg claude-fleet_{v}_aarch64.app.tar.gz
 desktop-x86_64-apple-darwin|desktop|macos-latest|x86_64-apple-darwin|--target x86_64-apple-darwin|claude-fleet_{v}_x64.dmg claude-fleet_{v}_x64.app.tar.gz
 desktop-x86_64-linux|desktop|ubuntu-24.04||--bundles appimage,deb|claude-fleet_{v}_amd64.deb claude-fleet_{v}_amd64.AppImage
-desktop-x86_64-windows|desktop|windows-latest||--bundles nsis|claude-fleet_{v}_x64-setup.exe|0.3.3
+desktop-x86_64-windows|desktop|windows-latest||--bundles nsis|claude-fleet_{v}_x64-setup.exe|0.3.4
 bins-x86_64-unknown-linux-gnu|bins|ubuntu-22.04|x86_64-unknown-linux-gnu||fleet-agent-{v}-x86_64-unknown-linux-gnu.tar.gz fleet-hub-{v}-x86_64-unknown-linux-gnu.tar.gz
 bins-aarch64-unknown-linux-gnu|bins|ubuntu-22.04-arm|aarch64-unknown-linux-gnu||fleet-agent-{v}-aarch64-unknown-linux-gnu.tar.gz fleet-hub-{v}-aarch64-unknown-linux-gnu.tar.gz
 checksums|checksums|ubuntu-24.04|||SHA256SUMS

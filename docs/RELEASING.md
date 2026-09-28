@@ -232,14 +232,14 @@ before you do it:
 
 ### The assets
 
-12 per release from 0.3.3 (11 before it), every one version-bearing:
+12 per release from 0.3.4 (11 before it), every one version-bearing:
 
 | asset | built by |
 |-------|----------|
 | `claude-fleet_<v>_aarch64.dmg`, `claude-fleet_<v>_aarch64.app.tar.gz` | `build`, `macos-latest` / `aarch64-apple-darwin` |
 | `claude-fleet_<v>_x64.dmg`, `claude-fleet_<v>_x64.app.tar.gz` | `build`, `macos-latest` / `x86_64-apple-darwin` |
 | `claude-fleet_<v>_amd64.deb`, `claude-fleet_<v>_amd64.AppImage` | `build`, `ubuntu-24.04` |
-| `claude-fleet_<v>_x64-setup.exe` (from 0.3.3) | `build`, `windows-latest` |
+| `claude-fleet_<v>_x64-setup.exe` (from 0.3.4) | `build`, `windows-latest` |
 | `fleet-agent-<v>-x86_64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04` |
 | `fleet-agent-<v>-aarch64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04-arm` |
 | `SHA256SUMS` | `checksums` |
@@ -254,7 +254,7 @@ The new name comes from `scripts/release-assets.sh`, the same table
 `verify-release` checks against.
 
 A leg added after the first release carries a `since` version in that table
-(the Windows installer: 0.3.3). `assets` leaves it out for older versions, so
+(the Windows installer: 0.3.4). `assets` leaves it out for older versions, so
 adding a leg does not turn every earlier release into an incomplete one for
 `verify-release` and [the drift check](#the-drift-check).
 

@@ -19,7 +19,7 @@ On first launch the app walks you through setup — see the **[Getting Started g
 Grab the bundle for your platform from the
 [Releases page](https://github.com/martin-janci/claude-fleet/releases) —
 `.dmg` for macOS (`aarch64` for Apple Silicon, `x86_64` for Intel),
-`.AppImage` or `.deb` for Linux, `_x64-setup.exe` for Windows (from 0.3.3).
+`.AppImage` or `.deb` for Linux, `_x64-setup.exe` for Windows (from 0.3.4).
 Every filename carries the version, so a download is always traceable to the
 release it came from.
 
