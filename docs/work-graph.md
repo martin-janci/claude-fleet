@@ -564,6 +564,12 @@ it. `0` keeps a table forever.
 - `work.retention.tracker_items_days` (180): cached tickets in done. Kept
   while any link, live or ended, names one, and while it is the parent of a
   kept ticket.
+- The describe cache (`work.describe_cache_secs`'s table, one item's whole
+  description) is swept with the tracker items, by the same window — except
+  its `0` is never "forever": with `work.retention.tracker_items_days` at
+  `0`, the describe cache is still swept at a fixed 30-day floor, so a
+  full-text cache never becomes an unbounded copy of every description
+  fleet ever fetched.
 - `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:
@@ -774,6 +780,7 @@ table.
 |---|---|---|---|
 | `work.recent_days` | `14` | 1–365 days | how long ended work with no live session keeps a sidebar group |
 | `work.sync_interval_secs` | `300` | seconds, `0` = off | seconds between tracker sync passes; read at start; under a minute is raised to one |
+| `work.describe_cache_secs` | `300` | seconds, `0` = off | how long a full ticket description fetched by *Read the full description* (`work { action: describe }`) is reused before fleet asks the tracker again; the cache is swept with the tracker items, at a floor of 30 days when that retention window is `0` |
 | `work.trusted_branch_projects` | `[]` | project ids | projects where a sole branch key links automatically; set from the popover, cleared with **Trust none** |
 | `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
 | `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |

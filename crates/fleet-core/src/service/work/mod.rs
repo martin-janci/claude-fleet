@@ -5,6 +5,7 @@
 
 pub mod agent_handover;
 pub mod card;
+pub mod describe;
 pub mod detect;
 pub mod handover;
 pub mod harvest;
@@ -287,6 +288,9 @@ pub enum WorkAction {
     Today,
     /// A ticket's context card from the cache (work graph M9.2).
     Card,
+    /// One item's whole description, on demand: the cache, else one live
+    /// fetch (Task 5 of the visible-truncation-and-describe plan).
+    Describe,
     /// Tidy-up candidates (work graph M7).
     Tidy,
     /// Work open again that has past sessions (work graph M7).
@@ -327,6 +331,7 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("org_suggestions", WorkAction::OrgSuggestions),
     ("today", WorkAction::Today),
     ("card", WorkAction::Card),
+    ("describe", WorkAction::Describe),
     ("tidy", WorkAction::Tidy),
     ("reopened", WorkAction::Reopened),
     ("local_items", WorkAction::LocalItems),
