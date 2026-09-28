@@ -2468,12 +2468,13 @@ deliberately.
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a
   phone* and *Clients* above.
-- **Failed bearers are throttled per address.** A bad or missing token on any
-  authenticated route is answered `401` once per second per source address
-  (the peer, or the last `X-Forwarded-For` hop when the peer is a private or
-  loopback proxy — the same rule `/pair` uses); a repeat inside that second is
-  `429`. The `[mcp] rejected request` log line names the address. A valid
-  token is never throttled: successes do not touch the bucket.
+- **Failed bearers are logged once per address.** A bad or missing token on
+  any authenticated route is answered `401`, every time — a client reads
+  `401` as "pair again", never as a busy hub. The `[mcp] rejected request`
+  warn line, which names the address, is written once per second per source
+  address (the peer, or the last `X-Forwarded-For` hop when the peer is a
+  private or loopback proxy — the same rule `/pair` uses); repeats inside
+  that second are logged at debug. Successes do not touch the bucket.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there
