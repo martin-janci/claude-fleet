@@ -45,13 +45,20 @@ check "…and leaves no half-written copy behind" test "$(count "$B"/state-*.db)
 FAKE="$ROOT/bin"; mkdir -p "$FAKE"
 cat >"$FAKE/docker" <<'EOF'
 #!/usr/bin/env bash
-# Records every call. `pull` of a `:missing` tag fails like ghcr does;
-# `compose stop` refuses when no pre-upgrade backup exists yet (that is the
-# order under test); `exec … healthcheck` is healthy; `exec … --version`
-# answers whatever tag .env pins.
+# Records every call. upgrade.sh runs `docker compose --env-file F <verb> …`:
+# the env file is logged on its own line and dropped, so the cases below
+# (and the log) see `compose <verb>`. `compose pull` of the tag `missing`
+# (FLEET_HUB_TAG from the shell, as upgrade.sh passes it) fails like ghcr
+# does; `compose stop` refuses when no pre-upgrade backup exists yet (that
+# is the order under test); `exec … healthcheck` is healthy; `exec …
+# --version` answers whatever tag .env pins.
+if [ "${1:-}" = compose ] && [ "${2:-}" = --env-file ]; then
+  echo "env-file $3" >>"$FAKE_LOG"
+  set -- compose "${@:4}"
+fi
 echo "docker $*" >>"$FAKE_LOG"
-case "$1 $2" in
-  "pull "*) case "$2" in *:missing) echo "manifest unknown" >&2; exit 1;; esac ;;
+case "${1:-} ${2:-}" in
+  "compose pull") [ "${FLEET_HUB_TAG:-}" = missing ] && { echo "manifest unknown" >&2; exit 1; } ;;
   "compose stop") ls "$FAKE_DIR"/backups/pre-*.db >/dev/null 2>&1 || { echo "stop before backup" >&2; exit 9; } ;;
   "compose exec")
     case "${@: -1}" in
@@ -64,6 +71,8 @@ EOF
 cat >"$FAKE/curl" <<'EOF'
 #!/usr/bin/env bash
 echo "curl $*" >>"$FAKE_LOG"
+# upgrade.sh hands the Authorization header over on stdin (`-H @-`).
+[ -t 0 ] || sed 's/^/curl-stdin /' >>"$FAKE_LOG"
 tag="$(sed -n 's/^FLEET_HUB_TAG=//p' "$FAKE_DIR/.env")"
 printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\\"version\\":\\"%s\\",\\"db_ready\\":true}"}]}}' "$tag"
 EOF
@@ -83,7 +92,9 @@ PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" 0.3.1 >"$ROOT/upgrade
 check "upgrade exits 0" test $? = 0
 check ".env now pins 0.3.1" grep -qx 'FLEET_HUB_TAG=0.3.1' "$U/.env"
 check "one pre-upgrade backup was taken" test "$(count "$U"/backups/pre-0.3.1-*.db)" = 1
-check "pull precedes stop" test "$(ord 'docker pull')" -lt "$(ord 'docker compose stop')"
+check "compose reads the pinned .env" grep -qx "env-file $U/.env" "$FAKE_LOG"
+check "…on every compose call" test "$(grep -c '^env-file ' "$FAKE_LOG")" = "$(grep -c '^docker compose' "$FAKE_LOG")"
+check "pull precedes stop" test "$(ord 'docker compose pull')" -lt "$(ord 'docker compose stop')"
 check "stop precedes up" test "$(ord 'docker compose stop')" -lt "$(ord 'docker compose up')"
 check "up precedes the healthcheck" test "$(ord 'docker compose up')" -lt "$(ord 'healthcheck')"
 check "the healthcheck precedes --version" test "$(ord 'healthcheck')" -lt "$(ord '--version')"
