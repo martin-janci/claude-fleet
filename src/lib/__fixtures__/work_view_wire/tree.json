@@ -1,5 +1,6 @@
 {
-  "generated_at": 1790518155,
+  "archived_hidden": 0,
+  "generated_at": 1790599681,
   "groups": [
     {
       "count": 1,
@@ -38,6 +39,7 @@
   ],
   "tasks": [
     {
+      "archived": false,
       "counts": {
         "active": 1,
         "ended": 0,
@@ -53,7 +55,7 @@
       "item_id": 2,
       "key": "TK-2",
       "kind": "tracker",
-      "last_activity_at": 1790518155,
+      "last_activity_at": 1790599681,
       "mine": true,
       "needs_you": false,
       "org_fenced": true,
@@ -69,9 +71,9 @@
       "sessions": [
         {
           "archived": false,
-          "created_at": 1790518155,
+          "created_at": 1790599681,
           "cross_org": false,
-          "decided_at": 1790518155,
+          "decided_at": 1790599681,
           "host": "h1",
           "link_id": 2,
           "link_version": 1,
@@ -98,6 +100,7 @@
       "unavailable": false
     },
     {
+      "archived": false,
       "counts": {
         "active": 1,
         "ended": 0,
@@ -113,7 +116,7 @@
       "item_id": 1,
       "key": "TK-1",
       "kind": "tracker",
-      "last_activity_at": 1790518155,
+      "last_activity_at": 1790599681,
       "mine": true,
       "needs_you": false,
       "org_fenced": true,
@@ -129,9 +132,9 @@
       "sessions": [
         {
           "archived": false,
-          "created_at": 1790518155,
+          "created_at": 1790599681,
           "cross_org": false,
-          "decided_at": 1790518155,
+          "decided_at": 1790599681,
           "host": "h1",
           "link_id": 1,
           "link_version": 1,
@@ -158,6 +161,7 @@
       "unavailable": false
     },
     {
+      "archived": false,
       "counts": {
         "active": 0,
         "ended": 0,
@@ -173,7 +177,7 @@
       "item_id": 3,
       "key": "TK-3",
       "kind": "tracker",
-      "last_activity_at": 1790518155,
+      "last_activity_at": 1790599681,
       "mine": true,
       "needs_you": false,
       "org_fenced": true,
@@ -189,7 +193,7 @@
       "sessions": [
         {
           "archived": false,
-          "created_at": 1790518155,
+          "created_at": 1790599681,
           "cross_org": false,
           "host": "h1",
           "link_id": 3,

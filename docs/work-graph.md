@@ -63,7 +63,9 @@ the group. The **Filters** panel has a *Work* group: tracker (with two
 or more trackers), status, the tracker's own column names, *Assigned to
 me*, and in work mode *Session: Any / Active session / Past only*;
 *Include → Archived work* shows or hides archived sessions and past
-work. Each filter that is on shows as a chip under the search, with a ×
+work. Archived work is hidden by default: the end of the list says *N
+archived hidden* with *Show archived*, and *Session: Past only* shows it
+regardless. Each filter that is on shows as a chip under the search, with a ×
 and *Clear all*; an empty list names the filters that hide it.
 
 > **[Screenshot placeholder]** The sidebar grouped by work, with a Done
@@ -108,6 +110,10 @@ and *Clear all*, and "No tasks match" names them. The view select saves
 the current filters under a name (Save as…, Update, Delete); saved views
 live on the hub, so the phone has the same ones. The Sessions list's own
 filters (hosts, recency, org scope) do not apply here and step aside.
+Archived tasks (done, or every session archived, with nothing running)
+are hidden by default; the end of the tree says how many, with *Show
+archived*, and the panel has an *Archived tasks* switch. *Status: Done*
+shows done tasks regardless. ⌘⇧O cycles the Work view's organisation.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its
@@ -182,7 +188,14 @@ including tasks with no session at all — as reads of the `work` tool
   count under the filters), and the orgs and trackers the caller sees.
   Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
-  `suggested`), `review`, `query`, `group`. Pages are a keyset: pass
+  `suggested`), `review`, `query`, `group`, `archived`. A task is
+  *archived* when it has no active session and is done, or every one of
+  its links (at least one of them past) is archived; the tree hides
+  archived tasks unless `archived: true` (or `status: "done"`) asks for
+  them, and `archived_hidden` says how many passed every other filter but
+  were hidden that way (over the whole result, not the page). Each task
+  carries `archived`; `task` / `session_tasks` / `review` answer archived
+  tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
   meanwhile may be skipped until the next full read.

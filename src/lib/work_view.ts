@@ -156,6 +156,9 @@ export interface WorkTask {
   counts?: { active?: number; ended?: number; suggested?: number };
   needs_you?: boolean;
   review?: boolean;
+  /** Done, or every session link archived, with nothing running: hidden
+   *  from the tree unless `filters.archived` (or `status: done`). */
+  archived?: boolean;
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */

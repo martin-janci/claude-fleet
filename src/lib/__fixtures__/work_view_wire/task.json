@@ -3,11 +3,12 @@
     "group": "Security",
     "note": "why",
     "task_id": "item:2",
-    "updated_at": 1790518155,
-    "updated_by": "me",
+    "updated_at": 1790599681,
+    "updated_by": "test",
     "version": 1
   },
   "task": {
+    "archived": false,
     "counts": {
       "active": 1,
       "ended": 0,
@@ -23,7 +24,7 @@
     "item_id": 2,
     "key": "TK-2",
     "kind": "tracker",
-    "last_activity_at": 1790518155,
+    "last_activity_at": 1790599681,
     "mine": true,
     "needs_you": false,
     "org_fenced": true,
@@ -39,9 +40,9 @@
     "sessions": [
       {
         "archived": false,
-        "created_at": 1790518155,
+        "created_at": 1790599681,
         "cross_org": false,
-        "decided_at": 1790518155,
+        "decided_at": 1790599681,
         "host": "h1",
         "link_id": 2,
         "link_version": 1,
