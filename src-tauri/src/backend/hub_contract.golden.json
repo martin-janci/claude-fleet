@@ -375,6 +375,7 @@
       "usage_updated_at",
       "work",
       "work_rejected",
+      "work_rev",
       "work_suggested",
       "worktree_id",
       "worktree_key"

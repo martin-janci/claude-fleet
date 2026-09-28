@@ -466,6 +466,7 @@ mod tests {
             work_rejected: vec![],
             work_suggested: None,
             org_id: None,
+            work_rev: None,
         }
     }
 

@@ -453,8 +453,14 @@ this design's.
   resync ends with a desktop-only `work:changed { what: "resync" }` —
   emitted only when the hub answered the re-list — which the Work view
   reads as "reload whole"; a hub never sends it. `SessionRow.work_rev`
-  (*Events* above) is not built: neither #342 nor #345 has it, and it is
-  service logic, which M14.1d does not add.
+  (*Events* above) was not built by #342 or #345; it is now (2026-09-28):
+  computed in SQL with the row (`SESSION_COLUMNS` in `store/rows.rs`) as
+  the sum of `id * 1000003 + version` over the session's live links, so a
+  link added, ended, removed, confirmed, rejected, made primary or archived
+  moves it (066's trigger bumps `version` on each); every link write
+  already re-reads and emits the row. `OrgScope::redact_row` /
+  `redact_json` clear it for a scoped caller. Additive and optional: no
+  contract bump.
 - 2026-09-27 (M14.1c, the writes): no migration (066's columns carry every
   version). `E_CONFLICT` is a new `IpcError` code. A link's version is
   compared only after the link is known to be the caller's to name (this

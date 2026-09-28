@@ -275,6 +275,15 @@ pub struct SessionRow {
     /// and emitted rows agree. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// A digest of the ids and versions of the session's live work links
+    /// (every state: confirmed, suggested, rejected), computed in SQL: it
+    /// moves when ANY of them changes — added, ended, confirmed, rejected,
+    /// made primary, archived — so a client sees a SECONDARY link change
+    /// that `work` (the primary only) does not show. Only equality means
+    /// anything. `None` when the session has no live link; cleared for a
+    /// scoped caller like the rest of the row's work (`OrgScope`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_rev: Option<i64>,
 }
 
 impl SessionRow {
@@ -374,7 +383,11 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id, prompt_submit_seq, stale_working_at"
+    " AS org_id, prompt_submit_seq, stale_working_at, \
+     (SELECT SUM(l.id * 1000003 + l.version) \
+        FROM participants p \
+        JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
+       WHERE p.session_id = sessions.id AND p.retired_at IS NULL) AS work_rev"
 );
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
@@ -467,6 +480,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         org_id: row.get(57)?,
         prompt_submit_seq: row.get(58)?,
         stale_working_at: row.get(59)?,
+        work_rev: row.get(60)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
